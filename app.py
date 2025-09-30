@@ -1,4 +1,4 @@
-import numpy as np
+﻿import numpy as np
 import pandas as pd
 from pathlib import Path
 import datetime as dt
@@ -93,7 +93,7 @@ df_day = load_daily(DATA_PATH)
 df_day["month"] = df_day["date"].dt.to_period("M").dt.to_timestamp()
 
 # ------------------ METRICS & CHART HELPERS ------------------
-def calc_idle_and_loss(group_df: pd.DataFrame, loss_max_gap_days=LOSS_MAX_GAP_DAYS):
+def calc_idle_and_loss(group_df: pd.DataFrame, loss_max_gap_days=LOSS_MAX_GAP_DAYS, baseline_mt_per_day=None):
     # Idle days between non-consecutive work dates (cap each gap by loss_max_gap_days)
     dts = group_df["date"].dropna().drop_duplicates().sort_values()
     if len(dts) > 1:
@@ -101,7 +101,12 @@ def calc_idle_and_loss(group_df: pd.DataFrame, loss_max_gap_days=LOSS_MAX_GAP_DA
         idle = int(np.minimum(diff_days[diff_days >= 1], loss_max_gap_days).sum())
     else:
         idle = 0
-    baseline = float(group_df["daily_prod_mt"].mean()) if len(group_df) else 0.0
+    if baseline_mt_per_day is not None and not pd.isna(baseline_mt_per_day):
+        baseline = float(baseline_mt_per_day)
+    elif len(group_df):
+        baseline = float(group_df["daily_prod_mt"].mean())
+    else:
+        baseline = 0.0
     loss_mt = baseline * idle
     delivered_mt = float(group_df["daily_prod_mt"].sum())
     potential_mt = delivered_mt + loss_mt
@@ -524,7 +529,7 @@ kpi_cards = dbc.Row([
 ROW_PX = 56
 VISIBLE_ROWS = 15
 TOPBOT_MARGIN = 120
-CONTAINER_HEIGHT = ROW_PX * VISIBLE_ROWS + TOPBOT_MARGIN  # ≈ 960px
+CONTAINER_HEIGHT = ROW_PX * VISIBLE_ROWS + TOPBOT_MARGIN  # â‰ˆ 960px
 
 # Graph wrapper
 gang_bar = html.Div(
@@ -697,18 +702,54 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
     kpi_delta = "(n/a)" if delta_pct is None else f"{delta_pct:+.1f}%"
     kpi_bench = f"{bench:.2f} MT"
 
-    # ---- Build loss dataframe (you already do this) ----
+    # ---- Determine month scope for loss metrics ----
+    selected_months = months_ts or []
+    if selected_months:
+        loss_month_start = max(selected_months)
+    else:
+        loss_month_start = pd.Timestamp.today().to_period("M").to_timestamp()
+    loss_month_end = loss_month_start + pd.offsets.MonthBegin(1)
+
+    scope_mask = pd.Series(True, index=df_day.index)
+    if projects:
+        scope_mask &= df_day["project_name"].isin(projects)
+    if not overall_gangs and gangs:
+        scope_mask &= df_day["gang_name"].isin(gangs)
+    scoped_all = df_day.loc[scope_mask].copy()
+
+    d_loss_scope = scoped_all[
+        (scoped_all["date"] >= loss_month_start) & (scoped_all["date"] < loss_month_end)
+    ].copy()
+
+    history_scope = scoped_all[scoped_all["date"] < loss_month_start]
+    baseline_map = {}
+    if not history_scope.empty:
+        baseline_map = (
+            history_scope.groupby("gang_name")["daily_prod_mt"]
+            .mean()
+            .fillna(0)
+            .to_dict()
+        )
+
+    # ---- Build loss dataframe (latest month only) ----
     loss_rows = []
-    for gname, gdf in d.groupby("gang_name"):
-        idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(gdf)
+    for gname, gdf in d_loss_scope.groupby("gang_name"):
+        override_baseline = baseline_map.get(gname, 0.0)
+        idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
+            gdf, baseline_mt_per_day=override_baseline
+        )
         loss_rows.append({
             "gang_name": gname,
             "delivered": delivered,
             "lost": loss_mt,
             "potential": potential,
-            "avg_prod": gdf["daily_prod_mt"].mean()
+            "avg_prod": gdf["daily_prod_mt"].mean(),
+            "baseline": baseline
         })
-    df_loss = pd.DataFrame(loss_rows).sort_values("potential", ascending=True)
+    df_loss = (
+        pd.DataFrame(loss_rows).sort_values("potential", ascending=True)
+        if loss_rows else pd.DataFrame(columns=["gang_name","delivered","lost","potential","avg_prod","baseline"])
+    )
     
     # --- thickness per gang row (track height) ---
     ROW_PX = 56            # try 56–64 for chunky rows
@@ -718,7 +759,7 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
 
 
     # ---- NEW KPIs: Active Gangs, Avg Efficiency, Lost Units ----
-    active_gangs = d["gang_name"].nunique()
+    active_gangs = d_loss_scope["gang_name"].nunique()
     tot_delivered = float(df_loss["delivered"].sum()) if not df_loss.empty else 0.0
     tot_lost = float(df_loss["lost"].sum()) if not df_loss.empty else 0.0
     tot_potential = tot_delivered + tot_lost
@@ -729,30 +770,30 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
     kpi_eff = f"{eff_pct:.1f}%"
     kpi_loss = f"{lost_pct:.1f}%"
 
-    # ---- Actual vs Potential horizontal bars (make bars thicker) ----
     fig_loss = go.Figure()
-    fig_loss.add_bar(
-        x=df_loss["delivered"], y=df_loss["gang_name"],
-        orientation="h", marker_color="green",
-        text=df_loss["delivered"].round(1), textposition="inside",
-        name="Delivered", width=0.95
-    )
-    fig_loss.add_bar(
-        x=df_loss["lost"], y=df_loss["gang_name"],
-        orientation="h", marker_color="red",
-        text=df_loss["lost"].round(1), textposition="inside",
-        name="Loss", base=df_loss["delivered"], width=0.95
-    )
-    for _, row in df_loss.iterrows():
-        fig_loss.add_annotation(
-            x=row["potential"], y=row["gang_name"],
-            text=f"{row['avg_prod']:.2f} MT/day",
-            showarrow=False, xanchor="left", yanchor="middle",
-            font=dict(size=10, color="black")
+    if not df_loss.empty:
+        fig_loss.add_bar(
+            x=df_loss["delivered"], y=df_loss["gang_name"],
+            orientation="h", marker_color="green",
+            text=df_loss["delivered"].round(1), textposition="inside",
+            name="Delivered", width=0.95
         )
+        fig_loss.add_bar(
+            x=df_loss["lost"], y=df_loss["gang_name"],
+            orientation="h", marker_color="red",
+            text=df_loss["lost"].round(1), textposition="inside",
+            name="Loss", base=df_loss["delivered"], width=0.95
+        )
+        for _, row in df_loss.iterrows():
+            fig_loss.add_annotation(
+                x=row["potential"], y=row["gang_name"],
+                text=f"{row['avg_prod']:.2f} MT/day (Baseline: {row['baseline']:.2f} MT/day)",
+                showarrow=False, xanchor="left", yanchor="middle",
+                font=dict(size=10, color="black")
+            )
     fig_loss.update_layout(
         barmode="stack", bargap=0.02,
-        height=fig_height,  # taller area so each bar looks chunky
+        height=fig_height,
         margin=dict(l=140, r=120, t=30, b=30),
         xaxis_title="Potential (MT)", yaxis_title="Gang",
         plot_bgcolor="#fafafa", paper_bgcolor="#ffffff"
@@ -774,7 +815,7 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
     Output("loss-modal", "is_open"),
     Output("modal-title", "children"),
     Output("modal-body", "children"),
-    Input("store-dblclick", "data"),   # <— open only on true double-click
+    Input("store-dblclick", "data"),   # <â€” open only on true double-click
     Input("modal-close", "n_clicks"),
     State("loss-modal", "is_open"),
     State("f-project", "value"),
@@ -810,17 +851,42 @@ def show_loss_on_double_click(dbl, close_clicks, is_open,
     elif months:
         months_ts = [pd.Period(m, "M").to_timestamp() for m in months]
 
-    # Project + period scope (ignore gang filter for details)
-    base = apply_filters(df_day, projects or [], months_ts or [], [],
-                         overall_months=overall_months, overall_gangs=True)
-    d_sel = base[base["gang_name"] == gang_clicked]
+    # Project scope only; month + baseline mirror main loss logic
+    scope_mask = pd.Series(True, index=df_day.index)
+    if projects:
+        scope_mask &= df_day["project_name"].isin(projects)
+    scoped_all = df_day.loc[scope_mask].copy()
+
+    loss_month_candidates = months_ts or []
+    if loss_month_candidates:
+        loss_month_start = max(loss_month_candidates)
+    else:
+        loss_month_start = pd.Timestamp.today().to_period("M").to_timestamp()
+    loss_month_end = loss_month_start + pd.offsets.MonthBegin(1)
+
+    d_sel = scoped_all[
+        (scoped_all["date"] >= loss_month_start)
+        & (scoped_all["date"] < loss_month_end)
+        & (scoped_all["gang_name"] == gang_clicked)
+    ]
 
     if d_sel.empty:
         return True, "Gang Efficiency & Loss", "No data in current selection."
 
-    idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(d_sel)
+    history_sel = scoped_all[
+        (scoped_all["date"] < loss_month_start)
+        & (scoped_all["gang_name"] == gang_clicked)
+    ]
+    baseline_override = history_sel["daily_prod_mt"].mean() if not history_sel.empty else 0.0
+    if pd.isna(baseline_override):
+        baseline_override = 0.0
+
+    idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
+        d_sel, baseline_mt_per_day=baseline_override
+    )
     eff = (delivered / potential * 100) if potential > 0 else 0.0
     lost_pct = (loss_mt / potential * 100) if potential > 0 else 0.0
+
 
     body = html.Div([
         html.Div(f"Gang: {gang_clicked}", className="fw-bold mb-2"),
@@ -896,7 +962,7 @@ def update_trace_tables(projects, months, quick_range, gangs, overall_months_val
     overall_months = "all_months" in (overall_months_val or [])
     overall_gangs  = "all_gangs"  in (overall_gangs_val  or [])
 
-    # months → timestamps
+    # months â†’ timestamps
     months_ts = []
     if quick_range:
         start_dt, end_dt = get_quick_date_options()[quick_range]
@@ -1019,7 +1085,7 @@ def update_trace_gang_options(projects, months, quick_range,
                               clicked_gang, current_value):
     overall_months = "all_months" in (overall_months_val or [])
 
-    # resolve months → timestamps
+    # resolve months â†’ timestamps
     months_ts = []
     if quick_range:
         start_dt, end_dt = get_quick_date_options()[quick_range]
@@ -1034,7 +1100,7 @@ def update_trace_gang_options(projects, months, quick_range,
     gangs = sorted(d_base["gang_name"].dropna().unique().tolist())
     options = [{"label": g, "value": g} for g in gangs]
 
-    # value priority: clicked gang → keep current if still valid → None
+    # value priority: clicked gang â†’ keep current if still valid â†’ None
     if clicked_gang and clicked_gang in gangs:
         value = clicked_gang
     elif current_value and current_value in gangs:
@@ -1051,3 +1117,8 @@ def update_trace_gang_options(projects, months, quick_range,
 if __name__ == "__main__":
     # For LAN sharing: set host="0.0.0.0"
     app.run_server(host="0.0.0.0", port=8050, debug=False)
+
+
+
+
+
