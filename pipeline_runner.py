@@ -55,12 +55,12 @@ def _normalise_files(raw: Optional[Iterable[str]], base: Path) -> Optional[List[
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
     """Reload the dashboard dataframe and recompute derived fields."""
     df = dashboard_module.load_daily(workbook_path)
-    # if "month" not in df.columns:
-    #     df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
-    # else:
-    #     df["month"] = df["month"].fillna(df["date"].dt.to_period("M").dt.to_timestamp())
     df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
-    dashboard_module.df_day = df
+    if hasattr(dashboard_module, "set_df_day"):
+        dashboard_module.set_df_day(df)
+    else:
+        dashboard_module.df_day = df
+
 
 
 
