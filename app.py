@@ -92,6 +92,10 @@ def load_daily(path: Path):
 df_day = load_daily(DATA_PATH)
 df_day["month"] = df_day["date"].dt.to_period("M").dt.to_timestamp()
 
+_last_date = df_day["date"].max()
+LAST_UPDATED_DATE = pd.to_datetime(_last_date) if pd.notna(_last_date) else None
+LAST_UPDATED_TEXT = LAST_UPDATED_DATE.strftime("%d-%m-%Y") if LAST_UPDATED_DATE is not None else "N/A"
+
 # ------------------ METRICS & CHART HELPERS ------------------
 def calc_idle_and_loss(group_df: pd.DataFrame, loss_max_gap_days=LOSS_MAX_GAP_DAYS, baseline_mt_per_day=None):
     # Idle days between non-consecutive work dates (cap each gap by loss_max_gap_days)
@@ -376,14 +380,49 @@ app.clientside_callback(
 
 
 # Options
-project_options = sorted(df_day["project_name"].dropna().unique())
-month_options = sorted(df_day["month"].dropna().unique())
-month_option_items = [
-    {"label": m.strftime("%b %Y"), "value": m.strftime("%Y-%m")}
-    for m in month_options
-]
-month_labels = [m.strftime("%b %Y") for m in month_options]  # Month names
-gang_options = sorted(df_day["gang_name"].dropna().unique())
+# month_options = sorted(df_day["month"].dropna().unique())
+# month_option_items = [
+#     {"label": m.strftime("%b %Y"), "value": m.strftime("%Y-%m")}
+#     for m in month_options
+# ]
+# month_labels = [m.strftime("%b %Y") for m in month_options]  # Month names
+
+# project_options = [
+#     {"label": p, "value": p}
+#     for p in sorted(df_day["project_name"].dropna().unique())
+# ]
+
+# gang_options = sorted(df_day["gang_name"].dropna().unique())
+
+@app.callback(
+    Output("f-project", "options"),
+    Input("store-click-meta", "data"),  # or just Input("f-project", "value") if you want a no-op trigger
+    prevent_initial_call=False
+)
+def update_project_options(_):
+    projects = sorted(df_day["project_name"].dropna().unique())
+    return [{"label": p, "value": p} for p in projects]
+
+
+@app.callback(
+    Output("f-gang", "options"),
+    Input("store-click-meta", "data"),
+    prevent_initial_call=False
+)
+def update_gang_options(_):
+    gangs = sorted(df_day["gang_name"].dropna().unique())
+    return [{"label": g, "value": g} for g in gangs]
+
+
+@app.callback(
+    Output("f-month", "options"),
+    Input("store-click-meta", "data"),
+    prevent_initial_call=False
+)
+def update_month_options(_):
+    months = sorted(df_day["month"].dropna().unique())
+    return [{"label": m.strftime("%b %Y"), "value": m.strftime("%Y-%m")} for m in months]
+
 
 # ---- FILTER BAR ----
 def get_quick_date_options():
@@ -404,9 +443,9 @@ controls = dbc.Card(
     dbc.CardBody([
         html.Div("Filters", className="fw-bold mb-2"),
         dbc.Row([
-            dbc.Col(dcc.Dropdown(project_options, multi=True, placeholder="Select project(s)", id="f-project"), md=4),
-            dbc.Col(dcc.Dropdown(month_option_items, multi=True, placeholder="Select month(s)", id="f-month"), md=4),
-            dbc.Col(dcc.Dropdown(gang_options, multi=True, placeholder="Select gang(s)", id="f-gang"), md=4),
+            dbc.Col(dcc.Dropdown(id="f-project", multi=True, placeholder="Select project(s)"), md=4),
+            dbc.Col(dcc.Dropdown(id="f-month", multi=True, placeholder="Select month(s)"), md=4),
+            dbc.Col(dcc.Dropdown(id="f-gang", multi=True, placeholder="Select gang(s)"), md=4),
         ], className="g-2"),
 
         # Quick time ranges
@@ -499,12 +538,12 @@ kpi_cards = dbc.Row([
         xs=12, sm=6, md=6, lg=3, xl=2
     ),
 
-    # Avg Efficiency
+    # Total Erection (This Period)
     dbc.Col(
         dbc.Card(
             dbc.CardBody([
-                html.Div("Avg Efficiency", className="fw-bold text-white-50"),
-                html.H2(id="kpi-eff", className="mb-0 text-white")
+                html.Div("Total Erection (This Period)", className="fw-bold text-white-50"),
+                html.H2(id="kpi-total", className="mb-0 text-white")
             ]),
             className="shadow-sm", style={"backgroundColor": "#ffbb66", "border": "0", "borderRadius": "12px"}
         ),
@@ -616,6 +655,7 @@ trace_block = dbc.Card(
 
 
 app.layout = dbc.Container([
+    html.Div(f"Last Updated On: {LAST_UPDATED_TEXT}", className="text-muted fw-semibold"),
     html.H2("Measure Output. Expose Lost Units.", className="mt-3 fw-bold"),
     html.Div("Tag causes; assign fixes.", className="text-muted mb-3"),
     controls,
@@ -651,9 +691,9 @@ modal,
     Output("kpi-avg", "children"),
     Output("kpi-delta", "children"),
     Output("kpi-bench", "children"),
-    Output("kpi-active", "children"),   # NEW
-    Output("kpi-eff", "children"),      # NEW
-    Output("kpi-loss", "children"),     # NEW
+    Output("kpi-active", "children"),
+    Output("kpi-total", "children"),
+    Output("kpi-loss", "children"),
     Output("g-actual-vs-bench", "figure"),
     Output("g-monthly", "figure"),
     Output("g-top5", "figure"),
@@ -705,10 +745,16 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
     # ---- Determine month scope for loss metrics ----
     selected_months = months_ts or []
     if selected_months:
-        loss_month_start = max(selected_months)
+        #loss_month_start = max(selected_months)
+        month_start = max(selected_months)
+    elif LAST_UPDATED_DATE is not None:
+        month_start = LAST_UPDATED_DATE.to_period("M").to_timestamp()
     else:
-        loss_month_start = pd.Timestamp.today().to_period("M").to_timestamp()
-    loss_month_end = loss_month_start + pd.offsets.MonthBegin(1)
+        month_start = pd.Timestamp.today().to_period("M").to_timestamp()
+    month_end = month_start + pd.offsets.MonthBegin(1)
+    #else:
+        #loss_month_start = pd.Timestamp.today().to_period("M").to_timestamp()
+    #loss_month_end = loss_month_start + pd.offsets.MonthBegin(1)
 
     scope_mask = pd.Series(True, index=df_day.index)
     if projects:
@@ -717,11 +763,17 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
         scope_mask &= df_day["gang_name"].isin(gangs)
     scoped_all = df_day.loc[scope_mask].copy()
 
+    #d_loss_scope = scoped_all[
+        #(scoped_all["date"] >= loss_month_start) & (scoped_all["date"] < loss_month_end)
+    #].copy()
+
+    #history_scope = scoped_all[scoped_all["date"] < loss_month_start]
     d_loss_scope = scoped_all[
-        (scoped_all["date"] >= loss_month_start) & (scoped_all["date"] < loss_month_end)
+        (scoped_all["date"] >= month_start) & (scoped_all["date"] < month_end)
     ].copy()
 
-    history_scope = scoped_all[scoped_all["date"] < loss_month_start]
+    # history = all time strictly before chosen month
+    history_scope = scoped_all[scoped_all["date"] < month_start]
     baseline_map = {}
     if not history_scope.empty:
         baseline_map = (
@@ -758,16 +810,16 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
     fig_height = int(ROW_PX * max(1, len(df_loss)) + TOPBOT_MARGIN)
 
 
-    # ---- NEW KPIs: Active Gangs, Avg Efficiency, Lost Units ----
+    # ---- KPIs: Active Gangs, Total Erection, Lost Units ----
     active_gangs = d_loss_scope["gang_name"].nunique()
+    total_period_mt = float(d_loss_scope["daily_prod_mt"].sum()) if not d_loss_scope.empty else 0.0
     tot_delivered = float(df_loss["delivered"].sum()) if not df_loss.empty else 0.0
     tot_lost = float(df_loss["lost"].sum()) if not df_loss.empty else 0.0
     tot_potential = tot_delivered + tot_lost
-    eff_pct = (tot_delivered / tot_potential * 100) if tot_potential > 0 else 0.0
     lost_pct = (tot_lost / tot_potential * 100) if tot_potential > 0 else 0.0
 
     kpi_active = f"{active_gangs}"
-    kpi_eff = f"{eff_pct:.1f}%"
+    kpi_total = f"{total_period_mt:.1f} MT"
     kpi_loss = f"{lost_pct:.1f}%"
 
     fig_loss = go.Figure()
@@ -805,7 +857,7 @@ def update_dashboard(projects, months, quick_range, gangs, overall_months_val, o
     fig_project_lines = create_project_lines_chart(df_day, selected_projects=projects, bench=bench)
 
     return (kpi_avg, kpi_delta, kpi_bench,
-            kpi_active, kpi_eff, kpi_loss,
+            kpi_active, kpi_total, kpi_loss,
             fig_loss, fig_line, fig_top5, fig_bottom5, fig_project_lines)
 
 
