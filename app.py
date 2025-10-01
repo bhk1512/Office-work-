@@ -79,7 +79,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
 
     app_instance = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
     app_instance.title = "KEC Productivity"
-    app_instance.layout = build_layout(last_updated_text, active_config.default_benchmark)
+    app_instance.layout = build_layout(last_updated_text)
 
     register_callbacks(app_instance, get_df_day, active_config)
     return app_instance
@@ -96,3 +96,4 @@ app = create_app(CONFIG)
 
 if __name__ == "__main__":
     main()
+

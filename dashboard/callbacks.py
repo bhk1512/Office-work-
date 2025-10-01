@@ -23,6 +23,9 @@ from .workbook import make_trace_workbook_bytes
 
 LOGGER = logging.getLogger(__name__)
 
+BENCHMARK_MT_PER_DAY = 9.0
+
+
 
 def register_callbacks(
     app: Dash,
@@ -105,7 +108,6 @@ def register_callbacks(
     @app.callback(
         Output("kpi-avg", "children"),
         Output("kpi-delta", "children"),
-        Output("kpi-bench", "children"),
         Output("kpi-active", "children"),
         Output("kpi-total", "children"),
         Output("kpi-loss", "children"),
@@ -118,22 +120,14 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-overall-months", "value"),
-        Input("f-overall-gangs", "value"),
-        Input("bench", "value"),
     )
     def update_dashboard(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
-        overall_months_val: Sequence[str] | None,
-        overall_gangs_val: Sequence[str] | None,
-        bench_value: float | None,
     ) -> tuple:
         df_day = data_provider()
-        overall_months = "all_months" in (overall_months_val or [])
-        overall_gangs = "all_gangs" in (overall_gangs_val or [])
         months_ts = resolve_months(months, quick_range)
 
         scoped = apply_filters(
@@ -141,25 +135,20 @@ def register_callbacks(
             projects or [],
             months_ts,
             gangs or [],
-            overall_months=overall_months,
-            overall_gangs=overall_gangs,
         )
         scoped_top_bottom = apply_filters(
             df_day,
             projects or [],
             months_ts,
             [],
-            overall_months=overall_months,
-            overall_gangs=True,
         )
 
-        benchmark = bench_value if bench_value is not None else config.default_benchmark
+        benchmark = BENCHMARK_MT_PER_DAY
         avg_prod = scoped["daily_prod_mt"].mean() if len(scoped) else 0.0
         delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
         kpi_avg = f"{avg_prod:.2f} MT"
         kpi_delta = "(n/a)" if delta_pct is None else f"{delta_pct:+.1f}%"
-        kpi_bench = f"{benchmark:.2f} MT"
-
+        
         selected_months = months_ts or []
         if selected_months:
             month_start = max(selected_months)
@@ -174,7 +163,7 @@ def register_callbacks(
         scope_mask = pd.Series(True, index=df_day.index)
         if projects:
             scope_mask &= df_day["project_name"].isin(projects)
-        if not overall_gangs and gangs:
+        if gangs:
             scope_mask &= df_day["gang_name"].isin(gangs)
         scoped_all = df_day.loc[scope_mask].copy()
 
@@ -285,7 +274,6 @@ def register_callbacks(
         return (
             kpi_avg,
             kpi_delta,
-            kpi_bench,
             kpi_active,
             kpi_total,
             kpi_loss,
@@ -307,8 +295,6 @@ def register_callbacks(
         State("f-month", "value"),
         State("f-quick-range", "value"),
         State("f-gang", "value"),
-        State("f-overall-months", "value"),
-        State("f-overall-gangs", "value"),
     )
     def show_loss_on_double_click(
         dbl_click: dict[str, Any] | None,
@@ -318,8 +304,6 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
-        overall_months_val: Sequence[str] | None,
-        overall_gangs_val: Sequence[str] | None,
     ):
         context = dash.callback_context
         if not context.triggered:
@@ -436,8 +420,6 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-overall-months", "value"),
-        Input("f-overall-gangs", "value"),
         Input("trace-gang", "value"),
         Input("store-selected-gang", "data"),
     )
@@ -446,14 +428,10 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
-        overall_months_val: Sequence[str] | None,
-        overall_gangs_val: Sequence[str] | None,
         trace_gang_value: str | None,
         selected_gang: str | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         df_day = data_provider()
-        overall_months = "all_months" in (overall_months_val or [])
-        overall_gangs = "all_gangs" in (overall_gangs_val or [])
         months_ts = resolve_months(months, quick_range)
 
         scoped = apply_filters(
@@ -461,16 +439,12 @@ def register_callbacks(
             projects or [],
             months_ts,
             gangs or [],
-            overall_months=overall_months,
-            overall_gangs=overall_gangs,
         )
         base_scope = apply_filters(
             df_day,
             projects or [],
             months_ts,
             [],
-            overall_months=overall_months,
-            overall_gangs=True,
         )
 
         if trace_gang_value:
@@ -530,9 +504,6 @@ def register_callbacks(
         State("f-month", "value"),
         State("f-quick-range", "value"),
         State("f-gang", "value"),
-        State("f-overall-months", "value"),
-        State("f-overall-gangs", "value"),
-        State("bench", "value"),
         State("trace-gang", "value"),
         State("store-selected-gang", "data"),
         prevent_initial_call=True,
@@ -543,26 +514,19 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
-        overall_months_val: Sequence[str] | None,
-        overall_gangs_val: Sequence[str] | None,
-        bench_value: float | None,
         trace_gang_value: str | None,
         selected_gang: str | None,
     ):
         df_day = data_provider()
-        overall_months = "all_months" in (overall_months_val or [])
-        overall_gangs = "all_gangs" in (overall_gangs_val or [])
         months_ts = resolve_months(months, quick_range)
         scoped = apply_filters(
             df_day,
             projects or [],
             months_ts,
             gangs or [],
-            overall_months=overall_months,
-            overall_gangs=overall_gangs,
         )
         gang_for_sheet = trace_gang_value or selected_gang
-        benchmark_value = bench_value if bench_value is not None else config.default_benchmark
+        benchmark_value = BENCHMARK_MT_PER_DAY
 
         def _writer(buffer: BytesIO) -> None:
             buffer.write(
@@ -585,8 +549,6 @@ def register_callbacks(
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
-        Input("f-overall-months", "value"),
-        Input("f-overall-gangs", "value"),
         Input("store-selected-gang", "data"),
         State("trace-gang", "value"),
     )
@@ -594,21 +556,16 @@ def register_callbacks(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
-        overall_months_val: Sequence[str] | None,
-        overall_gangs_val: Sequence[str] | None,
         clicked_gang: str | None,
         current_value: str | None,
     ) -> tuple[list[dict[str, str]], str | None]:
         df_day = data_provider()
-        overall_months = "all_months" in (overall_months_val or [])
         months_ts = resolve_months(months, quick_range)
         base = apply_filters(
             df_day,
             projects or [],
             months_ts,
             [],
-            overall_months=overall_months,
-            overall_gangs=True,
         )
         gangs = sorted(base["gang_name"].dropna().unique().tolist())
         options = [{"label": gang, "value": gang} for gang in gangs]
@@ -620,3 +577,13 @@ def register_callbacks(
         else:
             value = None
         return options, value
+
+
+
+
+
+
+
+
+
+

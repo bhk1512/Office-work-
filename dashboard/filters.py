@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
 
@@ -17,27 +17,22 @@ def apply_filters(
     projects: Sequence[str],
     months: Sequence[pd.Timestamp],
     gangs: Sequence[str],
-    *,
-    overall_months: bool = False,
-    overall_gangs: bool = False,
 ) -> pd.DataFrame:
     """Filter *data* by the provided selections."""
 
     filtered = data.copy()
     if projects:
         filtered = filtered[filtered["project_name"].isin(projects)]
-    if not overall_months and months:
+    if months:
         filtered = filtered[filtered["month"].isin(months)]
-    if not overall_gangs and gangs:
+    if gangs:
         filtered = filtered[filtered["gang_name"].isin(gangs)]
     LOGGER.debug(
-        "Filtered data down to %d rows (projects=%s, months=%s, gangs=%s, overall_months=%s, overall_gangs=%s)",
+        "Filtered data down to %d rows (projects=%s, months=%s, gangs=%s)",
         len(filtered),
         list(projects),
-        [m.strftime("%Y-%m") for m in months],
+        [month.strftime("%Y-%m") for month in months],
         list(gangs),
-        overall_months,
-        overall_gangs,
     )
     return filtered
 
