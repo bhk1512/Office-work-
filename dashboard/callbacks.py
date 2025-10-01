@@ -1,4 +1,5 @@
 """Dash callbacks for the productivity dashboard."""
+
 from __future__ import annotations
 
 import logging
@@ -21,10 +22,20 @@ from .filters import apply_filters, resolve_months
 from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang
 from .workbook import make_trace_workbook_bytes
 
+
 LOGGER = logging.getLogger(__name__)
 
 BENCHMARK_MT_PER_DAY = 9.0
 
+def _ensure_list(value: Sequence[str] | str | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+# project_list = _ensure_list(projects)
+# month_list = _ensure_list(months)
 
 
 def register_callbacks(
@@ -86,13 +97,14 @@ def register_callbacks(
         gangs: Sequence[str] | None,
     ) -> list[dict[str, str]]:
         df_day = data_provider()
-        months_ts = resolve_months(months, quick_range)
+        months_ts = resolve_months(_ensure_list(months), quick_range)
 
         filtered = df_day.copy()
         if months_ts:
             filtered = filtered[filtered["month"].isin(months_ts)]
-        if gangs:
-            filtered = filtered[filtered["gang_name"].isin(gangs)]
+        gang_list = _ensure_list(gangs)
+        if gang_list:
+            filtered = filtered[filtered["gang_name"].isin(gang_list)]
 
         projects = sorted(filtered["project_name"].dropna().unique())
         if not projects:
@@ -112,9 +124,10 @@ def register_callbacks(
     ) -> list[dict[str, str]]:
         df_day = data_provider()
         filtered = df_day.copy()
-        if projects:
-            filtered = filtered[filtered["project_name"].isin(projects)]
-        months_ts = resolve_months(months, quick_range)
+        project_list = _ensure_list(projects)
+        if project_list:
+            filtered = filtered[filtered["project_name"].isin(project_list)]
+        months_ts = resolve_months(_ensure_list(months), quick_range)
         if months_ts:
             filtered = filtered[filtered["month"].isin(months_ts)]
 
@@ -136,10 +149,12 @@ def register_callbacks(
     ) -> list[dict[str, str]]:
         df_day = data_provider()
         filtered = df_day.copy()
-        if projects:
-            filtered = filtered[filtered["project_name"].isin(projects)]
-        if gangs:
-            filtered = filtered[filtered["gang_name"].isin(gangs)]
+        project_list = _ensure_list(projects)
+        if project_list:
+            filtered = filtered[filtered["project_name"].isin(project_list)]
+        gang_list = _ensure_list(gangs)
+        if gang_list:
+            filtered = filtered[filtered["gang_name"].isin(gang_list)]
 
         months = sorted(filtered["month"].dropna().unique())
         if quick_range:
@@ -174,28 +189,22 @@ def register_callbacks(
         quick_range: str | None,
         gangs: Sequence[str] | None,
     ) -> tuple:
-        df_day = data_provider()
-        months_ts = resolve_months(months, quick_range)
+        project_list = _ensure_list(projects)
+        month_list = _ensure_list(months)
+        gang_list = _ensure_list(gangs)
 
-        scoped = apply_filters(
-            df_day,
-            projects or [],
-            months_ts,
-            gangs or [],
-        )
-        scoped_top_bottom = apply_filters(
-            df_day,
-            projects or [],
-            months_ts,
-            [],
-        )
+        df_day = data_provider()
+        months_ts = resolve_months(month_list, quick_range)
+
+        scoped = apply_filters(df_day, project_list, months_ts, gang_list)
+        scoped_top_bottom = apply_filters(df_day, project_list, months_ts, [])
 
         benchmark = BENCHMARK_MT_PER_DAY
         avg_prod = scoped["daily_prod_mt"].mean() if len(scoped) else 0.0
         delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
         kpi_avg = f"{avg_prod:.2f} MT"
         kpi_delta = "(n/a)" if delta_pct is None else f"{delta_pct:+.1f}%"
-        
+
         selected_months = months_ts or []
         if selected_months:
             month_start = max(selected_months)
@@ -209,10 +218,10 @@ def register_callbacks(
         month_end = month_start + pd.offsets.MonthBegin(1)
 
         scope_mask = pd.Series(True, index=df_day.index)
-        if projects:
-            scope_mask &= df_day["project_name"].isin(projects)
-        if gangs:
-            scope_mask &= df_day["gang_name"].isin(gangs)
+        if project_list:
+            scope_mask &= df_day["project_name"].isin(project_list)
+        if gang_list:
+            scope_mask &= df_day["gang_name"].isin(gang_list)
         scoped_all = df_day.loc[scope_mask].copy()
 
         loss_scope = scoped_all[
@@ -315,7 +324,7 @@ def register_callbacks(
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom)
         fig_project = create_project_lines_chart(
             df_day,
-            selected_projects=projects,
+            selected_projects=project_list or None,
             bench=benchmark,
         )
 
@@ -353,6 +362,10 @@ def register_callbacks(
         quick_range: str | None,
         gangs: Sequence[str] | None,
     ):
+        project_list = _ensure_list(projects)
+        month_list = _ensure_list(months)
+        gang_list = _ensure_list(gangs)
+
         context = dash.callback_context
         if not context.triggered:
             return is_open, dash.no_update, dash.no_update
@@ -363,11 +376,13 @@ def register_callbacks(
 
         df_day = data_provider()
         gang_clicked = dbl_click["gang"]
-        months_ts = resolve_months(months, quick_range)
+        months_ts = resolve_months(month_list, quick_range)
 
         scope_mask = pd.Series(True, index=df_day.index)
-        if projects:
-            scope_mask &= df_day["project_name"].isin(projects)
+        if project_list:
+            scope_mask &= df_day["project_name"].isin(project_list)
+        if gang_list:
+            scope_mask &= df_day["gang_name"].isin(gang_list)
         scoped_all = df_day.loc[scope_mask].copy()
 
         if months_ts:
@@ -421,46 +436,8 @@ def register_callbacks(
         )
         return True, "Gang Efficiency & Loss", body
 
-    @app.callback(
-        Output("f-month", "value"),
-        Input("f-quick-range", "value"),
-        prevent_initial_call=True,
-    )
-    def clear_months_when_quick_range_selected(quick: str | None):
-        if quick:
-            return []
-        return dash.no_update
-
-    @app.callback(
-        Output("f-quick-range", "value"),
-        Input("f-month", "value"),
-        prevent_initial_call=True,
-    )
-    def clear_quick_when_months_selected(month_values: Sequence[str] | None):
-        if month_values:
-            return None
-        return dash.no_update
-
-    @app.callback(
-        Output("store-selected-gang", "data"),
-        Input("g-actual-vs-bench", "clickData"),
-        Input("g-top5", "clickData"),
-        Input("g-bottom5", "clickData"),
-        prevent_initial_call=True,
-    )
-    def set_selected_gang(loss_click, top_click, bottom_click):
-        context = dash.callback_context
-        if not context.triggered:
-            return dash.no_update
-        source = context.triggered[0]["prop_id"].split(".")[0]
-        if source == "g-actual-vs-bench":
-            return (loss_click or {}).get("points", [{}])[0].get("y")
-        if source == "g-top5":
-            return (top_click or {}).get("points", [{}])[0].get("x")
-        if source == "g-bottom5":
-            return (bottom_click or {}).get("points", [{}])[0].get("x")
-        return dash.no_update
-
+    
+    
     @app.callback(
         Output("tbl-idle-intervals", "data"),
         Output("tbl-daily-prod", "data"),
@@ -479,33 +456,39 @@ def register_callbacks(
         trace_gang_value: str | None,
         selected_gang: str | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        project_list = _ensure_list(projects)
+        month_list = _ensure_list(months)
+        gang_list = _ensure_list(gangs)
+
         df_day = data_provider()
-        months_ts = resolve_months(months, quick_range)
+        months_ts = resolve_months(month_list, quick_range)
 
-        scoped = apply_filters(
-            df_day,
-            projects or [],
-            months_ts,
-            gangs or [],
-        )
-        base_scope = apply_filters(
-            df_day,
-            projects or [],
-            months_ts,
-            [],
-        )
+        base_scope = apply_filters(df_day, project_list, months_ts, []).copy()
+        scoped = apply_filters(df_day, project_list, months_ts, gang_list).copy()
 
-        if trace_gang_value:
-            idle_source = base_scope[base_scope["gang_name"] == trace_gang_value]
-        elif selected_gang:
-            if selected_gang in scoped["gang_name"].unique():
-                idle_source = scoped[scoped["gang_name"] == selected_gang]
-            else:
-                idle_source = base_scope[base_scope["gang_name"] == selected_gang]
-        elif gangs:
-            idle_source = scoped
+        def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
+            if not target_gang:
+                return pd.DataFrame()
+            subset = base_scope[base_scope["gang_name"] == target_gang]
+            if not subset.empty:
+                return subset
+            fallback = df_day[df_day["gang_name"] == target_gang].copy()
+            if project_list:
+                fallback = fallback[fallback["project_name"].isin(project_list)]
+            if months_ts:
+                fallback = fallback[fallback["month"].isin(months_ts)]
+            return fallback
+
+        gang_focus = trace_gang_value or selected_gang
+
+        if gang_focus:
+            idle_source = pick_gang_scope(gang_focus)
+        elif gang_list:
+            idle_source = base_scope[base_scope["gang_name"].isin(gang_list)]
         else:
-            idle_source = scoped
+            idle_source = base_scope
+        if idle_source.empty:
+            idle_source = scoped if not scoped.empty else base_scope
 
         idle_df = compute_idle_intervals_per_gang(
             idle_source, loss_max_gap_days=config.loss_max_gap_days
@@ -517,33 +500,32 @@ def register_callbacks(
             )
         idle_data = idle_df.to_dict("records")
 
-        if trace_gang_value:
-            daily = base_scope[base_scope["gang_name"] == trace_gang_value]
-        elif selected_gang:
-            if selected_gang in scoped["gang_name"].unique():
-                daily = scoped[scoped["gang_name"] == selected_gang]
-            else:
-                daily = base_scope[base_scope["gang_name"] == selected_gang]
-        elif gangs:
-            daily = scoped[scoped["gang_name"].isin(gangs)]
+        if gang_focus:
+            daily_source = pick_gang_scope(gang_focus)
+        elif gang_list:
+            daily_source = base_scope[base_scope["gang_name"].isin(gang_list)]
         else:
-            daily = scoped
+            daily_source = base_scope
+        if daily_source.empty:
+            daily_source = scoped if not scoped.empty else base_scope
 
-        daily = daily.sort_values(["gang_name", "date"])[
+        daily_source = daily_source.sort_values(["gang_name", "date"])[
             ["date", "gang_name", "project_name", "daily_prod_mt"]
         ]
-        if not daily.empty:
-            daily = daily.assign(
-                date=daily["date"].dt.strftime("%d-%m-%Y"),
+        if not daily_source.empty:
+            daily_source = daily_source.assign(
+                date=daily_source["date"].dt.strftime("%d-%m-%Y"),
                 daily_prod_mt=(
-                    daily["daily_prod_mt"].round(2).map(
+                    daily_source["daily_prod_mt"].round(2).map(
                         lambda value: ""
                         if pd.isna(value)
                         else f"{value:.2f}".rstrip("0").rstrip(".")
                     )
                 ),
             )
-        return idle_data, daily.to_dict("records")
+        daily_data = daily_source.to_dict("records")
+
+        return idle_data, daily_data
 
     @app.callback(
         Output("download-trace-xlsx", "data"),
@@ -565,14 +547,13 @@ def register_callbacks(
         trace_gang_value: str | None,
         selected_gang: str | None,
     ):
+        project_list = _ensure_list(projects)
+        month_list = _ensure_list(months)
+        gang_list = _ensure_list(gangs)
+
         df_day = data_provider()
-        months_ts = resolve_months(months, quick_range)
-        scoped = apply_filters(
-            df_day,
-            projects or [],
-            months_ts,
-            gangs or [],
-        )
+        months_ts = resolve_months(month_list, quick_range)
+        scoped = apply_filters(df_day, project_list, months_ts, gang_list)
         gang_for_sheet = trace_gang_value or selected_gang
         benchmark_value = BENCHMARK_MT_PER_DAY
 
@@ -581,8 +562,8 @@ def register_callbacks(
                 make_trace_workbook_bytes(
                     scoped,
                     months_ts,
-                    projects or [],
-                    gangs or [],
+                    project_list,
+                    gang_list,
                     benchmark_value,
                     gang_for_sheet=gang_for_sheet,
                     config=config,
@@ -607,14 +588,12 @@ def register_callbacks(
         clicked_gang: str | None,
         current_value: str | None,
     ) -> tuple[list[dict[str, str]], str | None]:
+        project_list = _ensure_list(projects)
+        month_list = _ensure_list(months)
+
         df_day = data_provider()
-        months_ts = resolve_months(months, quick_range)
-        base = apply_filters(
-            df_day,
-            projects or [],
-            months_ts,
-            [],
-        )
+        months_ts = resolve_months(month_list, quick_range)
+        base = apply_filters(df_day, project_list, months_ts, [])
         gangs = sorted(base["gang_name"].dropna().unique().tolist())
         options = [{"label": gang, "value": gang} for gang in gangs]
 
@@ -625,6 +604,24 @@ def register_callbacks(
         else:
             value = None
         return options, value
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
