@@ -200,7 +200,8 @@ def register_callbacks(
         if selected_months:
             month_start = max(selected_months)
         else:
-            last_date = pd.to_datetime(df_day["date"].max())
+            candidate = scoped if not scoped.empty else df_day
+            last_date = pd.to_datetime(candidate["date"].max())
             if pd.isna(last_date):
                 month_start = pd.Timestamp.today().to_period("M").to_timestamp()
             else:
