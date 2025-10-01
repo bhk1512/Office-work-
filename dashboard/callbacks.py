@@ -72,34 +72,81 @@ def register_callbacks(
         [State("store-click-meta", "data")],
     )
 
+    
+
     @app.callback(
         Output("f-project", "options"),
-        Input("store-click-meta", "data"),
-        prevent_initial_call=False,
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
     )
-    def update_project_options(_: Any) -> list[dict[str, str]]:
+    def update_project_options(
+        months: Sequence[str] | None,
+        quick_range: str | None,
+        gangs: Sequence[str] | None,
+    ) -> list[dict[str, str]]:
         df_day = data_provider()
-        projects = sorted(df_day["project_name"].dropna().unique())
+        months_ts = resolve_months(months, quick_range)
+
+        filtered = df_day.copy()
+        if months_ts:
+            filtered = filtered[filtered["month"].isin(months_ts)]
+        if gangs:
+            filtered = filtered[filtered["gang_name"].isin(gangs)]
+
+        projects = sorted(filtered["project_name"].dropna().unique())
+        if not projects:
+            projects = sorted(df_day["project_name"].dropna().unique())
         return [{"label": project, "value": project} for project in projects]
 
     @app.callback(
         Output("f-gang", "options"),
-        Input("store-click-meta", "data"),
-        prevent_initial_call=False,
+        Input("f-project", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
     )
-    def update_gang_options(_: Any) -> list[dict[str, str]]:
+    def update_gang_options(
+        projects: Sequence[str] | None,
+        months: Sequence[str] | None,
+        quick_range: str | None,
+    ) -> list[dict[str, str]]:
         df_day = data_provider()
-        gangs = sorted(df_day["gang_name"].dropna().unique())
+        filtered = df_day.copy()
+        if projects:
+            filtered = filtered[filtered["project_name"].isin(projects)]
+        months_ts = resolve_months(months, quick_range)
+        if months_ts:
+            filtered = filtered[filtered["month"].isin(months_ts)]
+
+        gangs = sorted(filtered["gang_name"].dropna().unique())
+        if not gangs:
+            gangs = sorted(df_day["gang_name"].dropna().unique())
         return [{"label": gang, "value": gang} for gang in gangs]
 
     @app.callback(
         Output("f-month", "options"),
-        Input("store-click-meta", "data"),
-        prevent_initial_call=False,
+        Input("f-project", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
     )
-    def update_month_options(_: Any) -> list[dict[str, str]]:
+    def update_month_options(
+        projects: Sequence[str] | None,
+        quick_range: str | None,
+        gangs: Sequence[str] | None,
+    ) -> list[dict[str, str]]:
         df_day = data_provider()
-        months = sorted(df_day["month"].dropna().unique())
+        filtered = df_day.copy()
+        if projects:
+            filtered = filtered[filtered["project_name"].isin(projects)]
+        if gangs:
+            filtered = filtered[filtered["gang_name"].isin(gangs)]
+
+        months = sorted(filtered["month"].dropna().unique())
+        if quick_range:
+            months_range = resolve_months(None, quick_range)
+            months = [month for month in months if month in months_range]
+        if not months:
+            months = sorted(df_day["month"].dropna().unique())
         return [
             {"label": month.strftime("%b %Y"), "value": month.strftime("%Y-%m")}
             for month in months
@@ -577,6 +624,15 @@ def register_callbacks(
         else:
             value = None
         return options, value
+
+
+
+
+
+
+
+
+
 
 
 
