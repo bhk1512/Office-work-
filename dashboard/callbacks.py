@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import dash_bootstrap_components as dbc 
+import pandas as pd
 from io import BytesIO
 from typing import Any, Callable, Sequence
 
@@ -43,6 +45,7 @@ def register_callbacks(
     app: Dash,
     data_provider: Callable[[], pd.DataFrame],
     config: AppConfig,
+    project_info_provider: Callable[[], pd.DataFrame] | None = None,
 ) -> None:
     """Register all Dash callbacks on *app*."""
 
@@ -251,6 +254,66 @@ def register_callbacks(
             {"label": month.strftime("%b %Y"), "value": month.strftime("%Y-%m")}
             for month in months
         ]
+
+    @app.callback(
+        Output("project-details", "children"),
+        Input("f-project", "value"),
+        prevent_initial_call=False,
+    )
+    def show_project_details(selected_projects):
+        
+        
+        if not selected_projects or len(selected_projects) != 1:
+            return "Select a single project to view its details."       
+        
+        if not project_info_provider:
+            return "No 'Project Details' source configured."  
+        df_info = project_info_provider()
+        if df_info is None or df_info.empty:
+            return "No 'Project Details' sheet found in the source workbook."
+
+        pname = str(selected_projects[0]).strip() 
+        # Match by Project Name (exact match first, then tolerant fallback)
+        row = df_info[df_info["Project Name"] == pname]
+        if row.empty and "Project Name" in df_info.columns:
+            # fallback to the normalized helper built during load
+            norm = lambda s: " ".join(str(s).strip().lower().split())
+            row = df_info[df_info["Project Name"].apply(norm) == norm(pname)]
+        if row.empty:
+            return f"No project details found for “{pname}”."
+
+
+        r = row.iloc[0]
+
+        def fmt_date(x):
+            return "" if pd.isna(x) else pd.to_datetime(x).strftime("%d-%m-%Y")
+
+        return html.Div([
+            dbc.Row([
+                dbc.Col(html.Div([
+                    html.Div([html.Span("Project Code: ", className="text-muted"), html.B(r.get("project_code",""))]),
+                    html.Div([html.Span("Client: ", className="text-muted"), html.B(r.get("client_name",""))]),
+                ]), md=6),
+                dbc.Col(html.Div([
+                    html.Div([html.Span("NOA Start: ", className="text-muted"), html.B(fmt_date(r.get("noa_start")))]),
+                    html.Div([html.Span("LOA End: ", className="text-muted"), html.B(fmt_date(r.get("loa_end")))]),
+                ]), md=6),
+            ], className="mb-2"),
+            dbc.Row([
+                dbc.Col(html.Div([
+                    html.Div([html.Span("Project Manager: ", className="text-muted"), html.B(r.get("project_mgr",""))]),
+                    html.Div([html.Span("Regional Manager: ", className="text-muted"), html.B(r.get("regional_mgr",""))]),
+                    html.Div([html.Span("Planning Engineer: ", className="text-muted"), html.B(r.get("planning_eng",""))]),
+                ]), md=6),
+                dbc.Col(html.Div([
+                    html.Div([html.Span("PCH: ", className="text-muted"), html.B(r.get("pch",""))]),
+                    html.Div([html.Span("Section Incharge: ", className="text-muted"), html.B(r.get("section_inch",""))]),
+                    html.Div([html.Span("Supervisor: ", className="text-muted"), html.B(r.get("supervisor",""))]),
+                ]), md=6),
+            ]),
+        ])
+
+
 
     @app.callback(
         Output("kpi-avg", "children"),
@@ -557,6 +620,7 @@ def register_callbacks(
         scoped = apply_filters(df_day, project_list, months_ts, gang_list)
         gang_for_sheet = trace_gang_value or selected_gang
         benchmark_value = BENCHMARK_MT_PER_DAY
+        project_info_df = project_info_provider() if project_info_provider else None
 
         def _writer(buffer: BytesIO) -> None:
             buffer.write(
@@ -568,6 +632,7 @@ def register_callbacks(
                     benchmark_value,
                     gang_for_sheet=gang_for_sheet,
                     config=config,
+                    project_info=project_info_df,
                 )
             )
 
@@ -611,44 +676,10 @@ def register_callbacks(
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     @app.callback(
         Output("trace-modal", "is_open"),
         Output("trace-modal-title", "children"),
-        Output("store-selected-gang", "data"),
+        # Output("store-selected-gang", "data"),
         Input("store-dblclick", "data"),
         Input("trace-modal-close", "n_clicks"),
         State("trace-modal", "is_open"),
@@ -666,11 +697,11 @@ def register_callbacks(
             raise PreventUpdate
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
         if trigger == "trace-modal-close":
-            return False, dash.no_update, current_selection
+            return False, dash.no_update
         if trigger == "store-dblclick":
             if not dbl_click or not dbl_click.get("gang"):
                 raise PreventUpdate
             gang_value = dbl_click["gang"]
             title = f"Traceability - {gang_value}"
-            return True, title, gang_value
+            return True, title
         raise PreventUpdate

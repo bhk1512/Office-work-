@@ -159,6 +159,63 @@ def normalize_gang_name(name: str) -> str:
     s = re.sub(r"([A-Za-z])(\d+)$", r"\1 \2", s)
     return s.strip()
 
+# --- NEW: tolerant loader for a single source file's "Project Details" ---
+def load_project_details_from_source(xl: pd.ExcelFile, source_file: Path) -> pd.DataFrame:
+    # only proceed if a "Project Details" sheet exists
+    if "Project Details" not in xl.sheet_names:
+        return pd.DataFrame()
+
+    dfp = pd.read_excel(xl, sheet_name="Project Details")
+
+    # tolerant column picks (allow minor header variations)
+    def pick(df, *opts):
+        cols = {str(c).strip().lower(): c for c in df.columns}
+        for o in opts:
+            k = o.strip().lower()
+            if k in cols:
+                return cols[k]
+        # contains fallback
+        for k, c in cols.items():
+            if any(o.lower() in k for o in opts):
+                return c
+        raise KeyError(f"Missing one of {opts} in {list(df.columns)}")
+
+    try:
+        c_code = pick(dfp, "Project Code", "project_code", "code")
+        c_name = pick(dfp, "Project Name", "project_name", "name")
+        c_client = pick(dfp, "Client Name", "client", "client_name")
+        c_noa = pick(dfp, "NOA Start Date", "noa start", "start date")
+        c_loa = pick(dfp, "LOA End Date", "loa end", "end date")
+        c_pm = pick(dfp, "Project Manager", "project manger", "pm")
+        c_rm = pick(dfp, "Regional Manager", "regional_manager")
+        c_pe = pick(dfp, "Planning Engineer", "planning_engineer")
+        c_pch = pick(dfp, "PCH")
+        c_si = pick(dfp, "Section Incharge", "section_incharge")
+        c_sup = pick(dfp, "Supervisor", "supervisor")
+    except KeyError:
+        # If the sheet is weirdly formatted, skip gracefully
+        return pd.DataFrame()
+
+    out = pd.DataFrame({
+        "project_code": dfp[c_code].astype(str).str.strip().str.upper(),
+        "project_name": dfp[c_name].astype(str).str.strip(),
+        "client_name":  dfp[c_client].astype(str).str.strip(),
+        "noa_start":    pd.to_datetime(dfp[c_noa], errors="coerce"),
+        "loa_end":      pd.to_datetime(dfp[c_loa], errors="coerce"),
+        "project_mgr":  dfp[c_pm].astype(str).str.strip(),
+        "regional_mgr": dfp[c_rm].astype(str).str.strip(),
+        "planning_eng": dfp[c_pe].astype(str).str.strip(),
+        "pch":          dfp[c_pch].astype(str).str.strip(),
+        "section_inch": dfp[c_si].astype(str).str.strip(),
+        "supervisor":   dfp[c_sup].astype(str).str.strip(),
+        "_source_file": source_file.name,
+    })
+
+    if "Project Name" in dfp.columns:
+        out["Project Name"] = dfp["Project Name"].astype(str).str.strip()
+    # drop fully-empty rows and rows without a project_code
+    out = out[out["project_code"].ne("").fillna(False)]
+    return out
 
 # ---------- Core (per file) ----------
 def process_file(path: Path):
@@ -389,6 +446,7 @@ def main(argv=None):
     all_per_day, all_per_erection = [], []
     all_issues, all_diag = [], []
     all_data_issues = []
+    all_proj_details = [] 
 
     for p in paths:
         if not p.exists():
@@ -396,6 +454,17 @@ def main(argv=None):
             continue
 
         per_day, per_erection, diag, issues, data_issues_df = process_file(p)
+
+        # --- NEW: attempt to read "Project Details" from this source ---
+        try:
+            xl_src = pd.ExcelFile(p, engine="openpyxl")
+            dfp = load_project_details_from_source(xl_src, p)
+            if not dfp.empty:
+                fn_project_name = parse_project_from_filename(p.name)  # you already use this elsewhere
+                dfp["Project Name"] = fn_project_name                 # <-- NEW (title-case col)
+                all_proj_details.append(dfp)
+        except Exception as e:
+            all_issues.append({"file": p.name, "issue": f"Project Details read error: {e}"})
 
         if not per_day.empty:
             all_per_day.append(per_day.assign(_source_file=p.name))
@@ -408,12 +477,56 @@ def main(argv=None):
             all_diag.append(diag)
         all_issues.extend(issues)
 
+
     # Consolidate across all inputs
     per_day_consol = pd.concat(all_per_day, ignore_index=True) if all_per_day else pd.DataFrame()
     per_erection_consol = pd.concat(all_per_erection, ignore_index=True) if all_per_erection else pd.DataFrame()
     data_issues_consol = pd.concat(all_data_issues, ignore_index=True) if all_data_issues else pd.DataFrame()
     issues_df = pd.DataFrame(all_issues) if all_issues else pd.DataFrame()
     diag_df = pd.DataFrame(all_diag) if all_diag else pd.DataFrame()
+        # --- NEW: consolidate Project Details across inputs ---
+        # --- consolidate Project Details across inputs (NEW) ---
+    if all_proj_details:
+        projdetails_df = pd.concat(all_proj_details, ignore_index=True)
+
+        # Deduplicate by project_code; latest file wins
+        projdetails_df = (
+            projdetails_df.sort_values("_source_file")
+                        .drop_duplicates(subset=["project_code"], keep="last")
+        )
+
+        # Order & friendly headers (align with other sheets' style)
+        projdetails_out = projdetails_df.rename(columns={
+            "project_code": "Project Code",
+            "client_name": "Client Name",
+            "noa_start": "NOA Start Date",
+            "loa_end": "LOA End Date",
+            "project_mgr": "Project Manager",
+            "regional_mgr": "Regional Manager",
+            "planning_eng": "Planning Engineer",
+            "pch": "PCH",
+            "section_inch": "Section Incharge",
+            "supervisor": "Supervisor",
+        })[
+            [
+                "Project Code",
+                "Project Name",
+                "project_name",           # <-- ensure this is present
+                "Client Name",
+                "NOA Start Date",
+                "LOA End Date",
+                "Project Manager",
+                "Regional Manager",
+                "Planning Engineer",
+                "PCH",
+                "Section Incharge",
+                "Supervisor",
+            ]
+        ]
+    else:
+        projdetails_out = pd.DataFrame()
+
+
 
     # README / Assumptions
     readme_lines = [
@@ -447,6 +560,9 @@ def main(argv=None):
             issues_df.to_excel(w, sheet_name="Issues", index=False)
         if not diag_df.empty:
             diag_df.to_excel(w, sheet_name="Diagnostics", index=False)
+        # --- NEW: write consolidated Project Details ---
+        if not projdetails_df.empty:
+            projdetails_df.to_excel(w, sheet_name="ProjectDetails", index=False)
         readme_df.to_excel(w, sheet_name="README_Assumptions", index=False)
 
         # Apply styling
@@ -457,7 +573,8 @@ def main(argv=None):
             ("Data Issues", "F8CBAD"),     # light red
             ("Issues", "D9D2E9"),          # purple
             ("Diagnostics", "FFE699"),     # yellow
-            ("README_Assumptions", "99CCFF")
+            ("README_Assumptions", "99CCFF"),
+            ("ProjectDetails", "99E6E6"),  # --- NEW ---
         ]:
             if sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]

@@ -30,6 +30,7 @@ def make_trace_workbook_bytes(
     *,
     gang_for_sheet: str | None = None,
     config: AppConfig | None = None,
+    project_info: pd.DataFrame | None = None,
 ) -> bytes:
     """Build the Excel export with summary, idle intervals, and daily detail."""
 
@@ -157,6 +158,37 @@ def make_trace_workbook_bytes(
                     _sanitize_sheet_name(f"Summary_{gang_for_sheet}"),
                     index=False,
                 )
+        
+        
+        # Optional: include ProjectDetails if exactly one project is selected
+        if projects and len(projects) == 1 and project_info is not None and not project_info.empty:
+            pname = str(projects[0]).strip()
+            # project_name -> project_code from scoped_data (or fall back to global if needed)
+            name_to_code = (
+                scoped_data.dropna(subset=["project_name", "project_code"])
+                           .drop_duplicates(subset=["project_name"])
+                           .set_index("project_name")["project_code"]
+                           .to_dict()
+            )
+            pcode = name_to_code.get(pname)
+            if pcode:
+                row = project_info[project_info["project_code"] == pcode]
+                if not row.empty:
+                    r = row.iloc[0]
+                    pd.DataFrame([{
+                        "Project Code": pcode,
+                        "Project Name": pname,
+                        "Client Name": r.get("client_name"),
+                        "NOA Start Date": r.get("noa_start"),
+                        "LOA End Date": r.get("loa_end"),
+                        "Project Manager": r.get("project_mgr"),
+                        "Regional Manager": r.get("regional_mgr"),
+                        "Planning Engineer": r.get("planning_eng"),
+                        "PCH": r.get("pch"),
+                        "Section Incharge": r.get("section_inch"),
+                        "Supervisor": r.get("supervisor"),
+                    }]).to_excel(writer, "ProjectDetails_Selected", index=False)
+
 
     buffer.seek(0)
     return buffer.getvalue()

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import re
 
 from .config import AppConfig
 
@@ -100,3 +101,54 @@ def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
     if "RawData" in workbook.sheet_names:
         return load_daily_from_rawdata(workbook, "RawData")
     raise FileNotFoundError("Neither 'DailyExpanded' nor 'RawData' found in workbook.")
+
+
+def _pick_tol(df: pd.DataFrame, opts):
+    m = {str(c).strip().lower(): c for c in df.columns}
+    for o in opts:
+        key = o.strip().lower()
+        if key in m: return m[key]
+    for k, c in m.items():
+        if any(o.lower() in k for o in opts):
+            return c
+    raise KeyError(f"Column not found among {opts}: have {list(df.columns)}")
+
+
+
+def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFrame:
+    try:
+        xl = pd.ExcelFile(path)
+        if sheet not in xl.sheet_names:
+            return pd.DataFrame()
+        df = pd.read_excel(xl, sheet_name=sheet)
+
+        col_code   = _pick_tol(df, ["Project Code","project_code","code"])
+        col_name   = _pick_tol(df, ["Project Name","project_name","name"])
+        col_client = _pick_tol(df, ["Client Name","client","client_name"])
+        col_noa    = _pick_tol(df, ["NOA Start Date","start date","noa start"])
+        col_loa    = _pick_tol(df, ["LOA End Date","end date","loa end"])
+        col_pe     = _pick_tol(df, ["Planning Engineer","planning_engineer"])
+        col_pch    = _pick_tol(df, ["PCH"])
+        col_rm     = _pick_tol(df, ["Regional Manager","regional_manager"])
+        col_pm     = _pick_tol(df, ["Project Manager","Project Manger","pm"])
+        col_si     = _pick_tol(df, ["Section Incharge","section_incharge"])
+        col_sup    = _pick_tol(df, ["Supervisor","supervisor"])
+
+        out = pd.DataFrame({
+            "project_code": df[col_code].astype(str).str.strip(),
+            "project_name": df[col_name].astype(str).str.strip(),
+            "client_name": df[col_client].astype(str).str.strip(),
+            "noa_start":   pd.to_datetime(df[col_noa], errors="coerce"),
+            "loa_end":     pd.to_datetime(df[col_loa], errors="coerce"),
+            "planning_eng": df[col_pe].astype(str).str.strip(),
+            "pch":          df[col_pch].astype(str).str.strip(),
+            "regional_mgr": df[col_rm].astype(str).str.strip(),
+            "project_mgr":  df[col_pm].astype(str).str.strip(),
+            "section_inch": df[col_si].astype(str).str.strip(),
+            "supervisor":   df[col_sup].astype(str).str.strip(),
+        })
+        out = out[(out["project_name"]!="nan") | (out["project_code"]!="nan")].copy()
+        out["key_name"] = out["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
+        return out
+    except Exception:
+        return pd.DataFrame()

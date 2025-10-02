@@ -140,7 +140,7 @@ def build_controls() -> dbc.Card:
                         dbc.Col(
                             dcc.Dropdown(
                                 id="f-project",
-                                multi=True,
+                                multi=False,
                                 placeholder="Select project(s)",
                             ),
                             md=4,
@@ -324,6 +324,19 @@ def build_kpi_cards() -> dbc.Row:
         className="g-3 align-items-stretch",
     )
 
+def build_project_details_card() -> dbc.Card:
+    return dbc.Card(
+        dbc.CardBody([
+            html.Div("Project Details", className="fw-bold mb-2"),
+            html.Div(
+                id="project-details",
+                className="small text-muted",
+                children="Select a single project to view its details."
+            ),
+        ]),
+        className="mb-3 shadow-sm"
+    )
+
 
 ROW_PX = 56
 VISIBLE_ROWS = 15
@@ -411,6 +424,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             ),
             html.Div("Tag causes; assign fixes.", className="text-muted mb-3"),
             controls,
+            build_project_details_card(),     # <-- INSERT HERE
             build_kpi_cards(),
             dbc.Row(
                 [

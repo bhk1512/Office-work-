@@ -10,7 +10,7 @@ from erection_compiled_to_daily_new import run_pipeline
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
     "input_directory": "Test",
-    "output_file": "ErectionCompiled_Output.xlsx",
+    "output_file": "ErectionCompiled_Output_testRun.xlsx",
     "pipeline_extra_args": [],
     "dash_host": "0.0.0.0",
     "dash_port": 8050,
