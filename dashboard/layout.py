@@ -58,9 +58,38 @@ def build_controls() -> dbc.Card:
                                 inline=True,
                                 className="mt-2",
                             ),
-                            md=12,
+                            md=10,
                         ),
-                    ]
+                        dbc.Col(
+                            dbc.Button(
+                                "Clear Quick Range",
+                                id="btn-clear-quick-range",
+                                color="link",
+                                size="sm",
+                                className="mt-2",
+                            ),
+                            md=2,
+                            className="d-flex align-items-center justify-content-end",
+                        ),
+                    ],
+                    className="g-2",
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dbc.Button(
+                                "Reset Filters",
+                                id="btn-reset-filters",
+                                color="secondary",
+                                outline=True,
+                                size="sm",
+                                className="mt-2",
+                            ),
+                            md=12,
+                            className="d-flex justify-content-end",
+                        ),
+                    ],
+                    className="g-2",
                 ),
             ]
         ),

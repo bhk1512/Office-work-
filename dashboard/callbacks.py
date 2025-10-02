@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dcc import send_bytes
+from dash.exceptions import PreventUpdate
 
 from .charts import (
     create_monthly_line_chart,
@@ -84,6 +85,28 @@ def register_callbacks(
     )
 
     
+
+    @app.callback(
+        Output("f-project", "value"),
+        Output("f-month", "value"),
+        Output("f-gang", "value"),
+        Output("f-quick-range", "value"),
+        Input("btn-reset-filters", "n_clicks"),
+        Input("btn-clear-quick-range", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def handle_filter_reset(
+        reset_clicks: int | None,
+        clear_quick_clicks: int | None,
+    ) -> tuple[Any, Any, Any, Any]:
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger_id == "btn-clear-quick-range":
+            return dash.no_update, dash.no_update, dash.no_update, None
+        return None, None, None, None
+
 
     @app.callback(
         Output("f-project", "options"),

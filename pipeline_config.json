@@ -1,5 +1,5 @@
 {
-  "input_directory": "C:\\Users\\kaushikb\\Documents\\Work\\Git\\Office-work-\\Test",
+  "input_directory": "Test",
   "output_file": "ErectionCompiled_Output_testRun.xlsx",
   "pipeline_extra_args": [],
   "dash_host": "0.0.0.0",
