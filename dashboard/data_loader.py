@@ -122,17 +122,17 @@ def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFr
             return pd.DataFrame()
         df = pd.read_excel(xl, sheet_name=sheet)
 
-        col_code   = _pick_tol(df, ["Project Code","project_code","code"])
-        col_name   = _pick_tol(df, ["Project Name","project_name","name"])
-        col_client = _pick_tol(df, ["Client Name","client","client_name"])
-        col_noa    = _pick_tol(df, ["NOA Start Date","start date","noa start"])
-        col_loa    = _pick_tol(df, ["LOA End Date","end date","loa end"])
-        col_pe     = _pick_tol(df, ["Planning Engineer","planning_engineer"])
-        col_pch    = _pick_tol(df, ["PCH"])
-        col_rm     = _pick_tol(df, ["Regional Manager","regional_manager"])
-        col_pm     = _pick_tol(df, ["Project Manager","Project Manger","pm"])
-        col_si     = _pick_tol(df, ["Section Incharge","section_incharge"])
-        col_sup    = _pick_tol(df, ["Supervisor","supervisor"])
+        col_code   = _pick_tol(df, ["project_code"])
+        col_name   = _pick_tol(df, ["project_name"])
+        col_client = _pick_tol(df, ["client_name"])
+        col_noa    = _pick_tol(df, ["noa_start"])
+        col_loa    = _pick_tol(df, ["loa_end"])
+        col_pe     = _pick_tol(df, ["planning_eng"])
+        col_pch    = _pick_tol(df, ["pch"])
+        col_rm     = _pick_tol(df, ["regional_mgr"])
+        col_pm     = _pick_tol(df, ["project_mgr"])
+        col_si     = _pick_tol(df, ["section_inch"])
+        col_sup    = _pick_tol(df, ["supervisor"])
 
         out = pd.DataFrame({
             "project_code": df[col_code].astype(str).str.strip(),
@@ -149,6 +149,8 @@ def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFr
         })
         out = out[(out["project_name"]!="nan") | (out["project_code"]!="nan")].copy()
         out["key_name"] = out["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
+        if "Project Name" in df.columns:
+            out["Project Name"] = df["Project Name"].astype(str).str.strip()
         return out
     except Exception:
         return pd.DataFrame()

@@ -263,7 +263,7 @@ def register_callbacks(
     def show_project_details(selected_projects):
         
         
-        if not selected_projects or len(selected_projects) != 1:
+        if not selected_projects:
             return "Select a single project to view its details."       
         
         if not project_info_provider:
@@ -272,7 +272,7 @@ def register_callbacks(
         if df_info is None or df_info.empty:
             return "No 'Project Details' sheet found in the source workbook."
 
-        pname = str(selected_projects[0]).strip() 
+        pname = str(selected_projects).strip() 
         # Match by Project Name (exact match first, then tolerant fallback)
         row = df_info[df_info["Project Name"] == pname]
         if row.empty and "Project Name" in df_info.columns:
