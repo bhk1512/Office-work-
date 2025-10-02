@@ -196,26 +196,66 @@ def load_project_details_from_source(xl: pd.ExcelFile, source_file: Path) -> pd.
         # If the sheet is weirdly formatted, skip gracefully
         return pd.DataFrame()
 
-    out = pd.DataFrame({
-        "project_code": dfp[c_code].astype(str).str.strip().str.upper(),
-        "project_name": dfp[c_name].astype(str).str.strip(),
-        "client_name":  dfp[c_client].astype(str).str.strip(),
+        # Build a narrow frame with the columns we care about
+    meta = pd.DataFrame({
+        "project_code": dfp[c_code],
+        "project_name": dfp[c_name],
+        "client_name":  dfp[c_client],
         "noa_start":    pd.to_datetime(dfp[c_noa], errors="coerce"),
         "loa_end":      pd.to_datetime(dfp[c_loa], errors="coerce"),
-        "project_mgr":  dfp[c_pm].astype(str).str.strip(),
-        "regional_mgr": dfp[c_rm].astype(str).str.strip(),
-        "planning_eng": dfp[c_pe].astype(str).str.strip(),
-        "pch":          dfp[c_pch].astype(str).str.strip(),
-        "section_inch": dfp[c_si].astype(str).str.strip(),
-        "supervisor":   dfp[c_sup].astype(str).str.strip(),
-        "_source_file": source_file.name,
-    })
+        "project_mgr":  dfp[c_pm],
+        "regional_mgr": dfp[c_rm],
+        "planning_eng": dfp[c_pe],
+        "pch":          dfp[c_pch],
+        "section_inch": dfp[c_si],
+        "supervisor":   dfp[c_sup],
+    }).astype(object)
 
+    # Forward-fill project metadata so blank rows (extra names) inherit the project
+    meta[["project_code","project_name","client_name","noa_start","loa_end",
+          "project_mgr","regional_mgr","planning_eng","pch"]] = \
+        meta[["project_code","project_name","client_name","noa_start","loa_end",
+              "project_mgr","regional_mgr","planning_eng","pch"]].ffill()
+
+    # Helper: join unique non-empty values, preserving order
+    def uniq_join(series):
+        vals = [str(x).strip() for x in series if pd.notna(x) and str(x).strip() != ""]
+        seen = set(); out = []
+        for v in vals:
+            if v not in seen:
+                seen.add(v); out.append(v)
+        return ", ".join(out)
+
+    # Aggregate to one row per project_code (collect multiples for the two fields)
+    out = (meta
+           .groupby("project_code", dropna=False)
+           .agg({
+               "project_name": "first",
+               "client_name":  "first",
+               "noa_start":    "first",
+               "loa_end":      "first",
+               "project_mgr":  "first",
+               "regional_mgr": "first",
+               "planning_eng": "first",
+               "pch":          "first",
+               "section_inch": uniq_join,
+               "supervisor":   uniq_join,
+           })
+           .reset_index()
+    )
+
+    # Uppercase/trim code; drop empties
+    out["project_code"] = out["project_code"].astype(str).str.strip().str.upper()
+    out = out[out["project_code"].ne("")]
+
+    # File name for traceability + pass-through literal "Project Name" label if present
+    out["_source_file"] = source_file.name
     if "Project Name" in dfp.columns:
-        out["Project Name"] = dfp["Project Name"].astype(str).str.strip()
-    # drop fully-empty rows and rows without a project_code
-    out = out[out["project_code"].ne("").fillna(False)]
+        # keep the human label from sheet; it’s already ffilled via meta
+        out["Project Name"] = meta.groupby("project_code")["project_name"].first().astype(str).str.strip()
+
     return out
+
 
 # ---------- Core (per file) ----------
 def process_file(path: Path):
