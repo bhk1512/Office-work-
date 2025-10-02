@@ -54,6 +54,7 @@ def _build_trace_contents(
             ],
             className="mb-3",
         ),
+        
         dbc.Row(
             [
                 dbc.Col(html.H5("Traceability"), md=8),
@@ -333,7 +334,10 @@ CONTAINER_HEIGHT = ROW_PX * VISIBLE_ROWS + TOPBOT_MARGIN
 def build_trace_block() -> dbc.Card:
     """Return the traceability card with tables and export controls."""
 
-    contents = _build_trace_contents(
+    contents = [
+    html.Div(id="trace-anchor"),  # <-- anchor lives ONLY in the main page, not the modal
+    ]
+    contents += _build_trace_contents(
         "trace-gang",
         "btn-export-trace",
         "tbl-idle-intervals",
@@ -463,6 +467,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_trace_block(),
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
+            html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
         ],
         fluid=True,

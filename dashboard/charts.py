@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .config import AppConfig
+from collections import defaultdict
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_BENCHMARK = AppConfig().default_benchmark
@@ -89,6 +90,7 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
     top_chart.update_xaxes(fixedrange=True)
     top_chart.update_yaxes(fixedrange=True)
 
+
     bottom_chart = go.Figure(
         go.Bar(
             x=bottom5["gang_name"],
@@ -109,6 +111,7 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
     bottom_chart.update_xaxes(fixedrange=True)
     bottom_chart.update_yaxes(fixedrange=True)
     LOGGER.debug("Top/Bottom charts built with %d gangs", len(per_gang))
+
     return top_chart, bottom_chart
 
 

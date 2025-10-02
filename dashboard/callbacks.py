@@ -51,37 +51,99 @@ def register_callbacks(
     app.clientside_callback(
         """
         function(lossClick, topClick, bottomClick, prevMeta) {
-            function getGang(cd, src){
-                if(!cd || !cd.points || !cd.points.length){ return null; }
-                return src === 'g-actual-vs-bench' ? cd.points[0].y : cd.points[0].x;
-            }
-            var src = null, cd = null;
-            if(lossClick && lossClick.points){ src = 'g-actual-vs-bench'; cd = lossClick; }
-            else if(topClick && topClick.points){ src = 'g-top5'; cd = topClick; }
-            else if(bottomClick && bottomClick.points){ src = 'g-bottom5'; cd = bottomClick; }
-            if(!src){
-                return [prevMeta, null];
-            }
-            var gang = getGang(cd, src);
-            var now  = Date.now();
-            var last = prevMeta || {};
-            var isSameSrc  = last.source === src;
-            var isSameGang = last.gang === gang;
-            var isDbl = isSameSrc && isSameGang && (now - (last.ts || 0) <= 700);
+        const C  = window.dash_clientside;
+        const NO = C.no_update;
+        const ctx = C.callback_context;
+        const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
 
-            var newMeta = {source: src, gang: gang, ts: now};
-            var dblData = isDbl ? {source: src, gang: gang, ts: now} : null;
+        let cd = null, src = null;
+        if (trg.startsWith("g-actual-vs-bench.")) { cd = lossClick;  src = "g-actual-vs-bench"; }
+        else if (trg.startsWith("g-top5."))        { cd = topClick;   src = "g-top5"; }
+        else if (trg.startsWith("g-bottom5."))     { cd = bottomClick; src = "g-bottom5"; }
+        else return [NO, NO];
 
-            return [newMeta, dblData];
+        if (!cd || !cd.points || !cd.points.length) return [NO, NO];
+
+        const pt  = cd.points[0];
+        const now = Date.now();
+        const gang =
+            (pt.customdata && (pt.customdata.gang ?? pt.customdata[0])) ??
+            pt.x ?? pt.y ?? null;
+
+        const newMeta = { source: src, gang: gang, ts: now };
+        return [newMeta, NO];  // update store-click-meta only; never touch store-dblclick
         }
         """,
         [Output("store-click-meta", "data"), Output("store-dblclick", "data")],
-        [
-            Input("g-actual-vs-bench", "clickData"),
-            Input("g-top5", "clickData"),
-            Input("g-bottom5", "clickData"),
-        ],
-        [State("store-click-meta", "data")],
+        [Input("g-actual-vs-bench", "clickData"),
+        Input("g-top5", "clickData"),
+        Input("g-bottom5", "clickData")],
+        [State("store-click-meta", "data")]
+    )
+
+
+
+    # Auto-scroll to Traceability when any chart is clicked
+    app.clientside_callback(
+        """
+        function(lossClick, topClick, bottomClick) {
+        const C = window.dash_clientside;
+        const NO = C.no_update;
+        const ctx = C.callback_context;
+        const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
+
+        // Only react when a graph's clickData fired
+        if (!trg || !trg.endsWith(".clickData")) return NO;
+
+        // Make sure we actually have a point (not a clear)
+        let cd = null;
+        if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
+        else if (trg.startsWith("g-top5."))        cd = topClick;
+        else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
+        if (!cd || !cd.points || !cd.points.length) return NO;
+
+        // Smooth-scroll to the Traceability anchor (adjust offset if you have a fixed header)
+        const anchor = document.getElementById("trace-anchor");
+        if (anchor) {
+            const OFFSET = 80; // tweak if your top navbar is taller/shorter
+            const y = anchor.getBoundingClientRect().top + window.pageYOffset - OFFSET;
+            window.scrollTo({ top: y, behavior: "smooth" });
+        }
+
+        // Return a changing string so Dash marks this callback updated
+        return String(Date.now());
+        }
+        """,
+        Output("scroll-wire", "children"),
+        [Input("g-actual-vs-bench", "clickData"),
+        Input("g-top5", "clickData"),
+        Input("g-bottom5", "clickData")]
+    )
+
+
+    app.clientside_callback(
+        """
+        function(lossClick, topClick, bottomClick, prev) {
+        const C = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+        const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
+        let cd = null;
+        if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
+        else if (trg.startsWith("g-top5."))        cd = topClick;
+        else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
+        else return NO;
+        if (!cd || !cd.points || !cd.points.length) return NO;
+        const pt = cd.points[0];
+        const gang =
+            (pt.customdata && (pt.customdata.gang ?? pt.customdata[0])) ??
+            pt.x ?? pt.y ?? null;
+        return gang || NO;
+        }
+        """,
+        Output("store-selected-gang", "data"),
+        [Input("g-actual-vs-bench", "clickData"),
+        Input("g-top5", "clickData"),
+        Input("g-bottom5", "clickData")],
+        State("store-selected-gang", "data")
     )
 
     
