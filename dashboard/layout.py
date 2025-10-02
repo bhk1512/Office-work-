@@ -165,53 +165,52 @@ def build_controls() -> dbc.Card:
                     className="g-2",
                 ),
                 dbc.Row(
-                    [
-                        dbc.Col(
-                            dbc.RadioItems(
-                                id="f-quick-range",
-                                options=[
-                                    {"label": "Last 3M", "value": "3M"},
-                                    {"label": "Last Qtr", "value": "Q"},
-                                    {"label": "Last 6M", "value": "6M"},
-                                    {"label": "YTD", "value": "YTD"},
-                                ],
-                                value=None,
-                                inline=True,
-                                className="mt-2",
+                        [
+                            # Left: radios + Clear link on one line
+                            dbc.Col(
+                                html.Div(
+                                    [
+                                        dbc.RadioItems(
+                                            id="f-quick-range",
+                                            options=[
+                                                {"label": "Last 3M", "value": "3M"},
+                                                {"label": "Last Qtr", "value": "Q"},
+                                                {"label": "Last 6M", "value": "6M"},
+                                                {"label": "YTD", "value": "YTD"},
+                                            ],
+                                            value=None,
+                                            inline=True,
+                                            className="mb-0",        # tighter
+                                        ),
+                                        dbc.Button(
+                                            "Clear Quick Range",
+                                            id="btn-clear-quick-range",
+                                            color="link",
+                                            size="sm",
+                                            className="p-0 ms-2",    # looks like a link, small gap
+                                        ),
+                                    ],
+                                    className="d-flex align-items-center flex-wrap mt-2 gap-2",
+                                ),
+                                md=10,
                             ),
-                            md=10,
-                        ),
-                        dbc.Col(
-                            dbc.Button(
-                                "Clear Quick Range",
-                                id="btn-clear-quick-range",
-                                color="link",
-                                size="sm",
-                                className="mt-2",
+
+                            # Right: Reset button, top-aligned
+                            dbc.Col(
+                                dbc.Button(
+                                    "Reset Filters",
+                                    id="btn-reset-filters",
+                                    color="secondary",
+                                    outline=True,
+                                    size="sm",
+                                    className="",               # no extra top margin
+                                ),
+                                md=2,
+                                className="d-flex justify-content-end align-items-start mt-2",
                             ),
-                            md=2,
-                            className="d-flex align-items-center justify-content-end",
-                        ),
-                    ],
-                    className="g-2",
-                ),
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            dbc.Button(
-                                "Reset Filters",
-                                id="btn-reset-filters",
-                                color="secondary",
-                                outline=True,
-                                size="sm",
-                                className="mt-2",
-                            ),
-                            md=12,
-                            className="d-flex justify-content-end",
-                        ),
-                    ],
-                    className="g-2",
-                ),
+                        ],
+                        className="g-2",
+                    ),
             ]
         ),
         className="mb-3 shadow-sm",
@@ -414,15 +413,11 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     trace_modal = build_trace_modal()
     layout = dbc.Container(
         [
-            html.Div(
+            html.H2(
                 f"Last Updated On: {last_updated_text}",
                 className="text-muted fw-semibold",
             ),
-            html.H2(
-                "Measure Output. Expose Lost Units.",
-                className="mt-3 fw-bold",
-            ),
-            html.Div("Tag causes; assign fixes.", className="text-muted mb-3"),
+            
             controls,
             build_project_details_card(),     # <-- INSERT HERE
             build_kpi_cards(),
