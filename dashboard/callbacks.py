@@ -341,7 +341,10 @@ def register_callbacks(
             yaxis_title="Gang",
             plot_bgcolor="#fafafa",
             paper_bgcolor="#ffffff",
+            dragmode=False,
         )
+        fig_loss.update_xaxes(fixedrange=True)
+        fig_loss.update_yaxes(fixedrange=True)
 
         fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom)
@@ -364,106 +367,14 @@ def register_callbacks(
             fig_project,
         )
 
-    @app.callback(
-        Output("loss-modal", "is_open"),
-        Output("modal-title", "children"),
-        Output("modal-body", "children"),
-        Input("store-dblclick", "data"),
-        Input("modal-close", "n_clicks"),
-        State("loss-modal", "is_open"),
-        State("f-project", "value"),
-        State("f-month", "value"),
-        State("f-quick-range", "value"),
-        State("f-gang", "value"),
-    )
-    def show_loss_on_double_click(
-        dbl_click: dict[str, Any] | None,
-        close_clicks: int | None,
-        is_open: bool,
-        projects: Sequence[str] | None,
-        months: Sequence[str] | None,
-        quick_range: str | None,
-        gangs: Sequence[str] | None,
-    ):
-        project_list = _ensure_list(projects)
-        month_list = _ensure_list(months)
-        gang_list = _ensure_list(gangs)
-
-        context = dash.callback_context
-        if not context.triggered:
-            return is_open, dash.no_update, dash.no_update
-        if context.triggered[0]["prop_id"].startswith("modal-close"):
-            return False, dash.no_update, dash.no_update
-        if not dbl_click or not dbl_click.get("gang"):
-            return is_open, dash.no_update, dash.no_update
-
-        df_day = data_provider()
-        gang_clicked = dbl_click["gang"]
-        months_ts = resolve_months(month_list, quick_range)
-
-        scope_mask = pd.Series(True, index=df_day.index)
-        if project_list:
-            scope_mask &= df_day["project_name"].isin(project_list)
-        if gang_list:
-            scope_mask &= df_day["gang_name"].isin(gang_list)
-        scoped_all = df_day.loc[scope_mask].copy()
-
-        if months_ts:
-            month_start = max(months_ts)
-        else:
-            last_date = pd.to_datetime(df_day["date"].max())
-            if pd.isna(last_date):
-                month_start = pd.Timestamp.today().to_period("M").to_timestamp()
-            else:
-                month_start = last_date.to_period("M").to_timestamp()
-        month_end = month_start + pd.offsets.MonthBegin(1)
-
-        selection = scoped_all[
-            (scoped_all["date"] >= month_start)
-            & (scoped_all["date"] < month_end)
-            & (scoped_all["gang_name"] == gang_clicked)
-        ]
-        if selection.empty:
-            return True, "Gang Efficiency & Loss", "No data in current selection."
-
-        history = scoped_all[
-            (scoped_all["date"] < month_start)
-            & (scoped_all["gang_name"] == gang_clicked)
-        ]
-        baseline_override = history["daily_prod_mt"].mean() if not history.empty else 0.0
-        if pd.isna(baseline_override):
-            baseline_override = 0.0
-
-        idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
-            selection,
-            loss_max_gap_days=config.loss_max_gap_days,
-            baseline_mt_per_day=baseline_override,
-        )
-        efficiency = (delivered / potential * 100) if potential > 0 else 0.0
-        lost_pct = (loss_mt / potential * 100) if potential > 0 else 0.0
-
-        body = html.Div(
-            [
-                html.Div(f"Gang: {gang_clicked}", className="fw-bold mb-2"),
-                html.Div(f"Erected (Delivered): {delivered:.2f} MT"),
-                html.Div(
-                    f"Loss: {loss_mt:.2f} MT ({lost_pct:.1f}%)",
-                    className="text-danger",
-                ),
-                html.Div(f"Efficiency: {efficiency:.1f}%", className="mt-1"),
-                html.Hr(),
-                html.Div(f"Baseline MT/day: {baseline:.2f}"),
-                html.Div(f"Idle days (cap {config.loss_max_gap_days}): {idle}"),
-                html.Div(f"Potential MT: {potential:.2f}"),
-            ]
-        )
-        return True, "Gang Efficiency & Loss", body
 
     
     
     @app.callback(
         Output("tbl-idle-intervals", "data"),
         Output("tbl-daily-prod", "data"),
+        Output("modal-tbl-idle-intervals", "data"),
+        Output("modal-tbl-daily-prod", "data"),
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
@@ -478,7 +389,7 @@ def register_callbacks(
         gangs: Sequence[str] | None,
         trace_gang_value: str | None,
         selected_gang: str | None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
         gang_list = _ensure_list(gangs)
@@ -548,11 +459,12 @@ def register_callbacks(
             )
         daily_data = daily_source.to_dict("records")
 
-        return idle_data, daily_data
+        return idle_data, daily_data, idle_data, daily_data
 
     @app.callback(
         Output("download-trace-xlsx", "data"),
         Input("btn-export-trace", "n_clicks"),
+        Input("modal-btn-export-trace", "n_clicks"),
         State("f-project", "value"),
         State("f-month", "value"),
         State("f-quick-range", "value"),
@@ -562,7 +474,8 @@ def register_callbacks(
         prevent_initial_call=True,
     )
     def export_trace(
-        _n_clicks: int | None,
+        main_clicks: int | None,
+        modal_clicks: int | None,
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
@@ -570,6 +483,9 @@ def register_callbacks(
         trace_gang_value: str | None,
         selected_gang: str | None,
     ):
+        if not (main_clicks or modal_clicks):
+            raise PreventUpdate
+
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
         gang_list = _ensure_list(gangs)
@@ -595,9 +511,12 @@ def register_callbacks(
 
         return send_bytes(_writer, "Trace_Calcs.xlsx")
 
+
     @app.callback(
         Output("trace-gang", "options"),
         Output("trace-gang", "value"),
+        Output("modal-trace-gang", "options"),
+        Output("modal-trace-gang", "value"),
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
@@ -610,7 +529,7 @@ def register_callbacks(
         quick_range: str | None,
         clicked_gang: str | None,
         current_value: str | None,
-    ) -> tuple[list[dict[str, str]], str | None]:
+    ) -> tuple[list[dict[str, str]], str | None, list[dict[str, str]], str | None]:
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
 
@@ -626,7 +545,7 @@ def register_callbacks(
             value = current_value
         else:
             value = None
-        return options, value
+        return options, value, options, value
 
 
 
@@ -664,3 +583,32 @@ def register_callbacks(
 
 
 
+    @app.callback(
+        Output("trace-modal", "is_open"),
+        Output("trace-modal-title", "children"),
+        Output("store-selected-gang", "data"),
+        Input("store-dblclick", "data"),
+        Input("trace-modal-close", "n_clicks"),
+        State("trace-modal", "is_open"),
+        State("store-selected-gang", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_trace_modal(
+        dbl_click: dict[str, Any] | None,
+        close_clicks: int | None,
+        is_open: bool,
+        current_selection: str | None,
+    ) -> tuple[bool, Any, str | None]:
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "trace-modal-close":
+            return False, dash.no_update, current_selection
+        if trigger == "store-dblclick":
+            if not dbl_click or not dbl_click.get("gang"):
+                raise PreventUpdate
+            gang_value = dbl_click["gang"]
+            title = f"Traceability - {gang_value}"
+            return True, title, gang_value
+        raise PreventUpdate

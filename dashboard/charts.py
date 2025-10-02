@@ -84,7 +84,10 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         yaxis_title="MT/day",
         height=280,
         margin=dict(l=40, r=20, t=30, b=50),
+        dragmode=False,
     )
+    top_chart.update_xaxes(fixedrange=True)
+    top_chart.update_yaxes(fixedrange=True)
 
     bottom_chart = go.Figure(
         go.Bar(
@@ -101,7 +104,10 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         yaxis_title="MT/day",
         height=280,
         margin=dict(l=40, r=20, t=30, b=50),
+        dragmode=False,
     )
+    bottom_chart.update_xaxes(fixedrange=True)
+    bottom_chart.update_yaxes(fixedrange=True)
     LOGGER.debug("Top/Bottom charts built with %d gangs", len(per_gang))
     return top_chart, bottom_chart
 

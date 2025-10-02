@@ -6,6 +6,126 @@ import dash_bootstrap_components as dbc
 from dash import dash_table
 from dash.dcc import Download
 
+CLICK_GRAPH_CONFIG = {
+    "displayModeBar": False,
+    "doubleClick": False,
+    "scrollZoom": False,
+    "modeBarButtonsToRemove": [
+        "zoom2d",
+        "pan2d",
+        "select2d",
+        "lasso2d",
+        "zoomIn2d",
+        "zoomOut2d",
+        "autoScale2d",
+        "resetScale2d",
+    ],
+}
+
+def _build_trace_contents(
+    trace_dropdown_id: str,
+    export_button_id: str,
+    idle_table_id: str,
+    daily_table_id: str,
+) -> list:
+    """Create the shared traceability body layout."""
+
+    return [
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Label(
+                            "Pick a gang (overrides Gang filter)",
+                            className="fw-semibold mb-1",
+                        ),
+                        dcc.Dropdown(
+                            id=trace_dropdown_id,
+                            options=[],
+                            value=None,
+                            placeholder="Start typing a gang...",
+                            clearable=True,
+                            persistence=True,
+                            persistence_type="session",
+                        ),
+                    ],
+                    md=6,
+                ),
+            ],
+            className="mb-3",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(html.H5("Traceability"), md=8),
+                dbc.Col(
+                    dbc.Button(
+                        "Export Trace Excel",
+                        id=export_button_id,
+                        color="primary",
+                    ),
+                    md=4,
+                    className="text-end",
+                ),
+            ],
+            className="align-items-center mb-3",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Div(
+                            "Idle Intervals (per gang)",
+                            className="fw-bold mb-2",
+                        ),
+                        dash_table.DataTable(
+                            id=idle_table_id,
+                            columns=[
+                                {"name": "Gang", "id": "gang_name"},
+                                {"name": "Interval Start", "id": "interval_start"},
+                                {"name": "Interval End", "id": "interval_end"},
+                                {"name": "Raw Gap (days)", "id": "raw_gap_days"},
+                                {"name": "Idle Counted (days)", "id": "idle_days_capped"},
+                            ],
+                            data=[],
+                            page_size=10,
+                            style_table={"overflowX": "auto"},
+                            style_cell={
+                                "fontFamily": "Inter, system-ui",
+                                "fontSize": 13,
+                            },
+                        ),
+                    ],
+                    md=6,
+                ),
+                dbc.Col(
+                    [
+                        html.Div(
+                            "Daily Productivity (selected scope)",
+                            className="fw-bold mb-2",
+                        ),
+                        dash_table.DataTable(
+                            id=daily_table_id,
+                            columns=[
+                                {"name": "Date", "id": "date"},
+                                {"name": "Gang", "id": "gang_name"},
+                                {"name": "Project", "id": "project_name"},
+                                {"name": "MT/day", "id": "daily_prod_mt"},
+                            ],
+                            data=[],
+                            page_size=10,
+                            style_table={"overflowX": "auto"},
+                            style_cell={
+                                "fontFamily": "Inter, system-ui",
+                                "fontSize": 13,
+                            },
+                        ),
+                    ],
+                    md=6,
+                ),
+            ]
+        ),
+    ]
+
 
 def build_controls() -> dbc.Card:
     """Return the filter controls card."""
@@ -213,122 +333,52 @@ CONTAINER_HEIGHT = ROW_PX * VISIBLE_ROWS + TOPBOT_MARGIN
 def build_trace_block() -> dbc.Card:
     """Return the traceability card with tables and export controls."""
 
+    contents = _build_trace_contents(
+        "trace-gang",
+        "btn-export-trace",
+        "tbl-idle-intervals",
+        "tbl-daily-prod",
+    )
+    contents.extend([
+        Download(id="download-trace-xlsx"),
+        dcc.Store(id="store-selected-gang"),
+    ])
     return dbc.Card(
-        dbc.CardBody(
-            [
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            [
-                                html.Label(
-                                    "Pick a gang (overrides Gang filter)",
-                                    className="fw-semibold mb-1",
-                                ),
-                                dcc.Dropdown(
-                                    id="trace-gang",
-                                    options=[],
-                                    value=None,
-                                    placeholder="Start typing a gang...",
-                                    clearable=True,
-                                    persistence=True,
-                                    persistence_type="session",
-                                ),
-                            ],
-                            md=6,
-                        ),
-                    ],
-                    className="mb-3",
-                ),
-                dbc.Row(
-                    [
-                        dbc.Col(html.H5("Traceability"), md=8),
-                        dbc.Col(
-                            dbc.Button(
-                                "Export Trace Excel",
-                                id="btn-export-trace",
-                                color="primary",
-                            ),
-                            md=4,
-                            className="text-end",
-                        ),
-                    ],
-                    className="align-items-center mb-3",
-                ),
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            [
-                                html.Div(
-                                    "Idle Intervals (per gang)",
-                                    className="fw-bold mb-2",
-                                ),
-                                dash_table.DataTable(
-                                    id="tbl-idle-intervals",
-                                    columns=[
-                                        {"name": "Gang", "id": "gang_name"},
-                                        {
-                                            "name": "Interval Start",
-                                            "id": "interval_start",
-                                        },
-                                        {
-                                            "name": "Interval End",
-                                            "id": "interval_end",
-                                        },
-                                        {
-                                            "name": "Raw Gap (days)",
-                                            "id": "raw_gap_days",
-                                        },
-                                        {
-                                            "name": "Idle Counted (days)",
-                                            "id": "idle_days_capped",
-                                        },
-                                    ],
-                                    data=[],
-                                    page_size=10,
-                                    style_table={"overflowX": "auto"},
-                                    style_cell={
-                                        "fontFamily": "Inter, system-ui",
-                                        "fontSize": 13,
-                                    },
-                                ),
-                            ],
-                            md=6,
-                        ),
-                        dbc.Col(
-                            [
-                                html.Div(
-                                    "Daily Productivity (selected scope)",
-                                    className="fw-bold mb-2",
-                                ),
-                                dash_table.DataTable(
-                                    id="tbl-daily-prod",
-                                    columns=[
-                                        {"name": "Date", "id": "date"},
-                                        {"name": "Gang", "id": "gang_name"},
-                                        {
-                                            "name": "Project",
-                                            "id": "project_name",
-                                        },
-                                        {"name": "MT/day", "id": "daily_prod_mt"},
-                                    ],
-                                    data=[],
-                                    page_size=10,
-                                    style_table={"overflowX": "auto"},
-                                    style_cell={
-                                        "fontFamily": "Inter, system-ui",
-                                        "fontSize": 13,
-                                    },
-                                ),
-                            ],
-                            md=6,
-                        ),
-                    ]
-                ),
-                Download(id="download-trace-xlsx"),
-                dcc.Store(id="store-selected-gang"),
-            ]
-        ),
+        dbc.CardBody(contents),
         className="mt-4 shadow-sm",
+    )
+
+
+def build_trace_modal() -> dbc.Modal:
+    """Return the modal that mirrors the traceability section."""
+
+    modal_contents = _build_trace_contents(
+        "modal-trace-gang",
+        "modal-btn-export-trace",
+        "modal-tbl-idle-intervals",
+        "modal-tbl-daily-prod",
+    )
+    modal_card = dbc.Card(
+        dbc.CardBody(modal_contents),
+        className="shadow-sm",
+    )
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle(id="trace-modal-title")),
+            dbc.ModalBody(modal_card),
+            dbc.ModalFooter(
+                dbc.Button(
+                    "Close",
+                    id="trace-modal-close",
+                    className="ms-auto",
+                    n_clicks=0,
+                )
+            ),
+        ],
+        id="trace-modal",
+        is_open=False,
+        size="xl",
+        scrollable=True,
     )
 
 
@@ -340,21 +390,11 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     gang_bar = html.Div(
         dcc.Graph(
             id="g-actual-vs-bench",
-            config={"displayModeBar": False, "doubleClick": "false"},
+            config=CLICK_GRAPH_CONFIG,
         ),
         style={"height": row_height, "overflowY": "auto"},
     )
-    modal = dbc.Modal(
-        [
-            dbc.ModalHeader(dbc.ModalTitle(id="modal-title")),
-            dbc.ModalBody(id="modal-body"),
-            dbc.ModalFooter(
-                dbc.Button("Close", id="modal-close", className="ms-auto", n_clicks=0)
-            ),
-        ],
-        id="loss-modal",
-        is_open=False,
-    )
+    trace_modal = build_trace_modal()
     layout = dbc.Container(
         [
             html.Div(
@@ -387,9 +427,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                     ),
                     dbc.Col(
                         [
-                            html.H5(
-                                "Actual vs Potential Performance (All Gangs)"
-                            ),
+                            html.H5("Actual vs Potential Performance (All Gangs)"),
                             gang_bar,
                         ],
                         md=6,
@@ -404,10 +442,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                             html.H5("Top 5 Gangs"),
                             dcc.Graph(
                                 id="g-top5",
-                                config={
-                                    "displayModeBar": False,
-                                    "doubleClick": "false",
-                                },
+                                config=CLICK_GRAPH_CONFIG,
                             ),
                         ],
                         md=6,
@@ -417,10 +452,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                             html.H5("Bottom 5 Gangs"),
                             dcc.Graph(
                                 id="g-bottom5",
-                                config={
-                                    "displayModeBar": False,
-                                    "doubleClick": "false",
-                                },
+                                config=CLICK_GRAPH_CONFIG,
                             ),
                         ],
                         md=6,
@@ -431,8 +463,11 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_trace_block(),
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
-            modal,
+            trace_modal,
         ],
         fluid=True,
     )
     return layout
+
+
+
