@@ -358,8 +358,8 @@ def build_project_details_card() -> dbc.Card:
     )
 
 
-ROW_PX = 56
-VISIBLE_ROWS = 15
+ROW_PX = 55
+VISIBLE_ROWS = 10
 TOPBOT_MARGIN = 120
 CONTAINER_HEIGHT = ROW_PX * VISIBLE_ROWS + TOPBOT_MARGIN
 

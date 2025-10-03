@@ -72,9 +72,13 @@ def register_callbacks(
 
         const pt  = cd.points[0];
         const now = Date.now();
-        const gang =
-            (pt.customdata && (pt.customdata.gang ?? pt.customdata[0])) ??
-            pt.x ?? pt.y ?? null;
+        let gang = null;
+        if (pt.customdata) {
+            if (typeof pt.customdata === "string")       gang = pt.customdata;
+            else if (Array.isArray(pt.customdata))       gang = pt.customdata[0];
+            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+        }
+        gang = gang || pt.x || pt.y || null;
 
         const newMeta = { source: src, gang: gang, ts: now };
         return [newMeta, NO];  // update store-click-meta only; never touch store-dblclick
@@ -139,9 +143,13 @@ def register_callbacks(
         else return NO;
         if (!cd || !cd.points || !cd.points.length) return NO;
         const pt = cd.points[0];
-        const gang =
-            (pt.customdata && (pt.customdata.gang ?? pt.customdata[0])) ??
-            pt.x ?? pt.y ?? null;
+        let gang = null;
+        if (pt.customdata) {
+            if (typeof pt.customdata === "string")       gang = pt.customdata;
+            else if (Array.isArray(pt.customdata))       gang = pt.customdata[0];
+            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+        }
+        gang = gang || pt.x || pt.y || null;
         return gang || NO;
         }
         """,
@@ -485,6 +493,8 @@ def register_callbacks(
                 textposition="inside",
                 name="Delivered",
                 width=0.95,
+                customdata=loss_df["gang_name"],                                     # NEW
+                hovertemplate="%{customdata}<br>Delivered: %{x:.1f} MT<extra></extra>"  # NEW
             )
             fig_loss.add_bar(
                 x=loss_df["lost"],
@@ -496,6 +506,8 @@ def register_callbacks(
                 name="Loss",
                 base=loss_df["delivered"],
                 width=0.95,
+                customdata=loss_df["gang_name"],                                     # NEW
+                hovertemplate="%{customdata}<br>Loss: %{x:.1f} MT<extra></extra>"       # NEW
             )
             for _, row in loss_df.iterrows():
                 fig_loss.add_annotation(
@@ -518,6 +530,7 @@ def register_callbacks(
             paper_bgcolor="#ffffff",
             dragmode=False,
         )
+        fig_loss.update_layout(clickmode="event+select")
         fig_loss.update_xaxes(fixedrange=True)
         fig_loss.update_yaxes(fixedrange=True)
 
