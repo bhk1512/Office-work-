@@ -70,46 +70,74 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
     top5 = per_gang.head(5)
     bottom5 = per_gang.tail(5)
 
+    EXEC_GREEN = "#2E7D32"   # deep, executive green
+    EXEC_RED   = "#C62828"   # deep, executive red
+    GRID_GRAY  = "#e9ecef"
+
     top_chart = go.Figure(
         go.Bar(
             x=top5["gang_name"],
             y=top5["daily_prod_mt"],
-            marker_color="green",
+            marker_color=EXEC_GREEN,
+            marker_line_width=0,
             text=top5["daily_prod_mt"].round(2),
             textposition="outside",
+            textfont=dict(size=12, color="#111"),
             name="Top 5",
         )
     )
+    ymax_top = float(top5["daily_prod_mt"].max()) if not top5.empty else 1.0
+    top_chart.update_yaxes(range=[0, ymax_top * 1.15], gridcolor=GRID_GRAY, zeroline=False)
+    top_chart.update_xaxes(tickangle=-10)
+
     top_chart.update_layout(
         # title="Top 5 Gangs (Avg Productivity)",
         yaxis_title="MT/day",
-        height=280,
-        margin=dict(l=40, r=20, t=30, b=50),
+        height=300,                               # was 280
+        margin=dict(l=40, r=20, t=50, b=60),      # more top/bottom for labels & long names
+        bargap=0.25,
+        plot_bgcolor="#f8f9fa",
+        paper_bgcolor="#ffffff",
         dragmode=False,
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
+        hovermode="x unified",
     )
-    top_chart.update_xaxes(fixedrange=True)
-    top_chart.update_yaxes(fixedrange=True)
+    top_chart.update_traces(hovertemplate="%{x}<br>Avg: %{y:.2f} MT/day<extra></extra>")
 
 
     bottom_chart = go.Figure(
         go.Bar(
             x=bottom5["gang_name"],
             y=bottom5["daily_prod_mt"],
-            marker_color="red",
+            marker_color=EXEC_RED,
+            marker_line_width=0,
             text=bottom5["daily_prod_mt"].round(2),
             textposition="outside",
+            textfont=dict(size=12, color="#111"),
             name="Bottom 5",
         )
     )
+
+    ymax_bot = float(bottom5["daily_prod_mt"].max()) if not bottom5.empty else 1.0
+    bottom_chart.update_yaxes(range=[0, ymax_bot * 1.15], gridcolor=GRID_GRAY, zeroline=False)
+    bottom_chart.update_xaxes(tickangle=-10)
+
     bottom_chart.update_layout(
         # title="Bottom 5 Gangs (Avg Productivity)",
         yaxis_title="MT/day",
-        height=280,
-        margin=dict(l=40, r=20, t=30, b=50),
+        height=300,                               # was 280
+        margin=dict(l=40, r=20, t=50, b=60),
+        bargap=0.25,
+        plot_bgcolor="#f8f9fa",
+        paper_bgcolor="#ffffff",
         dragmode=False,
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
+        hovermode="x unified",
     )
-    bottom_chart.update_xaxes(fixedrange=True)
-    bottom_chart.update_yaxes(fixedrange=True)
+    bottom_chart.update_traces(hovertemplate="%{x}<br>Avg: %{y:.2f} MT/day<extra></extra>")
+
     LOGGER.debug("Top/Bottom charts built with %d gangs", len(per_gang))
 
     return top_chart, bottom_chart
