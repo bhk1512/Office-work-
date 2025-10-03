@@ -10,6 +10,7 @@ from typing import Any, Callable, Sequence
 
 import dash
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dcc import send_bytes
@@ -482,6 +483,27 @@ def register_callbacks(
         kpi_loss = f"{total_lost:.1f} MT"
         kpi_loss_delta = f"{lost_pct:.1f}%"
 
+        # --- meta for hover: last project & last worked date per gang (within current filters) ---
+        # use scoped_all so it respects selected projects/gangs but across all dates
+        if {"gang_name", "project_name", "date"}.issubset(scoped_all.columns):
+            idx_last = scoped_all.sort_values("date").groupby("gang_name")["date"].idxmax()
+            meta = (
+                scoped_all.loc[idx_last, ["gang_name", "project_name", "date"]]
+                        .rename(columns={"project_name": "last_project", "date": "last_date"})
+            )
+            loss_df = loss_df.merge(meta, on="gang_name", how="left")
+            loss_df["last_date_str"] = pd.to_datetime(loss_df["last_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+        else:
+            loss_df["last_project"] = ""
+            loss_df["last_date_str"] = ""
+
+        # fill any gaps gracefully
+        loss_df["last_project"] = loss_df["last_project"].fillna("—")
+        loss_df["last_date_str"] = loss_df["last_date_str"].fillna("—")
+        # -------------------------------------------------------------------
+
+
+
         fig_loss = go.Figure()
         if not loss_df.empty:
             fig_loss.add_bar(
@@ -493,9 +515,15 @@ def register_callbacks(
                 textposition="inside",
                 name="Delivered",
                 width=0.95,
-                customdata=loss_df["gang_name"],                                     # NEW
-                hovertemplate="%{customdata}<br>Delivered: %{x:.1f} MT<extra></extra>"  # NEW
+                customdata=np.stack([loss_df["last_project"], loss_df["last_date_str"]], axis=-1),
+                hovertemplate=(
+                    "%{y}<br>"
+                    "Delivered: %{x:.1f} MT<br>"
+                    "Project: %{customdata[0]}<br>"
+                    "Last worked: %{customdata[1]}<extra></extra>"
+                ),
             )
+
             fig_loss.add_bar(
                 x=loss_df["lost"],
                 y=loss_df["gang_name"],
@@ -506,9 +534,15 @@ def register_callbacks(
                 name="Loss",
                 base=loss_df["delivered"],
                 width=0.95,
-                customdata=loss_df["gang_name"],                                     # NEW
-                hovertemplate="%{customdata}<br>Loss: %{x:.1f} MT<extra></extra>"       # NEW
+                customdata=np.stack([loss_df["last_project"], loss_df["last_date_str"]], axis=-1),
+                hovertemplate=(
+                    "%{y}<br>"
+                    "Loss: %{x:.1f} MT<br>"
+                    "Project: %{customdata[0]}<br>"
+                    "Last worked: %{customdata[1]}<extra></extra>"
+                ),
             )
+
             for _, row in loss_df.iterrows():
                 fig_loss.add_annotation(
                     x=row["potential"],
@@ -530,10 +564,10 @@ def register_callbacks(
             paper_bgcolor="#ffffff",
             dragmode=False,
         )
-        fig_loss.update_layout(clickmode="event+select")
-        fig_loss.update_xaxes(fixedrange=True)
-        fig_loss.update_yaxes(fixedrange=True)
-
+        fig_loss.update_layout(hovermode="closest", clickmode="event+select")
+        fig_loss.update_xaxes(showspikes=False, fixedrange=True)
+        fig_loss.update_yaxes(showspikes=False, fixedrange=True)
+        
         # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom)
         fig_project = create_project_lines_chart(
