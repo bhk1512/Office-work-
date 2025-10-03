@@ -384,12 +384,14 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
+        Input("f-topbot-metric", "value"),
     )
     def update_dashboard(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
+        topbot_metric: str | None,         
     ) -> tuple:
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
@@ -569,7 +571,7 @@ def register_callbacks(
         fig_loss.update_yaxes(showspikes=False, fixedrange=True)
         
         # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
-        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom)
+        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom, metric=(topbot_metric or "prod"))
         fig_project = create_project_lines_chart(
             df_day,
             selected_projects=project_list or None,

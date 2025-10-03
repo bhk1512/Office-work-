@@ -510,6 +510,25 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dbc.Row(
                 [
                     dbc.Col(
+                        dcc.RadioItems(
+                            id="f-topbot-metric",
+                            options=[
+                                {"label": "Productivity (MT/day)", "value": "prod"},
+                                {"label": "Erection (MT)", "value": "erection"},
+                            ],
+                            value="prod",               # default = Productivity
+                            inline=True,
+                            inputStyle={"marginRight": "6px"},
+                            labelStyle={"marginRight": "18px"},
+                        ),
+                        md="auto",
+                    ),
+                ],
+                className="mb-2",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
                         [
                             html.H5("Top 5 Gangs"),
                             dcc.Graph(

@@ -58,7 +58,7 @@ def _empty_figure(height: int = 300) -> go.Figure:
 #     return figure
 
 
-def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Figure]:
+def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> Tuple[go.Figure, go.Figure]:
     """Build top and bottom five gang bar charts."""
 
     if data.empty:
@@ -66,10 +66,24 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         empty = _empty_figure(height=280)
         return empty, empty
 
-    per_gang = data.groupby("gang_name")["daily_prod_mt"].mean().reset_index()
+    # pick aggregator and labels
+    if metric == "erection":
+        # total MT in scope (sum of daily MT)
+        per_gang = (data.groupby("gang_name", as_index=False)["daily_prod_mt"].sum())
+        ytitle = "MT"
+        textfmt = lambda s: s.round(1)
+        hoverline = "Total: %{y:.2f} MT"
+    else:
+        # average daily productivity (default)
+        per_gang = (data.groupby("gang_name", as_index=False)["daily_prod_mt"].mean())
+        ytitle = "MT/day"
+        textfmt = lambda s: s.round(2)
+        hoverline = "Avg: %{y:.2f} MT/day"
+
     per_gang = per_gang.sort_values("daily_prod_mt", ascending=False)
     top5 = per_gang.head(5)
     bottom5 = per_gang.tail(5)
+
 
     # ---------- NEW: add meta = project at last activity + last date ----------
     if {"gang_name", "project_name", "date"}.issubset(data.columns):
@@ -92,82 +106,40 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         bottom5["last_date_str"] = ""
     # -------------------------------------------------------------------------
 
-    EXEC_GREEN = "#2E7D32"   # deep, executive green
-    EXEC_RED   = "#C62828"   # deep, executive red
+    EXEC_GREEN = "#2E7D32"
+    EXEC_RED   = "#C62828"
     GRID_GRAY  = "#e9ecef"
 
     top_chart = go.Figure(
-        go.Bar(
-            x=top5["gang_name"],
-            y=top5["daily_prod_mt"],
-            marker_color=EXEC_GREEN,
-            marker_line_width=0,
-            text=top5["daily_prod_mt"].round(2),
-            textposition="outside",
-            textfont=dict(size=12, color="#111"),
-            name="Top 5",
-            # ---------- NEW: attach project + date to each bar ----------
-            customdata=np.stack([top5["last_project"].fillna("—"),
-                                 top5["last_date_str"].fillna("—")], axis=-1),
-            hovertemplate=(
-                "%{x}<br>"
-                "Avg: %{y:.2f} MT/day<br>"
-                "Project: %{customdata[0]}<br>"
-                "Last worked: %{customdata[1]}<extra></extra>"
-            ),
-            # ------------------------------------------------------------
-        )
+        data=[
+            go.Bar(
+                x=top5["gang_name"],
+                y=top5["daily_prod_mt"],
+                marker_color=EXEC_GREEN,
+                marker_line_width=0,
+                text=textfmt(top5["daily_prod_mt"]),
+                textposition="outside",
+                textfont=dict(size=12, color="#111"),
+                name="Top 5",
+                customdata=np.stack(
+                    [top5["last_project"].fillna("—"), top5["last_date_str"].fillna("—")],
+                    axis=-1,
+                ),
+                hovertemplate=(
+                    "%{x}<br>" + hoverline + "<br>"
+                    "Project: %{customdata[0]}<br>"
+                    "Last worked: %{customdata[1]}<extra></extra>"
+                ),
+            )
+        ]
     )
+
     ymax_top = float(top5["daily_prod_mt"].max()) if not top5.empty else 1.0
     top_chart.update_yaxes(range=[0, ymax_top * 1.15], gridcolor=GRID_GRAY, zeroline=False, showspikes=False)
     top_chart.update_xaxes(tickangle=-10, showspikes=False)
-
     top_chart.update_layout(
-        # title="Top 5 Gangs (Avg Productivity)",
-        yaxis_title="MT/day",
-        height=300,                               # was 280
-        margin=dict(l=40, r=20, t=50, b=60),      # more top/bottom for labels & long names
-        bargap=0.25,
-        plot_bgcolor="#f8f9fa",
-        paper_bgcolor="#ffffff",
-        dragmode=False,
-        uniformtext_minsize=10,
-        uniformtext_mode="hide",
-        hovermode="closest",
-    )
-    
-
-    bottom_chart = go.Figure(
-        go.Bar(
-            x=bottom5["gang_name"],
-            y=bottom5["daily_prod_mt"],
-            marker_color=EXEC_RED,
-            marker_line_width=0,
-            text=bottom5["daily_prod_mt"].round(2),
-            textposition="outside",
-            textfont=dict(size=12, color="#111"),
-            name="Bottom 5",
-            # ---------- NEW: attach project + date to each bar ----------
-            customdata=np.stack([bottom5["last_project"].fillna("—"),
-                                 bottom5["last_date_str"].fillna("—")], axis=-1),
-            hovertemplate=(
-                "%{x}<br>"
-                "Avg: %{y:.2f} MT/day<br>"
-                "Project: %{customdata[0]}<br>"
-                "Last worked: %{customdata[1]}<extra></extra>"
-            ),
-            # ------------------------------------------------------------
-        )
-    )
-
-    ymax_bot = float(bottom5["daily_prod_mt"].max()) if not bottom5.empty else 1.0
-    bottom_chart.update_yaxes(range=[0, ymax_bot * 1.15], gridcolor=GRID_GRAY, zeroline=False, showspikes=False)
-    bottom_chart.update_xaxes(tickangle=-10, showspikes=False)
-
-    bottom_chart.update_layout(
-        # title="Bottom 5 Gangs (Avg Productivity)",
-        yaxis_title="MT/day",
-        height=300,                               # was 280
+        yaxis_title=ytitle,
+        height=300,
         margin=dict(l=40, r=20, t=50, b=60),
         bargap=0.25,
         plot_bgcolor="#f8f9fa",
@@ -177,6 +149,47 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         uniformtext_mode="hide",
         hovermode="closest",
     )
+
+    bottom_chart = go.Figure(
+        data=[
+            go.Bar(
+                x=bottom5["gang_name"],
+                y=bottom5["daily_prod_mt"],
+                marker_color=EXEC_RED,
+                marker_line_width=0,
+                text=textfmt(bottom5["daily_prod_mt"]),
+                textposition="outside",
+                textfont=dict(size=12, color="#111"),
+                name="Bottom 5",
+                customdata=np.stack(
+                    [bottom5["last_project"].fillna("—"), bottom5["last_date_str"].fillna("—")],
+                    axis=-1,
+                ),
+                hovertemplate=(
+                    "%{x}<br>" + hoverline + "<br>"
+                    "Project: %{customdata[0]}<br>"
+                    "Last worked: %{customdata[1]}<extra></extra>"
+                ),
+            )
+        ]
+    )
+
+    ymax_bot = float(bottom5["daily_prod_mt"].max()) if not bottom5.empty else 1.0
+    bottom_chart.update_yaxes(range=[0, ymax_bot * 1.15], gridcolor=GRID_GRAY, zeroline=False, showspikes=False)
+    bottom_chart.update_xaxes(tickangle=-10, showspikes=False)
+    bottom_chart.update_layout(
+        yaxis_title=ytitle,
+        height=300,
+        margin=dict(l=40, r=20, t=50, b=60),
+        bargap=0.25,
+        plot_bgcolor="#f8f9fa",
+        paper_bgcolor="#ffffff",
+        dragmode=False,
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
+        hovermode="closest",
+    )
+
     
     LOGGER.debug("Top/Bottom charts built with %d gangs", len(per_gang))
 
