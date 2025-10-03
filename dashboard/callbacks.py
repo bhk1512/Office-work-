@@ -365,6 +365,7 @@ def register_callbacks(
         Output("kpi-active", "children"),
         Output("kpi-total", "children"),
         Output("kpi-loss", "children"),
+        Output("kpi-loss-delta", "children"),   # <--- add this line
         Output("g-actual-vs-bench", "figure"),
         # Output("g-monthly", "figure"),
         Output("g-top5", "figure"),
@@ -395,7 +396,11 @@ def register_callbacks(
         avg_prod = scoped["daily_prod_mt"].mean() if len(scoped) else 0.0
         delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
         kpi_avg = f"{avg_prod:.2f} MT"
-        kpi_delta = "(n/a)" if delta_pct is None else f"{delta_pct:+.1f}%"
+        kpi_delta = (
+            "(n/a)"
+            if delta_pct is None
+            else f"({delta_pct:+.0f}% vs {benchmark:.1f} MT)"
+        )
 
         selected_months = months_ts or []
         if selected_months:
@@ -466,7 +471,8 @@ def register_callbacks(
 
         kpi_active = f"{active_gangs}"
         kpi_total = f"{total_period_mt:.1f} MT"
-        kpi_loss = f"{lost_pct:.1f}%"
+        kpi_loss = f"{total_lost:.1f} MT"
+        kpi_loss_delta = f"{lost_pct:.1f}%"
 
         fig_loss = go.Figure()
         if not loss_df.empty:
@@ -529,6 +535,7 @@ def register_callbacks(
             kpi_active,
             kpi_total,
             kpi_loss,
+            kpi_loss_delta,
             fig_loss,
             # fig_monthly,
             fig_top5,

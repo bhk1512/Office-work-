@@ -228,10 +228,15 @@ def build_kpi_cards() -> dbc.Row:
                         [
                             html.Div(
                                 "Avg Output / Gang / Day",
-                                className="fw-bold text-white-50",
+                                className="fw-bold text-white",
                             ),
-                            html.H2(id="kpi-avg", className="mb-0 text-white"),
-                            html.Div(id="kpi-delta", className="small text-white-50"),
+                            html.Div(
+                                [
+                                    html.Span(id="kpi-avg", className="kpi-value"),
+                                    html.Span(id="kpi-delta", className="kpi-delta"),
+                                ],
+                                className="d-flex align-items-baseline kpi-row",
+                            ),
                         ]
                     ),
                     className="shadow-sm",
@@ -253,9 +258,14 @@ def build_kpi_cards() -> dbc.Row:
                         [
                             html.Div(
                                 "Active Gangs",
-                                className="fw-bold text-white-50",
+                                className="fw-bold text-white",
                             ),
-                            html.H2(id="kpi-active", className="mb-0 text-white"),
+                            html.Div(
+                                [
+                                    html.Span(id="kpi-active", className="kpi-value"),
+                                ],
+                                className="d-flex align-items-baseline kpi-row",
+                            ),
                         ]
                     ),
                     className="shadow-sm",
@@ -277,9 +287,14 @@ def build_kpi_cards() -> dbc.Row:
                         [
                             html.Div(
                                 "Total Erection (This Period)",
-                                className="fw-bold text-white-50",
+                                className="fw-bold text-white",
                             ),
-                            html.H2(id="kpi-total", className="mb-0 text-white"),
+                            html.Div(
+                                [
+                                    html.Span(id="kpi-total", className="kpi-value"),
+                                ],
+                                className="d-flex align-items-baseline kpi-row",
+                            ),
                         ]
                     ),
                     className="shadow-sm",
@@ -301,9 +316,15 @@ def build_kpi_cards() -> dbc.Row:
                         [
                             html.Div(
                                 "Lost Units",
-                                className="fw-bold text-white-50",
+                                className="fw-bold text-white",
                             ),
-                            html.H2(id="kpi-loss", className="mb-0 text-white"),
+                            html.Div(
+                                [
+                                    html.Span(id="kpi-loss", className="kpi-value"),
+                                    html.Span(id="kpi-loss-delta", className="kpi-delta"),  # % in brackets
+                                ],
+                                className="d-flex align-items-baseline kpi-row",
+                            ),
                         ]
                     ),
                     className="shadow-sm",

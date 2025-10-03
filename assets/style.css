@@ -1,0 +1,63 @@
+body {
+  background-color: #f8f9fa;   /* light gray-off white */
+}
+
+html {
+    scroll-behavior: smooth;
+  }
+
+.card {
+    background-color: #ffffff;    /* still white */
+    border: 0;
+    border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.navbar, .footer {
+  background-color: #f1f3f4;
+}
+
+  
+/* ---- Executive KPI styling ---- */
+.kpi-row {
+    gap: 0.25rem;
+    align-items: baseline;
+  }
+  
+.kpi-value {
+    /* Bigger + truly bold, with a font stack that has heavy weights on Windows too */
+    font-size: 2.6rem;              /* was 3.0rem */
+    font-weight: 900;
+    line-height: 1.1;
+    letter-spacing: -0.2px;
+    color: #111111;
+    white-space: nowrap;
+    font-family: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
+                 -apple-system, "Helvetica Neue", Arial, sans-serif;
+  
+    /* Sharper rendering on Windows + WebKit */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: geometricPrecision;
+}
+
+.kpi-delta {
+    font-size: 1.0rem;             /* slightly larger for readability */
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.95);
+    letter-spacing: 0.1px;
+    margin-left: 0.35rem;          /* guarantees a space before "(" even if string lacks it */
+    white-space: nowrap;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+  
+  /* Responsive scale-up on wide screens; scale-down on tablets/phones */
+@media (min-width: 1400px) {
+    .kpi-value { font-size: 3.0rem; }
+}
+@media (max-width: 991.98px) {
+  .kpi-value{ font-size: 2.1rem; }
+  .kpi-delta{ font-size: .95rem; }
+}
+  

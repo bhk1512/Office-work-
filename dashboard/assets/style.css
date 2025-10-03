@@ -1,6 +1,0 @@
-/* make the tiny icon obviously clickable */
-.js-plotly-plot .points path { cursor: pointer; }
-
-html {
-    scroll-behavior: smooth;
-  }
