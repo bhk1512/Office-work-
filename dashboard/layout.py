@@ -430,11 +430,11 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 id="g-project-lines",
                                 config={"displayModeBar": False},
                             ),
-                            html.H5("Average Productivity per Month"),
-                            dcc.Graph(
-                                id="g-monthly",
-                                config={"displayModeBar": False},
-                            ),
+                            # html.H5("Average Productivity per Month"),
+                            # dcc.Graph(
+                            #     id="g-monthly",
+                            #     config={"displayModeBar": False},
+                            # ),
                             # --- NEW: Responsibilities block ---
                             html.H5("Responsibilities"),
                             dbc.Row(

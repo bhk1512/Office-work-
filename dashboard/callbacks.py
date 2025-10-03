@@ -16,7 +16,7 @@ from dash.dcc import send_bytes
 from dash.exceptions import PreventUpdate
 
 from .charts import (
-    create_monthly_line_chart,
+    # create_monthly_line_chart,
     create_project_lines_chart,
     create_top_bottom_gangs_charts,
     build_responsibilities_chart,
@@ -366,7 +366,7 @@ def register_callbacks(
         Output("kpi-total", "children"),
         Output("kpi-loss", "children"),
         Output("g-actual-vs-bench", "figure"),
-        Output("g-monthly", "figure"),
+        # Output("g-monthly", "figure"),
         Output("g-top5", "figure"),
         Output("g-bottom5", "figure"),
         Output("g-project-lines", "figure"),
@@ -515,7 +515,7 @@ def register_callbacks(
         fig_loss.update_xaxes(fixedrange=True)
         fig_loss.update_yaxes(fixedrange=True)
 
-        fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
+        # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom)
         fig_project = create_project_lines_chart(
             df_day,
@@ -530,14 +530,14 @@ def register_callbacks(
             kpi_total,
             kpi_loss,
             fig_loss,
-            fig_monthly,
+            # fig_monthly,
             fig_top5,
             fig_bottom5,
             fig_project,
         )
 
 
-    
+
     
     @app.callback(
         Output("tbl-idle-intervals", "data"),

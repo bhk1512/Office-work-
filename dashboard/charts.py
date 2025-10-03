@@ -20,41 +20,41 @@ def _empty_figure(height: int = 300) -> go.Figure:
     return go.Figure().update_layout(height=height, margin=dict(l=40, r=20, t=30, b=50))
 
 
-def create_monthly_line_chart(data: pd.DataFrame, bench: float = DEFAULT_BENCHMARK) -> go.Figure:
-    """Build the average productivity line chart."""
+# def create_monthly_line_chart(data: pd.DataFrame, bench: float = DEFAULT_BENCHMARK) -> go.Figure:
+#     """Build the average productivity line chart."""
 
-    if data.empty:
-        LOGGER.debug("Monthly line chart requested with empty dataset")
-        return _empty_figure()
+#     if data.empty:
+#         LOGGER.debug("Monthly line chart requested with empty dataset")
+#         return _empty_figure()
 
-    monthly = data.groupby("month")["daily_prod_mt"].mean().reset_index()
-    figure = go.Figure()
-    figure.add_trace(
-        go.Scatter(
-            x=monthly["month"],
-            y=monthly["daily_prod_mt"],
-            mode="lines+markers",
-            name="Avg Productivity",
-            line=dict(color="#0074D9"),
-        )
-    )
-    figure.add_hline(
-        y=bench,
-        line_dash="dot",
-        line_color="red",
-        annotation_text=f"Benchmark {bench} MT/day",
-        annotation_position="top left",
-    )
-    figure.update_layout(
-        height=300,
-        margin=dict(l=40, r=20, t=30, b=50),
-        xaxis_title="Month",
-        yaxis_title="Avg Productivity (MT)",
-        plot_bgcolor="#fafafa",
-        paper_bgcolor="#ffffff",
-    )
-    LOGGER.debug("Monthly line chart built for %d months", len(monthly))
-    return figure
+#     monthly = data.groupby("month")["daily_prod_mt"].mean().reset_index()
+#     figure = go.Figure()
+#     figure.add_trace(
+#         go.Scatter(
+#             x=monthly["month"],
+#             y=monthly["daily_prod_mt"],
+#             mode="lines+markers",
+#             name="Avg Productivity",
+#             line=dict(color="#0074D9"),
+#         )
+#     )
+#     figure.add_hline(
+#         y=bench,
+#         line_dash="dot",
+#         line_color="red",
+#         annotation_text=f"Benchmark {bench} MT/day",
+#         annotation_position="top left",
+#     )
+#     figure.update_layout(
+#         height=300,
+#         margin=dict(l=40, r=20, t=30, b=50),
+#         xaxis_title="Month",
+#         yaxis_title="Avg Productivity (MT)",
+#         plot_bgcolor="#fafafa",
+#         paper_bgcolor="#ffffff",
+#     )
+#     LOGGER.debug("Monthly line chart built for %d months", len(monthly))
+#     return figure
 
 
 def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Figure]:
