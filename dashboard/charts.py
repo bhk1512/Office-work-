@@ -81,7 +81,7 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         )
     )
     top_chart.update_layout(
-        title="Top 5 Gangs (Avg Productivity)",
+        # title="Top 5 Gangs (Avg Productivity)",
         yaxis_title="MT/day",
         height=280,
         margin=dict(l=40, r=20, t=30, b=50),
@@ -102,7 +102,7 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         )
     )
     bottom_chart.update_layout(
-        title="Bottom 5 Gangs (Avg Productivity)",
+        # title="Bottom 5 Gangs (Avg Productivity)",
         yaxis_title="MT/day",
         height=280,
         margin=dict(l=40, r=20, t=30, b=50),
@@ -120,7 +120,11 @@ def create_project_lines_chart(
     selected_projects: Sequence[str] | None = None,
     bench: float = DEFAULT_BENCHMARK,
 ) -> go.Figure:
-    """Build the per-project monthly productivity lines chart."""
+    """Build the per-project monthly productivity lines chart.
+
+    If `selected_projects` is provided, those projects are HIGHLIGHTED
+    (thicker, full opacity) and others are deemphasized (lower opacity).
+    """
 
     if data.empty:
         LOGGER.debug("Project lines chart requested with empty dataset")
@@ -129,18 +133,30 @@ def create_project_lines_chart(
     monthly = (
         data.groupby(["month", "project_name"])["daily_prod_mt"].mean().reset_index()
     )
+
+    # NEW: treat incoming list as "highlight list" (not a filter)
+    highlight_projects = set(selected_projects or [])
+
     figure = go.Figure()
-    projects_to_plot = selected_projects or monthly["project_name"].unique()
-    for project in projects_to_plot:
+    all_projects = monthly["project_name"].unique()
+
+    for project in all_projects:
         project_data = monthly[monthly["project_name"] == project]
+        is_highlight = project in highlight_projects
+
         figure.add_trace(
             go.Scatter(
                 x=project_data["month"],
                 y=project_data["daily_prod_mt"],
                 mode="lines+markers",
                 name=project,
+                # --- emphasis vs background
+                opacity=1.0 if is_highlight or not highlight_projects else 0.25,
+                line=dict(width=3 if is_highlight else 1.5),
+                marker=dict(size=6 if is_highlight else 4),
             )
         )
+
     figure.add_hline(
         y=bench,
         line_dash="dot",
@@ -156,8 +172,9 @@ def create_project_lines_chart(
         plot_bgcolor="#fafafa",
         paper_bgcolor="#ffffff",
     )
-    LOGGER.debug("Project lines chart built for %d projects", len(projects_to_plot))
+    LOGGER.debug("Project lines chart built for %d projects", len(all_projects))
     return figure
+
 
 
 # --- NEW: responsibilities chart builder ---
