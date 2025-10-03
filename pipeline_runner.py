@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from erection_compiled_to_daily_new import run_pipeline
+from microplan_compile import compile_microplans_to_workbook
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -137,6 +138,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             files=[str(p) for p in resolved_files] if resolved_files else None,
             output_path=str(resolved_output) if resolved_output else None,
             extra_args=extra_args,
+        )
+                # --- NEW: Compile Micro Plan responsibilities into the same workbook ---
+        # Prefer the input folder; if the user passed explicit files, derive a common parent
+        if resolved_files:
+            common_parent = os.path.commonpath([os.path.dirname(str(p)) for p in resolved_files])
+            micro_input_dir = common_parent
+        else:
+            micro_input_dir = str(resolved_input)
+        print(f"[pipeline] MicroPlan: scanning '{micro_input_dir}' and writing to '{resolved_output}'")
+        compile_microplans_to_workbook(
+            input_dir=micro_input_dir,
+            output_path=str(resolved_output),
+            write_raw_per_project=False,  # set True if you want cleaned per-project sheets too
         )
     else:
         print("[pipeline] Skipping compilation step as requested.")

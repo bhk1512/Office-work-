@@ -202,6 +202,14 @@ def read_microplan_file(path: str,
         usecols=range(MICROPLAN_LEFT_WIDTH),  # same left-block constraint
     )
 
+     # --- NEW TRUNCATION LOGIC ---
+    # Find first completely empty row after header
+    mask_empty = df.isna().all(axis=1)
+    if mask_empty.any():
+        first_empty_idx = mask_empty.idxmax()  # index of first True
+        # truncate everything after this row
+        df = df.loc[:first_empty_idx-1]
+
     rename_map = {}
     for col in df.columns:
         canon = _alias_to_canonical(col, schema)
@@ -243,7 +251,7 @@ def build_responsibilities_long(df_clean: pd.DataFrame,
     for c in ("revenue", "tower_weight"):
         if c not in df_clean.columns:
             df_clean[c] = 0.0
-
+    
     frames = []
     pairs = [
         ("gang_name",        "Gang"),
@@ -329,7 +337,7 @@ def compile_microplans_to_workbook(
 
     agg_all = []
     index_rows = []
-
+    raw_sheets_to_write = []  # [(sheet_name, df_clean)]
     for p in paths:
         proj_name = infer_project_name_from_filename(p)
         proj_key  = normalize_key(proj_name)
@@ -347,13 +355,10 @@ def compile_microplans_to_workbook(
                 agg_all.append(resp_long)
 
             # (optional) also keep per-project cleaned sheet
-            # if write_raw_per_project:
-            #     per_project_sheet = f"MicroPlan_{proj_key}"[:31]
-            #     per_project_to_write.append((per_project_sheet, df_clean))
+            if write_raw_per_project:
+                per_project_sheet = f"MicroPlan_{proj_key}"[:31]  # Excel sheet name limit
+                raw_sheets_to_write.append((per_project_sheet, df_clean))
 
-            if write_raw_per_project and per_project_to_write:
-                for sheet_name, df_clean in per_project_to_write:
-                    _safe_write_df(writer, df_clean, sheet_name, index=False)
             # ...
             index_rows.append({
                 "file_path": p,
@@ -392,6 +397,11 @@ def compile_microplans_to_workbook(
         # Index sheet
         idx_df = pd.DataFrame(index_rows, columns=["file_path","project_name","project_key","rows_cleaned","status","error"])
         _safe_write_df(writer, idx_df, MICROPLAN_INDEX_SHEET, index=False)
+
+        # (optional) per-project cleaned sheets
+        if write_raw_per_project and raw_sheets_to_write:
+            for sheet_name, df_clean in raw_sheets_to_write:
+                _safe_write_df(writer, df_clean, sheet_name, index=False)
 
 
 # ======================
