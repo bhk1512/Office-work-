@@ -158,3 +158,64 @@ def create_project_lines_chart(
     )
     LOGGER.debug("Project lines chart built for %d projects", len(projects_to_plot))
     return figure
+
+
+# --- NEW: responsibilities chart builder ---
+
+
+def build_empty_responsibilities_figure(message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        height=320,
+        margin=dict(l=40, r=20, t=30, b=40),
+        plot_bgcolor="#fafafa",
+        paper_bgcolor="#ffffff",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        showlegend=False,
+    )
+    fig.add_annotation(
+        text=message,
+        xref="paper", yref="paper", x=0.5, y=0.5,
+        showarrow=False, font=dict(size=13)
+    )
+    return fig
+
+
+def build_responsibilities_chart(
+    df: pd.DataFrame,
+    entity_label: str,                  # "Gang" | "Section Incharge" | "Supervisor"
+    metric: str = "tower_weight",       # "revenue" | "tower_weight"  (default tower_weight)
+    title: str | None = None,
+    top_n: int = 20
+) -> go.Figure:
+    if df.empty:
+        return build_empty_responsibilities_figure("No Micro Plan data for the selected project.")
+
+    metric = metric if metric in ("revenue", "tower_weight") else "tower_weight"
+    axis_title = "Revenue" if metric == "revenue" else "Tower Weight (MT)"
+
+    g = (df.groupby("entity_name", as_index=False)[metric]
+           .sum()
+           .sort_values(metric, ascending=False)
+           .head(top_n))
+    g["delivered"] = (0.10 * g[metric]).round(2)
+
+    fig = go.Figure()
+    fig.add_bar(y=g["entity_name"], x=g[metric], orientation="h", name="Responsibility", width=0.9)
+    fig.add_bar(y=g["entity_name"], x=g["delivered"], orientation="h", name="Delivered (10%)", width=0.9)
+
+    fig.update_layout(
+        barmode="group",
+        height=max(320, 22 * len(g) + 120),
+        margin=dict(l=200, r=40, t=30, b=50),
+        xaxis_title=axis_title,
+        yaxis_title=entity_label,
+        plot_bgcolor="#fafafa",
+        paper_bgcolor="#ffffff",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+        title=title or None
+    )
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(autorange="reversed", fixedrange=True)
+    return fig

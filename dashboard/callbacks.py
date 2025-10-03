@@ -19,11 +19,14 @@ from .charts import (
     create_monthly_line_chart,
     create_project_lines_chart,
     create_top_bottom_gangs_charts,
+    build_responsibilities_chart,
+    build_empty_responsibilities_figure,
 )
 from .config import AppConfig
 from .filters import apply_filters, resolve_months
 from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang
 from .workbook import make_trace_workbook_bytes
+from .data_loader import load_microplan_responsibilities
 
 
 LOGGER = logging.getLogger(__name__)
@@ -313,6 +316,47 @@ def register_callbacks(
             ]),
         ])
 
+    # --- NEW: responsibilities chart callback ---
+
+    @app.callback(
+        Output("g-responsibilities", "figure"),
+        Input("f-project", "value"),
+        Input("f-resp-entity", "value"),
+        Input("f-resp-metric", "value"),
+    )
+    def update_responsibilities_chart(project_value: str | None, entity_value: str | None, metric_value: str | None):
+        # If no project selected, show friendly message (do NOT PreventUpdate, or it stays blank)
+        if not project_value:
+            return build_empty_responsibilities_figure("Select a single project to view its details.")
+
+        entity_value = (entity_value or "Supervisor").strip()
+        metric_value = (metric_value or "tower_weight").strip()
+
+        cfg = AppConfig()
+        df = load_microplan_responsibilities(cfg.data_path)
+
+        # If sheet missing/empty → explain
+        if df.empty:
+            return build_empty_responsibilities_figure("No Micro Plan data found in the compiled workbook.")
+
+        # Normalize project value (your dropdown uses 'Project Name' text)
+        sel_norm = str(project_value).replace("\u00a0", " ").strip()
+        sel_lc = sel_norm.lower()
+
+        # STRICT match first on project_name, then on key, then fallback to contains
+        dfp = df[(df["project_name_lc"] == sel_lc) | (df["project_key_lc"] == sel_lc)]
+        if dfp.empty:
+            dfp = df[df["project_name_lc"].str.contains(sel_lc, na=False)]
+
+        # Only keep the selected entity type
+        dfp = dfp[dfp["entity_type"].astype(str).str.strip().str.lower() == entity_value.lower()]
+
+        if dfp.empty:
+            return build_empty_responsibilities_figure("No responsibilities found for the selected filters.")
+
+        # Build figure
+        title = None  # keep clean; or set to f"{entity_value} — {metric_value.replace('_', ' ').title()}"
+        return build_responsibilities_chart(dfp, entity_label=entity_value, metric=metric_value, title=title, top_n=20)
 
 
     @app.callback(

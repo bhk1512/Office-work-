@@ -435,6 +435,44 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 id="g-monthly",
                                 config={"displayModeBar": False},
                             ),
+                            # --- NEW: Responsibilities block ---
+                            html.H5("Responsibilities"),
+                            dbc.Row(
+                                [
+                                    dbc.Col(
+                                        dcc.RadioItems(
+                                            id="f-resp-entity",
+                                            options=[
+                                                {"label": "Gangs", "value": "Gang"},
+                                                {"label": "Section Incharges", "value": "Section Incharge"},
+                                                {"label": "Supervisors", "value": "Supervisor"},
+                                            ],
+                                            value="Supervisor",  # default as requested
+                                            inputStyle={"marginRight": "6px"},
+                                            labelStyle={"marginRight": "18px"},
+                                            inline=True,
+                                        ),
+                                        width="auto",
+                                    ),
+                                    dbc.Col(
+                                        dcc.RadioItems(
+                                            id="f-resp-metric",
+                                            options=[
+                                                {"label": "Tower Weight", "value": "tower_weight"},
+                                                {"label": "Revenue", "value": "revenue"},
+                                            ],
+                                            value="tower_weight",  # default as requested
+                                            inputStyle={"marginRight": "6px"},
+                                            labelStyle={"marginRight": "18px"},
+                                            inline=True,
+                                        ),
+                                        width="auto",
+                                    ),
+                                ],
+                                className="mb-2",
+                            ),
+                            dcc.Graph(id="g-responsibilities", config={"displayModeBar": False}),
+                            # --- END NEW ---
                         ],
                         md=6,
                     ),
