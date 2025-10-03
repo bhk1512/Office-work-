@@ -6,6 +6,7 @@ from typing import Iterable, Sequence, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
+import numpy as np
 
 from .config import AppConfig
 from collections import defaultdict
@@ -70,6 +71,27 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
     top5 = per_gang.head(5)
     bottom5 = per_gang.tail(5)
 
+    # ---------- NEW: add meta = project at last activity + last date ----------
+    if {"gang_name", "project_name", "date"}.issubset(data.columns):
+        # find the last activity row per gang
+        idx_last = data.sort_values("date").groupby("gang_name")["date"].idxmax()
+        meta = (
+            data.loc[idx_last, ["gang_name", "project_name", "date"]]
+                .rename(columns={"project_name": "last_project", "date": "last_date"})
+        )
+        top5 = top5.merge(meta, on="gang_name", how="left")
+        bottom5 = bottom5.merge(meta, on="gang_name", how="left")
+
+        # pretty dates for hover
+        top5["last_date_str"] = pd.to_datetime(top5["last_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+        bottom5["last_date_str"] = pd.to_datetime(bottom5["last_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+    else:
+        top5["last_project"] = ""
+        top5["last_date_str"] = ""
+        bottom5["last_project"] = ""
+        bottom5["last_date_str"] = ""
+    # -------------------------------------------------------------------------
+
     EXEC_GREEN = "#2E7D32"   # deep, executive green
     EXEC_RED   = "#C62828"   # deep, executive red
     GRID_GRAY  = "#e9ecef"
@@ -84,11 +106,21 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
             textposition="outside",
             textfont=dict(size=12, color="#111"),
             name="Top 5",
+            # ---------- NEW: attach project + date to each bar ----------
+            customdata=np.stack([top5["last_project"].fillna("—"),
+                                 top5["last_date_str"].fillna("—")], axis=-1),
+            hovertemplate=(
+                "%{x}<br>"
+                "Avg: %{y:.2f} MT/day<br>"
+                "Project: %{customdata[0]}<br>"
+                "Last worked: %{customdata[1]}<extra></extra>"
+            ),
+            # ------------------------------------------------------------
         )
     )
     ymax_top = float(top5["daily_prod_mt"].max()) if not top5.empty else 1.0
-    top_chart.update_yaxes(range=[0, ymax_top * 1.15], gridcolor=GRID_GRAY, zeroline=False)
-    top_chart.update_xaxes(tickangle=-10)
+    top_chart.update_yaxes(range=[0, ymax_top * 1.15], gridcolor=GRID_GRAY, zeroline=False, showspikes=False)
+    top_chart.update_xaxes(tickangle=-10, showspikes=False)
 
     top_chart.update_layout(
         # title="Top 5 Gangs (Avg Productivity)",
@@ -101,10 +133,9 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         dragmode=False,
         uniformtext_minsize=10,
         uniformtext_mode="hide",
-        hovermode="x unified",
+        hovermode="closest",
     )
-    top_chart.update_traces(hovertemplate="%{x}<br>Avg: %{y:.2f} MT/day<extra></extra>")
-
+    
 
     bottom_chart = go.Figure(
         go.Bar(
@@ -116,12 +147,22 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
             textposition="outside",
             textfont=dict(size=12, color="#111"),
             name="Bottom 5",
+            # ---------- NEW: attach project + date to each bar ----------
+            customdata=np.stack([bottom5["last_project"].fillna("—"),
+                                 bottom5["last_date_str"].fillna("—")], axis=-1),
+            hovertemplate=(
+                "%{x}<br>"
+                "Avg: %{y:.2f} MT/day<br>"
+                "Project: %{customdata[0]}<br>"
+                "Last worked: %{customdata[1]}<extra></extra>"
+            ),
+            # ------------------------------------------------------------
         )
     )
 
     ymax_bot = float(bottom5["daily_prod_mt"].max()) if not bottom5.empty else 1.0
-    bottom_chart.update_yaxes(range=[0, ymax_bot * 1.15], gridcolor=GRID_GRAY, zeroline=False)
-    bottom_chart.update_xaxes(tickangle=-10)
+    bottom_chart.update_yaxes(range=[0, ymax_bot * 1.15], gridcolor=GRID_GRAY, zeroline=False, showspikes=False)
+    bottom_chart.update_xaxes(tickangle=-10, showspikes=False)
 
     bottom_chart.update_layout(
         # title="Bottom 5 Gangs (Avg Productivity)",
@@ -134,10 +175,9 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame) -> Tuple[go.Figure, go.Fi
         dragmode=False,
         uniformtext_minsize=10,
         uniformtext_mode="hide",
-        hovermode="x unified",
+        hovermode="closest",
     )
-    bottom_chart.update_traces(hovertemplate="%{x}<br>Avg: %{y:.2f} MT/day<extra></extra>")
-
+    
     LOGGER.debug("Top/Bottom charts built with %d gangs", len(per_gang))
 
     return top_chart, bottom_chart
