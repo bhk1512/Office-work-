@@ -378,7 +378,6 @@ def build_trace_block() -> dbc.Card:
     )
     contents.extend([
         Download(id="download-trace-xlsx"),
-        dcc.Store(id="store-selected-gang"),
     ])
     return dbc.Card(
         dbc.CardBody(contents),
@@ -444,6 +443,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_kpi_cards(),
             dbc.Row(
                 [
+                    # LEFT: Projects over Months (only)
                     dbc.Col(
                         [
                             html.H5("Projects over Months"),
@@ -451,12 +451,12 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 id="g-project-lines",
                                 config={"displayModeBar": False},
                             ),
-                            # html.H5("Average Productivity per Month"),
-                            # dcc.Graph(
-                            #     id="g-monthly",
-                            #     config={"displayModeBar": False},
-                            # ),
-                            # --- NEW: Responsibilities block ---
+                        ],
+                        md=6,
+                    ),
+                    # RIGHT: Responsibilities (moved here)
+                    dbc.Col(
+                        [
                             html.H5("Responsibilities"),
                             dbc.Row(
                                 [
@@ -468,7 +468,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                 {"label": "Section Incharges", "value": "Section Incharge"},
                                                 {"label": "Supervisors", "value": "Supervisor"},
                                             ],
-                                            value="Supervisor",  # default as requested
+                                            value="Supervisor",
                                             inputStyle={"marginRight": "6px"},
                                             labelStyle={"marginRight": "18px"},
                                             inline=True,
@@ -482,7 +482,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                 {"label": "Tower Weight", "value": "tower_weight"},
                                                 {"label": "Revenue", "value": "revenue"},
                                             ],
-                                            value="tower_weight",  # default as requested
+                                            value="tower_weight",
                                             inputStyle={"marginRight": "6px"},
                                             labelStyle={"marginRight": "18px"},
                                             inline=True,
@@ -493,14 +493,6 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 className="mb-2",
                             ),
                             dcc.Graph(id="g-responsibilities", config={"displayModeBar": False}),
-                            # --- END NEW ---
-                        ],
-                        md=6,
-                    ),
-                    dbc.Col(
-                        [
-                            html.H5("Actual vs Potential Performance (All Gangs)"),
-                            gang_bar,
                         ],
                         md=6,
                     ),
@@ -509,51 +501,66 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             ),
             dbc.Row(
                 [
+                    # LEFT: Actual vs Potential (moved down here)
                     dbc.Col(
-                        dcc.RadioItems(
-                            id="f-topbot-metric",
-                            options=[
-                                {"label": "Productivity (MT/day)", "value": "prod"},
-                                {"label": "Erection (MT)", "value": "erection"},
+                        [
+                            html.H5("Actual vs Potential Performance (All Gangs)"),
+                            html.Div(
+                                dcc.Graph(id="g-actual-vs-bench", config=CLICK_GRAPH_CONFIG),
+                                style={"height": row_height, "overflowY": "auto"},
+                            ),
+                        ],
+                        md=6,
+                    ),
+
+                    # RIGHT: merged Top/Bottom inside one card
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(html.Span("Performance Rankings"), align="center"),
+                                            dbc.Col(
+                                                dcc.RadioItems(
+                                                    id="f-topbot-metric",
+                                                    options=[
+                                                        {"label": "Productivity (MT/day)", "value": "prod"},
+                                                        {"label": "Erection (MT)", "value": "erection"},
+                                                    ],
+                                                    value="prod",
+                                                    inline=True,
+                                                    inputStyle={"marginRight": "6px"},
+                                                    labelStyle={"marginRight": "18px"},
+                                                ),
+                                                width="auto",
+                                            ),
+                                        ],
+                                        justify="between",
+                                        align="center",
+                                    )
+                                ),
+                                dbc.CardBody(
+                                    [
+                                        html.Div("Top 5 Performers", className="text-success fw-semibold mb-2"),
+                                        dcc.Graph(id="g-top5", config=CLICK_GRAPH_CONFIG),
+                                        html.Hr(className="my-3"),
+                                        html.Div("Bottom 5 Performers", className="text-danger fw-semibold mb-2"),
+                                        dcc.Graph(id="g-bottom5", config=CLICK_GRAPH_CONFIG),
+                                    ]
+                                ),
                             ],
-                            value="prod",               # default = Productivity
-                            inline=True,
-                            inputStyle={"marginRight": "6px"},
-                            labelStyle={"marginRight": "18px"},
+                            className="shadow-sm",
                         ),
-                        md="auto",
-                    ),
-                ],
-                className="mb-2",
-            ),
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            html.H5("Top 5 Gangs"),
-                            dcc.Graph(
-                                id="g-top5",
-                                config=CLICK_GRAPH_CONFIG,
-                            ),
-                        ],
-                        md=6,
-                    ),
-                    dbc.Col(
-                        [
-                            html.H5("Bottom 5 Gangs"),
-                            dcc.Graph(
-                                id="g-bottom5",
-                                config=CLICK_GRAPH_CONFIG,
-                            ),
-                        ],
                         md=6,
                     ),
                 ],
-                className="g-3",
+                className="mb-4",
             ),
             build_trace_block(),
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
+            dcc.Store(id="store-selected-gang", data=None),   
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
         ],

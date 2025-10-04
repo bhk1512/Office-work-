@@ -73,16 +73,21 @@ def register_callbacks(
 
         const pt  = cd.points[0];
         const now = Date.now();
+
+        // ✅ Prefer axis category for gang (robust to customdata being [project, date])
         let gang = null;
-        if (pt.customdata) {
-            if (typeof pt.customdata === "string")       gang = pt.customdata;
-            else if (Array.isArray(pt.customdata))       gang = pt.customdata[0];
-            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+        if (typeof pt.y === "string")      gang = pt.y;   // horiz bars -> gang on y
+        else if (typeof pt.x === "string") gang = pt.x;   // vertical bars -> gang on x
+        else if (pt.customdata) {
+            if (typeof pt.customdata === "string") gang = pt.customdata;
+            else if (Array.isArray(pt.customdata)) gang = pt.customdata.find(v => typeof v === "string") || null;
+            else if (typeof pt.customdata === "object") gang = pt.customdata.gang || pt.customdata.name || null;
         }
-        gang = gang || pt.x || pt.y || null;
+
+        if (!gang) return [NO, NO];
 
         const newMeta = { source: src, gang: gang, ts: now };
-        return [newMeta, NO];  // update store-click-meta only; never touch store-dblclick
+        return [newMeta, NO];
         }
         """,
         [Output("store-click-meta", "data"), Output("store-dblclick", "data")],
@@ -91,6 +96,8 @@ def register_callbacks(
         Input("g-bottom5", "clickData")],
         [State("store-click-meta", "data")]
     )
+
+
 
 
 
@@ -137,20 +144,26 @@ def register_callbacks(
         function(lossClick, topClick, bottomClick, prev) {
         const C = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
         const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
+
         let cd = null;
         if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
         else if (trg.startsWith("g-top5."))        cd = topClick;
         else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
         else return NO;
+
         if (!cd || !cd.points || !cd.points.length) return NO;
         const pt = cd.points[0];
+
+        // ✅ Prefer axis category; fall back to customdata only if needed
         let gang = null;
-        if (pt.customdata) {
-            if (typeof pt.customdata === "string")       gang = pt.customdata;
-            else if (Array.isArray(pt.customdata))       gang = pt.customdata[0];
-            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+        if (typeof pt.y === "string")      gang = pt.y;
+        else if (typeof pt.x === "string") gang = pt.x;
+        else if (pt.customdata) {
+            if (typeof pt.customdata === "string") gang = pt.customdata;
+            else if (Array.isArray(pt.customdata)) gang = pt.customdata.find(v => typeof v === "string") || null;
+            else if (typeof pt.customdata === "object") gang = pt.customdata.gang || pt.customdata.name || null;
         }
-        gang = gang || pt.x || pt.y || null;
+
         return gang || NO;
         }
         """,
@@ -160,6 +173,7 @@ def register_callbacks(
         Input("g-bottom5", "clickData")],
         State("store-selected-gang", "data")
     )
+
 
     
 

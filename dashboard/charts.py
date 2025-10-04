@@ -299,21 +299,24 @@ def build_responsibilities_chart(
            .head(top_n))
     g["delivered"] = (0.10 * g[metric]).round(2)
 
+    # traces (VERTICAL)
     fig = go.Figure()
-    fig.add_bar(y=g["entity_name"], x=g[metric], orientation="h", name="Responsibility", width=0.9)
-    fig.add_bar(y=g["entity_name"], x=g["delivered"], orientation="h", name="Delivered (10%)", width=0.9)
+    fig.add_bar(x=g["entity_name"], y=g[metric], name="Responsibility", width=0.9)
+    fig.add_bar(x=g["entity_name"], y=g["delivered"], name="Delivered (10%)", width=0.9)
 
+    # layout / axes for vertical bars
     fig.update_layout(
         barmode="group",
-        height=max(320, 22 * len(g) + 120),
-        margin=dict(l=200, r=40, t=30, b=50),
-        xaxis_title=axis_title,
-        yaxis_title=entity_label,
+        height=360,
+        margin=dict(l=40, r=20, t=30, b=90),  # more bottom for angled ticks
+        xaxis_title=entity_label,
+        yaxis_title=axis_title,
         plot_bgcolor="#fafafa",
         paper_bgcolor="#ffffff",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
-        title=title or None
+        title=title or None,
     )
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(autorange="reversed", fixedrange=True)
+    fig.update_xaxes(tickangle=-15, automargin=True, showspikes=False)
+    fig.update_yaxes(gridcolor="#e9ecef", zeroline=False, rangemode="tozero", showspikes=False)
     return fig
+
