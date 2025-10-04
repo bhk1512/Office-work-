@@ -225,9 +225,11 @@ html {
 .same-h{ height: 600px; display:flex; flex-direction:column; }
 .same-h .card-body{ flex:1; display:flex; flex-direction:column; }
 
-/* Pointer cursor for Plotly bars (top & bottom charts) */
-.js-plotly-plot .plotly .barlayer .trace .bars path,
-.js-plotly-plot .plotly .barlayer .trace .bars rect,
-.js-plotly-plot .plotly .scatterlayer .trace .points path {
+/* Pointer cursor for Plotly bars (robust selectors) */
+.js-plotly-plot .barlayer path,
+.js-plotly-plot .barlayer rect,
+.js-plotly-plot .bars path,
+.js-plotly-plot .bars rect,
+.js-plotly-plot .scatterlayer .points path {
   cursor: pointer !important;
 }

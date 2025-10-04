@@ -580,10 +580,10 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 dbc.CardBody(
                                     [
                                         html.Div("Top 5 Performers", className="text-success fw-semibold mb-2"),
-                                        dcc.Graph(id="g-top5", config=CLICK_GRAPH_CONFIG),
+                                        dcc.Graph(id="g-top5", config=CLICK_GRAPH_CONFIG, style={"cursor":"pointer"}),
                                         html.Hr(className="my-3"),
                                         html.Div("Bottom 5 Performers", className="text-danger fw-semibold mb-2"),
-                                        dcc.Graph(id="g-bottom5", config=CLICK_GRAPH_CONFIG),
+                                        dcc.Graph(id="g-bottom5", config=CLICK_GRAPH_CONFIG, style={"cursor":"pointer"}),
                                     ]
                                 ),
                             ],

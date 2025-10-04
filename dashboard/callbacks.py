@@ -205,17 +205,21 @@ def register_callbacks(
         if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
         const trg = ctx.triggered[0].prop_id || "";
 
-        // 1) AVP list rows (pattern-matching IDs)
-        if (trg.startsWith('{"type":"avp-row"')) {
+        // ---- robust: parse the pattern id JSON instead of relying on key order
+        try {
+            const idPart = trg.split(".")[0];
+            const pid = JSON.parse(idPart);
+            if (pid && pid.type === "avp-row") {
             if (!rowClicks || !rowClicks.length) return NO;
             let last = -1;
-            for (let i=0;i<rowClicks.length;i++){ if (rowClicks[i]) last = i; }
+            for (let i = 0; i < rowClicks.length; i++) { if (rowClicks[i]) last = i; }
             if (last < 0) return NO;
             const gang = rowIds && rowIds[last] && rowIds[last].index;
             return gang || NO;
-        }
+            }
+        } catch (e) { /* ignore and fall through to chart clicks */ }
 
-        // 2) Plotly charts
+        // ---- charts (unchanged)
         let cd = null;
         if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
         else if (trg.startsWith("g-top5."))        cd = topClick;
@@ -224,8 +228,6 @@ def register_callbacks(
 
         if (!cd || !cd.points || !cd.points.length) return NO;
         const pt = cd.points[0];
-
-        // Prefer axis category for the gang name; fall back to customdata heuristics
         let gang = null;
         if (typeof pt.y === "string")      gang = pt.y;
         else if (typeof pt.x === "string") gang = pt.x;
@@ -242,13 +244,14 @@ def register_callbacks(
         Input("g-actual-vs-bench", "clickData"),
         Input("g-top5", "clickData"),
         Input("g-bottom5", "clickData"),
-        Input({"type": "avp-row", "index": ALL}, "n_clicks"),
+        Input({"type":"avp-row","index": dash.dependencies.ALL}, "n_clicks"),
         ],
         [
-        State({"type": "avp-row", "index": ALL}, "id"),
+        State({"type":"avp-row","index": dash.dependencies.ALL}, "id"),
         State("store-selected-gang", "data"),
         ],
     )
+    
 
     
 
