@@ -9,12 +9,14 @@ from io import BytesIO
 from typing import Any, Callable, Sequence
 
 import dash
+import re
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dcc import send_bytes
 from dash.exceptions import PreventUpdate
+from dash.dependencies import ALL
 
 from .charts import (
     # create_monthly_line_chart,
@@ -33,6 +35,60 @@ from .data_loader import load_microplan_responsibilities
 LOGGER = logging.getLogger(__name__)
 
 BENCHMARK_MT_PER_DAY = 9.0
+
+
+
+_slug = lambda s: re.sub(r"[^a-z0-9_-]+", "-", str(s).lower()).strip("-")
+
+def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project="—", last_date="—"):
+    badge_cls = "good" if pct >= 80 else ("mid" if pct >= 65 else "low")
+    delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
+    lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
+
+    row_id = f"avp-row-{_slug(gang)}"  # unique string id for tooltip target
+
+    return html.Div(
+        className="avp-item",
+        children=[
+            html.Div(
+                className="avp-head",
+                children=[html.Div(gang, className="avp-name"),
+                        html.Div(f"{int(round(pct))}%", className=f"avp-pct {badge_cls}")],
+            ),
+           
+            html.Div(className="avp-track", children=[
+                html.Div(className="avp-delivered", style={"width": f"{delivered_pct}%"}),
+                html.Div(className="avp-lost", style={"left": f"{delivered_pct}%", "width": f"{lost_pct}%"}),
+            ]),
+            html.Div(className="avp-meta", children=[
+                html.Span([html.Span(f"{delivered:.0f} MT", className="del"), " vs ", html.Span(f"{lost:.0f} MT lost", className="los")]),
+                html.Span(f"{total:.0f} MT", className="tot"),
+            ]),
+            # 1) CLICK OVERLAY (pattern ID) — this is what Dash listens to for n_clicks
+            html.Div(
+                id={"type": "avp-row", "index": gang},  # pattern-matching ID for clicks
+                n_clicks=0,
+                className="avp-hit",
+            ),
+
+            # 2) TOOLTIP ANCHOR (string ID) — tiny element used ONLY to anchor the tooltip
+            html.Span(id=row_id, className="avp-tip-anchor"),
+
+            # 3) TOOLTIP (bootstrap) — target is the string id above
+            dbc.Tooltip(
+                [
+                    html.Div(html.B(gang)),
+                    html.Div(f"Project: {last_project}"),
+                    html.Div(f"Last worked at: {last_date}"),
+                    html.Div(f"Current MT/day: {avg_prod:.2f}"),
+                    html.Div(f"Baseline MT/day: {baseline:.2f}"),
+                ],
+                target=row_id,                 # <-- IMPORTANT: target must be a STRING id
+                placement="right",
+                delay={"show": 100, "hide": 100},
+            ),
+        ],
+    )
 
 def _ensure_list(value: Sequence[str] | str | None) -> list[str]:
     if value is None:
@@ -139,12 +195,27 @@ def register_callbacks(
     )
 
 
+    from dash.dependencies import ALL
+
+    # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
     app.clientside_callback(
         """
-        function(lossClick, topClick, bottomClick, prev) {
+        function(lossClick, topClick, bottomClick, rowClicks, rowIds, prev) {
         const C = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
-        const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
+        if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+        const trg = ctx.triggered[0].prop_id || "";
 
+        // 1) AVP list rows (pattern-matching IDs)
+        if (trg.startsWith('{"type":"avp-row"')) {
+            if (!rowClicks || !rowClicks.length) return NO;
+            let last = -1;
+            for (let i=0;i<rowClicks.length;i++){ if (rowClicks[i]) last = i; }
+            if (last < 0) return NO;
+            const gang = rowIds && rowIds[last] && rowIds[last].index;
+            return gang || NO;
+        }
+
+        // 2) Plotly charts
         let cd = null;
         if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
         else if (trg.startsWith("g-top5."))        cd = topClick;
@@ -154,26 +225,30 @@ def register_callbacks(
         if (!cd || !cd.points || !cd.points.length) return NO;
         const pt = cd.points[0];
 
-        // ✅ Prefer axis category; fall back to customdata only if needed
+        // Prefer axis category for the gang name; fall back to customdata heuristics
         let gang = null;
         if (typeof pt.y === "string")      gang = pt.y;
         else if (typeof pt.x === "string") gang = pt.x;
         else if (pt.customdata) {
-            if (typeof pt.customdata === "string") gang = pt.customdata;
-            else if (Array.isArray(pt.customdata)) gang = pt.customdata.find(v => typeof v === "string") || null;
-            else if (typeof pt.customdata === "object") gang = pt.customdata.gang || pt.customdata.name || null;
+            if (typeof pt.customdata === "string")       gang = pt.customdata;
+            else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
+            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
         }
-
         return gang || NO;
         }
         """,
         Output("store-selected-gang", "data"),
-        [Input("g-actual-vs-bench", "clickData"),
+        [
+        Input("g-actual-vs-bench", "clickData"),
         Input("g-top5", "clickData"),
-        Input("g-bottom5", "clickData")],
-        State("store-selected-gang", "data")
+        Input("g-bottom5", "clickData"),
+        Input({"type": "avp-row", "index": ALL}, "n_clicks"),
+        ],
+        [
+        State({"type": "avp-row", "index": ALL}, "id"),
+        State("store-selected-gang", "data"),
+        ],
     )
-
 
     
 
@@ -389,6 +464,7 @@ def register_callbacks(
         Output("kpi-total", "children"),
         Output("kpi-loss", "children"),
         Output("kpi-loss-delta", "children"),   # <--- add this line
+        Output("avp-list", "children"),            # <-- NEW (HTML children)
         Output("g-actual-vs-bench", "figure"),
         # Output("g-monthly", "figure"),
         Output("g-top5", "figure"),
@@ -483,6 +559,46 @@ def register_callbacks(
             )
         )
 
+
+        # --- meta for hover: last project & last worked date per gang (within current filters)
+        meta_ready = {"gang_name", "project_name", "date"}.issubset(scoped_all.columns) and not scoped_all.empty
+
+        if meta_ready:
+            idx_last = scoped_all.sort_values("date").groupby("gang_name")["date"].idxmax()
+            meta = (
+                scoped_all.loc[idx_last, ["gang_name", "project_name", "date"]]
+                .rename(columns={"project_name": "last_project", "date": "last_date"})
+            )
+            loss_df = loss_df.merge(meta, on="gang_name", how="left")
+        else:
+            # guarantee columns exist even when we couldn't compute meta
+            loss_df = loss_df.assign(last_project=np.nan, last_date=pd.NaT)
+
+        # pretty, null-safe strings for hover (NO KeyError even if meta missing)
+        last_date_series = pd.to_datetime(loss_df.get("last_date"), errors="coerce")
+        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("—")
+        loss_df["last_project"]  = loss_df.get("last_project").fillna("—")
+
+        # Build left-card HTML list from loss_df (now that meta is attached)
+        avp_children = []
+        if not loss_df.empty:
+            for _, r in loss_df.iterrows():
+                total = (r["delivered"] + r["lost"]) if pd.notna(r["delivered"]) and pd.notna(r["lost"]) else r["potential"]
+                total = float(total) if pd.notna(total) else 0.0
+                pct = 0.0 if total == 0 else (100.0 * float(r["delivered"]) / total)
+                avp_children.append(
+                    _render_avp_row(
+                        r["gang_name"], float(r["delivered"]), float(r["lost"]),
+                        total, pct,
+                        avg_prod=float(r.get("avg_prod", 0.0)),
+                        baseline=float(r.get("baseline", 0.0)),
+                        last_project=str(r.get("last_project", "—")),
+                        last_date=str(r.get("last_date_str", "—")),
+                    )
+                )
+
+
+
         row_px = 56
         topbot_margin = 120
         fig_height = int(row_px * max(1, len(loss_df)) + topbot_margin)
@@ -499,24 +615,6 @@ def register_callbacks(
         kpi_loss = f"{total_lost:.1f} MT"
         kpi_loss_delta = f"{lost_pct:.1f}%"
 
-        # --- meta for hover: last project & last worked date per gang (within current filters) ---
-        # use scoped_all so it respects selected projects/gangs but across all dates
-        if {"gang_name", "project_name", "date"}.issubset(scoped_all.columns):
-            idx_last = scoped_all.sort_values("date").groupby("gang_name")["date"].idxmax()
-            meta = (
-                scoped_all.loc[idx_last, ["gang_name", "project_name", "date"]]
-                        .rename(columns={"project_name": "last_project", "date": "last_date"})
-            )
-            loss_df = loss_df.merge(meta, on="gang_name", how="left")
-            loss_df["last_date_str"] = pd.to_datetime(loss_df["last_date"], errors="coerce").dt.strftime("%d-%b-%Y")
-        else:
-            loss_df["last_project"] = ""
-            loss_df["last_date_str"] = ""
-
-        # fill any gaps gracefully
-        loss_df["last_project"] = loss_df["last_project"].fillna("—")
-        loss_df["last_date_str"] = loss_df["last_date_str"].fillna("—")
-        # -------------------------------------------------------------------
 
 
 
@@ -585,7 +683,7 @@ def register_callbacks(
         fig_loss.update_yaxes(showspikes=False, fixedrange=True)
         
         # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
-        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom, metric=(topbot_metric or "prod"))
+        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom, metric=(topbot_metric or "prod"), baseline_map=baseline_map)
         fig_project = create_project_lines_chart(
             df_day,
             selected_projects=project_list or None,
@@ -599,7 +697,8 @@ def register_callbacks(
             kpi_total,
             kpi_loss,
             kpi_loss_delta,
-            fig_loss,
+            avp_children,  
+            fig_loss,   # kept but hidden in layout to preserve clickData wiring
             # fig_monthly,
             fig_top5,
             fig_bottom5,

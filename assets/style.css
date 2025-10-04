@@ -140,3 +140,94 @@ html {
 .kpi-delta{
   flex-shrink: 0;          /* <-- pill keeps its width, doesn't crush value */
 }
+
+
+
+/* === Section header & legend === */
+.section-header{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:12px; margin-bottom:6px;
+}
+.section-title{ font-size:1.35rem; font-weight:800; color:var(--text); }
+.section-sub{ color:var(--muted); font-size:.95rem; }
+
+.legend{ display:flex; gap:14px; align-items:center; }
+.legend__item{ display:flex; align-items:center; gap:8px; font-weight:600; }
+.legend__dot{ width:14px; height:14px; border-radius:4px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.04); }
+
+.dot--delivered{ background:#16A34A; }  /* green 600 */
+.dot--lost{ background:#EF4444; }       /* red 500 */
+
+/* === Segmented control (style radio as pills) === */
+.segment{
+  display:flex; gap:8px; background:#fff; border:1px solid var(--border);
+  padding:4px; border-radius:12px; box-shadow:var(--shadow-1);
+}
+.segment input[type="radio"]{ display:none; }
+.segment label{
+  padding:8px 12px; border-radius:8px; cursor:pointer; user-select:none;
+  font-weight:700; font-size:.92rem; color:#111827;
+}
+/* highlight the selected radio (label that HAS a checked input) */
+.segment label:has(input[type="radio"]:checked){
+  background:#0B1020; color:#fff;
+  box-shadow:0 1px 2px rgba(0,0,0,.1), 0 6px 18px rgba(0,0,0,.12);
+}
+
+/* === AVP list (left card) === */
+.avp-wrap{ height:460px; overflow:auto; padding-right:4px; }
+.avp-item{
+  background:var(--surface); border:1px solid var(--border); border-radius:12px;
+  padding:12px 14px; margin:12px 0; box-shadow:var(--shadow-1);
+}
+.avp-item { cursor: pointer; }
+.avp-item:hover { box-shadow: var(--shadow-2); }
+/* AVP rows: tooltip/click hit-area should cover the whole row */
+.avp-item{ position: relative; }           /* establish containing block for the overlay */
+.avp-hit{
+     position: absolute;
+     inset: 0;
+     z-index: 5;          /* <-- ensure overlay is on top so it receives the click */
+     cursor: pointer;
+   }
+.avp-tip-anchor{
+    position: absolute; top: 8px; left: 8px;
+    width: 1px; height: 1px;                      /* invisible but present for tooltip */
+    pointer-events: none;                         /* don't steal clicks */
+  }
+
+.avp-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.avp-name{ font-weight:800; color:#111827; }
+.avp-pct{ padding:4px 8px; border-radius:999px; font-weight:700; font-size:.85rem; }
+.avp-pct.good{ background:rgba(22,163,74,.12); color:#166534; border:1px solid rgba(22,163,74,.2); }
+.avp-pct.mid{  background:rgba(234,179,8,.12); color:#92400e; border:1px solid rgba(234,179,8,.25); }
+.avp-pct.low{  background:rgba(239,68,68,.12); color:#991b1b; border:1px solid rgba(239,68,68,.24); }
+
+/* bar track */
+.avp-track{
+  height:10px; border-radius:999px; background:#e8eef8; position:relative;
+  overflow:hidden; margin:8px 0 6px; 
+}
+/* delivered (green) & lost (red) segments */
+.avp-delivered, .avp-lost{
+  position:absolute; top:0; height:100%;
+}
+.avp-delivered{ left:0; background:#16A34A; }
+.avp-lost{ background:#EF4444; }
+
+/* inline totals on right */
+.avp-meta{ display:flex; justify-content:space-between; font-weight:700; }
+.avp-meta .del{ color:#16A34A; }
+.avp-meta .los{ color:#EF4444; }
+.avp-meta .tot{ color:#6b7280; }
+
+/* same height cards */
+.same-h{ height: 600px; display:flex; flex-direction:column; }
+.same-h .card-body{ flex:1; display:flex; flex-direction:column; }
+
+/* Pointer cursor for Plotly bars (top & bottom charts) */
+.js-plotly-plot .plotly .barlayer .trace .bars path,
+.js-plotly-plot .plotly .barlayer .trace .bars rect,
+.js-plotly-plot .plotly .scatterlayer .trace .points path {
+  cursor: pointer !important;
+}

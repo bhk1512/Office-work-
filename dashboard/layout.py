@@ -428,13 +428,13 @@ def build_layout(last_updated_text: str) -> dbc.Container:
 
     controls = build_controls()
     row_height = f"{CONTAINER_HEIGHT}px"
-    gang_bar = html.Div(
-        dcc.Graph(
-            id="g-actual-vs-bench",
-            config=CLICK_GRAPH_CONFIG,
-        ),
-        style={"height": row_height, "overflowY": "auto"},
-    )
+    # gang_bar = html.Div(
+    #     dcc.Graph(
+    #         id="g-actual-vs-bench",
+    #         config=CLICK_GRAPH_CONFIG,
+    #     ),
+    #     style={"height": row_height, "overflowY": "auto"},
+    # )
     trace_modal = build_trace_modal()
     layout = dbc.Container(
         [
@@ -506,17 +506,35 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             ),
             dbc.Row(
                 [
-                    # LEFT: Actual vs Potential (moved down here)
+                    # LEFT: Actual vs Potential (Figma-style list with scroll)
                     dbc.Col(
-                        [
-                            html.H5("Actual vs Potential Performance (All Gangs)"),
-                            html.Div(
-                                dcc.Graph(id="g-actual-vs-bench", config=CLICK_GRAPH_CONFIG),
-                                style={"height": row_height, "overflowY": "auto"},
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div(
+                                        className="section-header",
+                                        children=[
+                                            html.Div("Gang Performance: Delivered vs Lost", className="section-title"),
+                                            html.Div(
+                                                className="legend",
+                                                children=[
+                                                    html.Div([html.Span(className="legend__dot dot--delivered"), "Delivered Output"], className="legend__item"),
+                                                    html.Div([html.Span(className="legend__dot dot--lost"), "Lost Potential"], className="legend__item"),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
+                                    html.Hr(style={"borderColor": "var(--border)", "margin": "8px 0 10px"}),
+                                    html.Div(id="avp-list", className="avp-wrap"),
+                                    # Keep the original figure hidden so existing clientside callbacks keep working
+                                    dcc.Graph(id="g-actual-vs-bench", config=CLICK_GRAPH_CONFIG, style={"display": "none"}),
+                                ]
                             ),
-                        ],
+                            className="same-h card--elev",
+                        ),
                         md=6,
                     ),
+
 
                     # RIGHT: merged Top/Bottom inside one card
                     dbc.Col(
@@ -525,26 +543,40 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 dbc.CardHeader(
                                     dbc.Row(
                                         [
-                                            dbc.Col(html.Span("Performance Rankings"), align="center"),
                                             dbc.Col(
-                                                dcc.RadioItems(
-                                                    id="f-topbot-metric",
-                                                    options=[
-                                                        {"label": "Productivity (MT/day)", "value": "prod"},
-                                                        {"label": "Erection (MT)", "value": "erection"},
+                                                html.Div(
+                                                    children=[
+                                                        html.Div("Performance Rankings", className="section-title"),
+                                                        html.Div("Top and bottom performing gangs", className="section-sub"),
+                                                    ]
+                                                ),
+                                                align="center",
+                                            ),
+                                            dbc.Col(
+                                                html.Div(
+                                                    className="segment",
+                                                    children=[
+                                                        dcc.RadioItems(
+                                                            id="f-topbot-metric",              # keep same id
+                                                            options=[
+                                                                {"label": "Productivity", "value": "prod"},
+                                                                {"label": "Erection", "value": "erection"},
+                                                            ],
+                                                            value="prod",
+                                                            labelStyle={"display": "inline-flex", "gap": "0"},
+                                                            inputStyle={"marginRight": "8px"},
+                                                        )
                                                     ],
-                                                    value="prod",
-                                                    inline=True,
-                                                    inputStyle={"marginRight": "6px"},
-                                                    labelStyle={"marginRight": "18px"},
                                                 ),
                                                 width="auto",
+                                                align="center",
                                             ),
                                         ],
                                         justify="between",
                                         align="center",
                                     )
                                 ),
+
                                 dbc.CardBody(
                                     [
                                         html.Div("Top 5 Performers", className="text-success fw-semibold mb-2"),
@@ -555,7 +587,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     ]
                                 ),
                             ],
-                            className="shadow-sm",
+                            className="same-h shadow-sm",
                         ),
                         md=6,
                     ),

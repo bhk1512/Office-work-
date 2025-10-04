@@ -58,7 +58,11 @@ def _empty_figure(height: int = 300) -> go.Figure:
 #     return figure
 
 
-def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> Tuple[go.Figure, go.Figure]:
+def create_top_bottom_gangs_charts(
+    data: pd.DataFrame,
+    metric: str = "prod",
+    baseline_map: dict[str, float] | None = None,
+) -> Tuple[go.Figure, go.Figure]:
     """Build top and bottom five gang bar charts."""
 
     if data.empty:
@@ -105,6 +109,15 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> 
         bottom5["last_project"] = ""
         bottom5["last_date_str"] = ""
     # -------------------------------------------------------------------------
+        # Add current & baseline values for hover
+    if baseline_map is None:
+        baseline_map = {}
+    top5["baseline_metric"] = top5["gang_name"].map(baseline_map).fillna(0.0)
+    bottom5["baseline_metric"] = bottom5["gang_name"].map(baseline_map).fillna(0.0)
+
+    # Current metric is what we plotted (y value)
+    top5["current_metric"] = top5["daily_prod_mt"]
+    bottom5["current_metric"] = bottom5["daily_prod_mt"]
 
     EXEC_GREEN = "#2E7D32"
     EXEC_RED   = "#C62828"
@@ -122,13 +135,25 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> 
                 textfont=dict(size=12, color="#111"),
                 name="Top 5",
                 customdata=np.stack(
-                    [top5["last_project"].fillna("—"), top5["last_date_str"].fillna("—")],
+                    [top5["last_project"].fillna("—"),
+                    top5["last_date_str"].fillna("—"),
+                    top5["current_metric"],
+                    top5["baseline_metric"]],
                     axis=-1,
                 ),
                 hovertemplate=(
                     "%{x}<br>" + hoverline + "<br>"
                     "Project: %{customdata[0]}<br>"
-                    "Last worked: %{customdata[1]}<extra></extra>"
+                    "Last worked at: %{customdata[1]}<br>"
+                    "Current " + ytitle + ": %{customdata[2]:.2f}<br>"
+                    "Baseline " + ytitle + ": %{customdata[3]:.2f}<extra></extra>"
+                ),
+                hoverlabel=dict(
+                    bgcolor="rgba(255,255,255,0.95)",
+                    font=dict(color="#111827", size=13),
+                    bordercolor="rgba(17,24,39,0.15)",
+                    align="left",
+                    namelength=0,
                 ),
             )
         ]
@@ -139,8 +164,8 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> 
     top_chart.update_xaxes(tickangle=-10, showspikes=False)
     top_chart.update_layout(
         yaxis_title=ytitle,
-        height=300,
-        margin=dict(l=40, r=20, t=50, b=60),
+        height=200,
+        margin=dict(l=36, r=16, t=10, b=10),
         bargap=0.25,
         plot_bgcolor="#f8f9fa",
         paper_bgcolor="#ffffff",
@@ -149,6 +174,7 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> 
         uniformtext_mode="hide",
         hovermode="closest",
     )
+    
 
     bottom_chart = go.Figure(
         data=[
@@ -162,25 +188,37 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> 
                 textfont=dict(size=12, color="#111"),
                 name="Bottom 5",
                 customdata=np.stack(
-                    [bottom5["last_project"].fillna("—"), bottom5["last_date_str"].fillna("—")],
+                    [bottom5["last_project"].fillna("—"),
+                    bottom5["last_date_str"].fillna("—"),
+                    bottom5["current_metric"],
+                    bottom5["baseline_metric"]],
                     axis=-1,
                 ),
                 hovertemplate=(
                     "%{x}<br>" + hoverline + "<br>"
                     "Project: %{customdata[0]}<br>"
-                    "Last worked: %{customdata[1]}<extra></extra>"
+                    "Last worked at: %{customdata[1]}<br>"
+                    "Current " + ytitle + ": %{customdata[2]:.2f}<br>"
+                    "Baseline " + ytitle + ": %{customdata[3]:.2f}<extra></extra>"
+                ),
+                hoverlabel=dict(
+                    bgcolor="rgba(255,255,255,0.95)",
+                    font=dict(color="#111827", size=13),
+                    bordercolor="rgba(17,24,39,0.15)",
+                    align="left",
+                    namelength=0,
                 ),
             )
         ]
     )
-
+    
     ymax_bot = float(bottom5["daily_prod_mt"].max()) if not bottom5.empty else 1.0
     bottom_chart.update_yaxes(range=[0, ymax_bot * 1.15], gridcolor=GRID_GRAY, zeroline=False, showspikes=False)
     bottom_chart.update_xaxes(tickangle=-10, showspikes=False)
     bottom_chart.update_layout(
         yaxis_title=ytitle,
-        height=300,
-        margin=dict(l=40, r=20, t=50, b=60),
+        height=200,
+        margin=dict(l=36, r=16, t=10, b=10),
         bargap=0.25,
         plot_bgcolor="#f8f9fa",
         paper_bgcolor="#ffffff",
@@ -189,7 +227,7 @@ def create_top_bottom_gangs_charts(data: pd.DataFrame, metric: str = "prod") -> 
         uniformtext_mode="hide",
         hovermode="closest",
     )
-
+    
     
     LOGGER.debug("Top/Bottom charts built with %d gangs", len(per_gang))
 
