@@ -5,6 +5,8 @@ from dash import dcc, html
 import dash_bootstrap_components as dbc
 from dash import dash_table
 from dash.dcc import Download
+import urllib.parse
+from dash import html
 
 CLICK_GRAPH_CONFIG = {
     "displayModeBar": False,
@@ -21,6 +23,26 @@ CLICK_GRAPH_CONFIG = {
         "resetScale2d",
     ],
 }
+
+# Inline SVG fragments for simple icons (white strokes)
+_ICON_SHAPES = {
+    "trend_down":  '<polyline points="4,8 10,14 13,11 20,18" stroke="white" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+    "trend_up":    '<polyline points="4,16 10,10 13,13 20,6"  stroke="white" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+    "users":       ('<circle cx="9" cy="9" r="3" stroke="white" stroke-width="2" fill="none"/>'
+                    '<circle cx="15" cy="9" r="3" stroke="white" stroke-width="2" fill="none"/>'
+                    '<path d="M3 20c1-3 4-5 9-5s8 2 9 5" stroke="white" stroke-width="2" fill="none" stroke-linecap="round"/>'),
+    "activity":    '<polyline points="3,12 7,12 10,3 14,21 17,12 21,12" stroke="white" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+}
+
+def _icon(name: str, size: int = 18) -> html.Img:
+    """Return a small white SVG icon as <img src='data:image/svg+xml;utf8,...'>"""
+    inner = _ICON_SHAPES[name]
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+        f'viewBox="0 0 24 24">{inner}</svg>'
+    )
+    uri = "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
+    return html.Img(src=uri, style={"width": f"{size}px", "height": f"{size}px"})
 
 def _build_trace_contents(
     trace_dropdown_id: str,
@@ -217,144 +239,127 @@ def build_controls() -> dbc.Card:
     )
 
 
-def build_kpi_cards() -> dbc.Row:
-    """Return the KPI cards row."""
+def _svg(icon_path: str, size: int = 18):
+    """Small inline SVG helper (white icons)."""
+    return html.Span(
+        dangerously_allow_html=True,
+        children=f'''
+<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="{icon_path}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+''',
+    )
 
+# Lucide paths (top-right icons)
+_LUCIDE_TREND_DOWN = "7 7 17 17M17 7h0v10H7"
+_LUCIDE_USERS      = "17 21v-2a4 4 0 0 0-4-4H11a4 4 0 0 0-4 4v2M7 7a4 4 0 1 0 8 0 4 4 0 0 0-8 0"
+_LUCIDE_TREND_UP   = "7 17 17 7M7 7h10v10"
+_LUCIDE_ACTIVITY   = "22 12h-4l-3 9-6-18-3 9H2"
+
+def build_kpi_cards() -> dbc.Row:
     return dbc.Row(
         [
+            # 1) Avg Output / Gang / Day  (blue)
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(
-                                "Avg Output / Gang / Day",
-                                className="fw-bold text-white",
-                            ),
+                            html.Div(_icon("trend_down"), className="kpi__icon"),
+                            html.Div("Avg Output / Gang / Day", className="kpi-label"),
                             html.Div(
                                 [
                                     html.Span(id="kpi-avg", className="kpi-value"),
                                     html.Span(id="kpi-delta", className="kpi-delta"),
                                 ],
-                                className="d-flex align-items-baseline kpi-row",
+                                className="kpi-row",
                             ),
                         ]
                     ),
-                    className="shadow-sm",
-                    style={
-                        "backgroundColor": "#4f9cff",
-                        "border": "0",
-                        "borderRadius": "12px",
-                    },
+                    className="kpi kpi--blue",
                 ),
-                xs=12,
-                sm=6,
-                md=6,
-                lg=3,
-                xl=3,
+                xs=12, sm=6, md=6, lg=3, xl=3,
             ),
+
+            # 2) Active Projects (purple)
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
+                            html.Div(_icon("users"), className="kpi__icon"),
+                            html.Div("Active Projects", className="kpi-label"),
                             html.Div(
-                                "Active Gangs",
-                                className="fw-bold text-white",
-                            ),
-                            html.Div(
-                                [
-                                    html.Span(id="kpi-active", className="kpi-value"),
-                                ],
-                                className="d-flex align-items-baseline kpi-row",
+                                [ html.Span(id="kpi-active", className="kpi-value") ],
+                                className="kpi-row",
                             ),
                         ]
                     ),
-                    className="shadow-sm",
-                    style={
-                        "backgroundColor": "#d6b4fc",
-                        "border": "0",
-                        "borderRadius": "12px",
-                    },
+                    className="kpi kpi--purple",
                 ),
-                xs=12,
-                sm=6,
-                md=6,
-                lg=3,
-                xl=3,
+                xs=12, sm=6, md=6, lg=3, xl=3,
             ),
+
+            # 3) Total Erection (This Period) (orange for Figma look)
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
+                            html.Div(_icon("trend_up"), className="kpi__icon"),
+                            html.Div("Total Erection (This Period)", className="kpi-label"),
                             html.Div(
-                                "Total Erection (This Period)",
-                                className="fw-bold text-white",
-                            ),
-                            html.Div(
-                                [
-                                    html.Span(id="kpi-total", className="kpi-value"),
-                                ],
-                                className="d-flex align-items-baseline kpi-row",
+                                [ html.Span(id="kpi-total", className="kpi-value") ],
+                                className="kpi-row",
                             ),
                         ]
                     ),
-                    className="shadow-sm",
-                    style={
-                        "backgroundColor": "#ffbb66",
-                        "border": "0",
-                        "borderRadius": "12px",
-                    },
+                    className="kpi kpi--green",
                 ),
-                xs=12,
-                sm=6,
-                md=6,
-                lg=3,
-                xl=3,
+                xs=12, sm=6, md=6, lg=3, xl=3,
             ),
+
+            # 4) Lost Units (red)
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(
-                                "Lost Units",
-                                className="fw-bold text-white",
-                            ),
+                            html.Div(_icon("trend_down"), className="kpi__icon"),
+                            html.Div("Lost Units", className="kpi-label"),
                             html.Div(
                                 [
                                     html.Span(id="kpi-loss", className="kpi-value"),
-                                    html.Span(id="kpi-loss-delta", className="kpi-delta"),  # % in brackets
+                                    html.Span(id="kpi-loss-delta", className="kpi-delta"),
                                 ],
-                                className="d-flex align-items-baseline kpi-row",
+                                className="kpi-row",
                             ),
                         ]
                     ),
-                    className="shadow-sm",
-                    style={
-                        "backgroundColor": "#ff7b7b",
-                        "border": "0",
-                        "borderRadius": "12px",
-                    },
+                    className="kpi kpi--red",
                 ),
-                xs=12,
-                sm=6,
-                md=6,
-                lg=3,
-                xl=3,
+                xs=12, sm=6, md=6, lg=3, xl=3,
             ),
         ],
         className="g-3 align-items-stretch",
     )
 
+
 def build_project_details_card() -> dbc.Card:
     return dbc.Card(
         dbc.CardBody([
-            html.Div("Project Details", className="fw-bold mb-2"),
+            html.Div(
+                [
+                    html.Div("Project Details", className="project-details__title"),
+                    # small neutral icon (purely visual; no functionality)
+                    html.Span("ℹ️", style={"opacity": 0.6, "fontSize": "0.95rem"}),
+                ],
+                className="project-details mb-2",
+            ),
+            html.Hr(className="my-2", style={"borderColor": "var(--border)"}),
             html.Div(
                 id="project-details",
-                className="small text-muted",
-                children="Select a single project to view its details."
+                className="project-details__body",
+                children="Select a single project to view its details.",
             ),
         ]),
-        className="mb-3 shadow-sm"
+        className="mb-3 card--elev",
     )
 
 

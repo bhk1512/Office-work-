@@ -1,3 +1,15 @@
+/* === Figma-inspired surface + tokens (light theme) === */
+:root{
+  --surface:#ffffff;
+  --surface-2:#fafbff;
+  --border:#e6e9f0;
+  --text:#0f172a;
+  --muted:#6b7280;
+  --radius:14px;
+  --shadow-1:0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
+  --shadow-2:0 2px 6px rgba(16,24,40,.08), 0 16px 40px rgba(16,24,40,.08);
+}
+
 body {
   background-color: #f4f6f8;   /* light gray-off white */
 }
@@ -6,58 +18,125 @@ html {
     scroll-behavior: smooth;
   }
 
-.card {
-    background-color: #ffffff;    /* still white */
-    border: 0;
-    border-radius: 12px;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-}
-
-.navbar, .footer {
-  background-color: #f1f3f4;
-}
-
-  
-/* ---- Executive KPI styling ---- */
-.kpi-row {
-    gap: 0.25rem;
-    align-items: baseline;
+  .card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    box-shadow:var(--shadow-1);
   }
-  
-.kpi-value {
-    /* Bigger + truly bold, with a font stack that has heavy weights on Windows too */
-    font-size: 2.6rem;              /* was 3.0rem */
-    font-weight: 900;
-    line-height: 1.1;
-    letter-spacing: -0.2px;
-    color: #111111;
-    white-space: nowrap;
-    font-family: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
-                 -apple-system, "Helvetica Neue", Arial, sans-serif;
-  
-    /* Sharper rendering on Windows + WebKit */
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    text-rendering: geometricPrecision;
+  .card--elev{ box-shadow:var(--shadow-2); }
+
+  /* === Project Details === */
+.project-details{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+.project-details__title{
+  font-weight:700;
+  letter-spacing:.2px;
+}
+.project-details__body{
+  font-size:.95rem;
+  color:var(--muted);
 }
 
-.kpi-delta {
-    font-size: 1.0rem;             /* slightly larger for readability */
-    font-weight: 700;
-    color: rgba(255, 255, 255, 0.95);
-    letter-spacing: 0.1px;
-    margin-left: 0.35rem;          /* guarantees a space before "(" even if string lacks it */
-    white-space: nowrap;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
+/* === Figma (Tailwind) gradient variants + icon slot === */
+.kpi{
+  position: relative;
+  padding:18px 22px;
+  padding-right: 58px;
+  border-radius:16px;
+  border: none;
+  color:#fff;                  /* White text on vibrant cards */
+  box-shadow: 0 8px 30px rgba(0,0,0,.12);
+  overflow: hidden;
 }
-  
-  /* Responsive scale-up on wide screens; scale-down on tablets/phones */
-@media (min-width: 1400px) {
-    .kpi-value { font-size: 3.0rem; }
+
+/* === Solid background variants === */
+.kpi--blue   { background:#2563EB; color:#fff; }
+.kpi--purple { background:#7C3AED; color:#fff; }
+.kpi--green  { background:#22C55E; color:#fff; }
+.kpi--red    { background:#EF4444; color:#fff; }
+
+.kpi-label{
+  display:block;
+  font-size:.9rem;
+  font-weight:700;
+  letter-spacing:.2px;           /* slightly tighter than before */
+  text-transform:uppercase;
+  white-space:nowrap;            /* no wrap */
+  word-break:keep-all;           /* don't break around slashes */
+  overflow:hidden;
+  text-overflow:ellipsis;        /* if ever too long, truncate with … */
+  max-width: 100%;
 }
-@media (max-width: 991.98px) {
-  .kpi-value{ font-size: 2.1rem; }
-  .kpi-delta{ font-size: .95rem; }
+
+.kpi-row{
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:8px;
 }
-  
+
+.kpi-value{
+  font-size:2.4rem;
+  font-weight:900;
+  line-height:1;
+  letter-spacing:.3px;
+}
+
+.kpi-delta{
+  font-size:.9rem;
+  font-weight:700;
+  padding:6px 10px;
+  border-radius:999px;
+  background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.24);
+  color:#fff;
+  white-space: nowrap;
+}
+
+/* Make all KPI cards equal height */
+.kpi{ min-height: 132px; }              /* adjust to your taste: 112–140px works well */
+.kpi .card-body{ height: 100%; }
+
+/* Optional: keep the row content vertically centered */
+.kpi-row{ align-items: center; }
+
+/* top-right icon “chip” */
+.kpi__icon{
+  position:absolute;
+  top:10px;
+  right:12px;
+  width:28px;
+  height:28px;
+  display:grid;
+  place-items:center;
+  border-radius:10px;
+  background: rgba(255,255,255,.18);
+  border:1px solid rgba(255,255,255,.24);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18);
+}
+
+.kpi .card-body{
+  height:100%;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+}
+
+.kpi-value{
+  white-space: nowrap;     /* <-- prevents '4.35' and 'MT' from splitting */
+  display: inline-block;
+  max-width: 100%;
+}
+
+/* Ensure the row never wraps and the pill doesn't squeeze the value */
+.kpi-row{
+  flex-wrap: nowrap;       /* <-- no wrapping inside the row */
+}
+.kpi-delta{
+  flex-shrink: 0;          /* <-- pill keeps its width, doesn't crush value */
+}
