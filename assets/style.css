@@ -343,3 +343,112 @@ html {
   .project-label { font-size: 12px; }
   .project-value { font-size: 15px; }
 }
+
+
+/* ===== Project Overview: Professional skin ===== */
+
+/* kill Bootstrap white bg on the outer card; keep only the inner surface */
+.project-card-wrap{
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* blue, subtle gradient surface with soft outline + elevation */
+.project-card{
+  background: linear-gradient(180deg, #F6FAFF 0%, #EEF4FF 100%);
+  border-radius: 16px;
+  border: 1px solid #E3EAFD;
+  box-shadow: 0 6px 24px rgba(30, 58, 138, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  padding: 20px 24px;                 /* tighter than Bootstrap */
+}
+
+/* header */
+.project-card__head{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;                /* tighten */
+}
+.project-card__title{
+  font-size: 20px;
+  font-weight: 800;
+  color: #0F172A;
+  letter-spacing: .2px;
+  margin: 0;
+}
+
+/* 3-column grid */
+.project-grid{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  column-gap: 36px;                   /* tighter than before */
+  row-gap: 6px;
+}
+
+/* column dividers like the screenshot */
+.project-grid > .project-col{
+  position: relative;
+  padding-left: 0;
+  padding-right: 24px;
+}
+.project-grid > .project-col:nth-child(2),
+.project-grid > .project-col:nth-child(3){
+  padding-left: 28px;
+}
+.project-grid > .project-col:nth-child(2)::before,
+.project-grid > .project-col:nth-child(3)::before{
+  content: "";
+  position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(208,219,255,0) 0%, #D0DBFF 10%, #D0DBFF 90%, rgba(208,219,255,0) 100%);
+}
+
+/* label/value hierarchy */
+.project-label{
+  font-size: 12.5px;                  /* a hair smaller */
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: #64748B;
+  text-transform: uppercase;
+  margin: 12px 0 2px;
+}
+.project-value{
+  font-size: 16px;
+  font-weight: 800;
+  color: #0F172A;
+  margin: 0 0 4px;
+  line-height: 1.25;
+}
+
+/* compact mode on dense layouts (when lots of fields wrap) */
+@media (min-width: 1280px){
+  .project-grid{ column-gap: 40px; }
+}
+
+/* tablet */
+@media (max-width: 992px){
+  .project-card{ padding: 18px 18px; }
+  .project-grid{ grid-template-columns: 1fr 1fr; column-gap: 24px; }
+  .project-grid > .project-col:nth-child(2)::before{ display:none; } /* avoid odd mid divider on 2-col */
+}
+
+/* phone */
+@media (max-width: 640px){
+  .project-card{ padding: 14px 14px; }
+  .project-card__title{ font-size: 18px; }
+  .project-grid{ grid-template-columns: 1fr; row-gap: 4px; }
+  .project-grid > .project-col::before{ display:none; }
+  .project-label{ font-size: 12px; }
+  .project-value{ font-size: 15px; }
+}
+
+
+/* empty message inside the blue card */
+.project-empty{
+  color: #64748B;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 2px 6px 2px;
+}

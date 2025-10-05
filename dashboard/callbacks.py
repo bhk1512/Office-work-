@@ -376,56 +376,73 @@ def register_callbacks(
             for month in months
         ]
 
+    # ---- Project Overview (dynamic body) -----------------------------------------
     @app.callback(
-        Output("pd-title", "children"),          # NEW: dynamic header text
-        Output("project-details", "children"),   # existing body container
+        Output("pd-title", "children"),          # header text
+        Output("project-details", "children"),   # body (message OR 3-col grid)
         Input("f-project", "value"),
         prevent_initial_call=False,
     )
-    def show_project_details(selected_projects):
+    def show_project_details(selected_project):
         """
-        Renders the three-column Project Overview body and a dynamic title.
-        Uses the same project_info_provider() and columns you already load.
+        If no selection -> show friendly message.
+        If selection found -> render the 3-column grid with real values.
+        Uses project_info_provider() as in your existing code.
         """
-        # ---- default title + empty state ----
         default_title = "Project Overview"
-        if not selected_projects:
-            # no selection → keep neutral title and your existing message
-            return default_title, "Select a single project to view its details."
 
-        # ---- data source checks exactly like before ----
+        # 1) No selection -> message
+        if not selected_project:
+            return (
+                default_title,
+                html.Div("Select a single project to view its details.", className="project-empty"),
+            )
+
+        # 2) Source existence checks (same expectations as your current code)
         if not project_info_provider:
-            return default_title, "No 'Project Details' source configured."
-        df_info = project_info_provider()
+            return (
+                default_title,
+                html.Div("No 'Project Details' source configured.", className="project-empty"),
+            )
+
+        df_info = project_info_provider()  # must return a DataFrame
         if df_info is None or df_info.empty:
-            return default_title, "No 'Project Details' sheet found in the source workbook."
+            return (
+                default_title,
+                html.Div("No 'Project Details' sheet found in the source workbook.", className="project-empty"),
+            )
 
-        pname = str(selected_projects).strip()
+        pname = str(selected_project).strip()
 
-        # exact match first, then normalized fallback (same logic you used)
+        # Try exact match first, then normalized match on 'Project Name'
         row = df_info[df_info.get("Project Name") == pname]
         if row.empty and "Project Name" in df_info.columns:
             norm = lambda s: " ".join(str(s).strip().lower().split())
             row = df_info[df_info["Project Name"].apply(norm) == norm(pname)]
+
         if row.empty:
-            return default_title, f"No project details found for “{pname}”."
+            return (
+                default_title,
+                html.Div(f"No project details found for “{pname}”.", className="project-empty"),
+            )
 
         r = row.iloc[0]
 
+        # Helpers (same as you used)
         def fmt_txt(key: str) -> str:
             v = r.get(key, "")
-            return "" if pd.isna(v) else str(v).strip()
+            return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
 
         def fmt_date(key: str) -> str:
             v = r.get(key, None)
-            if pd.isna(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
                 return ""
             try:
                 return pd.to_datetime(v).strftime("%d-%m-%Y")
             except Exception:
                 return str(v)
 
-        # ---- 3-column body (matches the screenshot) ----
+        # 3) Build the 3-column body (matches your new CSS skin)
         body = html.Div(
             [
                 # Column 1 (Left)
@@ -481,6 +498,7 @@ def register_callbacks(
 
         title = f"{pname} – Project Overview"
         return title, body
+
 
 
     # --- NEW: responsibilities chart callback ---

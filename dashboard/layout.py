@@ -332,21 +332,26 @@ def build_kpi_cards() -> dbc.Row:
 
 
 def build_project_details_card() -> dbc.Card:
+    """Project Overview card: the body is dynamic (message OR 3-col grid)."""
     return dbc.Card(
-        dbc.CardBody([
-            html.Div(
-                [
-                    html.Div(id="pd-title", className="project-card__title", children="Project Overview"),
-                ],
-                className="project-card__head",
-            ),
-            html.Div(
-                id="project-details",
-                className="project-details__body",
-                children="Select a single project to view its details.",
-            ),
-        ]),
-        className="mb-3 card--elev",
+        dbc.CardBody(
+            [
+                # Header (title is filled by callback)
+                html.Div(
+                    [html.Div(id="pd-title", className="project-card__title", children="Project Overview")],
+                    className="project-card__head",
+                ),
+
+                # Body (callback will inject either message OR the 3-column grid)
+                html.Div(
+                    id="project-details",
+                    className="project-details__body",
+                    children=html.Div("Select a single project to view its details.", className="project-empty"),
+                ),
+            ],
+            className="project-card",        # blue surface on CardBody
+        ),
+        className="mb-3 project-card-wrap",  # neutral wrapper
     )
 
 
@@ -495,46 +500,73 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                         ],
                         md=6,
                     ),
-                    # RIGHT: Responsibilities (moved here)
+                    # RIGHT: Responsibilities (Figma-styled card)
                     dbc.Col(
-                        [
-                            html.H5("Responsibilities"),
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dcc.RadioItems(
-                                            id="f-resp-entity",
-                                            options=[
-                                                {"label": "Gangs", "value": "Gang"},
-                                                {"label": "Section Incharges", "value": "Section Incharge"},
-                                                {"label": "Supervisors", "value": "Supervisor"},
-                                            ],
-                                            value="Supervisor",
-                                            inputStyle={"marginRight": "6px"},
-                                            labelStyle={"marginRight": "18px"},
-                                            inline=True,
-                                        ),
-                                        width="auto",
-                                    ),
-                                    dbc.Col(
-                                        dcc.RadioItems(
-                                            id="f-resp-metric",
-                                            options=[
-                                                {"label": "Tower Weight", "value": "tower_weight"},
-                                                {"label": "Revenue", "value": "revenue"},
-                                            ],
-                                            value="tower_weight",
-                                            inputStyle={"marginRight": "6px"},
-                                            labelStyle={"marginRight": "18px"},
-                                            inline=True,
-                                        ),
-                                        width="auto",
-                                    ),
-                                ],
-                                className="mb-2",
-                            ),
-                            dcc.Graph(id="g-responsibilities", config={"displayModeBar": False}),
-                        ],
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                html.Div(
+                                                    children=[
+                                                        html.Div("Responsibilities", className="section-title"),
+                                                        html.Div("Target vs Delivered with Achievement %", className="section-sub"),
+                                                    ]
+                                                ),
+                                                align="center",
+                                            ),
+                                            dbc.Col(
+                                                html.Div(
+                                                    className="segment",
+                                                    children=[
+                                                        dcc.RadioItems(
+                                                            id="f-resp-entity",
+                                                            options=[
+                                                                {"label": "Gangs", "value": "Gang"},
+                                                                {"label": "Section Incharges", "value": "Section Incharge"},
+                                                                {"label": "Supervisors", "value": "Supervisor"},
+                                                            ],
+                                                            value="Supervisor",
+                                                            labelStyle={"display": "inline-flex", "gap": "0"},
+                                                            inputStyle={"marginRight": "8px"},
+                                                        )
+                                                    ],
+                                                ),
+                                                width="auto",
+                                                align="center",
+                                            ),
+                                            dbc.Col(
+                                                html.Div(
+                                                    className="segment",
+                                                    children=[
+                                                        dcc.RadioItems(
+                                                            id="f-resp-metric",
+                                                            options=[
+                                                                {"label": "Tower Weight", "value": "tower_weight"},
+                                                                {"label": "Revenue", "value": "revenue"},
+                                                            ],
+                                                            value="tower_weight",
+                                                            labelStyle={"display": "inline-flex", "gap": "0"},
+                                                            inputStyle={"marginRight": "8px"},
+                                                        )
+                                                    ],
+                                                ),
+                                                width="auto",
+                                                align="center",
+                                            ),
+                                        ],
+                                        justify="between",
+                                        align="center",
+                                    )
+                                ),
+                                dbc.CardBody(
+                                    [
+                                        dcc.Graph(id="g-responsibilities", config={"displayModeBar": False}),
+                                    ]
+                                ),
+                            ]
+                        ),
                         md=6,
                     ),
                 ],

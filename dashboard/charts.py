@@ -321,7 +321,7 @@ def build_empty_responsibilities_figure(message: str) -> go.Figure:
 def build_responsibilities_chart(
     df: pd.DataFrame,
     entity_label: str,                  # "Gang" | "Section Incharge" | "Supervisor"
-    metric: str = "tower_weight",       # "revenue" | "tower_weight"  (default tower_weight)
+    metric: str = "tower_weight",       # "revenue" | "tower_weight"
     title: str | None = None,
     top_n: int = 20
 ) -> go.Figure:
@@ -331,30 +331,78 @@ def build_responsibilities_chart(
     metric = metric if metric in ("revenue", "tower_weight") else "tower_weight"
     axis_title = "Revenue" if metric == "revenue" else "Tower Weight (MT)"
 
-    g = (df.groupby("entity_name", as_index=False)[metric]
-           .sum()
-           .sort_values(metric, ascending=False)
-           .head(top_n))
+    g = (
+        df.groupby("entity_name", as_index=False)[metric]
+          .sum()
+          .sort_values(metric, ascending=False)
+          .head(top_n)
+    )
+
+    # Keep your delivered proxy (10% of target) to show the red bars
     g["delivered"] = (0.10 * g[metric]).round(2)
+    # Achievement % for the green line
+    g["ach_pct"] = np.where(g[metric] > 0, (g["delivered"] / g[metric]) * 100.0, 0.0).round(1)
 
-    # traces (VERTICAL)
     fig = go.Figure()
-    fig.add_bar(x=g["entity_name"], y=g[metric], name="Responsibility", width=0.9)
-    fig.add_bar(x=g["entity_name"], y=g["delivered"], name="Delivered (10%)", width=0.9)
 
-    # layout / axes for vertical bars
+    # Responsibility Target (blue bars)
+    fig.add_bar(
+        x=g["entity_name"],
+        y=g[metric],
+        name="Responsibility Target",
+        width=0.9,
+        marker_color="#3B82F6",  # blue-500
+    )
+
+    # Actual Delivered (red bars)
+    fig.add_bar(
+        x=g["entity_name"],
+        y=g["delivered"],
+        name="Actual Delivered",
+        width=0.9,
+        marker_color="#EF4444",  # red-500
+    )
+
+    # Achievement % (green line + markers) on secondary y-axis
+    fig.add_scatter(
+        x=g["entity_name"],
+        y=g["ach_pct"],
+        name="Achievement %",
+        mode="lines+markers",
+        yaxis="y2",
+        line=dict(width=2.5, color="#16A34A"),   # green-600
+        marker=dict(size=6),
+        hovertemplate="%{y:.1f}%<extra>Achievement %</extra>",
+    )
+
     fig.update_layout(
         barmode="group",
         height=360,
-        margin=dict(l=40, r=20, t=30, b=90),  # more bottom for angled ticks
+        margin=dict(l=40, r=20, t=30, b=90),
         xaxis_title=entity_label,
         yaxis_title=axis_title,
         plot_bgcolor="#fafafa",
         paper_bgcolor="#ffffff",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
-        title=title or None,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.02,
+            xanchor="left", x=0.0,
+            font=dict(size=11)
+        ),
+        # Secondary y-axis on the right for %
+        yaxis2=dict(
+            title="Achievement %",
+            overlaying="y",
+            side="right",
+            rangemode="tozero",
+            range=[0, 100],
+            showgrid=False,
+            zeroline=False,
+        ),
     )
+
     fig.update_xaxes(tickangle=-15, automargin=True, showspikes=False)
     fig.update_yaxes(gridcolor="#e9ecef", zeroline=False, rangemode="tozero", showspikes=False)
+
     return fig
 
