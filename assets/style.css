@@ -233,3 +233,53 @@ html {
 .js-plotly-plot .scatterlayer .points path {
   cursor: pointer !important;
 }
+
+
+
+/* === Topbar (Figma-like) === */
+.topbar{
+  display:flex;
+  align-items:flex-start;
+  gap:16px;
+  padding:8px 4px 20px 4px;
+}
+
+.topbar__icon{ flex:0 0 auto; }
+
+.brand-badge{
+  width:44px; height:44px;
+  border-radius:14px;
+  background: linear-gradient(180deg,#2563eb 0%, #1d4ed8 100%);
+  box-shadow: var(--shadow-2);
+  display:flex; align-items:center; justify-content:center;
+}
+.brand-badge__icon{ display:flex; line-height:0; }
+
+.topbar__text{ display:flex; flex-direction:column; gap:6px; }
+.topbar__title{
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji", "Segoe UI Symbol";
+  font-weight: 800;
+  font-size: 34px;
+  letter-spacing: .2px;
+  color: #1f2937; /* slate-800 */
+}
+
+.topbar__meta{
+  display:flex; align-items:center;
+  gap:8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #64748B; /* slate-500/600 */
+  background: #f1f5f9;   /* subtle chip bg */
+  border: 1px solid #E6E9F0;
+  padding: 6px 10px;
+  width: fit-content;
+  border-radius: 999px;
+  box-shadow: var(--shadow-1);
+}
+
+/* small tweaks for tighter top spacing on narrow screens */
+@media (max-width: 640px){
+  .topbar__title{ font-size: 28px; }
+  .brand-badge{ width:40px; height:40px; border-radius:12px; }
+}

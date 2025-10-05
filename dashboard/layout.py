@@ -7,6 +7,7 @@ from dash import dash_table
 from dash.dcc import Download
 import urllib.parse
 from dash import html
+import dash.dcc as dcc
 
 CLICK_GRAPH_CONFIG = {
     "displayModeBar": False,
@@ -239,17 +240,6 @@ def build_controls() -> dbc.Card:
     )
 
 
-def _svg(icon_path: str, size: int = 18):
-    """Small inline SVG helper (white icons)."""
-    return html.Span(
-        dangerously_allow_html=True,
-        children=f'''
-<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="{icon_path}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
-''',
-    )
-
 # Lucide paths (top-right icons)
 _LUCIDE_TREND_DOWN = "7 7 17 17M17 7h0v10H7"
 _LUCIDE_USERS      = "17 21v-2a4 4 0 0 0-4-4H11a4 4 0 0 0-4 4v2M7 7a4 4 0 1 0 8 0 4 4 0 0 0-8 0"
@@ -423,6 +413,58 @@ def build_trace_modal() -> dbc.Modal:
     )
 
 
+def build_header(title: str, last_updated_text: str) -> html.Div:
+    """Top section: icon + big title, and 'Last Updated On' line under it."""
+
+    # Build small inline SVGs as IMG data URIs (Dash-safe across versions)
+    cube_svg_str = '''
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+     xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <path d="M12 2L20 6.5V17.5L12 22L4 17.5V6.5L12 2Z" stroke="white" stroke-width="1.6"/>
+  <path d="M12 2V12L20 17.5" stroke="white" stroke-width="1.6"/>
+  <path d="M12 12L4 17.5" stroke="white" stroke-width="1.6"/>
+</svg>
+'''.strip()
+    cube_img = html.Img(
+        src="data:image/svg+xml;utf8," + urllib.parse.quote(cube_svg_str),
+        style={"width": "22px", "height": "22px"},
+    )
+
+    calendar_svg_str = '''
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+     xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <rect x="3" y="4" width="18" height="17" rx="2" stroke="#64748B" stroke-width="1.5"/>
+  <path d="M8 2V6M16 2V6" stroke="#64748B" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M3 9H21" stroke="#64748B" stroke-width="1.5"/>
+</svg>
+'''.strip()
+    calendar_img = html.Img(
+        src="data:image/svg+xml;utf8," + urllib.parse.quote(calendar_svg_str),
+        style={"width": "16px", "height": "16px", "marginRight": "8px"},
+    )
+
+    return html.Div(
+        [
+            html.Div(  # left icon badge
+                html.Div(cube_img, className="brand-badge"),
+                className="topbar__icon"
+            ),
+            html.Div(  # right text block
+                [
+                    html.Div(title, className="topbar__title"),
+                    html.Div(
+                        [calendar_img, html.Span(f"Last Updated On: {last_updated_text}")],
+                        className="topbar__meta",
+                    ),
+                ],
+                className="topbar__text",
+            ),
+        ],
+        className="topbar",
+    )
+
+
+
 def build_layout(last_updated_text: str) -> dbc.Container:
     """Assemble the full Dash layout."""
 
@@ -438,10 +480,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     trace_modal = build_trace_modal()
     layout = dbc.Container(
         [
-            html.H2(
-                f"Last Updated On: {last_updated_text}",
-                className="text-muted fw-semibold",
-            ),
+            build_header("Productivity Dashboard", last_updated_text),
             
             controls,
             build_project_details_card(),     # <-- INSERT HERE
