@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dcc import send_bytes
 from dash.exceptions import PreventUpdate
-from dash.dependencies import ALL
+from dash.dependencies import Input, Output, State, ALL
 
 from .charts import (
     # create_monthly_line_chart,
@@ -160,42 +160,59 @@ def register_callbacks(
     # Auto-scroll to Traceability when any chart is clicked
     app.clientside_callback(
         """
-        function(lossClick, topClick, bottomClick) {
-        const C = window.dash_clientside;
-        const NO = C.no_update;
-        const ctx = C.callback_context;
-        const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
+        function(lossClick, topClick, bottomClick, rowClicks, selectedGang) {
+        const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+        if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+        const trg = ctx.triggered[0].prop_id || "";
 
-        // Only react when a graph's clickData fired
-        if (!trg || !trg.endsWith(".clickData")) return NO;
+        let shouldScroll = false;
 
-        // Make sure we actually have a point (not a clear)
-        let cd = null;
-        if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
-        else if (trg.startsWith("g-top5."))        cd = topClick;
-        else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
-        if (!cd || !cd.points || !cd.points.length) return NO;
+        // A) Any graph clickData fired with a valid point
+        if (trg.endsWith(".clickData")) {
+            let cd = null;
+            if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
+            else if (trg.startsWith("g-top5."))        cd = topClick;
+            else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
+            if (cd && cd.points && cd.points.length) shouldScroll = true;
+        }
 
-        // Smooth-scroll to the Traceability anchor (adjust offset if you have a fixed header)
+        // B) Any AVP row click (pattern ID), robust to key order
+        try {
+            const idPart = trg.split(".")[0];
+            const pid = JSON.parse(idPart);
+            if (pid && pid.type === "avp-row") {
+            // we don't need to inspect which one; any click should scroll
+            shouldScroll = true;
+            }
+        } catch(e) {}
+
+        // C) Fallback: when store-selected-gang updates (covers programmatic updates)
+        if (trg === "store-selected-gang.data" && selectedGang) {
+            shouldScroll = true;
+        }
+
+        if (!shouldScroll) return NO;
+
         const anchor = document.getElementById("trace-anchor");
         if (anchor) {
-            const OFFSET = 80; // tweak if your top navbar is taller/shorter
+            const OFFSET = 80; // adjust if you have a taller header
             const y = anchor.getBoundingClientRect().top + window.pageYOffset - OFFSET;
             window.scrollTo({ top: y, behavior: "smooth" });
         }
-
-        // Return a changing string so Dash marks this callback updated
+        // Return a changing token so Dash marks this callback as updated
         return String(Date.now());
         }
         """,
         Output("scroll-wire", "children"),
-        [Input("g-actual-vs-bench", "clickData"),
-        Input("g-top5", "clickData"),
-        Input("g-bottom5", "clickData")]
+        [
+            Input("g-actual-vs-bench", "clickData"),
+            Input("g-top5", "clickData"),
+            Input("g-bottom5", "clickData"),
+            Input({"type":"avp-row","index": ALL}, "n_clicks"),   # NEW
+            Input("store-selected-gang", "data"),                 # NEW
+        ]
     )
 
-
-    from dash.dependencies import ALL
 
     # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
     app.clientside_callback(
