@@ -69,10 +69,11 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                 id={"type": "avp-row", "index": gang},  # pattern-matching ID for clicks
                 n_clicks=0,
                 className="avp-hit",
+                children=html.Span(id=row_id, className="avp-tip-anchor"),
             ),
 
             # 2) TOOLTIP ANCHOR (string ID) — tiny element used ONLY to anchor the tooltip
-            html.Span(id=row_id, className="avp-tip-anchor"),
+            # html.Span(id=row_id, className="avp-tip-anchor"),
 
             # 3) TOOLTIP (bootstrap) — target is the string id above
             dbc.Tooltip(
@@ -173,66 +174,6 @@ def register_callbacks(
     )
 
 
-
-
-
-
-    # Auto-scroll to Traceability when any chart is clicked
-    # app.clientside_callback(
-    #     """
-    #     function(lossClick, topClick, bottomClick, rowClicks, selectedGang) {
-    #     const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
-    #     if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
-    #     const trg = ctx.triggered[0].prop_id || "";
-
-    #     let shouldScroll = false;
-
-    #     // A) Any graph clickData fired with a valid point
-    #     if (trg.endsWith(".clickData")) {
-    #         let cd = null;
-    #         if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
-    #         else if (trg.startsWith("g-top5."))        cd = topClick;
-    #         else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
-    #         if (cd && cd.points && cd.points.length) shouldScroll = true;
-    #     }
-
-    #     // B) Any AVP row click (pattern ID), robust to key order
-    #     try {
-    #         const idPart = trg.split(".")[0];
-    #         const pid = JSON.parse(idPart);
-    #         if (pid && pid.type === "avp-row") {
-    #         // we don't need to inspect which one; any click should scroll
-    #         shouldScroll = true;
-    #         }
-    #     } catch(e) {}
-
-    #     // C) Fallback: when store-selected-gang updates (covers programmatic updates)
-    #     if (trg === "store-selected-gang.data" && selectedGang) {
-    #         shouldScroll = true;
-    #     }
-
-    #     if (!shouldScroll) return NO;
-
-    #     const anchor = document.getElementById("trace-anchor");
-    #     if (anchor) {
-    #         const OFFSET = 80; // adjust if you have a taller header
-    #         const y = anchor.getBoundingClientRect().top + window.pageYOffset - OFFSET;
-    #         window.scrollTo({ top: y, behavior: "smooth" });
-    #     }
-    #     // Return a changing token so Dash marks this callback as updated
-    #     return String(Date.now());
-    #     }
-    #     """,
-    #     Output("scroll-wire", "children"),
-    #     [
-    #         Input("g-actual-vs-bench", "clickData"),
-    #         Input("g-top5", "clickData"),
-    #         Input("g-bottom5", "clickData"),
-    #         Input({"type":"avp-row","index": ALL}, "n_clicks"),   # NEW
-    #         Input("store-selected-gang", "data"),                 # NEW
-    #     ]
-    # )
-    # Auto-scroll ONLY when we have a chart click recorded in store-click-meta
     # Auto-scroll ONLY when a real click was recorded into store-click-meta
     app.clientside_callback(
         """
@@ -793,6 +734,7 @@ def register_callbacks(
 
         fig_loss = go.Figure()
         if not loss_df.empty:
+            # --- Delivered bar (replace the existing fig_loss.add_bar block) ---
             fig_loss.add_bar(
                 x=loss_df["delivered"],
                 y=loss_df["gang_name"],
@@ -802,15 +744,33 @@ def register_callbacks(
                 textposition="inside",
                 name="Delivered",
                 width=0.95,
-                customdata=np.stack([loss_df["last_project"], loss_df["last_date_str"]], axis=-1),
+                # match Top/Bottom customdata shape: [last_project, last_date_str, current_metric, baseline_metric]
+                customdata=np.stack(
+                    [
+                        loss_df["last_project"].fillna("—"),
+                        loss_df["last_date_str"].fillna("—"),
+                        loss_df["avg_prod"].fillna(0.0),      # current metric (MT/day)
+                        loss_df["baseline"].fillna(0.0),      # baseline (MT/day)
+                    ],
+                    axis=-1,
+                ),
                 hovertemplate=(
                     "%{y}<br>"
-                    "Delivered: %{x:.1f} MT<br>"
                     "Project: %{customdata[0]}<br>"
-                    "Last worked: %{customdata[1]}<extra></extra>"
+                    "Last worked at: %{customdata[1]}<br>"
+                    "Current MT/day: %{customdata[2]:.2f}<br>"
+                    "Baseline MT/day: %{customdata[3]:.2f}<extra></extra>"
+                ),
+                hoverlabel=dict(
+                    bgcolor="rgba(255,255,255,0.95)",
+                    font=dict(color="#111827", size=13),
+                    bordercolor="rgba(17,24,39,0.15)",
+                    align="left",
+                    namelength=0,
                 ),
             )
 
+            # --- Loss bar (replace the existing fig_loss.add_bar block) ---
             fig_loss.add_bar(
                 x=loss_df["lost"],
                 y=loss_df["gang_name"],
@@ -821,12 +781,28 @@ def register_callbacks(
                 name="Loss",
                 base=loss_df["delivered"],
                 width=0.95,
-                customdata=np.stack([loss_df["last_project"], loss_df["last_date_str"]], axis=-1),
+                customdata=np.stack(
+                    [
+                        loss_df["last_project"].fillna("—"),
+                        loss_df["last_date_str"].fillna("—"),
+                        loss_df["avg_prod"].fillna(0.0),
+                        loss_df["baseline"].fillna(0.0),
+                    ],
+                    axis=-1,
+                ),
                 hovertemplate=(
                     "%{y}<br>"
-                    "Loss: %{x:.1f} MT<br>"
                     "Project: %{customdata[0]}<br>"
-                    "Last worked: %{customdata[1]}<extra></extra>"
+                    "Last worked at: %{customdata[1]}<br>"
+                    "Current MT/day: %{customdata[2]:.2f}<br>"
+                    "Baseline MT/day: %{customdata[3]:.2f}<extra></extra>"
+                ),
+                hoverlabel=dict(
+                    bgcolor="rgba(255,255,255,0.95)",
+                    font=dict(color="#111827", size=13),
+                    bordercolor="rgba(17,24,39,0.15)",
+                    align="left",
+                    namelength=0,
                 ),
             )
 
@@ -861,6 +837,7 @@ def register_callbacks(
             df_day,
             selected_projects=project_list or None,
             bench=benchmark,
+            avg_line=avg_prod,   # NEW: show Average (Avg Output / Gang / Day) line
         )
 
         return (

@@ -238,11 +238,14 @@ def create_project_lines_chart(
     data: pd.DataFrame,
     selected_projects: Sequence[str] | None = None,
     bench: float = DEFAULT_BENCHMARK,
+    avg_line: float | None = None,    # NEW: draw "Average (Avg Output / Gang / Day)" line when provided
 ) -> go.Figure:
-    """Build the per-project monthly productivity lines chart.
+    """Per-project monthly productivity lines.
 
-    If `selected_projects` is provided, those projects are HIGHLIGHTED
-    (thicker, full opacity) and others are deemphasized (lower opacity).
+    - Selected projects are emphasized (thicker, full opacity).
+    - Non-selected projects are faded (lower opacity).
+    - Legend sits BELOW the chart.
+    - Shows Benchmark (red dashed) and optional Average (cyan dotted) lines.
     """
 
     if data.empty:
@@ -253,46 +256,89 @@ def create_project_lines_chart(
         data.groupby(["month", "project_name"])["daily_prod_mt"].mean().reset_index()
     )
 
-    # NEW: treat incoming list as "highlight list" (not a filter)
     highlight_projects = set(selected_projects or [])
+    fig = go.Figure()
 
-    figure = go.Figure()
-    all_projects = monthly["project_name"].unique()
-
-    for project in all_projects:
-        project_data = monthly[monthly["project_name"] == project]
+    for project in monthly["project_name"].unique():
+        d = monthly[monthly["project_name"] == project]
         is_highlight = project in highlight_projects
 
-        figure.add_trace(
+        fig.add_trace(
             go.Scatter(
-                x=project_data["month"],
-                y=project_data["daily_prod_mt"],
-                mode="lines+markers",
+                x=pd.to_datetime(d["month"]),
+                y=d["daily_prod_mt"],
+                mode="lines+markers" if is_highlight else "lines",
                 name=project,
-                # --- emphasis vs background
-                opacity=1.0 if is_highlight or not highlight_projects else 0.25,
-                line=dict(width=3 if is_highlight else 1.5),
-                marker=dict(size=6 if is_highlight else 4),
+                opacity=1.0 if is_highlight or not highlight_projects else 0.28,
+                line=dict(width=3.2 if is_highlight else 1.8, shape="spline"),
+                marker=dict(size=6 if is_highlight else 0),
+                hovertemplate="<b>%{x|%b %Y}</b><br>%{meta}: %{y:.2f} MT<extra></extra>",
+                meta=project,
             )
         )
 
-    figure.add_hline(
-        y=bench,
-        line_dash="dot",
-        line_color="red",
-        annotation_text=f"Benchmark {bench} MT/day",
-        annotation_position="top left",
-    )
-    figure.update_layout(
-        height=300,
-        margin=dict(l=40, r=20, t=30, b=50),
-        xaxis_title="Month",
-        yaxis_title="Avg Productivity (MT)",
-        plot_bgcolor="#fafafa",
+    # Benchmark horizontal line (kept)
+    if bench is not None:
+        fig.add_hline(
+            y=bench,
+            line_dash="dash",
+            line_color="#EF4444",
+            line_width=2,
+            annotation_text=f"Benchmark {bench:.1f} MT/day",
+            annotation_position="top left",
+            annotation_font_color="#374151",
+            annotation_bgcolor="rgba(255,255,255,0.85)",
+        )
+
+    # NEW: Average horizontal line (from KPI)
+    if avg_line is not None:
+        fig.add_hline(
+            y=avg_line,
+            line_dash="dot",
+            line_color="#0EA5E9",
+            line_width=2,
+            annotation_text=f"Average {avg_line:.1f} MT/day",
+            annotation_position="top left",
+            annotation_yshift=-18,
+            annotation_font_color="#0369A1",
+            annotation_bgcolor="rgba(255,255,255,0.85)",
+        )
+
+    fig.update_layout(
+        height=360,
+        margin=dict(l=40, r=20, t=10, b=90),  # extra bottom space for legend
+        xaxis=dict(
+            title="Month",
+            tickformat="%b %Y",
+            showgrid=True,
+            gridcolor="#eef0f3",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title="Avg Productivity (MT)",
+            rangemode="tozero",
+            showgrid=True,
+            gridcolor="#eef0f3",
+            zeroline=False,
+        ),
+        plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.25,          # BELOW the chart
+            xanchor="left",
+            x=0.0,
+            font=dict(size=12),
+            itemclick="toggleothers",
+            itemdoubleclick="toggle",
+        ),
+        transition=dict(duration=200),
     )
-    LOGGER.debug("Project lines chart built for %d projects", len(all_projects))
-    return figure
+
+    LOGGER.debug("Project lines chart built for %d projects", monthly['project_name'].nunique())
+    return fig
 
 
 

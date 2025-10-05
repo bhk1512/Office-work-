@@ -491,13 +491,22 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                 [
                     # LEFT: Projects over Months (only)
                     dbc.Col(
-                        [
-                            html.H5("Projects over Months"),
-                            dcc.Graph(
-                                id="g-project-lines",
-                                config={"displayModeBar": False},
-                            ),
-                        ],
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    [
+                                        html.Div("Projects over Months", className="section-title"),
+                                        html.Div("Monthly output trends for selected projects", className="section-sub"),
+                                    ]
+                                ),
+                                dbc.CardBody(
+                                    [
+                                        dcc.Graph(id="g-projects-over-months", config={"displayModeBar": False}, style={"marginBottom": "6px"}),
+                                    ]
+                                ),
+                            ],
+                            className="viz-card shadow-soft section-gap-top",
+                        ),
                         md=6,
                     ),
                     # RIGHT: Responsibilities (Figma-styled card with KPIs)
@@ -613,7 +622,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     ]
                                 ),
                             ],
-                            className="shadow-soft"  # matches other cards
+                            className="viz-card shadow-soft section-gap-top"  # matches other cards
                         ),
                         md=6,
                     ),

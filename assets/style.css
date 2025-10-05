@@ -525,3 +525,40 @@ html {
 .card:has(#g-responsibilities) .kpi-row-compact { margin-top: 0.35rem; row-gap: 0.5rem; }
 /* small bottom margin on the graph */
 .card:has(#g-responsibilities) #g-responsibilities { margin-bottom: 0.25rem; }
+
+
+
+/* === Standard viz card chrome (border, radius, shadow) === */
+.viz-card {
+  background: #ffffff;
+  border: 1px solid var(--border, #e9eef3);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+/* match other cards' header/body look */
+.viz-card .card-header {
+  background: #ffffff;
+  border-bottom: 1px solid var(--border, #e9eef3);
+  padding: 12px 16px;
+}
+.viz-card .card-body {
+  padding: 12px 16px;
+}
+
+/* soft shadow (keeps your existing variable if defined) */
+.shadow-soft {
+  box-shadow: 0 10px 18px rgba(2, 8, 23, 0.06), 0 2px 6px rgba(2, 8, 23, 0.04);
+}
+
+/* === Vertical gap above both cards (from KPI tiles above) === */
+.section-gap-top { margin-top: 16px; }
+
+/* keep legend placed below without crowding the next section */
+#\g-projects-over-months { margin-bottom: 4px; } /* escape-safe id selector */
+
+
+/* Make the click overlay and the tooltip anchor fill the entire row */
+.avp-item { position: relative; }
+.avp-hit { position: absolute; inset: 0; }
+.avp-tip-anchor { position: absolute; inset: 0; display: block; }
