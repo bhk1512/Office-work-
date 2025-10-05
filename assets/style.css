@@ -283,3 +283,63 @@ html {
   .topbar__title{ font-size: 28px; }
   .brand-badge{ width:40px; height:40px; border-radius:12px; }
 }
+
+
+
+/* === Project Overview Card (3-column, responsive) === */
+.project-card { 
+  background: #f0f6ff;                 /* soft blue like your screenshot */
+  border-radius: 16px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.06);
+  padding: 24px 28px;
+  border: none;
+}
+
+.project-card__head { margin-bottom: 14px; }
+
+.project-card__title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: .2px;
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  column-gap: 48px;
+  row-gap: 10px;
+}
+
+.project-col { display: flex; flex-direction: column; }
+
+.project-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: #64748B;
+  text-transform: uppercase;
+  margin: 12px 0 2px;
+}
+
+.project-value {
+  font-size: 16px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 0 0 4px;
+}
+
+/* Responsiveness */
+@media (max-width: 992px){
+  .project-grid { grid-template-columns: 1fr 1fr; column-gap: 28px; }
+  .project-card { padding: 20px 22px; }
+  .project-card__title { font-size: 18px; }
+  .project-value { font-size: 15px; }
+}
+@media (max-width: 640px){
+  .project-grid { grid-template-columns: 1fr; row-gap: 8px; }
+  .project-card { padding: 16px 16px; }
+  .project-card__title { font-size: 17px; }
+  .project-label { font-size: 12px; }
+  .project-value { font-size: 15px; }
+}

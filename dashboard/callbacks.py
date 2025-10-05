@@ -377,62 +377,111 @@ def register_callbacks(
         ]
 
     @app.callback(
-        Output("project-details", "children"),
+        Output("pd-title", "children"),          # NEW: dynamic header text
+        Output("project-details", "children"),   # existing body container
         Input("f-project", "value"),
         prevent_initial_call=False,
     )
     def show_project_details(selected_projects):
-        
-        
+        """
+        Renders the three-column Project Overview body and a dynamic title.
+        Uses the same project_info_provider() and columns you already load.
+        """
+        # ---- default title + empty state ----
+        default_title = "Project Overview"
         if not selected_projects:
-            return "Select a single project to view its details."       
-        
+            # no selection → keep neutral title and your existing message
+            return default_title, "Select a single project to view its details."
+
+        # ---- data source checks exactly like before ----
         if not project_info_provider:
-            return "No 'Project Details' source configured."  
+            return default_title, "No 'Project Details' source configured."
         df_info = project_info_provider()
         if df_info is None or df_info.empty:
-            return "No 'Project Details' sheet found in the source workbook."
+            return default_title, "No 'Project Details' sheet found in the source workbook."
 
-        pname = str(selected_projects).strip() 
-        # Match by Project Name (exact match first, then tolerant fallback)
-        row = df_info[df_info["Project Name"] == pname]
+        pname = str(selected_projects).strip()
+
+        # exact match first, then normalized fallback (same logic you used)
+        row = df_info[df_info.get("Project Name") == pname]
         if row.empty and "Project Name" in df_info.columns:
-            # fallback to the normalized helper built during load
             norm = lambda s: " ".join(str(s).strip().lower().split())
             row = df_info[df_info["Project Name"].apply(norm) == norm(pname)]
         if row.empty:
-            return f"No project details found for “{pname}”."
-
+            return default_title, f"No project details found for “{pname}”."
 
         r = row.iloc[0]
 
-        def fmt_date(x):
-            return "" if pd.isna(x) else pd.to_datetime(x).strftime("%d-%m-%Y")
+        def fmt_txt(key: str) -> str:
+            v = r.get(key, "")
+            return "" if pd.isna(v) else str(v).strip()
 
-        return html.Div([
-            dbc.Row([
-                dbc.Col(html.Div([
-                    html.Div([html.Span("Project Code: ", className="text-muted"), html.B(r.get("project_code",""))]),
-                    html.Div([html.Span("Client: ", className="text-muted"), html.B(r.get("client_name",""))]),
-                ]), md=6),
-                dbc.Col(html.Div([
-                    html.Div([html.Span("NOA Start: ", className="text-muted"), html.B(fmt_date(r.get("noa_start")))]),
-                    html.Div([html.Span("LOA End: ", className="text-muted"), html.B(fmt_date(r.get("loa_end")))]),
-                ]), md=6),
-            ], className="mb-2"),
-            dbc.Row([
-                dbc.Col(html.Div([
-                    html.Div([html.Span("Project Manager: ", className="text-muted"), html.B(r.get("project_mgr",""))]),
-                    html.Div([html.Span("Regional Manager: ", className="text-muted"), html.B(r.get("regional_mgr",""))]),
-                    html.Div([html.Span("Planning Engineer: ", className="text-muted"), html.B(r.get("planning_eng",""))]),
-                ]), md=6),
-                dbc.Col(html.Div([
-                    html.Div([html.Span("PCH: ", className="text-muted"), html.B(r.get("pch",""))]),
-                    html.Div([html.Span("Section Incharge: ", className="text-muted"), html.B(r.get("section_inch",""))]),
-                    html.Div([html.Span("Supervisor: ", className="text-muted"), html.B(r.get("supervisor",""))]),
-                ]), md=6),
-            ]),
-        ])
+        def fmt_date(key: str) -> str:
+            v = r.get(key, None)
+            if pd.isna(v):
+                return ""
+            try:
+                return pd.to_datetime(v).strftime("%d-%m-%Y")
+            except Exception:
+                return str(v)
+
+        # ---- 3-column body (matches the screenshot) ----
+        body = html.Div(
+            [
+                # Column 1 (Left)
+                html.Div(
+                    [
+                        html.P("PROJECT CODE", className="project-label"),
+                        html.H6(fmt_txt("project_code"), className="project-value"),
+
+                        html.P("CLIENT", className="project-label"),
+                        html.H6(fmt_txt("client_name"), className="project-value"),
+
+                        html.P("NOA START", className="project-label"),
+                        html.H6(fmt_date("noa_start"), className="project-value"),
+
+                        html.P("LOA END", className="project-label"),
+                        html.H6(fmt_date("loa_end"), className="project-value"),
+                    ],
+                    className="project-col",
+                ),
+
+                # Column 2 (Middle)
+                html.Div(
+                    [
+                        html.P("PCH", className="project-label"),
+                        html.H6(fmt_txt("pch"), className="project-value"),
+
+                        html.P("REGIONAL MANAGER", className="project-label"),
+                        html.H6(fmt_txt("regional_mgr"), className="project-value"),
+
+                        html.P("PROJECT MANAGER", className="project-label"),
+                        html.H6(fmt_txt("project_mgr"), className="project-value"),
+
+                        html.P("PLANNING ENGINEER", className="project-label"),
+                        html.H6(fmt_txt("planning_eng"), className="project-value"),
+                    ],
+                    className="project-col",
+                ),
+
+                # Column 3 (Right)
+                html.Div(
+                    [
+                        html.P("SECTION INCHARGE", className="project-label"),
+                        html.H6(fmt_txt("section_inch"), className="project-value"),
+
+                        html.P("SUPERVISORS", className="project-label"),
+                        html.H6(fmt_txt("supervisor"), className="project-value"),
+                    ],
+                    className="project-col",
+                ),
+            ],
+            className="project-grid",
+        )
+
+        title = f"{pname} – Project Overview"
+        return title, body
+
 
     # --- NEW: responsibilities chart callback ---
 

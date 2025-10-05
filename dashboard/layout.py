@@ -336,13 +336,10 @@ def build_project_details_card() -> dbc.Card:
         dbc.CardBody([
             html.Div(
                 [
-                    html.Div("Project Details", className="project-details__title"),
-                    # small neutral icon (purely visual; no functionality)
-                    html.Span("ℹ️", style={"opacity": 0.6, "fontSize": "0.95rem"}),
+                    html.Div(id="pd-title", className="project-card__title", children="Project Overview"),
                 ],
-                className="project-details mb-2",
+                className="project-card__head",
             ),
-            html.Hr(className="my-2", style={"borderColor": "var(--border)"}),
             html.Div(
                 id="project-details",
                 className="project-details__body",
