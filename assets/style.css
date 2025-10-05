@@ -452,3 +452,76 @@ html {
   font-weight: 600;
   padding: 4px 2px 6px 2px;
 }
+
+
+/* ===== Responsibilities card — compact pills + KPI chips (scoped) ===== */
+/* Scope to the card that contains #g-responsibilities so we don't affect anything else */
+.card:has(#g-responsibilities) .header-pills {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: end;
+}
+
+.card:has(#g-responsibilities) .header-pills .segment {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  box-shadow: var(--shadow-1);
+}
+
+/* smallest pills so both groups fit on one line next to the title */
+.card:has(#g-responsibilities) .segment.segment-xxs .dash-radio-items label {
+  padding: 4px 10px;
+  font-size: 13px;
+  border-radius: 10px;
+  margin-right: 4px;
+}
+.card:has(#g-responsibilities) .segment.segment-xxs .dash-radio-items input {
+  transform: scale(0.82);
+}
+
+/* Allow wrap on narrow screens only */
+@media (max-width: 991.98px) {
+  .card:has(#g-responsibilities) .header-pills {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    justify-content: flex-start;
+  }
+}
+
+/* KPI chips under the chart — compact boxes, same text sizes */
+.card:has(#g-responsibilities) .kpi {
+  padding: 10px 12px;
+  min-height: 62px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-1);
+  background: #fff;
+}
+.card:has(#g-responsibilities) .kpi .kpi-value {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.15;
+}
+.card:has(#g-responsibilities) .kpi .kpi-sub {
+  font-size: 13px;
+  margin-top: 2px;
+  color: #6b7280;
+}
+
+/* light color variants matching your screenshot */
+.card:has(#g-responsibilities) .kpi.kpi-blue  { background-color: #F1F5FF; color: #0f172a; }
+.card:has(#g-responsibilities) .kpi.kpi-red   { background-color: #FFF4F4; color: #0f172a; }
+.card:has(#g-responsibilities) .kpi.kpi-green { background-color: #F0FFF6; color: #0f172a; }
+.card:has(#g-responsibilities) .kpi.kpi-blue  .kpi-value  { color: #2563EB; }
+.card:has(#g-responsibilities) .kpi.kpi-red   .kpi-value  { color: #DC2626; }
+.card:has(#g-responsibilities) .kpi.kpi-green .kpi-value  { color: #16A34A; }
+/* hide the “hero KPI” corner chip inside these light chips (if present) */
+.card:has(#g-responsibilities) .kpi .kpi__icon { display: none; }
+
+/* tighten space between chart and KPI row */
+.card:has(#g-responsibilities) .kpi-row-compact { margin-top: 0.35rem; row-gap: 0.5rem; }
+/* small bottom margin on the graph */
+.card:has(#g-responsibilities) #g-responsibilities { margin-bottom: 0.25rem; }

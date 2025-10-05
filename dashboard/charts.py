@@ -338,10 +338,24 @@ def build_responsibilities_chart(
           .head(top_n)
     )
 
-    # Keep your delivered proxy (10% of target) to show the red bars
-    g["delivered"] = (0.10 * g[metric]).round(2)
-    # Achievement % for the green line
-    g["ach_pct"] = np.where(g[metric] > 0, (g["delivered"] / g[metric]) * 100.0, 0.0).round(1)
+    # Delivered:
+    # If your data already has a delivered column per entity, use it.
+    delivered_col = None
+    for cand in ("delivered", "actual_delivered", "achieved", "delivered_mt", "delivered_value"):
+        if cand in df.columns:
+            delivered_col = cand
+            break
+
+    if delivered_col:
+        d = (
+            df.groupby("entity_name", as_index=False)[delivered_col]
+              .sum()
+        )
+        g = g.merge(d, on="entity_name", how="left")
+        g["delivered_plot"] = g[delivered_col].fillna(0)
+    else:
+        # Fallback to your earlier convention (10% proxy)
+        g["delivered_plot"] = (0.10 * g[metric]).round(2)
 
     fig = go.Figure()
 
@@ -350,35 +364,28 @@ def build_responsibilities_chart(
         x=g["entity_name"],
         y=g[metric],
         name="Responsibility Target",
-        width=0.9,
-        marker_color="#3B82F6",  # blue-500
+        width=0.55,
+        marker_color="#3B82F6",
+        hovertemplate="<b>%{x}</b><br>Target: %{y:,.0f}<extra></extra>",
     )
 
     # Actual Delivered (red bars)
     fig.add_bar(
         x=g["entity_name"],
-        y=g["delivered"],
+        y=g["delivered_plot"],
         name="Actual Delivered",
-        width=0.9,
-        marker_color="#EF4444",  # red-500
+        width=0.55,
+        marker_color="#EF4444",
+        hovertemplate="<b>%{x}</b><br>Delivered: %{y:,.0f}<extra></extra>",
     )
 
-    # Achievement % (green line + markers) on secondary y-axis
-    fig.add_scatter(
-        x=g["entity_name"],
-        y=g["ach_pct"],
-        name="Achievement %",
-        mode="lines+markers",
-        yaxis="y2",
-        line=dict(width=2.5, color="#16A34A"),   # green-600
-        marker=dict(size=6),
-        hovertemplate="%{y:.1f}%<extra>Achievement %</extra>",
-    )
 
     fig.update_layout(
         barmode="group",
+        bargap=0.30,        # space between groups
+        bargroupgap=0.22,   # space between the two bars in a group
         height=360,
-        margin=dict(l=40, r=20, t=30, b=90),
+        margin=dict(l=40, r=20, t=10, b=60),
         xaxis_title=entity_label,
         yaxis_title=axis_title,
         plot_bgcolor="#fafafa",
@@ -389,19 +396,9 @@ def build_responsibilities_chart(
             xanchor="left", x=0.0,
             font=dict(size=11)
         ),
-        # Secondary y-axis on the right for %
-        yaxis2=dict(
-            title="Achievement %",
-            overlaying="y",
-            side="right",
-            rangemode="tozero",
-            range=[0, 100],
-            showgrid=False,
-            zeroline=False,
-        ),
     )
 
-    fig.update_xaxes(tickangle=-15, automargin=True, showspikes=False)
+    fig.update_xaxes(tickangle=-20, automargin=True, showspikes=False)
     fig.update_yaxes(gridcolor="#e9ecef", zeroline=False, rangemode="tozero", showspikes=False)
 
     return fig

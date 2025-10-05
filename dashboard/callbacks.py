@@ -111,107 +111,147 @@ def register_callbacks(
 
     LOGGER.debug("Registering callbacks")
 
+    # Charts OR AVP rows -> store-click-meta (single source of truth)
     app.clientside_callback(
         """
-        function(lossClick, topClick, bottomClick, prevMeta) {
-        const C  = window.dash_clientside;
-        const NO = C.no_update;
-        const ctx = C.callback_context;
-        const trg = (ctx && ctx.triggered && ctx.triggered[0] && ctx.triggered[0].prop_id) || "";
+        function(lossClick, topClick, bottomClick, rowClicks, rowIds, prevMeta) {
+            const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+            if (!ctx || !ctx.triggered || !ctx.triggered.length) return [NO, NO];
+            const trg = ctx.triggered[0].prop_id || "";
 
-        let cd = null, src = null;
-        if (trg.startsWith("g-actual-vs-bench.")) { cd = lossClick;  src = "g-actual-vs-bench"; }
-        else if (trg.startsWith("g-top5."))        { cd = topClick;   src = "g-top5"; }
-        else if (trg.startsWith("g-bottom5."))     { cd = bottomClick; src = "g-bottom5"; }
-        else return [NO, NO];
+            // ---- AVP row clicks (pattern ID) ----
+            try {
+                const idPart = trg.split(".")[0];
+                const pid = JSON.parse(idPart);
+                if (pid && pid.type === "avp-row") {
+                    if (!rowClicks || !rowClicks.length) return [NO, NO];
+                    let last = -1;
+                    for (let i = 0; i < rowClicks.length; i++) { if (rowClicks[i]) last = i; }
+                    if (last < 0) return [NO, NO];
+                    const gang = rowIds && rowIds[last] && rowIds[last].index;
+                    if (!gang) return [NO, NO];
+                    return [{ source: "g-actual-vs-bench", gang: String(gang), ts: Date.now() }, NO];
+                }
+            } catch (e) { /* not a pattern id; fall through to charts */ }
 
-        if (!cd || !cd.points || !cd.points.length) return [NO, NO];
+            // ---- Chart clicks (3 graphs) ----
+            let cd = null, src = null;
+            if (trg.startsWith("g-actual-vs-bench.")) { cd = lossClick;  src = "g-actual-vs-bench"; }
+            else if (trg.startsWith("g-top5."))        { cd = topClick;   src = "g-top5"; }
+            else if (trg.startsWith("g-bottom5."))     { cd = bottomClick; src = "g-bottom5"; }
+            else return [NO, NO];
 
-        const pt  = cd.points[0];
-        const now = Date.now();
+            if (!cd || !cd.points || !cd.points.length) return [NO, NO];
+            const pt  = cd.points[0];
 
-        // ✅ Prefer axis category for gang (robust to customdata being [project, date])
-        let gang = null;
-        if (typeof pt.y === "string")      gang = pt.y;   // horiz bars -> gang on y
-        else if (typeof pt.x === "string") gang = pt.x;   // vertical bars -> gang on x
-        else if (pt.customdata) {
-            if (typeof pt.customdata === "string") gang = pt.customdata;
-            else if (Array.isArray(pt.customdata)) gang = pt.customdata.find(v => typeof v === "string") || null;
-            else if (typeof pt.customdata === "object") gang = pt.customdata.gang || pt.customdata.name || null;
-        }
+            // Prefer axis category; fallback to customdata
+            let gang = null;
+            if (typeof pt.y === "string")      gang = pt.y;   // horiz bars
+            else if (typeof pt.x === "string") gang = pt.x;   // vertical bars
+            else if (pt.customdata){
+                if (typeof pt.customdata === "string")       gang = pt.customdata;
+                else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
+                else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+            }
+            if (!gang) return [NO, NO];
 
-        if (!gang) return [NO, NO];
-
-        const newMeta = { source: src, gang: gang, ts: now };
-        return [newMeta, NO];
+            return [{ source: src, gang: String(gang), ts: Date.now() }, NO];
         }
         """,
         [Output("store-click-meta", "data"), Output("store-dblclick", "data")],
-        [Input("g-actual-vs-bench", "clickData"),
-        Input("g-top5", "clickData"),
-        Input("g-bottom5", "clickData")],
-        [State("store-click-meta", "data")]
+        [
+            Input("g-actual-vs-bench", "clickData"),
+            Input("g-top5", "clickData"),
+            Input("g-bottom5", "clickData"),
+            Input({"type": "avp-row", "index": ALL}, "n_clicks"),   # ← merged in here
+        ],
+        [
+            State({"type": "avp-row", "index": ALL}, "id"),
+            State("store-click-meta", "data"),
+        ],
+        prevent_initial_call=True,
     )
+
 
 
 
 
 
     # Auto-scroll to Traceability when any chart is clicked
+    # app.clientside_callback(
+    #     """
+    #     function(lossClick, topClick, bottomClick, rowClicks, selectedGang) {
+    #     const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+    #     if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+    #     const trg = ctx.triggered[0].prop_id || "";
+
+    #     let shouldScroll = false;
+
+    #     // A) Any graph clickData fired with a valid point
+    #     if (trg.endsWith(".clickData")) {
+    #         let cd = null;
+    #         if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
+    #         else if (trg.startsWith("g-top5."))        cd = topClick;
+    #         else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
+    #         if (cd && cd.points && cd.points.length) shouldScroll = true;
+    #     }
+
+    #     // B) Any AVP row click (pattern ID), robust to key order
+    #     try {
+    #         const idPart = trg.split(".")[0];
+    #         const pid = JSON.parse(idPart);
+    #         if (pid && pid.type === "avp-row") {
+    #         // we don't need to inspect which one; any click should scroll
+    #         shouldScroll = true;
+    #         }
+    #     } catch(e) {}
+
+    #     // C) Fallback: when store-selected-gang updates (covers programmatic updates)
+    #     if (trg === "store-selected-gang.data" && selectedGang) {
+    #         shouldScroll = true;
+    #     }
+
+    #     if (!shouldScroll) return NO;
+
+    #     const anchor = document.getElementById("trace-anchor");
+    #     if (anchor) {
+    #         const OFFSET = 80; // adjust if you have a taller header
+    #         const y = anchor.getBoundingClientRect().top + window.pageYOffset - OFFSET;
+    #         window.scrollTo({ top: y, behavior: "smooth" });
+    #     }
+    #     // Return a changing token so Dash marks this callback as updated
+    #     return String(Date.now());
+    #     }
+    #     """,
+    #     Output("scroll-wire", "children"),
+    #     [
+    #         Input("g-actual-vs-bench", "clickData"),
+    #         Input("g-top5", "clickData"),
+    #         Input("g-bottom5", "clickData"),
+    #         Input({"type":"avp-row","index": ALL}, "n_clicks"),   # NEW
+    #         Input("store-selected-gang", "data"),                 # NEW
+    #     ]
+    # )
+    # Auto-scroll ONLY when we have a chart click recorded in store-click-meta
+    # Auto-scroll ONLY when a real click was recorded into store-click-meta
     app.clientside_callback(
         """
-        function(lossClick, topClick, bottomClick, rowClicks, selectedGang) {
-        const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
-        if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
-        const trg = ctx.triggered[0].prop_id || "";
-
-        let shouldScroll = false;
-
-        // A) Any graph clickData fired with a valid point
-        if (trg.endsWith(".clickData")) {
-            let cd = null;
-            if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
-            else if (trg.startsWith("g-top5."))        cd = topClick;
-            else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
-            if (cd && cd.points && cd.points.length) shouldScroll = true;
-        }
-
-        // B) Any AVP row click (pattern ID), robust to key order
-        try {
-            const idPart = trg.split(".")[0];
-            const pid = JSON.parse(idPart);
-            if (pid && pid.type === "avp-row") {
-            // we don't need to inspect which one; any click should scroll
-            shouldScroll = true;
-            }
-        } catch(e) {}
-
-        // C) Fallback: when store-selected-gang updates (covers programmatic updates)
-        if (trg === "store-selected-gang.data" && selectedGang) {
-            shouldScroll = true;
-        }
-
-        if (!shouldScroll) return NO;
-
-        const anchor = document.getElementById("trace-anchor");
-        if (anchor) {
-            const OFFSET = 80; // adjust if you have a taller header
+        function(meta){
+            if(!meta || !meta.source || !meta.gang) return "";
+            const anchor = document.getElementById("trace-anchor");
+            if(anchor){
+            const OFFSET = 80;
             const y = anchor.getBoundingClientRect().top + window.pageYOffset - OFFSET;
             window.scrollTo({ top: y, behavior: "smooth" });
-        }
-        // Return a changing token so Dash marks this callback as updated
-        return String(Date.now());
+            }
+            return String(Date.now());
         }
         """,
         Output("scroll-wire", "children"),
-        [
-            Input("g-actual-vs-bench", "clickData"),
-            Input("g-top5", "clickData"),
-            Input("g-bottom5", "clickData"),
-            Input({"type":"avp-row","index": ALL}, "n_clicks"),   # NEW
-            Input("store-selected-gang", "data"),                 # NEW
-        ]
+        Input("store-click-meta", "data"),
+        prevent_initial_call=True,
     )
+
 
 
     # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
@@ -503,16 +543,23 @@ def register_callbacks(
 
     # --- NEW: responsibilities chart callback ---
 
+        # Responsibilities: grouped bars + three KPIs
     @app.callback(
         Output("g-responsibilities", "figure"),
+        Output("kpi-resp-target-value", "children"),
+        Output("kpi-resp-delivered-value", "children"),
+        Output("kpi-resp-ach-value", "children"),
         Input("f-project", "value"),
         Input("f-resp-entity", "value"),
         Input("f-resp-metric", "value"),
     )
-    def update_responsibilities_chart(project_value: str | None, entity_value: str | None, metric_value: str | None):
-        # If no project selected, show friendly message (do NOT PreventUpdate, or it stays blank)
+    def update_responsibilities(project_value: str | None,
+                                entity_value: str | None,
+                                metric_value: str | None):
+        # graceful empty state
         if not project_value:
-            return build_empty_responsibilities_figure("Select a single project to view its details.")
+            empty = build_empty_responsibilities_figure("Select a single project to view its details.")
+            return empty, "—", "—", "—"
 
         entity_value = (entity_value or "Supervisor").strip()
         metric_value = (metric_value or "tower_weight").strip()
@@ -520,28 +567,67 @@ def register_callbacks(
         cfg = AppConfig()
         df = load_microplan_responsibilities(cfg.data_path)
 
-        # If sheet missing/empty → explain
         if df.empty:
-            return build_empty_responsibilities_figure("No Micro Plan data found in the compiled workbook.")
+            empty = build_empty_responsibilities_figure("No Micro Plan data found in the compiled workbook.")
+            return empty, "—", "—", "—"
 
-        # Normalize project value (your dropdown uses 'Project Name' text)
+        # normalize project text and match
         sel_norm = str(project_value).replace("\u00a0", " ").strip()
         sel_lc = sel_norm.lower()
 
-        # STRICT match first on project_name, then on key, then fallback to contains
         dfp = df[(df["project_name_lc"] == sel_lc) | (df["project_key_lc"] == sel_lc)]
         if dfp.empty:
             dfp = df[df["project_name_lc"].str.contains(sel_lc, na=False)]
 
-        # Only keep the selected entity type
+        # keep only the chosen entity type
         dfp = dfp[dfp["entity_type"].astype(str).str.strip().str.lower() == entity_value.lower()]
-
         if dfp.empty:
-            return build_empty_responsibilities_figure("No responsibilities found for the selected filters.")
+            empty = build_empty_responsibilities_figure("No responsibilities found for the selected filters.")
+            return empty, "—", "—", "—"
 
-        # Build figure
-        title = None  # keep clean; or set to f"{entity_value} — {metric_value.replace('_', ' ').title()}"
-        return build_responsibilities_chart(dfp, entity_label=entity_value, metric=metric_value, title=title, top_n=20)
+        # ---- figure
+        fig = build_responsibilities_chart(
+            dfp,
+            entity_label=entity_value,
+            metric=metric_value,
+            title=None,
+            top_n=20,
+        )
+
+        # ---- KPI totals
+        total_target = float(dfp[metric_value].sum())
+
+        # pick delivered column if present; fallback = 10% proxy (same as chart)
+        delivered_col = None
+        for cand in ("delivered", "actual_delivered", "achieved", "delivered_mt", "delivered_value"):
+            if cand in dfp.columns:
+                delivered_col = cand
+                break
+
+        if delivered_col:
+            total_delivered = float(dfp[delivered_col].fillna(0).sum())
+        else:
+            total_delivered = float(0.10 * total_target)
+
+        achievement = 0.0 if total_target == 0 else (total_delivered / total_target) * 100.0
+
+        # Formatters: MT vs Revenue
+        def fmt_num(v: float) -> str:
+            # for revenue, show currency with thousands; for MT, plain thousands
+            if metric_value == "revenue":
+                try:
+                    # ₹ with Indian grouping is tricky; keep simple international grouping
+                    return f"₹{v:,.0f}"
+                except Exception:
+                    return f"₹{v:,.0f}"
+            return f"{v:,.0f}"
+
+        kpi_target_txt = fmt_num(total_target)
+        kpi_deliv_txt  = fmt_num(total_delivered)
+        kpi_ach_txt    = f"{achievement:.0f}%"
+
+        return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
+
 
 
     @app.callback(
@@ -800,30 +886,30 @@ def register_callbacks(
         Output("tbl-daily-prod", "data"),
         Output("modal-tbl-idle-intervals", "data"),
         Output("modal-tbl-daily-prod", "data"),
-        Input("f-project", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-        Input("f-gang", "value"),
-        Input("trace-gang", "value"),
-        Input("store-selected-gang", "data"),
+        Input("store-click-meta", "data"),          # <- only trigger
+        State("f-project", "value"),
+        State("f-month", "value"),
+        State("f-quick-range", "value"),
+        State("f-gang", "value"),
+        prevent_initial_call=True,
     )
-    def update_trace_tables(
-        projects: Sequence[str] | None,
-        months: Sequence[str] | None,
-        quick_range: str | None,
-        gangs: Sequence[str] | None,
-        trace_gang_value: str | None,
-        selected_gang: str | None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    def update_trace_tables(meta, projects, months, quick_range, gangs):
+        if not meta or meta.get("source") not in ("g-actual-vs-bench","g-top5","g-bottom5"):
+            raise PreventUpdate
+
+        gang_focus = meta.get("gang")
+        if not gang_focus:
+            raise PreventUpdate
+
         project_list = _ensure_list(projects)
-        month_list = _ensure_list(months)
-        gang_list = _ensure_list(gangs)
+        month_list   = _ensure_list(months)
+        gang_list    = _ensure_list(gangs)
 
         df_day = data_provider()
         months_ts = resolve_months(month_list, quick_range)
 
         base_scope = apply_filters(df_day, project_list, months_ts, []).copy()
-        scoped = apply_filters(df_day, project_list, months_ts, gang_list).copy()
+        scoped     = apply_filters(df_day, project_list, months_ts, gang_list).copy()
 
         def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
             if not target_gang:
@@ -831,21 +917,15 @@ def register_callbacks(
             subset = base_scope[base_scope["gang_name"] == target_gang]
             if not subset.empty:
                 return subset
-            fallback = df_day[df_day["gang_name"] == target_gang].copy()
+            fb = df_day[df_day["gang_name"] == target_gang].copy()
             if project_list:
-                fallback = fallback[fallback["project_name"].isin(project_list)]
+                fb = fb[fb["project_name"].isin(project_list)]
             if months_ts:
-                fallback = fallback[fallback["month"].isin(months_ts)]
-            return fallback
+                fb = fb[fb["month"].isin(months_ts)]
+            return fb
 
-        gang_focus = trace_gang_value or selected_gang
-
-        if gang_focus:
-            idle_source = pick_gang_scope(gang_focus)
-        elif gang_list:
-            idle_source = base_scope[base_scope["gang_name"].isin(gang_list)]
-        else:
-            idle_source = base_scope
+        # Idle intervals
+        idle_source = pick_gang_scope(gang_focus)
         if idle_source.empty:
             idle_source = scoped if not scoped.empty else base_scope
 
@@ -859,15 +939,10 @@ def register_callbacks(
             )
         idle_data = idle_df.to_dict("records")
 
-        if gang_focus:
-            daily_source = pick_gang_scope(gang_focus)
-        elif gang_list:
-            daily_source = base_scope[base_scope["gang_name"].isin(gang_list)]
-        else:
-            daily_source = base_scope
+        # Daily prod
+        daily_source = pick_gang_scope(gang_focus)
         if daily_source.empty:
             daily_source = scoped if not scoped.empty else base_scope
-
         daily_source = daily_source.sort_values(["gang_name", "date"])[
             ["date", "gang_name", "project_name", "daily_prod_mt"]
         ]
@@ -876,14 +951,13 @@ def register_callbacks(
                 date=daily_source["date"].dt.strftime("%d-%m-%Y"),
                 daily_prod_mt=(
                     daily_source["daily_prod_mt"].round(2).map(
-                        lambda value: ""
-                        if pd.isna(value)
-                        else f"{value:.2f}".rstrip("0").rstrip(".")
+                        lambda v: "" if pd.isna(v) else f"{v:.2f}".rstrip("0").rstrip(".")
                     )
                 ),
             )
         daily_data = daily_source.to_dict("records")
 
+        # mirror into modal tables
         return idle_data, daily_data, idle_data, daily_data
 
     @app.callback(
