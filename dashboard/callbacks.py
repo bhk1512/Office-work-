@@ -76,10 +76,16 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
             #     # children=html.Span(id=row_id, className="avp-tip-anchor"),
             # ),
 
-            # 2) TOOLTIP ANCHOR (string ID) — tiny element used ONLY to anchor the tooltip
-            html.Span(id=row_tip_id, className="avp-tip-anchor"),
+            html.Div(
+                id={"type": "avp-tip", "index": gang},     # pattern id to allow row-wide click capture
+                n_clicks=0,
+                className="avp-tip-overlay",
+                children=[
+                    # string id to attach dbc.Tooltip (fills the overlay)
+                    html.Span(id=row_tip_id, className="avp-tip-fill")
+                ],
+            ),
 
-            # 3) TOOLTIP (bootstrap) — target is the string id above
             dbc.Tooltip(
                 [
                     html.Div(html.B(gang)),
@@ -119,24 +125,28 @@ def register_callbacks(
     # Charts OR AVP rows -> store-click-meta (robust & single source of truth)
     app.clientside_callback(
         """
-        function(lossClick, topClick, bottomClick, rowClicks, rowIds) {
+        // charts OR AVP (row or overlay) -> store-click-meta
+        function(lossClick, topClick, bottomClick, rowTs, tipTs) {
         const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
         if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
 
         const prop   = ctx.triggered[0].prop_id || "";
         const idPart = prop.split(".")[0];
 
-        // ---- AVP pattern id path
+        // --- AVP surfaces (row or overlay) — only accept real, timestamped clicks
         try {
             const pid = JSON.parse(idPart);
-            if (pid && pid.type === "avp-row") {
-            const gang = pid.index;                          // <-- read directly from triggered id
+            if (pid && (pid.type === "avp-row" || pid.type === "avp-tip")) {
+            if (!prop.endsWith(".n_clicks_timestamp")) return NO; // ignore re-renders
+            const ts = ctx.triggered[0].value;
+            if (!ts || ts <= 0) return NO;                        // must be a real click
+            const gang = pid.index;
             if (!gang) return NO;
             return { source: "g-actual-vs-bench", gang: String(gang), ts: Date.now() };
             }
-        } catch(e) { /* not a pattern id; fall through to charts */ }
+        } catch(e) { /* not a pattern id; continue */ }
 
-        // ---- Chart path: use the real component id as source
+        // --- charts path
         let cd = null;
         if (idPart === "g-actual-vs-bench") cd = lossClick;
         else if (idPart === "g-top5")       cd = topClick;
@@ -151,9 +161,9 @@ def register_callbacks(
         if (typeof pt.y === "string")      gang = pt.y;
         else if (typeof pt.x === "string") gang = pt.x;
         else if (pt.customdata){
-            if (typeof pt.customdata === "string")       gang = pt.customdata;
-            else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
-            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+            if (typeof pt.customdata === "string")      gang = pt.customdata;
+            else if (Array.isArray(pt.customdata))      gang = pt.customdata.find(v => typeof v === "string") || null;
+            else if (typeof pt.customdata === "object") gang = pt.customdata.gang || pt.customdata.name || null;
         }
         if (!gang) return NO;
 
@@ -165,11 +175,12 @@ def register_callbacks(
         Input("g-actual-vs-bench", "clickData"),
         Input("g-top5", "clickData"),
         Input("g-bottom5", "clickData"),
-        Input({"type":"avp-row","index": dash.dependencies.ALL}, "n_clicks"),
+        Input({"type":"avp-row","index": dash.dependencies.ALL}, "n_clicks_timestamp"),
+        Input({"type":"avp-tip","index": dash.dependencies.ALL}, "n_clicks_timestamp"),
         ],
-        [ State({"type":"avp-row","index": dash.dependencies.ALL}, "id") ],
         prevent_initial_call=True,
     )
+
 
     # Keep trace gang selection in sync with the last click (chart or AVP)
     app.clientside_callback(

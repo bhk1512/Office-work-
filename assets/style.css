@@ -183,18 +183,22 @@ html {
 .avp-item { cursor: pointer; }
 .avp-item:hover { box-shadow: var(--shadow-2); }
 /* AVP rows: tooltip/click hit-area should cover the whole row */
-.avp-item{ position: relative; cursor: pointer; }
+/* AVP rows: row is clickable; overlay provides row-wide hover + optional click target */
+.avp-item { position: relative; cursor: pointer; }
 
-/* full-row invisible hover target for dbc.Tooltip */
-.avp-tip-anchor {
+/* Full-row overlay that can receive hover and clicks */
+.avp-tip-overlay{
   position: absolute;
-  top: 8px;
-  right: 12px;
-  width: 1px;
-  height: 1px;
+  inset: 0;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+/* Tooltip target fills the overlay so hover works anywhere on the row */
+.avp-tip-fill{
+  position: absolute;
+  inset: 0;
   display: block;
-  pointer-events: auto;   /* gets hover for tooltip */
-  z-index: 1;             /* sits above row background */
 }
 
 .avp-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
