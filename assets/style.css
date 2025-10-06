@@ -186,11 +186,15 @@ html {
 .avp-item{ position: relative; cursor: pointer; }
 
 /* full-row invisible hover target for dbc.Tooltip */
-.avp-tip-anchor{
+.avp-tip-anchor {
   position: absolute;
-  inset: 0;                 /* fill the whole row */
+  top: 8px;
+  right: 12px;
+  width: 1px;
+  height: 1px;
   display: block;
-  pointer-events: auto;     /* receives hover for tooltip */
+  pointer-events: auto;   /* gets hover for tooltip */
+  z-index: 1;             /* sits above row background */
 }
 
 .avp-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
@@ -584,3 +588,5 @@ html {
 /* Clear link + Reset button alignment */
 .filter-card .filter-clear-link{ font-size:13px; }
 .filter-card .filter-reset-btn{ margin-left:0; }
+
+#trace-anchor, #tables-anchor { scroll-margin-top: 80px; }

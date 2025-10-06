@@ -46,8 +46,12 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
 
     row_id = f"avp-row-{_slug(gang)}"  # unique string id for tooltip target
+    row_tip_id = f"avp-tip-{gang}"  # STRING id for tooltip target
 
     return html.Div(
+        id={"type": "avp-row", "index": gang},   # <-- move pattern id to the row itself
+        n_clicks=0,
+        style={"cursor": "pointer"},             # (nice to have)
         className="avp-item",
         children=[
             html.Div(
@@ -65,15 +69,15 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                 html.Span(f"{total:.0f} MT", className="tot"),
             ]),
             # 1) CLICK OVERLAY (pattern ID) — this is what Dash listens to for n_clicks
-            html.Div(
-                id={"type": "avp-row", "index": gang},  # pattern-matching ID for clicks
-                n_clicks=0,
-                className="avp-hit",
-                # children=html.Span(id=row_id, className="avp-tip-anchor"),
-            ),
+            # html.Div(
+            #     id={"type": "avp-row", "index": gang},  # pattern-matching ID for clicks
+            #     n_clicks=0,
+            #     className="avp-hit",
+            #     # children=html.Span(id=row_id, className="avp-tip-anchor"),
+            # ),
 
             # 2) TOOLTIP ANCHOR (string ID) — tiny element used ONLY to anchor the tooltip
-            html.Span(id=row_id, className="avp-tip-anchor"),
+            html.Span(id=row_tip_id, className="avp-tip-anchor"),
 
             # 3) TOOLTIP (bootstrap) — target is the string id above
             dbc.Tooltip(
@@ -84,7 +88,7 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                     html.Div(f"Current MT/day: {avg_prod:.2f}"),
                     html.Div(f"Baseline MT/day: {baseline:.2f}"),
                 ],
-                target=row_id,                 # <-- IMPORTANT: target must be a STRING id
+                target=row_tip_id,
                 placement="right",
                 delay={"show": 100, "hide": 100},
             ),
@@ -112,176 +116,201 @@ def register_callbacks(
 
     LOGGER.debug("Registering callbacks")
 
-    # Charts OR AVP rows -> store-click-meta (single source of truth)
+    # Charts OR AVP rows -> store-click-meta (robust & single source of truth)
     app.clientside_callback(
         """
-        function(lossClick, topClick, bottomClick, rowClicks, rowIds, prevMeta) {
-            const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
-            if (!ctx || !ctx.triggered || !ctx.triggered.length) return [NO, NO];
-            const trg = ctx.triggered[0].prop_id || "";
-
-            // ---- AVP row clicks (pattern ID) ----
-            try {
-                const idPart = trg.split(".")[0];
-                const pid = JSON.parse(idPart);
-                if (pid && pid.type === "avp-row") {
-                    if (!rowClicks || !rowClicks.length) return [NO, NO];
-                    let last = -1;
-                    for (let i = 0; i < rowClicks.length; i++) { if (rowClicks[i]) last = i; }
-                    if (last < 0) return [NO, NO];
-                    const gang = rowIds && rowIds[last] && rowIds[last].index;
-                    if (!gang) return [NO, NO];
-                    return [{ source: "avp", gang: String(gang), ts: Date.now() }, NO];
-                }
-            } catch (e) { /* not a pattern id; fall through to charts */ }
-
-            // ---- Chart clicks (3 graphs) ----
-            let cd = null, src = null;
-            if (trg.startsWith("g-actual-vs-bench.")) { cd = lossClick;  src = "g-actual-vs-bench"; }
-            else if (trg.startsWith("g-top5."))        { cd = topClick;   src = "g-top5"; }
-            else if (trg.startsWith("g-bottom5."))     { cd = bottomClick; src = "g-bottom5"; }
-            else return [NO, NO];
-
-            if (!cd || !cd.points || !cd.points.length) return [NO, NO];
-            const pt  = cd.points[0];
-
-            // Prefer axis category; fallback to customdata
-            let gang = null;
-            if (typeof pt.y === "string")      gang = pt.y;   // horiz bars
-            else if (typeof pt.x === "string") gang = pt.x;   // vertical bars
-            else if (pt.customdata){
-                if (typeof pt.customdata === "string")       gang = pt.customdata;
-                else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
-                else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
-            }
-            if (!gang) return [NO, NO];
-
-            return [{ source: src, gang: String(gang), ts: Date.now() }, NO];
-        }
-        """,
-        [Output("store-click-meta", "data"), Output("store-dblclick", "data")],
-        [
-            Input("g-actual-vs-bench", "clickData"),
-            Input("g-top5", "clickData"),
-            Input("g-bottom5", "clickData"),
-            Input({"type": "avp-row", "index": ALL}, "n_clicks"),   # ← merged in here
-        ],
-        [
-            State({"type": "avp-row", "index": ALL}, "id"),
-            State("store-click-meta", "data"),
-        ],
-        prevent_initial_call=True,
-    )
-
-
-    # Auto-scroll ONLY when a real click was recorded into store-click-meta
-    app.clientside_callback(
-    """
-    function(meta){
-        if(!meta || !meta.source || !meta.gang) return "";
-        // Only charts should trigger scroll (NOT 'avp' rows)
-        const chartSources = new Set(["g-actual-vs-bench","g-top5","g-bottom5"]);
-        if (!chartSources.has(meta.source)) return "";
-
-        // Find the nearest scrollable ancestor (fallback = window)
-        function getScrollParent(el){
-            let node = el && el.parentElement;
-            while (node){
-                const st = window.getComputedStyle(node);
-                const oy = st.overflowY;
-                if (oy === "auto" || oy === "scroll") return node;
-                node = node.parentElement;
-            }
-            return window;
-        }
-
-        let tries = 0;
-        function tryScroll(){
-            const anchor = document.getElementById("trace-anchor")
-                        || document.getElementById("tables-anchor");
-            if (!anchor){
-                if (tries++ < 25) { setTimeout(tryScroll, 60); }
-                return;
-            }
-            const scroller = getScrollParent(anchor);
-            const currentTop = (scroller === window ? window.pageYOffset : scroller.scrollTop);
-            const targetY = anchor.getBoundingClientRect().top + currentTop - 80;
-
-            if (scroller === window) {
-                window.scrollTo({ top: targetY, behavior: "smooth" });
-            } else {
-                scroller.scrollTo({ top: targetY, behavior: "smooth" });
-            }
-        }
-
-        // Defer and retry briefly so the tables/anchor are in the DOM
-        setTimeout(tryScroll, 0);
-        return String(Date.now());
-    }
-    """,
-    Output("scroll-wire", "children"),
-    Input("store-click-meta", "data"),
-    prevent_initial_call=True,
-)
-
-
-
-
-
-    # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
-    app.clientside_callback(
-        """
-        function(lossClick, topClick, bottomClick, rowClicks, rowIds, prev) {
-        const C = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+        function(lossClick, topClick, bottomClick, rowClicks, rowIds) {
+        const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
         if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
-        const trg = ctx.triggered[0].prop_id || "";
 
-        // ---- robust: parse the pattern id JSON instead of relying on key order
+        const prop   = ctx.triggered[0].prop_id || "";
+        const idPart = prop.split(".")[0];
+
+        // ---- AVP pattern id path
         try {
-            const idPart = trg.split(".")[0];
             const pid = JSON.parse(idPart);
             if (pid && pid.type === "avp-row") {
-            if (!rowClicks || !rowClicks.length) return NO;
-            let last = -1;
-            for (let i = 0; i < rowClicks.length; i++) { if (rowClicks[i]) last = i; }
-            if (last < 0) return NO;
-            const gang = rowIds && rowIds[last] && rowIds[last].index;
-            return gang || NO;
+            const gang = pid.index;                          // <-- read directly from triggered id
+            if (!gang) return NO;
+            return { source: "g-actual-vs-bench", gang: String(gang), ts: Date.now() };
             }
-        } catch (e) { /* ignore and fall through to chart clicks */ }
+        } catch(e) { /* not a pattern id; fall through to charts */ }
 
-        // ---- charts (unchanged)
+        // ---- Chart path: use the real component id as source
         let cd = null;
-        if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
-        else if (trg.startsWith("g-top5."))        cd = topClick;
-        else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
+        if (idPart === "g-actual-vs-bench") cd = lossClick;
+        else if (idPart === "g-top5")       cd = topClick;
+        else if (idPart === "g-bottom5")    cd = bottomClick;
         else return NO;
 
         if (!cd || !cd.points || !cd.points.length) return NO;
         const pt = cd.points[0];
+
+        // Extract gang robustly (y for horiz bars, x for vertical)
         let gang = null;
         if (typeof pt.y === "string")      gang = pt.y;
         else if (typeof pt.x === "string") gang = pt.x;
-        else if (pt.customdata) {
+        else if (pt.customdata){
             if (typeof pt.customdata === "string")       gang = pt.customdata;
             else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
             else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
         }
-        return gang || NO;
+        if (!gang) return NO;
+
+        return { source: idPart, gang: String(gang), ts: Date.now() };
         }
         """,
-        Output("store-selected-gang", "data"),
+        Output("store-click-meta", "data"),
         [
         Input("g-actual-vs-bench", "clickData"),
         Input("g-top5", "clickData"),
         Input("g-bottom5", "clickData"),
         Input({"type":"avp-row","index": dash.dependencies.ALL}, "n_clicks"),
         ],
-        [
-        State({"type":"avp-row","index": dash.dependencies.ALL}, "id"),
-        State("store-selected-gang", "data"),
-        ],
+        [ State({"type":"avp-row","index": dash.dependencies.ALL}, "id") ],
+        prevent_initial_call=True,
     )
+
+    # Keep trace gang selection in sync with the last click (chart or AVP)
+    app.clientside_callback(
+        """
+        function(meta){
+        if (!meta || !meta.gang) return window.dash_clientside.no_update;
+        return meta.gang;
+        }
+        """,
+        Output("store-selected-gang", "data"),
+        Input("store-click-meta", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(meta){
+        if(!meta || !meta.source || !meta.gang) return "";
+        const CHART_SOURCES = new Set(["g-actual-vs-bench","g-top5","g-bottom5"]);
+        if (!CHART_SOURCES.has(meta.source)) return "";
+
+        // retry briefly so the anchor exists before we scroll
+        let tries = 0;
+        function go(){
+            const anchor = document.getElementById("trace-anchor") || document.getElementById("tables-anchor");
+            if (!anchor) { if (tries++ < 25) setTimeout(go, 60); return; }
+            anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        setTimeout(go, 0);
+        return String(Date.now());
+        }
+        """,
+        Output("scroll-wire", "children"),
+        Input("store-click-meta", "data"),
+        prevent_initial_call=True,
+    )
+
+
+    # Inputs include ALL avp-row n_clicks so the callback fires on AVP clicks
+    app.clientside_callback(
+        """
+        function(topClick, bottomClick, benchClick, avpClicks) {
+        const NO = window.dash_clientside.no_update;
+        const ctx = dash_clientside.callback_context;
+        if (!ctx.triggered || !ctx.triggered.length) return NO;
+
+        const [idPart, prop] = ctx.triggered[0].prop_id.split(".");
+        console.log("TRIGGER", ctx.triggered[0].prop_id);
+        try {
+            const pid = JSON.parse(idPart);
+
+            // AVP row click → treat as chart click
+            if (pid && pid.type === "avp-row") {
+            const gang = pid.index;
+            if (!gang) return NO;
+            return { source: "g-actual-vs-bench", gang: String(gang), ts: Date.now() };
+            }
+        } catch (e) {
+            // Not a pattern id? fall through to chart clicks
+        }
+
+        // Handle chart clicks (g-top5 / g-bottom5 / g-actual-vs-bench)
+        if (idPart === "g-top5" && topClick && topClick.points && topClick.points[0]) {
+            return { source: "g-top5", gang: String(topClick.points[0].x), ts: Date.now() };
+        }
+        if (idPart === "g-bottom5" && bottomClick && bottomClick.points && bottomClick.points[0]) {
+            return { source: "g-bottom5", gang: String(bottomClick.points[0].x), ts: Date.now() };
+        }
+        if (idPart === "g-actual-vs-bench" && benchClick && benchClick.points && benchClick.points[0]) {
+            return { source: "g-actual-vs-bench", gang: String(benchClick.points[0].x), ts: Date.now() };
+        }
+
+        return NO;
+        }
+        """,
+        Output("store-click-meta", "data"),
+        [
+        Input("g-top5", "clickData"),
+        Input("g-bottom5", "clickData"),
+        Input("g-actual-vs-bench", "clickData"),
+        Input({"type": "avp-row", "index": ALL}, "n_clicks"),  # ← AVP input
+        ],
+        prevent_initial_call=True,
+    )
+
+
+
+    # # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
+    # app.clientside_callback(
+    #     """
+    #     function(lossClick, topClick, bottomClick, rowClicks, rowIds, prev) {
+    #     const C = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+    #     if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+    #     const trg = ctx.triggered[0].prop_id || "";
+
+    #     // ---- robust: parse the pattern id JSON instead of relying on key order
+    #     try {
+    #         const idPart = trg.split(".")[0];
+    #         const pid = JSON.parse(idPart);
+    #         if (pid && pid.type === "avp-row") {
+    #         if (!rowClicks || !rowClicks.length) return NO;
+    #         let last = -1;
+    #         for (let i = 0; i < rowClicks.length; i++) { if (rowClicks[i]) last = i; }
+    #         if (last < 0) return NO;
+    #         const gang = rowIds && rowIds[last] && rowIds[last].index;
+    #         return gang || NO;
+    #         }
+    #     } catch (e) { /* ignore and fall through to chart clicks */ }
+
+    #     // ---- charts (unchanged)
+    #     let cd = null;
+    #     if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
+    #     else if (trg.startsWith("g-top5."))        cd = topClick;
+    #     else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
+    #     else return NO;
+
+    #     if (!cd || !cd.points || !cd.points.length) return NO;
+    #     const pt = cd.points[0];
+    #     let gang = null;
+    #     if (typeof pt.y === "string")      gang = pt.y;
+    #     else if (typeof pt.x === "string") gang = pt.x;
+    #     else if (pt.customdata) {
+    #         if (typeof pt.customdata === "string")       gang = pt.customdata;
+    #         else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
+    #         else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+    #     }
+    #     return gang || NO;
+    #     }
+    #     """,
+    #     Output("store-selected-gang", "data"),
+    #     [
+    #     Input("g-actual-vs-bench", "clickData"),
+    #     Input("g-top5", "clickData"),
+    #     Input("g-bottom5", "clickData"),
+    #     Input({"type":"avp-row","index": dash.dependencies.ALL}, "n_clicks"),
+    #     ],
+    #     [
+    #     State({"type":"avp-row","index": dash.dependencies.ALL}, "id"),
+    #     State("store-selected-gang", "data"),
+    #     ],
+    # )
     
 
     
@@ -292,7 +321,7 @@ def register_callbacks(
         Output("f-gang", "value"),
         Output("f-quick-range", "value"),
         Input("btn-reset-filters", "n_clicks"),
-        Input("btn-clear-quick-range", "n_clicks"),
+        Input("link-clear-quick-range", "n_clicks"),
         prevent_initial_call=True,
     )
     def handle_filter_reset(
@@ -303,7 +332,7 @@ def register_callbacks(
         if not ctx.triggered:
             raise PreventUpdate
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger_id == "btn-clear-quick-range":
+        if trigger_id == "link-clear-quick-range":
             return dash.no_update, dash.no_update, dash.no_update, None
         return None, None, None, None
 
@@ -390,6 +419,15 @@ def register_callbacks(
             for month in months
         ]
 
+    @app.callback(
+        Output("f-month", "value", allow_duplicate=True),
+        Input("f-quick-range", "value"),
+        prevent_initial_call=True,
+    )
+    def _clear_month_value_on_quick_change(qr):
+        # When a quick-range is chosen, let code derive months from it; drop stale manual months.
+        return None
+
     # ---- Project Overview (dynamic body) -----------------------------------------
     @app.callback(
         Output("pd-title", "children"),          # header text
@@ -404,6 +442,15 @@ def register_callbacks(
         Uses project_info_provider() as in your existing code.
         """
         default_title = "Project Overview"
+
+        # Normalize list vs string from a multi=True dropdown
+        if isinstance(selected_project, (list, tuple)):
+            if len(selected_project) != 1:
+                return (
+                    default_title,
+                    html.Div("Select a single project to view its details.", className="project-empty"),
+                )
+            selected_project = selected_project[0]
 
         # 1) No selection -> message
         if not selected_project:
@@ -430,6 +477,9 @@ def register_callbacks(
 
         # Try exact match first, then normalized match on 'Project Name'
         row = df_info[df_info.get("Project Name") == pname]
+        if "Project Name" in df_info.columns:
+            row = df_info[df_info["Project Name"].astype(str).str.strip() == pname]
+        
         if row.empty and "Project Name" in df_info.columns:
             norm = lambda s: " ".join(str(s).strip().lower().split())
             row = df_info[df_info["Project Name"].apply(norm) == norm(pname)]
@@ -862,7 +912,7 @@ def register_callbacks(
         )
         fig_loss.update_layout(hovermode="closest", clickmode="event+select")
         fig_loss.update_xaxes(showspikes=False, fixedrange=True)
-        fig_loss.update_yaxes(showspikes=False, fixedrange=True)
+        fig_loss.update_yaxes(showspikes=False, fixedrange=True, type="category")
         
         # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom, metric=(topbot_metric or "prod"), baseline_map=baseline_map)
@@ -889,14 +939,14 @@ def register_callbacks(
         )
 
 
+    CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
 
-    
     @app.callback(
         Output("tbl-idle-intervals", "data"),
         Output("tbl-daily-prod", "data"),
         Output("modal-tbl-idle-intervals", "data"),
         Output("modal-tbl-daily-prod", "data"),
-        Input("store-click-meta", "data"),          # <- only trigger
+        Input("store-click-meta", "data"),      # only trigger
         State("f-project", "value"),
         State("f-month", "value"),
         State("f-quick-range", "value"),
@@ -904,12 +954,14 @@ def register_callbacks(
         prevent_initial_call=True,
     )
     def update_trace_tables(meta, projects, months, quick_range, gangs):
-        if not meta or meta.get("source") not in ("g-actual-vs-bench","g-top5","g-bottom5"):
+        # Proceed only when the click source is a chart (not AVP)
+        if not meta or meta.get("source") not in CHART_SOURCES:
             raise PreventUpdate
 
         gang_focus = meta.get("gang")
         if not gang_focus:
             raise PreventUpdate
+
 
         project_list = _ensure_list(projects)
         month_list   = _ensure_list(months)

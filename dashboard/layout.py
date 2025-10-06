@@ -673,7 +673,14 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     html.Hr(style={"borderColor": "var(--border)", "margin": "8px 0 10px"}),
                                     html.Div(id="avp-list", className="avp-wrap"),
                                     # Keep the original figure hidden so existing clientside callbacks keep working
-                                    dcc.Graph(id="g-actual-vs-bench", config=CLICK_GRAPH_CONFIG, style={"display": "none"}),
+                                    # dcc.Graph(id="g-actual-vs-bench", config=CLICK_GRAPH_CONFIG, style={"display": "none"}),
+                                    dcc.Graph(
+                                        id="g-actual-vs-bench",
+                                        config=CLICK_GRAPH_CONFIG,
+                                        style={
+                                            "display": "none",
+                                        },
+                                    ),
                                 ]
                             ),
                             className="same-h card--elev",
