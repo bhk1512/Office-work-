@@ -583,7 +583,7 @@ def register_callbacks(
         # Output("g-monthly", "figure"),
         Output("g-top5", "figure"),
         Output("g-bottom5", "figure"),
-        Output("g-project-lines", "figure"),
+        Output("g-projects-over-months", "figure"),
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
