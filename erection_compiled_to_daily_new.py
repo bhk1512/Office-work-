@@ -38,6 +38,7 @@ EXPECTED_HEADERS = [
     "completion date",
     "gang name",
     "tower weight",
+    "status",
 ]
 
 # Accepts: "Erection Compiled", "Erection-Compiled", "Erection Compiled v2", etc.
