@@ -606,7 +606,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                         dbc.CardBody(
                                                             [
                                                                 html.Div(id="kpi-resp-target-value", className="kpi-value"),
-                                                                html.Div("Total Target MT", className="kpi-sub"),
+                                                                html.Div("Total Target", className="kpi-sub"),
                                                             ]
                                                         ),
                                                         className="kpi kpi-blue",
@@ -618,7 +618,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                         dbc.CardBody(
                                                             [
                                                                 html.Div(id="kpi-resp-delivered-value", className="kpi-value"),
-                                                                html.Div("Total Delivered MT", className="kpi-sub"),
+                                                                html.Div("Total Delivered", className="kpi-sub"),
                                                             ]
                                                         ),
                                                         className="kpi kpi-red",

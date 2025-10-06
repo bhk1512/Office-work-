@@ -131,7 +131,7 @@ def register_callbacks(
                     if (last < 0) return [NO, NO];
                     const gang = rowIds && rowIds[last] && rowIds[last].index;
                     if (!gang) return [NO, NO];
-                    return [{ source: "g-actual-vs-bench", gang: String(gang), ts: Date.now() }, NO];
+                    return [{ source: "avp", gang: String(gang), ts: Date.now() }, NO];
                 }
             } catch (e) { /* not a pattern id; fall through to charts */ }
 
@@ -176,22 +176,55 @@ def register_callbacks(
 
     # Auto-scroll ONLY when a real click was recorded into store-click-meta
     app.clientside_callback(
-        """
-        function(meta){
-            if(!meta || !meta.source || !meta.gang) return "";
-            const anchor = document.getElementById("trace-anchor");
-            if(anchor){
-            const OFFSET = 80;
-            const y = anchor.getBoundingClientRect().top + window.pageYOffset - OFFSET;
-            window.scrollTo({ top: y, behavior: "smooth" });
+    """
+    function(meta){
+        if(!meta || !meta.source || !meta.gang) return "";
+        // Only charts should trigger scroll (NOT 'avp' rows)
+        const chartSources = new Set(["g-actual-vs-bench","g-top5","g-bottom5"]);
+        if (!chartSources.has(meta.source)) return "";
+
+        // Find the nearest scrollable ancestor (fallback = window)
+        function getScrollParent(el){
+            let node = el && el.parentElement;
+            while (node){
+                const st = window.getComputedStyle(node);
+                const oy = st.overflowY;
+                if (oy === "auto" || oy === "scroll") return node;
+                node = node.parentElement;
             }
-            return String(Date.now());
+            return window;
         }
-        """,
-        Output("scroll-wire", "children"),
-        Input("store-click-meta", "data"),
-        prevent_initial_call=True,
-    )
+
+        let tries = 0;
+        function tryScroll(){
+            const anchor = document.getElementById("trace-anchor")
+                        || document.getElementById("tables-anchor");
+            if (!anchor){
+                if (tries++ < 25) { setTimeout(tryScroll, 60); }
+                return;
+            }
+            const scroller = getScrollParent(anchor);
+            const currentTop = (scroller === window ? window.pageYOffset : scroller.scrollTop);
+            const targetY = anchor.getBoundingClientRect().top + currentTop - 80;
+
+            if (scroller === window) {
+                window.scrollTo({ top: targetY, behavior: "smooth" });
+            } else {
+                scroller.scrollTo({ top: targetY, behavior: "smooth" });
+            }
+        }
+
+        // Defer and retry briefly so the tables/anchor are in the DOM
+        setTimeout(tryScroll, 0);
+        return String(Date.now());
+    }
+    """,
+    Output("scroll-wire", "children"),
+    Input("store-click-meta", "data"),
+    prevent_initial_call=True,
+)
+
+
 
 
 
