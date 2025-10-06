@@ -69,11 +69,11 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                 id={"type": "avp-row", "index": gang},  # pattern-matching ID for clicks
                 n_clicks=0,
                 className="avp-hit",
-                children=html.Span(id=row_id, className="avp-tip-anchor"),
+                # children=html.Span(id=row_id, className="avp-tip-anchor"),
             ),
 
             # 2) TOOLTIP ANCHOR (string ID) — tiny element used ONLY to anchor the tooltip
-            # html.Span(id=row_id, className="avp-tip-anchor"),
+            html.Span(id=row_id, className="avp-tip-anchor"),
 
             # 3) TOOLTIP (bootstrap) — target is the string id above
             dbc.Tooltip(

@@ -152,91 +152,112 @@ def _build_trace_contents(
 
 
 def build_controls() -> dbc.Card:
-    """Return the filter controls card."""
-
+    """Filter controls: Projects → Gangs → Months; quick range under Months; Reset left."""
     return dbc.Card(
         dbc.CardBody(
             [
-                html.Div("Filters", className="fw-bold mb-2"),
+                # Row 1: Projects, Gangs, Months
                 dbc.Row(
                     [
                         dbc.Col(
-                            dcc.Dropdown(
-                                id="f-project",
-                                multi=False,
-                                placeholder="Select project(s)",
+                            html.Div(
+                                [
+                                    dcc.Dropdown(
+                                        id="f-project",
+                                        multi=True,
+                                        placeholder="Select project(s)",
+                                        className="filter-select",
+                                    ),
+                                ],
+                                className="filter-field",
                             ),
                             md=4,
                         ),
                         dbc.Col(
-                            dcc.Dropdown(
-                                id="f-month",
-                                multi=True,
-                                placeholder="Select month(s)",
+                            html.Div(
+                                [
+                                    dcc.Dropdown(
+                                        id="f-gang",
+                                        multi=True,
+                                        placeholder="Select gang(s)",
+                                        className="filter-select",
+                                    ),
+                                ],
+                                className="filter-field",
                             ),
                             md=4,
                         ),
                         dbc.Col(
-                            dcc.Dropdown(
-                                id="f-gang",
-                                multi=True,
-                                placeholder="Select gang(s)",
+                            html.Div(
+                                [
+                                    dcc.Dropdown(
+                                        id="f-month",
+                                        multi=True,
+                                        placeholder="Select month(s)",
+                                        className="filter-select",
+                                    ),
+                                ],
+                                className="filter-field",
                             ),
                             md=4,
                         ),
                     ],
-                    className="g-2",
+                    className="g-3",
                 ),
-                dbc.Row(
-                        [
-                            # Left: radios + Clear link on one line
-                            dbc.Col(
-                                html.Div(
-                                    [
-                                        dbc.RadioItems(
-                                            id="f-quick-range",
-                                            options=[
-                                                {"label": "Last 3M", "value": "3M"},
-                                                {"label": "Last Qtr", "value": "Q"},
-                                                {"label": "Last 6M", "value": "6M"},
-                                                {"label": "YTD", "value": "YTD"},
-                                            ],
-                                            value=None,
-                                            inline=True,
-                                            className="mb-0",        # tighter
-                                        ),
-                                        dbc.Button(
-                                            "Clear Quick Range",
-                                            id="btn-clear-quick-range",
-                                            color="link",
-                                            size="sm",
-                                            className="p-0 ms-2",    # looks like a link, small gap
-                                        ),
-                                    ],
-                                    className="d-flex align-items-center flex-wrap mt-2 gap-2",
-                                ),
-                                md=10,
-                            ),
 
-                            # Right: Reset button, top-aligned
-                            dbc.Col(
-                                dbc.Button(
-                                    "Reset Filters",
-                                    id="btn-reset-filters",
-                                    color="secondary",
-                                    outline=True,
-                                    size="sm",
-                                    className="",               # no extra top margin
-                                ),
-                                md=2,
-                                className="d-flex justify-content-end align-items-start mt-2",
+                # Row 2: Reset (left) + Quick range under Months (right)
+                dbc.Row(
+                    [
+                        # Left: Reset button
+                        dbc.Col(
+                            dbc.Button(
+                                "Reset Filters",
+                                id="btn-reset-filters",
+                                color="secondary",
+                                outline=True,
+                                size="sm",
+                                className="filter-reset-btn",
                             ),
-                        ],
-                        className="g-2",
-                    ),
+                            md=4,
+                            className="d-flex align-items-center",
+                        ),
+
+                        # Middle spacer (keeps radios visually under the Months column)
+                        dbc.Col(md=4),
+
+                        # Right: Quick-range radios + Clear link, under Months
+                        dbc.Col(
+                            html.Div(
+                                [
+                                    dbc.RadioItems(
+                                        id="f-quick-range",
+                                        options=[
+                                            {"label": "Last 3M", "value": "3M"},
+                                            {"label": "Last Qtr", "value": "Q"},
+                                            {"label": "Last 6M", "value": "6M"},
+                                            {"label": "YTD", "value": "YTD"},
+                                        ],
+                                        value=None,
+                                        inline=True,
+                                        className="filter-quick-items",
+                                    ),
+                                    html.A(
+                                        "Clear Quick Range",
+                                        id="link-clear-quick-range",
+                                        n_clicks=0,
+                                        className="filter-clear-link",
+                                    ),
+                                ],
+                                className="filter-quick-under-months",
+                            ),
+                            md=4,
+                        ),
+                    ],
+                    className="g-2 mt-1",
+                ),
             ]
         ),
-        className="mb-3 shadow-sm",
+        className="mb-3 shadow-sm filter-card",
     )
 
 

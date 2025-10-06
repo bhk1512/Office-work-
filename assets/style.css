@@ -183,18 +183,15 @@ html {
 .avp-item { cursor: pointer; }
 .avp-item:hover { box-shadow: var(--shadow-2); }
 /* AVP rows: tooltip/click hit-area should cover the whole row */
-.avp-item{ position: relative; }           /* establish containing block for the overlay */
-.avp-hit{
-     position: absolute;
-     inset: 0;
-     z-index: 5;          /* <-- ensure overlay is on top so it receives the click */
-     cursor: pointer;
-   }
+.avp-item{ position: relative; cursor: pointer; }
+
+/* full-row invisible hover target for dbc.Tooltip */
 .avp-tip-anchor{
-    position: absolute; top: 8px; left: 8px;
-    width: 1px; height: 1px;                      /* invisible but present for tooltip */
-    pointer-events: none;                         /* don't steal clicks */
-  }
+  position: absolute;
+  inset: 0;                 /* fill the whole row */
+  display: block;
+  pointer-events: auto;     /* receives hover for tooltip */
+}
 
 .avp-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
 .avp-name{ font-weight:800; color:#111827; }
@@ -558,7 +555,32 @@ html {
 #\g-projects-over-months { margin-bottom: 4px; } /* escape-safe id selector */
 
 
-/* Make the click overlay and the tooltip anchor fill the entire row */
-.avp-item { position: relative; }
-.avp-hit { position: absolute; inset: 0; }
-.avp-tip-anchor { position: absolute; inset: 0; display: block; }
+
+/* ===== Filters strip (scoped) ===== */
+.filter-card .filter-field { display: flex; flex-direction: column; }
+
+/* Dropdown chrome */
+.filter-card .filter-select .Select-control{
+  border:1px solid var(--border, #e6e9f0);
+  border-radius:12px;
+  box-shadow: var(--shadow-1);
+  min-height:44px;
+  background:#fff;
+}
+.filter-card .filter-select .Select-placeholder,
+.filter-card .filter-select .Select-value { padding-left:10px; color:#0f172a; }
+.filter-card .filter-select .Select-arrow { border-top-color:#64748b; }
+
+/* Quick range radios under Months */
+.filter-card .filter-quick-under-months{
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+}
+.filter-card .filter-quick-items .form-check{
+  display:inline-flex; align-items:center; margin:0 10px 0 0;
+}
+.filter-card .filter-quick-items input[type="radio"]{ margin-right:6px; transform:scale(.95); }
+.filter-card .filter-quick-items label{ font-weight:600; color:#0f172a; cursor:pointer; }
+
+/* Clear link + Reset button alignment */
+.filter-card .filter-clear-link{ font-size:13px; }
+.filter-card .filter-reset-btn{ margin-left:0; }
