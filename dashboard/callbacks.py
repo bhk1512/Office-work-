@@ -208,53 +208,6 @@ def register_callbacks(
     )
 
 
-    # Inputs include ALL avp-row n_clicks so the callback fires on AVP clicks
-    app.clientside_callback(
-        """
-        function(topClick, bottomClick, benchClick, avpClicks) {
-        const NO = window.dash_clientside.no_update;
-        const ctx = dash_clientside.callback_context;
-        if (!ctx.triggered || !ctx.triggered.length) return NO;
-
-        const [idPart, prop] = ctx.triggered[0].prop_id.split(".");
-        console.log("TRIGGER", ctx.triggered[0].prop_id);
-        try {
-            const pid = JSON.parse(idPart);
-
-            // AVP row click → treat as chart click
-            if (pid && pid.type === "avp-row") {
-            const gang = pid.index;
-            if (!gang) return NO;
-            return { source: "g-actual-vs-bench", gang: String(gang), ts: Date.now() };
-            }
-        } catch (e) {
-            // Not a pattern id? fall through to chart clicks
-        }
-
-        // Handle chart clicks (g-top5 / g-bottom5 / g-actual-vs-bench)
-        if (idPart === "g-top5" && topClick && topClick.points && topClick.points[0]) {
-            return { source: "g-top5", gang: String(topClick.points[0].x), ts: Date.now() };
-        }
-        if (idPart === "g-bottom5" && bottomClick && bottomClick.points && bottomClick.points[0]) {
-            return { source: "g-bottom5", gang: String(bottomClick.points[0].x), ts: Date.now() };
-        }
-        if (idPart === "g-actual-vs-bench" && benchClick && benchClick.points && benchClick.points[0]) {
-            return { source: "g-actual-vs-bench", gang: String(benchClick.points[0].x), ts: Date.now() };
-        }
-
-        return NO;
-        }
-        """,
-        Output("store-click-meta", "data"),
-        [
-        Input("g-top5", "clickData"),
-        Input("g-bottom5", "clickData"),
-        Input("g-actual-vs-bench", "clickData"),
-        Input({"type": "avp-row", "index": ALL}, "n_clicks"),  # ← AVP input
-        ],
-        prevent_initial_call=True,
-    )
-
 
 
     # # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
