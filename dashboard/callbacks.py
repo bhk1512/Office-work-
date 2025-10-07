@@ -881,13 +881,86 @@ def register_callbacks(
                     "baseline": baseline,
                 }
             )
-        loss_df = (
-            pd.DataFrame(loss_rows).sort_values("potential", ascending=True)
-            if loss_rows
-            else pd.DataFrame(
-                columns=["gang_name", "delivered", "lost", "potential", "avg_prod", "baseline"]
+        if loss_rows:
+
+            loss_df = pd.DataFrame(loss_rows)
+
+            deliv = loss_df["delivered"].astype(float)
+
+            lost = loss_df["lost"].astype(float)
+
+            potential = loss_df["potential"].astype(float)
+
+            sum_series = deliv.add(lost)
+
+            use_sum = deliv.notna() & lost.notna()
+
+            potential_fallback = potential.where(potential.notna(), sum_series)
+
+            total_series = pd.Series(
+
+                np.where(use_sum, sum_series, potential_fallback),
+
+                index=loss_df.index,
+
+            ).fillna(0.0)
+
+            efficiency_series = np.where(
+
+                total_series > 0.0,
+
+                (deliv.fillna(0.0) / total_series) * 100.0,
+
+                0.0,
+
             )
-        )
+
+            loss_df = (
+
+                loss_df.assign(
+
+                    efficiency_pct=efficiency_series,
+
+                    total_mt=total_series,
+
+                )
+
+                .sort_values("efficiency_pct", ascending=True)
+
+                .reset_index(drop=True)
+
+            )
+
+        else:
+
+            loss_df = pd.DataFrame(
+
+                columns=[
+
+                    "gang_name",
+
+                    "delivered",
+
+                    "lost",
+
+                    "potential",
+
+                    "avg_prod",
+
+                    "baseline",
+
+                    "efficiency_pct",
+
+                    "total_mt",
+
+                ]
+
+            )
+
+
+
+
+
 
 
         # --- meta for hover: last project & last worked date per gang (within current filters)
@@ -910,22 +983,64 @@ def register_callbacks(
         loss_df["last_project"]  = loss_df.get("last_project").fillna("—")
 
         # Build left-card HTML list from loss_df (now that meta is attached)
+
         avp_children = []
+
         if not loss_df.empty:
+
             for _, r in loss_df.iterrows():
-                total = (r["delivered"] + r["lost"]) if pd.notna(r["delivered"]) and pd.notna(r["lost"]) else r["potential"]
-                total = float(total) if pd.notna(total) else 0.0
-                pct = 0.0 if total == 0 else (100.0 * float(r["delivered"]) / total)
-                avp_children.append(
-                    _render_avp_row(
-                        r["gang_name"], float(r["delivered"]), float(r["lost"]),
-                        total, pct,
-                        avg_prod=float(r.get("avg_prod", 0.0)),
-                        baseline=float(r.get("baseline", 0.0)),
-                        last_project=str(r.get("last_project", "—")),
-                        last_date=str(r.get("last_date_str", "—")),
+
+                total = float(r.get("total_mt", 0.0))
+
+                if total == 0.0:
+
+                    base_total = (
+
+                        r["delivered"] + r["lost"]
+
+                        if pd.notna(r["delivered"]) and pd.notna(r["lost"])
+
+                        else r["potential"]
+
                     )
+
+                    total = float(base_total) if pd.notna(base_total) else 0.0
+
+                pct = r.get("efficiency_pct", np.nan)
+
+                pct = float(pct) if pd.notna(pct) else 0.0
+
+                if total > 0.0 and pct == 0.0:
+
+                    pct = (100.0 * float(r["delivered"]) / total)
+
+                avp_children.append(
+
+                    _render_avp_row(
+
+                        r["gang_name"], float(r["delivered"]), float(r["lost"]),
+
+                        total, pct,
+
+                        avg_prod=float(r.get("avg_prod", 0.0)),
+
+                        baseline=float(r.get("baseline", 0.0)),
+
+                        last_project=str(r.get("last_project", "\uFFFD")),
+
+                        last_date=str(r.get("last_date_str", "\uFFFD")),
+
+                    )
+
                 )
+
+
+
+
+
+
+
+
 
 
 
@@ -1297,6 +1412,7 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
 
 
 
