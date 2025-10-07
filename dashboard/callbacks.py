@@ -10,13 +10,11 @@ from typing import Any, Callable, Sequence
 
 import dash
 import re
-import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
-from dash.dcc import send_bytes
 from dash.exceptions import PreventUpdate
-from dash.dependencies import Input, Output, State, ALL
+from dash.dcc import send_bytes
 
 from .charts import (
     # create_monthly_line_chart,
@@ -44,7 +42,6 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
     delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
 
-    row_id = f"avp-row-{_slug(gang)}"  # unique string id for tooltip target
     row_tip_id = f"avp-tip-{gang}"  # STRING id for tooltip target
 
     return html.Div(
@@ -67,13 +64,7 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                 html.Span([html.Span(f"{delivered:.0f} MT", className="del"), " vs ", html.Span(f"{lost:.0f} MT lost", className="los")]),
                 html.Span(f"{total:.0f} MT", className="tot"),
             ]),
-            # 1) CLICK OVERLAY (pattern ID) — this is what Dash listens to for n_clicks
-            # html.Div(
-            #     id={"type": "avp-row", "index": gang},  # pattern-matching ID for clicks
-            #     n_clicks=0,
-            #     className="avp-hit",
-            #     # children=html.Span(id=row_id, className="avp-tip-anchor"),
-            # ),
+            
 
             html.Div(
                 id={"type": "avp-tip", "index": gang},     # pattern id to allow row-wide click capture
@@ -107,15 +98,15 @@ def _ensure_list(value: Sequence[str] | str | None) -> list[str]:
         return [value]
     return list(value)
 
-# project_list = _ensure_list(projects)
-# month_list = _ensure_list(months)
-
 
 def register_callbacks(
     app: Dash,
     data_provider: Callable[[], pd.DataFrame],
     config: AppConfig,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
+    responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
+    responsibilities_completion_provider: Callable[[], set[tuple[str, str]]] | None = None,
+    responsibilities_error_provider: Callable[[], str | None] | None = None,
 ) -> None:
     """Register all Dash callbacks on *app*."""
 
@@ -556,22 +547,56 @@ def register_callbacks(
         metric_value = (metric_value or "tower_weight").strip()
         metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
 
-        cfg = AppConfig()
-        try:
-            workbook = pd.ExcelFile(cfg.data_path)
-        except FileNotFoundError:
-            LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
-            return _empty_response("Compiled workbook not found.")
-        except Exception as exc:
-            LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
-            return _empty_response("Unable to load Micro Plan data.")
+        load_error_msg: str | None = None
+        completed_keys: set[tuple[str, str]] = set()
+        df_atomic: pd.DataFrame | None = None
+        workbook: pd.ExcelFile | None = None
 
-        atomic_sheet = "MicroPlanResponsibilities"
-        if atomic_sheet not in workbook.sheet_names:
-            LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
-            return _empty_response("No Micro Plan data found in the compiled workbook.")
+        if responsibilities_provider is not None:
+            try:
+                df_atomic = responsibilities_provider()
+            except RuntimeError as exc:
+                LOGGER.warning("Responsibilities data unavailable: %s", exc)
+                return _empty_response(str(exc))
+            except Exception as exc:
+                LOGGER.exception("Failed to access responsibilities data: %s", exc)
+                return _empty_response("Unable to load Micro Plan data.")
+            else:
+                df_atomic = df_atomic.copy()
+                if responsibilities_completion_provider is not None:
+                    try:
+                        completed_keys = set(responsibilities_completion_provider())
+                    except Exception as exc:
+                        LOGGER.warning("Failed to resolve responsibilities completion keys: %s", exc)
+                        completed_keys = set()
+                if responsibilities_error_provider is not None:
+                    try:
+                        load_error_msg = responsibilities_error_provider()
+                    except Exception:
+                        load_error_msg = None
+        else:
+            cfg = config
+            try:
+                workbook = pd.ExcelFile(cfg.data_path)
+            except FileNotFoundError:
+                LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
+                return _empty_response("Compiled workbook not found.")
+            except Exception as exc:
+                LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
+                return _empty_response("Unable to load Micro Plan data.")
 
-        df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
+            atomic_sheet = "MicroPlanResponsibilities"
+            if atomic_sheet not in workbook.sheet_names:
+                LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
+                return _empty_response("No Micro Plan data found in the compiled workbook.")
+
+            df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
+
+        if df_atomic is None or df_atomic.empty:
+            message = load_error_msg or "No Micro Plan data found in the compiled workbook."
+            return _empty_response(message)
+
+        df_atomic = df_atomic.copy()
 
         def _normalize_text(value: object) -> str:
             text = str(value).replace("\u00a0", " ").strip()
@@ -625,6 +650,56 @@ def register_callbacks(
         df_atomic["entity_type_lc"] = df_atomic["entity_type"].str.lower()
         df_atomic["location_no_norm"] = df_atomic["location_no"].map(_normalize_location)
 
+        if responsibilities_provider is None and workbook is not None:
+            daily_sheet = None
+            for candidate in ("Daily Expanded", "DailyExpanded"):
+                if candidate in workbook.sheet_names:
+                    daily_sheet = candidate
+                    break
+
+            if daily_sheet:
+                try:
+                    df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
+                except Exception as exc:
+                    LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
+                else:
+                    def _pick_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str:
+                        mapping = {str(col).strip().lower(): col for col in frame.columns}
+                        for candidate in candidates:
+                            key = candidate.strip().lower()
+                            if key in mapping:
+                                return mapping[key]
+                        for key, original in mapping.items():
+                            if any(cand.lower() in key for cand in candidates):
+                                return original
+                        raise KeyError(candidates)
+
+                    try:
+                        col_proj = _pick_column(df_daily, ("project_name", "project"))
+                        col_loc = _pick_column(
+                            df_daily, ("location_no", "location number", "location")
+                        )
+                    except KeyError:
+                        LOGGER.warning(
+                            "Daily sheet missing project/location columns; delivered will rely on realised values only."
+                        )
+                    else:
+                        cleaned = pd.DataFrame(
+                            {
+                                "project_name_lc": df_daily[col_proj].map(_normalize_lower),
+                                "location_no_norm": df_daily[col_loc].map(_normalize_location),
+                            }
+                        )
+                        completed_keys = {
+                            (p, loc)
+                            for p, loc in zip(cleaned["project_name_lc"], cleaned["location_no_norm"])
+                            if p and loc
+                        }
+            else:
+                LOGGER.info(
+                    "Daily Expanded sheet not found; delivered values fall back to realised revenue only."
+                )
+
         sel_norm = _normalize_text(project_value)
         sel_lc = sel_norm.lower()
 
@@ -642,55 +717,6 @@ def register_callbacks(
 
         if df_entity.empty:
             return _empty_response("No responsibilities found for the selected filters.")
-
-        daily_sheet = None
-        for candidate in ("Daily Expanded", "DailyExpanded"):
-            if candidate in workbook.sheet_names:
-                daily_sheet = candidate
-                break
-
-        completed_keys: set[tuple[str, str]] = set()
-        if daily_sheet:
-            try:
-                df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
-            except Exception as exc:
-                LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
-                df_daily = pd.DataFrame()
-            else:
-                def _pick_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str:
-                    mapping = {str(col).strip().lower(): col for col in frame.columns}
-                    for candidate in candidates:
-                        key = candidate.strip().lower()
-                        if key in mapping:
-                            return mapping[key]
-                    for key, original in mapping.items():
-                        if any(cand.lower() in key for cand in candidates):
-                            return original
-                    raise KeyError(candidates)
-
-                try:
-                    col_proj = _pick_column(df_daily, ("project_name", "project"))
-                    col_loc = _pick_column(df_daily, ("location_no", "location number", "location"))
-                except KeyError:
-                    LOGGER.warning(
-                        "Daily sheet missing project/location columns; delivered will rely on realised values only."
-                    )
-                else:
-                    cleaned = pd.DataFrame(
-                        {
-                            "project_name_lc": df_daily[col_proj].map(_normalize_lower),
-                            "location_no_norm": df_daily[col_loc].map(_normalize_location),
-                        }
-                    )
-                    completed_keys = {
-                        (p, loc)
-                        for p, loc in zip(cleaned["project_name_lc"], cleaned["location_no_norm"])
-                        if p and loc
-                    }
-        else:
-            LOGGER.info(
-                "Daily Expanded sheet not found; delivered values fall back to realised revenue only."
-            )
 
         df_entity["is_completed"] = [
             (proj, loc) in completed_keys
@@ -759,7 +785,6 @@ def register_callbacks(
         kpi_ach_txt = f"{achievement:.0f}%"
 
         return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
-
 
 
     @app.callback(
@@ -1249,6 +1274,9 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+
+
 
 
 

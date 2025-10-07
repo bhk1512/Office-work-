@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
-import re
 
 from .config import AppConfig
 
@@ -152,47 +151,5 @@ def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFr
         if "Project Name" in df.columns:
             out["Project Name"] = df["Project Name"].astype(str).str.strip()
         return out
-    except Exception:
-        return pd.DataFrame()
-
-
-# --- NEW: Micro Plan responsibilities loader ---
-
-def load_microplan_responsibilities(path: Path, sheet: str = "MicroPlanResponsibilities") -> pd.DataFrame:
-    """
-    Expects tidy columns: project_key | project_name | entity_type | entity_name | revenue | tower_weight
-    Returns empty DataFrame if sheet is missing / unreadable (no exceptions).
-    """
-    try:
-        xl = pd.ExcelFile(path)
-        if sheet not in xl.sheet_names:
-            return pd.DataFrame()
-        df = pd.read_excel(xl, sheet_name=sheet)
-
-        # normalize presence
-        for c in ["project_key", "project_name", "entity_type", "entity_name"]:
-            if c not in df.columns:
-                df[c] = ""
-            df[c] = df[c].astype(str).str.strip()
-
-        for c in ["revenue", "tower_weight"]:
-            if c not in df.columns:
-                df[c] = 0.0
-        df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
-        df["tower_weight"] = pd.to_numeric(df["tower_weight"], errors="coerce").fillna(0.0)
-
-        # helpers for matching
-        df["project_key_lc"] = df["project_key"].str.lower()
-        df["project_name_norm"] = df["project_name"].str.replace(r"\s+", " ", regex=True).str.strip()
-        df["project_name_lc"] = df["project_name_norm"].str.lower()
-
-        # standardize entity_type spelling just in case
-        df["entity_type"] = df["entity_type"].replace({
-            "Gangs": "Gang",
-            "Section Incharges": "Section Incharge",
-            "Supervisors": "Supervisor",
-        }).astype(str)
-
-        return df
     except Exception:
         return pd.DataFrame()

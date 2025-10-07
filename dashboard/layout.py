@@ -6,8 +6,6 @@ import dash_bootstrap_components as dbc
 from dash import dash_table
 from dash.dcc import Download
 import urllib.parse
-from dash import html
-import dash.dcc as dcc
 
 CLICK_GRAPH_CONFIG = {
     "displayModeBar": False,
@@ -492,14 +490,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     """Assemble the full Dash layout."""
 
     controls = build_controls()
-    row_height = f"{CONTAINER_HEIGHT}px"
-    # gang_bar = html.Div(
-    #     dcc.Graph(
-    #         id="g-actual-vs-bench",
-    #         config=CLICK_GRAPH_CONFIG,
-    #     ),
-    #     style={"height": row_height, "overflowY": "auto"},
-    # )
+    
     trace_modal = build_trace_modal()
     layout = dbc.Container(
         [

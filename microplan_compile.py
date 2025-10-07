@@ -70,9 +70,6 @@ CURRENT_MICROPLAN_SCHEMA = MICROPLAN_SCHEMA_V1
 MICROPLAN_AGG_SHEET_NAME = "MicroPlanResponsibilities"
 MICROPLAN_INDEX_SHEET    = "MicroPlanIndex"
 
-# Also write a per-project cleaned Micro Plan sheet?
-WRITE_MICROPLAN_RAW_PER_PROJECT = True   # set True if you also want cleaned per-project sheets
-
 # Search pattern for "Micro Plan" files
 MICROPLAN_GLOB_PATTERN = "**/*micro*plan*.xls*"
 
@@ -91,10 +88,6 @@ def _norm_text(x: str) -> str:
     x = re.sub(r"[\s\-_./()]+", " ", x)
     x = re.sub(r"[^a-z0-9 %]+", "", x)
     return " ".join(x.split())
-
-
-def _row_tokens(sr) -> set[str]:
-    return set(_norm_text(v) for v in sr.tolist() if pd.notna(v) and str(v).strip() != "")
 
 _DETECTION_TOKENS_RAW = {
     # core entity/metrics
@@ -172,11 +165,6 @@ def _alias_to_canonical(colname: str, schema: dict) -> Optional[str]:
     return None
 
 
-def _coerce_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    return df
 
 
 def infer_project_name_from_filename(path: str) -> str:
@@ -394,14 +382,13 @@ def compile_microplans_to_workbook(
     """
     paths = sorted(glob(os.path.join(input_dir, glob_pattern), recursive=True))
 
-    agg_all = []
     atomic_all = []
     index_rows = []
     
     for p in paths:
         proj_name = infer_project_name_from_filename(p)
         proj_key  = normalize_key(proj_name)
-        per_project_to_write = [] 
+        
         # if write_raw_per_project else None
         try:
             df_clean = read_microplan_file(p, schema)
@@ -413,12 +400,7 @@ def compile_microplans_to_workbook(
             # build and collect per-project responsibilities
             resp_long = build_responsibilities_atomic(df_clean, proj_name, proj_key)
             if not resp_long.empty:
-                atomic_all.append(resp_long)
-
-            # (optional) also keep per-project cleaned sheet
-            # if write_raw_per_project:
-            per_project_sheet = f"MicroPlan_{proj_name}"[:31]  # Excel sheet name limit
-            
+                atomic_all.append(resp_long)         
 
             # ...
             index_rows.append({

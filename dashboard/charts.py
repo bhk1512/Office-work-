@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
 
 from .config import AppConfig
-from collections import defaultdict
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_BENCHMARK = AppConfig().default_benchmark
