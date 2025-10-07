@@ -1079,19 +1079,42 @@ def register_callbacks(
         Output("tbl-daily-prod", "data"),
         Output("modal-tbl-idle-intervals", "data"),
         Output("modal-tbl-daily-prod", "data"),
-        Input("store-click-meta", "data"),      # only trigger
+        Input("store-click-meta", "data"),
+        Input("trace-gang", "value"),
+        Input("modal-trace-gang", "value"),
         State("f-project", "value"),
         State("f-month", "value"),
         State("f-quick-range", "value"),
         State("f-gang", "value"),
         prevent_initial_call=True,
     )
-    def update_trace_tables(meta, projects, months, quick_range, gangs):
-        # Proceed only when the click source is a chart (not AVP)
-        if not meta or meta.get("source") not in CHART_SOURCES:
+    def update_trace_tables(
+        meta,
+        trace_gang_value,
+        modal_trace_gang_value,
+        projects,
+        months,
+        quick_range,
+        gangs,
+    ):
+        ctx = dash.callback_context
+        if not ctx.triggered:
             raise PreventUpdate
 
-        gang_focus = meta.get("gang")
+        triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        dropdown_selection = trace_gang_value or modal_trace_gang_value
+        meta_source = meta.get("source") if isinstance(meta, dict) else None
+        meta_gang = meta.get("gang") if isinstance(meta, dict) else None
+        meta_is_chart = meta_source in CHART_SOURCES and bool(meta_gang)
+
+        if triggered_id == "store-click-meta":
+            if meta_is_chart:
+                gang_focus = meta_gang
+            else:
+                gang_focus = dropdown_selection
+        else:
+            gang_focus = dropdown_selection or (meta_gang if meta_is_chart else None)
+
         if not gang_focus:
             raise PreventUpdate
 
