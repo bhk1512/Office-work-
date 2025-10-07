@@ -46,13 +46,21 @@ MICROPLAN_SCHEMA_V1 = {
         "gang_name":        ["gang name"],
         "section_incharge": ["section incharge"],
         "supervisor":       ["supervisor"],
+        "revenue_planned":   ["revenue planned", "revenue"],
+        "revenue_realised":  ["revenue realised", "revenue realized", "revenue realization"],
+        "location_no":       ["location no.", "loc no", "loc no.", "location no"],
+
     },
     "optional": {
         "tower_weight": ["tower weight"],
-        "revenue": ["revenue planned", "revenue"],  # map "Revenue Planned" here
-        "loc_no": ["loc no.", "loc no"],
         "tower_type": ["tower type"],
-        "manpower": ["manpower"],
+        "manpower":            ["manpower"],
+        "power_tools_issued":  ["power tools issued (yes/no)", "power tools issued"],
+        "material_feeding":    ["material feeding", "matl feeding"],
+        "starting_date":       ["starting date", "start date"],
+        "completion_date":     ["completion date", "end date"],
+        "tack_welding":        ["tack-welding", "tack welding"],
+        "final_checking":      ["final checking", "final check"],
     }
 }
 CURRENT_MICROPLAN_SCHEMA = MICROPLAN_SCHEMA_V1
@@ -70,7 +78,7 @@ MICROPLAN_GLOB_PATTERN = "**/*micro*plan*.xls*"
 
 # Header search window
 HEADER_SCAN_MAX_ROWS = 50
-MICROPLAN_LEFT_WIDTH = 20
+MICROPLAN_LEFT_WIDTH = 30
 
 # ==========================
 # === Helper / Utilities ===
@@ -91,7 +99,8 @@ def _row_tokens(sr) -> set[str]:
 _DETECTION_TOKENS_RAW = {
     # core entity/metrics
     "gang name", "section incharge", "supervisor",
-    "tower weight", "revenue planned",
+    "tower weight", "revenue planned", "revenue realised", "revenue realized",
+    "location no", "loc no",
     # helpful supporting headers (boosts scoring)
     # "sl", "loc no.", "tower type", "manpower",
     # "power tools issued (yes/no)", "matl feeding",
@@ -114,28 +123,40 @@ def _pick_erection_sheet(path: str) -> str:
     return wb.worksheets[0].title
 
 
-def _detect_header_row(path: str,sheet: str, max_rows: int = HEADER_SCAN_MAX_ROWS) -> int:
+def _detect_header_row(path: str, sheet: str, max_rows: int = HEADER_SCAN_MAX_ROWS) -> int:
+    """
+    Detect the header row by scanning the first `max_rows` rows without any
+    index-based column limits. If you want to ignore far-right noise, we slice
+    *after* reading instead of using `usecols`, which can go out of bounds on
+    narrow sheets.
+    """
     prev = pd.read_excel(
         path,
         sheet_name=sheet,
         header=None,
         nrows=max_rows,
-        # limit to the left block so we don't pick up far-right noise
-        usecols=range(MICROPLAN_LEFT_WIDTH),
         engine="openpyxl",
+        dtype=object,
     )
+
     best_row, best_score = None, -1
+
+    # Evaluate each candidate row; only consider the first MICROPLAN_LEFT_WIDTH cells
+    width = MICROPLAN_LEFT_WIDTH if isinstance(MICROPLAN_LEFT_WIDTH, int) and MICROPLAN_LEFT_WIDTH > 0 else prev.shape[1]
+
     for r in range(len(prev)):
-        toks = {_norm_text(v) for v in prev.iloc[r].tolist() if str(v).strip() != ""}
-        # DEBUG (optional): print(toks)
+        # slice row to left window, coerce to strings safely
+        row_vals = prev.iloc[r].tolist()[:width]
+        toks = {_norm_text(v) for v in row_vals if v is not None and str(v).strip() != ""}
         score = sum(1 for t in _DETECTION_TOKENS if t in toks)
         if score > best_score:
             best_row, best_score = r, score
 
-    # accept rows with score >= 2 (your sample often hits 2 on the true header row)
+    # Require a minimal confidence to avoid false positives
     if best_row is None or best_score < 3:
-        raise ValueError(f"Header row not found on first sheet (best_score={best_score}).")
+        raise ValueError(f"Header row not found on sheet '{sheet}' (best_score={best_score}).")
     return best_row
+
 
 
 
@@ -188,19 +209,31 @@ def normalize_key(s: str) -> str:
     """Stable snake_key → 'TA416' → 'ta416'"""
     return re.sub(r"[^a-z0-9]+", "", _norm_text(s))
 
+
+def _safe_read_excel_by_header(path: str, sheet_name: str, header_row: int) -> pd.DataFrame:
+    """
+    Read a sheet using the detected header row. Avoid index-based `usecols`;
+    we'll trim by names (and optionally left width) after reading.
+    """
+    df = pd.read_excel(
+        path,
+        sheet_name=sheet_name,
+        header=header_row,
+        dtype=object,
+        engine="openpyxl",
+    )
+    # standardize NA and strip column label whitespace
+    df = df.where(df.notna(), None)
+    df.columns = [str(c).strip() if c is not None else "" for c in df.columns]
+    return df
+
 def read_microplan_file(path: str,
                         schema: dict,
                         header_scan_rows: int = HEADER_SCAN_MAX_ROWS) -> pd.DataFrame:
     sheet = _pick_erection_sheet(path)
     header_row = _detect_header_row(path,sheet, max_rows=header_scan_rows)
 
-    df = pd.read_excel(
-        path,
-        engine="openpyxl",
-        sheet_name=sheet,
-        header=header_row,
-        usecols=range(MICROPLAN_LEFT_WIDTH),  # same left-block constraint
-    )
+    df = _safe_read_excel_by_header(path, sheet, header_row)
 
      # --- NEW TRUNCATION LOGIC ---
     # Find first completely empty row after header
@@ -217,24 +250,26 @@ def read_microplan_file(path: str,
             rename_map[col] = canon
     df = df.rename(columns=rename_map)
 
-    needed = ["gang_name", "section_incharge", "supervisor", "tower_weight", "revenue"]
-    keep = [c for c in needed if c in df.columns]
-    if not keep:
-        raise ValueError(f"No target columns detected. Columns read: {list(df.columns)}")
+    needed = ["gang_name", "section_incharge", "supervisor", "tower_weight", "revenue_planned", "revenue_realised", "location_no"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Required columns missing: {missing}. Columns read: {list(df.columns)}")
 
-    df = df[keep].copy()
 
     for col in ["gang_name", "section_incharge", "supervisor"]:
         if col in df.columns:
             df[col] = df[col].ffill().astype(str).str.strip()
+    
+    # location as stable string id (not numeric), trimmed
+    df["location_no"] = df["location_no"].astype(object).map(
+        lambda x: str(x).strip() if x is not None and str(x).strip() != "" else None
+    )
 
-    for c in ("tower_weight", "revenue"):
-        if c not in df.columns:
-            df[c] = 0.0
-    df = _coerce_numeric(df, ["tower_weight", "revenue"])
+    for c in ("tower_weight", "revenue_planned", "revenue_realised"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
-    mask = (df["revenue"].fillna(0) == 0) & (df["tower_weight"].fillna(0) == 0)
-    df = df.loc[~mask]
+    mask = (df["revenue_planned"].fillna(0) == 0) & (df["revenue_realised"].fillna(0) == 0) & (df["tower_weight"].fillna(0) == 0)
+    df = df.loc[~mask].reset_index(drop=True)
 
     return df.reset_index(drop=True)
 
@@ -244,42 +279,67 @@ def read_microplan_file(path: str,
 
 
 
-def build_responsibilities_long(df_clean: pd.DataFrame,
-                                project_name: str,
-                                project_key: str) -> pd.DataFrame:
-    # guarantee numeric columns exist
-    for c in ("revenue", "tower_weight"):
+def build_responsibilities_atomic(df_clean: pd.DataFrame,
+                                  project_name: str,
+                                  project_key: str) -> pd.DataFrame:
+    """
+    Return atomic rows: one row per (project, entity_type, entity_name, location_no)
+    with the *per-row* revenue/tower_weight values from the microplan (no pre-aggregation).
+    """
+    # Ensure required columns exist (reader enforces schema earlier)
+    for c in ("revenue_planned", "revenue_realised", "tower_weight"):
         if c not in df_clean.columns:
             df_clean[c] = 0.0
-    
+
+    # normalize location as stable string (already done earlier, but keep safe)
+    loc = df_clean["location_no"].astype(object).map(
+        lambda x: str(x).strip() if x is not None and str(x).strip() != "" else None
+    )
+
     frames = []
     pairs = [
         ("gang_name",        "Gang"),
         ("section_incharge", "Section Incharge"),
         ("supervisor",       "Supervisor"),
     ]
+
     for col, etype in pairs:
         if col not in df_clean.columns:
             continue
-        grp = (
-            df_clean
-            .groupby(col, dropna=True)[["revenue", "tower_weight"]]
-            .sum()
-            .reset_index()
-            .rename(columns={col: "entity_name"})
-        )
-        grp["entity_type"]  = etype
-        grp["project_name"] = project_name
-        grp["project_key"]  = project_key
-        frames.append(grp)
+        # atomic slice for this entity type
+        cols_to_take = [c for c in [
+            col, "location_no",
+            "revenue_planned","revenue_realised","tower_weight",
+            "tower_type","manpower","power_tools_issued","material_feeding",
+            "starting_date","completion_date","tack_welding","final_checking"
+        ] if c in df_clean.columns]
+        part = df_clean[cols_to_take].copy()
+        part.insert(0, "project_key",  project_key)
+        part.insert(1, "project_name", project_name)
+        part.insert(2, "entity_type",  etype)
+        part = part.rename(columns={col: "entity_name"})
+        # Drop rows with missing entity_name or missing/blank location
+        part["entity_name"] = part["entity_name"].astype(str).str.strip()
+        part["location_no"] = loc  # normalized above
+        part = part[(part["entity_name"] != "") & part["location_no"].notna()]
+        frames.append(part)
 
     if not frames:
         return pd.DataFrame(columns=[
-            "project_key","project_name","entity_type","entity_name","revenue","tower_weight"
+            "project_key","project_name","entity_type","entity_name",
+            "location_no","revenue_planned","revenue_realised","tower_weight"
         ])
 
     out = pd.concat(frames, ignore_index=True)
-    return out[["project_key","project_name","entity_type","entity_name","revenue","tower_weight"]]
+    # Column order for consistency
+    cols = [
+        "project_key","project_name","entity_type","entity_name","location_no",
+        "revenue_planned","revenue_realised","tower_weight",
+        "tower_type","manpower","power_tools_issued","material_feeding",
+        "starting_date","completion_date","tack_welding","final_checking"
+    ]
+    return out[cols]
+
 
 
 
@@ -322,7 +382,7 @@ def compile_microplans_to_workbook(
     input_dir: str,
     output_path: str,
     *,
-    write_raw_per_project: bool = WRITE_MICROPLAN_RAW_PER_PROJECT,
+    # write_raw_per_project: bool = WRITE_MICROPLAN_RAW_PER_PROJECT,
     schema: dict = CURRENT_MICROPLAN_SCHEMA,
     glob_pattern: str = MICROPLAN_GLOB_PATTERN
 ) -> None:
@@ -336,28 +396,30 @@ def compile_microplans_to_workbook(
     paths = sorted(glob(os.path.join(input_dir, glob_pattern), recursive=True))
 
     agg_all = []
+    atomic_all = []
     index_rows = []
-    raw_sheets_to_write = []  # [(sheet_name, df_clean)]
+    
     for p in paths:
         proj_name = infer_project_name_from_filename(p)
         proj_key  = normalize_key(proj_name)
-        per_project_to_write = [] if write_raw_per_project else None
+        per_project_to_write = [] 
+        # if write_raw_per_project else None
         try:
             df_clean = read_microplan_file(p, schema)
                         # ensure numeric responsibility columns exist
-            for c in ("revenue", "tower_weight"):
+            for c in ("revenue_planned", "tower_weight"):
                 if c not in df_clean.columns:
                     df_clean[c] = 0.0
 
             # build and collect per-project responsibilities
-            resp_long = build_responsibilities_long(df_clean, proj_name, proj_key)
+            resp_long = build_responsibilities_atomic(df_clean, proj_name, proj_key)
             if not resp_long.empty:
-                agg_all.append(resp_long)
+                atomic_all.append(resp_long)
 
             # (optional) also keep per-project cleaned sheet
-            if write_raw_per_project:
-                per_project_sheet = f"MicroPlan_{proj_key}"[:31]  # Excel sheet name limit
-                raw_sheets_to_write.append((per_project_sheet, df_clean))
+            # if write_raw_per_project:
+            per_project_sheet = f"MicroPlan_{proj_name}"[:31]  # Excel sheet name limit
+            
 
             # ...
             index_rows.append({
@@ -380,28 +442,29 @@ def compile_microplans_to_workbook(
 
 
     # Write combined outputs in one go
+    # --- Write combined outputs (atomic only) ---
     with _open_writer_overwriting_sheets(output_path) as writer:
-        # Responsibilities sheet (always create with headers)
-        if agg_all:
-            out = pd.concat(agg_all, ignore_index=True)
-            out = (
-                out.groupby(["project_key","project_name","entity_type","entity_name"], as_index=False)
-                   .agg({"revenue":"sum","tower_weight":"sum"})
-            )
+        # Atomic responsibilities sheet
+        if atomic_all:
+            responsibilities = pd.concat(atomic_all, ignore_index=True)
         else:
-            out = pd.DataFrame(columns=[
-                "project_key","project_name","entity_type","entity_name","revenue","tower_weight"
+            responsibilities = pd.DataFrame(columns=[
+                "project_key","project_name","entity_type","entity_name",
+                "location_no","revenue_planned","revenue_realised","tower_weight",
+                "tower_type","manpower","power_tools_issued","material_feeding",
+                "starting_date","completion_date","tack_welding","final_checking"
             ])
-        _safe_write_df(writer, out, MICROPLAN_AGG_SHEET_NAME, index=False)
 
-        # Index sheet
-        idx_df = pd.DataFrame(index_rows, columns=["file_path","project_name","project_key","rows_cleaned","status","error"])
+        _safe_write_df(writer, responsibilities, MICROPLAN_AGG_SHEET_NAME, index=False)
+
+        # Index sheet for traceability
+        idx_df = pd.DataFrame(
+            index_rows,
+            columns=["file_path","project_name","project_key","rows_cleaned","status","error"]
+        )
         _safe_write_df(writer, idx_df, MICROPLAN_INDEX_SHEET, index=False)
 
-        # (optional) per-project cleaned sheets
-        if write_raw_per_project and raw_sheets_to_write:
-            for sheet_name, df_clean in raw_sheets_to_write:
-                _safe_write_df(writer, df_clean, sheet_name, index=False)
+
 
 
 # ======================
@@ -412,8 +475,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Compile 'Micro Plan' responsibilities into the compiled workbook.")
     p.add_argument("--input-dir", required=True, help="Root folder containing project Excel files (where 'Micro Plan' files reside).")
     p.add_argument("--output-xlsx", required=True, help="Path to the compiled workbook (e.g., ErectionCompiled_Output_testRun.xlsx).")
-    p.add_argument("--write-raw", action="store_true",
-                   help="Also write per-project cleaned Micro Plan sheets (MicroPlan_<project_key>).")
+    # p.add_argument("--write-raw", action="store_true",
+                #    help="Also write per-project cleaned Micro Plan sheets (MicroPlan_<project_key>).")
     return p
 
 
@@ -422,7 +485,7 @@ def main() -> None:
     compile_microplans_to_workbook(
         input_dir=args.input_dir,
         output_path=args.output_xlsx,
-        write_raw_per_project=bool(args.write_raw),
+        # write_raw_per_project=bool(args.write_raw),
     )
 
 

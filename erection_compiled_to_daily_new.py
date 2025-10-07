@@ -304,7 +304,7 @@ def process_file(path: Path):
     })
 
     # Only the fields we need for computation
-    needed = ["starting date", "completion date", "gang name", "tower weight"]
+    needed = ["starting date", "completion date", "gang name", "tower weight", "location no","status"]
     missing = [c for c in needed if c not in df.columns]
     if missing:
         issues.append({
@@ -322,6 +322,14 @@ def process_file(path: Path):
     work["Gang name"] = work["gang name"].apply(normalize_gang_name)
     work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
     work["Project Name"] = parse_project_from_filename(path.name)
+    # NEW: normalize required passthrough fields
+    work["Location No."] = (
+        work["location no"].astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
+    )
+
+    work["Status"] = (
+        work["status"].astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
+    )
 
     # Precompute validity flags
     missing_dt_mask = work["Start Date"].isna() | work["Complete Date"].isna()
@@ -343,7 +351,7 @@ def process_file(path: Path):
     def push_data_issue(mask, reason: str):
         if mask.any():
             sub = work.loc[mask, ["Start Date", "Complete Date", "Gang name", "Tower Weight",
-                                  "Productivity", "Project Name"]].copy()
+                                  "Productivity", "Project Name", "Location No.", "Status"]].copy()
             sub["Issues"] = reason
             data_issues_rows.append(sub)
 
@@ -382,7 +390,7 @@ def process_file(path: Path):
 
     # ---- Per-erection (UNEXPANDED) ----
     per_erection = work[[
-        "Start Date", "Complete Date", "Gang name", "Tower Weight", "Productivity", "Project Name"
+        "Start Date", "Complete Date", "Gang name", "Tower Weight", "Productivity", "Project Name", "Location No.", "Status"
     ]].copy()
 
     # ---- Per-day (EXPANDED) ----
@@ -397,6 +405,8 @@ def process_file(path: Path):
                 "Tower Weight": r["Tower Weight"],
                 "Productivity": r["Productivity"],
                 "Project Name": r["Project Name"],
+                "Location No.": r["Location No."],
+                "Status": r["Status"],
             })
 
     per_day = pd.DataFrame(rows)
