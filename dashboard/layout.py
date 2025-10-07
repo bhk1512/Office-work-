@@ -297,7 +297,7 @@ def build_kpi_cards() -> dbc.Row:
                     dbc.CardBody(
                         [
                             html.Div(_icon("users"), className="kpi__icon"),
-                            html.Div("Active Projects", className="kpi-label"),
+                            html.Div("Active Gangs", className="kpi-label"),
                             html.Div(
                                 [ html.Span(id="kpi-active", className="kpi-value") ],
                                 className="kpi-row",

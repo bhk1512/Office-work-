@@ -150,7 +150,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         compile_microplans_to_workbook(
             input_dir=micro_input_dir,
             output_path=str(resolved_output),
-            write_raw_per_project=False,  # set True if you want cleaned per-project sheets too
         )
     else:
         print("[pipeline] Skipping compilation step as requested.")

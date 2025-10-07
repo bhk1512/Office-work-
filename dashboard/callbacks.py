@@ -29,7 +29,6 @@ from .config import AppConfig
 from .filters import apply_filters, resolve_months
 from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang
 from .workbook import make_trace_workbook_bytes
-from .data_loader import load_microplan_responsibilities
 
 
 LOGGER = logging.getLogger(__name__)
@@ -541,78 +540,223 @@ def register_callbacks(
         Input("f-resp-entity", "value"),
         Input("f-resp-metric", "value"),
     )
-    def update_responsibilities(project_value: str | None,
-                                entity_value: str | None,
-                                metric_value: str | None):
-        # graceful empty state
+    def update_responsibilities(
+        project_value: str | None,
+        entity_value: str | None,
+        metric_value: str | None,
+    ):
+        def _empty_response(message: str):
+            empty_fig = build_empty_responsibilities_figure(message)
+            return empty_fig, "\u2014", "\u2014", "\u2014"
+
         if not project_value:
-            empty = build_empty_responsibilities_figure("Select a single project to view its details.")
-            return empty, "—", "—", "—"
+            return _empty_response("Select a single project to view its details.")
 
         entity_value = (entity_value or "Supervisor").strip()
         metric_value = (metric_value or "tower_weight").strip()
+        metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
 
         cfg = AppConfig()
-        df = load_microplan_responsibilities(cfg.data_path)
+        try:
+            workbook = pd.ExcelFile(cfg.data_path)
+        except FileNotFoundError:
+            LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
+            return _empty_response("Compiled workbook not found.")
+        except Exception as exc:
+            LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
+            return _empty_response("Unable to load Micro Plan data.")
 
-        if df.empty:
-            empty = build_empty_responsibilities_figure("No Micro Plan data found in the compiled workbook.")
-            return empty, "—", "—", "—"
+        atomic_sheet = "MicroPlanResponsibilities"
+        if atomic_sheet not in workbook.sheet_names:
+            LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
+            return _empty_response("No Micro Plan data found in the compiled workbook.")
 
-        # normalize project text and match
-        sel_norm = str(project_value).replace("\u00a0", " ").strip()
+        df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
+
+        def _normalize_text(value: object) -> str:
+            text = str(value).replace("\u00a0", " ").strip()
+            lowered = text.lower()
+            if lowered in {"", "nan", "none", "null"}:
+                return ""
+            return text
+
+        def _normalize_lower(value: object) -> str:
+            return _normalize_text(value).lower()
+
+        def _normalize_location(value: object) -> str:
+            txt = _normalize_text(value)
+            if not txt or txt.lower() in {"nan", "none"}:
+                return ""
+            if txt.endswith(".0") and txt.replace(".", "", 1).isdigit():
+                txt = txt.split(".", 1)[0]
+            return txt
+
+        text_columns = ("project_key", "project_name", "entity_type", "entity_name", "location_no")
+        for col in text_columns:
+            if col not in df_atomic.columns:
+                df_atomic[col] = ""
+            df_atomic[col] = df_atomic[col].map(_normalize_text)
+
+        standard_entity_labels = {
+            "gangs": "Gang",
+            "gang": "Gang",
+            "section incharges": "Section Incharge",
+            "section incharge": "Section Incharge",
+            "section in-charge": "Section Incharge",
+            "supervisors": "Supervisor",
+            "supervisor": "Supervisor",
+        }
+        df_atomic["entity_type"] = df_atomic["entity_type"].map(
+            lambda val: standard_entity_labels.get(val.lower(), val) if val else val
+        )
+
+        numeric_columns = {
+            "revenue_planned": 0.0,
+            "revenue_realised": 0.0,
+            "tower_weight": 0.0,
+        }
+        for col, default in numeric_columns.items():
+            if col not in df_atomic.columns:
+                df_atomic[col] = default
+            df_atomic[col] = pd.to_numeric(df_atomic[col], errors="coerce").fillna(default)
+
+        df_atomic["project_key_lc"] = df_atomic["project_key"].str.lower()
+        df_atomic["project_name_lc"] = df_atomic["project_name"].str.lower()
+        df_atomic["entity_type_lc"] = df_atomic["entity_type"].str.lower()
+        df_atomic["location_no_norm"] = df_atomic["location_no"].map(_normalize_location)
+
+        sel_norm = _normalize_text(project_value)
         sel_lc = sel_norm.lower()
 
-        dfp = df[(df["project_name_lc"] == sel_lc) | (df["project_key_lc"] == sel_lc)]
-        if dfp.empty:
-            dfp = df[df["project_name_lc"].str.contains(sel_lc, na=False)]
+        df_project = df_atomic[
+            (df_atomic["project_name_lc"] == sel_lc) | (df_atomic["project_key_lc"] == sel_lc)
+        ]
+        if df_project.empty:
+            df_project = df_atomic[df_atomic["project_name_lc"].str.contains(sel_lc, na=False)]
 
-        # keep only the chosen entity type
-        dfp = dfp[dfp["entity_type"].astype(str).str.strip().str.lower() == entity_value.lower()]
-        if dfp.empty:
-            empty = build_empty_responsibilities_figure("No responsibilities found for the selected filters.")
-            return empty, "—", "—", "—"
+        if df_project.empty:
+            return _empty_response("Selected project not found in Micro Plan data.")
 
-        # ---- figure
+        entity_lc = entity_value.lower()
+        df_entity = df_project[df_project["entity_type_lc"] == entity_lc].copy()
+
+        if df_entity.empty:
+            return _empty_response("No responsibilities found for the selected filters.")
+
+        daily_sheet = None
+        for candidate in ("Daily Expanded", "DailyExpanded"):
+            if candidate in workbook.sheet_names:
+                daily_sheet = candidate
+                break
+
+        completed_keys: set[tuple[str, str]] = set()
+        if daily_sheet:
+            try:
+                df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
+            except Exception as exc:
+                LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
+                df_daily = pd.DataFrame()
+            else:
+                def _pick_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str:
+                    mapping = {str(col).strip().lower(): col for col in frame.columns}
+                    for candidate in candidates:
+                        key = candidate.strip().lower()
+                        if key in mapping:
+                            return mapping[key]
+                    for key, original in mapping.items():
+                        if any(cand.lower() in key for cand in candidates):
+                            return original
+                    raise KeyError(candidates)
+
+                try:
+                    col_proj = _pick_column(df_daily, ("project_name", "project"))
+                    col_loc = _pick_column(df_daily, ("location_no", "location number", "location"))
+                except KeyError:
+                    LOGGER.warning(
+                        "Daily sheet missing project/location columns; delivered will rely on realised values only."
+                    )
+                else:
+                    cleaned = pd.DataFrame(
+                        {
+                            "project_name_lc": df_daily[col_proj].map(_normalize_lower),
+                            "location_no_norm": df_daily[col_loc].map(_normalize_location),
+                        }
+                    )
+                    completed_keys = {
+                        (p, loc)
+                        for p, loc in zip(cleaned["project_name_lc"], cleaned["location_no_norm"])
+                        if p and loc
+                    }
+        else:
+            LOGGER.info(
+                "Daily Expanded sheet not found; delivered values fall back to realised revenue only."
+            )
+
+        df_entity["is_completed"] = [
+            (proj, loc) in completed_keys
+            for proj, loc in zip(df_entity["project_name_lc"], df_entity["location_no_norm"])
+        ]
+
+        df_entity["delivered_revenue"] = np.where(
+            df_entity["revenue_realised"] > 0,
+            df_entity["revenue_realised"],
+            np.where(df_entity["is_completed"], df_entity["revenue_planned"], 0.0),
+        )
+        df_entity["delivered_tower_weight"] = np.where(
+            df_entity["is_completed"], df_entity["tower_weight"], 0.0
+        )
+
+        df_entity = df_entity[df_entity["entity_name"].astype(bool)].copy()
+        if df_entity.empty:
+            return _empty_response("No responsibilities found for the selected filters.")
+
+        aggregated = (
+            df_entity.groupby("entity_name", as_index=False)[
+                [
+                    "revenue_planned",
+                    "delivered_revenue",
+                    "tower_weight",
+                    "delivered_tower_weight",
+                ]
+            ]
+            .sum()
+        )
+        aggregated = aggregated.rename(columns={"revenue_planned": "revenue"})
+
+        if aggregated.empty:
+            return _empty_response("No responsibilities found for the selected filters.")
+
+        aggregated["delivered_value"] = np.where(
+            metric_value == "revenue",
+            aggregated["delivered_revenue"],
+            aggregated["delivered_tower_weight"],
+        )
+
         fig = build_responsibilities_chart(
-            dfp,
+            aggregated,
             entity_label=entity_value,
             metric=metric_value,
             title=None,
             top_n=20,
         )
 
-        # ---- KPI totals
-        total_target = float(dfp[metric_value].sum())
-
-        # pick delivered column if present; fallback = 10% proxy (same as chart)
-        delivered_col = None
-        for cand in ("delivered", "actual_delivered", "achieved", "delivered_mt", "delivered_value"):
-            if cand in dfp.columns:
-                delivered_col = cand
-                break
-
-        if delivered_col:
-            total_delivered = float(dfp[delivered_col].fillna(0).sum())
+        if metric_value == "revenue":
+            total_target = float(aggregated["revenue"].sum())
+            total_delivered = float(aggregated["delivered_revenue"].sum())
         else:
-            total_delivered = float(0.10 * total_target)
+            total_target = float(aggregated["tower_weight"].sum())
+            total_delivered = float(aggregated["delivered_tower_weight"].sum())
 
         achievement = 0.0 if total_target == 0 else (total_delivered / total_target) * 100.0
 
-        # Formatters: MT vs Revenue
-        def fmt_num(v: float) -> str:
-            # for revenue, show currency with thousands; for MT, plain thousands
+        def fmt_num(value: float) -> str:
             if metric_value == "revenue":
-                try:
-                    # ₹ with Indian grouping is tricky; keep simple international grouping
-                    return f"₹{v:,.0f}"
-                except Exception:
-                    return f"₹{v:,.0f}"
-            return f"{v:,.0f}"
+                return f"\u20b9{value:,.0f}"
+            return f"{value:,.0f} MT"
 
         kpi_target_txt = fmt_num(total_target)
-        kpi_deliv_txt  = fmt_num(total_delivered)
-        kpi_ach_txt    = f"{achievement:.0f}%"
+        kpi_deliv_txt = fmt_num(total_delivered)
+        kpi_ach_txt = f"{achievement:.0f}%"
 
         return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
 
@@ -1105,3 +1249,7 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+
+
+

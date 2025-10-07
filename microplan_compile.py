@@ -382,7 +382,6 @@ def compile_microplans_to_workbook(
     input_dir: str,
     output_path: str,
     *,
-    # write_raw_per_project: bool = WRITE_MICROPLAN_RAW_PER_PROJECT,
     schema: dict = CURRENT_MICROPLAN_SCHEMA,
     glob_pattern: str = MICROPLAN_GLOB_PATTERN
 ) -> None:
@@ -485,7 +484,6 @@ def main() -> None:
     compile_microplans_to_workbook(
         input_dir=args.input_dir,
         output_path=args.output_xlsx,
-        # write_raw_per_project=bool(args.write_raw),
     )
 
 
