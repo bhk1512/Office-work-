@@ -1,0 +1,9 @@
+        if not project_value:`r`n            return _empty_response("Select a single project to view its details.")`r`n`r`n        if isinstance(project_value, (list, tuple)):`r`n            cleaned_projects = [str(p).strip() for p in project_value if p]`r`n            if len(cleaned_projects) != 1:`r`n                return _empty_response("Select a single project to view its details.")`r`n            project_value = cleaned_projects[0]`r`n`r`n        entity_value = (entity_value or "Supervisor").strip()
+        metric_value = (metric_value or "tower_weight").strip()
+        metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
+
+        load_error_msg: str | None = None
+        completed_keys: set[tuple[str, str]] = set()
+        df_atomic: pd.DataFrame | None = None
+        workbook: pd.ExcelFile | None = None
+

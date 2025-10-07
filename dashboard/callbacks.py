@@ -543,6 +543,12 @@ def register_callbacks(
         if not project_value:
             return _empty_response("Select a single project to view its details.")
 
+        if isinstance(project_value, (list, tuple)):
+            cleaned_projects = [str(p).strip() for p in project_value if p]
+            if len(cleaned_projects) != 1:
+                return _empty_response("Select a single project to view its details.")
+            project_value = cleaned_projects[0]
+
         entity_value = (entity_value or "Supervisor").strip()
         metric_value = (metric_value or "tower_weight").strip()
         metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
@@ -702,12 +708,18 @@ def register_callbacks(
 
         sel_norm = _normalize_text(project_value)
         sel_lc = sel_norm.lower()
+        sel_compact = re.sub(r"[^a-z0-9]", "", sel_lc)
 
         df_project = df_atomic[
             (df_atomic["project_name_lc"] == sel_lc) | (df_atomic["project_key_lc"] == sel_lc)
         ]
-        if df_project.empty:
-            df_project = df_atomic[df_atomic["project_name_lc"].str.contains(sel_lc, na=False)]
+
+        if df_project.empty and sel_compact:
+            project_name_compact = df_atomic["project_name_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+            project_key_compact = df_atomic["project_key_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+            df_project = df_atomic[
+                (project_name_compact == sel_compact) | (project_key_compact == sel_compact)
+            ]
 
         if df_project.empty:
             return _empty_response("Selected project not found in Micro Plan data.")
@@ -1412,6 +1424,10 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+
+
+
 
 
 
