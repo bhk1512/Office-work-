@@ -1277,10 +1277,37 @@ def register_callbacks(
         idle_df = compute_idle_intervals_per_gang(
             idle_source, loss_max_gap_days=config.loss_max_gap_days
         )
+        baseline_lookup: dict[str, float] = {}
+        if not idle_source.empty:
+            baseline_lookup = {
+                gang: calc_idle_and_loss(
+                    gang_df,
+                    loss_max_gap_days=config.loss_max_gap_days,
+                )[1]
+                for gang, gang_df in idle_source.groupby("gang_name")
+            }
         if not idle_df.empty:
-            idle_df = idle_df.assign(
-                interval_start=idle_df["interval_start"].dt.strftime("%d-%m-%Y"),
-                interval_end=idle_df["interval_end"].dt.strftime("%d-%m-%Y"),
+            idle_df["baseline"] = idle_df["gang_name"].map(baseline_lookup).fillna(0.0)
+            idle_df["interval_loss_mt"] = (
+                idle_df["baseline"].astype(float)
+                * idle_df["idle_days_capped"].astype(float)
+            )
+            idle_df["cumulative_loss"] = idle_df.groupby("gang_name")[
+                "interval_loss_mt"
+            ].cumsum()
+            def _fmt_metric(value):
+                if pd.isna(value):
+                    return ""
+                formatted = f"{value:.2f}"
+                return formatted.rstrip("0").rstrip(".")
+            idle_df = (
+                idle_df.assign(
+                    interval_start=idle_df["interval_start"].dt.strftime("%d-%m-%Y"),
+                    interval_end=idle_df["interval_end"].dt.strftime("%d-%m-%Y"),
+                    baseline=idle_df["baseline"].apply(_fmt_metric),
+                    cumulative_loss=idle_df["cumulative_loss"].apply(_fmt_metric),
+                )
+                .drop(columns=["interval_loss_mt"])
             )
         idle_data = idle_df.to_dict("records")
 

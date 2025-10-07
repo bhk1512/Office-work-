@@ -107,6 +107,8 @@ def _build_trace_contents(
                                 {"name": "Interval End", "id": "interval_end"},
                                 {"name": "Raw Gap (days)", "id": "raw_gap_days"},
                                 {"name": "Idle Counted (days)", "id": "idle_days_capped"},
+                                {"name": "Baseline (MT/day)", "id": "baseline"},
+                                {"name": "Cumulative Loss (MT)", "id": "cumulative_loss"},
                             ],
                             data=[],
                             page_size=10,
@@ -128,9 +130,9 @@ def _build_trace_contents(
                         dash_table.DataTable(
                             id=daily_table_id,
                             columns=[
-                                {"name": "Date", "id": "date"},
                                 {"name": "Gang", "id": "gang_name"},
                                 {"name": "Project", "id": "project_name"},
+                                {"name": "Date", "id": "date"},
                                 {"name": "MT/day", "id": "daily_prod_mt"},
                             ],
                             data=[],
@@ -139,7 +141,9 @@ def _build_trace_contents(
                             style_cell={
                                 "fontFamily": "Inter, system-ui",
                                 "fontSize": 13,
+                                "border": "1px solid var(--border, #e6e9f0)",
                             },
+                            style_header={"border": "1px solid var(--border, #e6e9f0)"},
                         ),
                     ],
                     md=6,
