@@ -1,4 +1,4 @@
-"""Excel workbook export helpers."""
+﻿"""Excel workbook export helpers."""
 from __future__ import annotations
 
 import logging
@@ -9,7 +9,7 @@ from typing import Sequence
 import pandas as pd
 
 from .config import AppConfig
-from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang
+from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang, compute_gang_baseline_maps
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,10 +37,17 @@ def make_trace_workbook_bytes(
     active_config = config or AppConfig()
     LOGGER.info("Building trace workbook (rows=%d)", len(scoped_data))
 
+    overall_baseline_map, monthly_baseline_map = compute_gang_baseline_maps(scoped_data)
+
     summary_rows: list[dict[str, object]] = []
     for gang_name, gang_df in scoped_data.groupby("gang_name"):
+        overall_baseline = overall_baseline_map.get(gang_name)
+        monthly_baseline = monthly_baseline_map.get(gang_name)
         idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
-            gang_df, loss_max_gap_days=active_config.loss_max_gap_days
+            gang_df,
+            loss_max_gap_days=active_config.loss_max_gap_days,
+            baseline_mt_per_day=overall_baseline,
+            baseline_by_month=monthly_baseline,
         )
         summary_rows.append(
             {
@@ -74,7 +81,10 @@ def make_trace_workbook_bytes(
     )
 
     idle_df = compute_idle_intervals_per_gang(
-        scoped_data, loss_max_gap_days=active_config.loss_max_gap_days
+        scoped_data,
+        loss_max_gap_days=active_config.loss_max_gap_days,
+        baseline_month_lookup=monthly_baseline_map,
+        baseline_fallback_map=overall_baseline_map,
     )
     daily_df = (
         scoped_data.sort_values(["gang_name", "date"])
@@ -124,7 +134,10 @@ def make_trace_workbook_bytes(
             selected = scoped_data[scoped_data["gang_name"] == gang_for_sheet]
             if not selected.empty:
                 single_idle = compute_idle_intervals_per_gang(
-                    selected, loss_max_gap_days=active_config.loss_max_gap_days
+                    selected,
+                    loss_max_gap_days=active_config.loss_max_gap_days,
+                    baseline_month_lookup=monthly_baseline_map,
+                    baseline_fallback_map=overall_baseline_map,
                 )
                 single_idle.to_excel(
                     writer,
@@ -138,7 +151,10 @@ def make_trace_workbook_bytes(
                 )
 
                 idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
-                    selected, loss_max_gap_days=active_config.loss_max_gap_days
+                    selected,
+                    loss_max_gap_days=active_config.loss_max_gap_days,
+                    baseline_mt_per_day=overall_baseline_map.get(gang_for_sheet),
+                    baseline_by_month=monthly_baseline_map.get(gang_for_sheet),
                 )
                 efficiency = (delivered / potential * 100) if potential > 0 else 0.0
                 pd.DataFrame(
@@ -192,3 +208,8 @@ def make_trace_workbook_bytes(
 
     buffer.seek(0)
     return buffer.getvalue()
+
+
+
+
+

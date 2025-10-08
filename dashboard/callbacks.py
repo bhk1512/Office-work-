@@ -1,4 +1,4 @@
-"""Dash callbacks for the productivity dashboard."""
+﻿"""Dash callbacks for the productivity dashboard."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .charts import (
 )
 from .config import AppConfig
 from .filters import apply_filters, resolve_months
-from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang
+from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang, compute_gang_baseline_maps
 from .workbook import make_trace_workbook_bytes
 
 
@@ -37,7 +37,7 @@ BENCHMARK_MT_PER_DAY = 9.0
 
 _slug = lambda s: re.sub(r"[^a-z0-9_-]+", "-", str(s).lower()).strip("-")
 
-def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project="—", last_date="—"):
+def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project="â€”", last_date="â€”"):
     badge_cls = "good" if pct >= 80 else ("mid" if pct >= 65 else "low")
     delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
@@ -137,7 +137,7 @@ def register_callbacks(
         const prop   = ctx.triggered[0].prop_id || "";
         const idPart = prop.split(".")[0];
 
-        // --- AVP surfaces (row or overlay) — only accept real, timestamped clicks
+        // --- AVP surfaces (row or overlay) â€” only accept real, timestamped clicks
         try {
             const pid = JSON.parse(idPart);
             if (pid && (pid.type === "avp-row" || pid.type === "avp-tip")) {
@@ -472,7 +472,7 @@ def register_callbacks(
         if row.empty:
             return (
                 default_title,
-                html.Div(f"No project details found for “{pname}”.", className="project-empty"),
+                html.Div(f"No project details found for â€œ{pname}â€.", className="project-empty"),
             )
 
         r = row.iloc[0]
@@ -545,7 +545,7 @@ def register_callbacks(
             className="project-grid",
         )
 
-        title = f"{pname} – Project Overview"
+        title = f"{pname} â€“ Project Overview"
         return title, body
 
 
@@ -921,19 +921,20 @@ def register_callbacks(
             loss_scope = scoped_all.copy()
             history_scope = scoped_all.copy()
 
-        baseline_map = {}
-        if not history_scope.empty and "gang_name" in history_scope:
-            baseline_map = (
-                history_scope.groupby("gang_name")["daily_prod_mt"].mean().dropna().to_dict()
-            )
+        baseline_overall_map, baseline_monthly_map = compute_gang_baseline_maps(scoped_all)
+        history_overall_map, _ = compute_gang_baseline_maps(history_scope)
+        if history_overall_map:
+            baseline_overall_map.update(history_overall_map)
 
+        baseline_map = baseline_overall_map
         loss_rows: list[dict[str, float]] = []
         for gang_name, gang_df in loss_scope.groupby("gang_name"):
-            override_baseline = baseline_map.get(gang_name)
+            overall_baseline = baseline_overall_map.get(gang_name)
             idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
                 gang_df,
                 loss_max_gap_days=config.loss_max_gap_days,
-                baseline_mt_per_day=override_baseline,
+                baseline_mt_per_day=overall_baseline,
+                baseline_by_month=baseline_monthly_map.get(gang_name),
             )
             loss_rows.append(
                 {
@@ -1043,8 +1044,8 @@ def register_callbacks(
 
         # pretty, null-safe strings for hover (NO KeyError even if meta missing)
         last_date_series = pd.to_datetime(loss_df.get("last_date"), errors="coerce")
-        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("—")
-        loss_df["last_project"]  = loss_df.get("last_project").fillna("—")
+        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("â€”")
+        loss_df["last_project"]  = loss_df.get("last_project").fillna("â€”")
 
         # Build left-card HTML list from loss_df (now that meta is attached)
 
@@ -1142,8 +1143,8 @@ def register_callbacks(
                 # match Top/Bottom customdata shape: [last_project, last_date_str, current_metric, baseline_metric]
                 customdata=np.stack(
                     [
-                        loss_df["last_project"].fillna("—"),
-                        loss_df["last_date_str"].fillna("—"),
+                        loss_df["last_project"].fillna("â€”"),
+                        loss_df["last_date_str"].fillna("â€”"),
                         loss_df["avg_prod"].fillna(0.0),      # current metric (MT/day)
                         loss_df["baseline"].fillna(0.0),      # baseline (MT/day)
                     ],
@@ -1178,8 +1179,8 @@ def register_callbacks(
                 width=0.95,
                 customdata=np.stack(
                     [
-                        loss_df["last_project"].fillna("—"),
-                        loss_df["last_date_str"].fillna("—"),
+                        loss_df["last_project"].fillna("â€”"),
+                        loss_df["last_date_str"].fillna("â€”"),
                         loss_df["avg_prod"].fillna(0.0),
                         loss_df["baseline"].fillna(0.0),
                     ],
@@ -1321,25 +1322,25 @@ def register_callbacks(
                 fb = fb[fb["month"].isin(months_ts)]
             return fb
 
+        baseline_source = df_day.copy()
+        if project_list:
+            baseline_source = baseline_source[baseline_source["project_name"].isin(project_list)]
+        if gang_list:
+            baseline_source = baseline_source[baseline_source["gang_name"].isin(gang_list)]
+        overall_baseline_map, monthly_baseline_map = compute_gang_baseline_maps(baseline_source)
+
         # Idle intervals
         idle_source = pick_gang_scope(gang_focus)
         if idle_source.empty:
             idle_source = scoped if not scoped.empty else base_scope
 
         idle_df = compute_idle_intervals_per_gang(
-            idle_source, loss_max_gap_days=config.loss_max_gap_days
+            idle_source,
+            loss_max_gap_days=config.loss_max_gap_days,
+            baseline_month_lookup=monthly_baseline_map,
+            baseline_fallback_map=overall_baseline_map,
         )
-        baseline_lookup: dict[str, float] = {}
-        if not idle_source.empty:
-            baseline_lookup = {
-                gang: calc_idle_and_loss(
-                    gang_df,
-                    loss_max_gap_days=config.loss_max_gap_days,
-                )[1]
-                for gang, gang_df in idle_source.groupby("gang_name")
-            }
         if not idle_df.empty:
-            idle_df["baseline"] = idle_df["gang_name"].map(baseline_lookup).fillna(0.0)
             idle_df["interval_loss_mt"] = (
                 idle_df["baseline"].astype(float)
                 * idle_df["idle_days_capped"].astype(float)
@@ -1347,11 +1348,13 @@ def register_callbacks(
             idle_df["cumulative_loss"] = idle_df.groupby("gang_name")[
                 "interval_loss_mt"
             ].cumsum()
+
             def _fmt_metric(value):
                 if pd.isna(value):
                     return ""
                 formatted = f"{value:.2f}"
                 return formatted.rstrip("0").rstrip(".")
+
             idle_df = (
                 idle_df.assign(
                     interval_start=idle_df["interval_start"].dt.strftime("%d-%m-%Y"),
@@ -1503,6 +1506,12 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+
+
+
+
+
 
 
 

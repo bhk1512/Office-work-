@@ -255,6 +255,7 @@ def build_controls() -> dbc.Card:
                                         id="link-clear-quick-range",
                                         n_clicks=0,
                                         className="filter-clear-link",
+                                        style={"cursor": "pointer"},
                                     ),
                                 ],
                                 className="filter-quick-under-months",
@@ -798,6 +799,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
         fluid=True,
     )
     return layout
+
 
 
 
