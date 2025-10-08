@@ -561,12 +561,16 @@ def register_callbacks(
         Input("f-project", "value"),
         Input("f-resp-entity", "value"),
         Input("f-resp-metric", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
     )
     def update_responsibilities(
         project_value: str | None,
         entity_value: str | None,
         metric_value: str | None,
-    ):
+        months_value: Sequence[str] | None,
+        quick_range_value: str | None,
+    ): 
         def _empty_response(message: str):
             empty_fig = build_empty_responsibilities_figure(message)
             return empty_fig, "\u2014", "\u2014", "\u2014"
@@ -634,6 +638,17 @@ def register_callbacks(
             return _empty_response(message)
 
         df_atomic = df_atomic.copy()
+
+        month_list = _ensure_list(months_value)
+        months_ts = resolve_months(month_list, quick_range_value)
+        active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
+
+        if 'completion_date' in df_atomic.columns:
+            df_atomic['completion_month'] = pd.to_datetime(
+                df_atomic['completion_date'], errors='coerce'
+            ).dt.to_period('M').dt.to_timestamp()
+        else:
+            df_atomic['completion_month'] = pd.NaT
 
         def _normalize_text(value: object) -> str:
             text = str(value).replace("\u00a0", " ").strip()
@@ -754,6 +769,17 @@ def register_callbacks(
 
         if df_project.empty:
             return _empty_response("Selected project not found in Micro Plan data.")
+
+        if not active_months:
+            return _empty_response("Select a month to view the Micro Plan.")
+
+        if active_months:
+            month_mask = df_project['completion_month'].isin(active_months)
+            if not month_mask.any():
+                label = _format_period_label(active_months)
+                label_clean = label.strip('()') if label else 'selected month'
+                return _empty_response(f"Micro Plan for {label_clean} is not available.")
+            df_project = df_project.loc[month_mask].copy()
 
         entity_lc = entity_value.lower()
         df_entity = df_project[df_project["entity_type_lc"] == entity_lc].copy()
