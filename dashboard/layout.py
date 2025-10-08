@@ -419,16 +419,53 @@ def build_trace_block() -> dbc.Card:
 def build_erections_card() -> dbc.Card:
     """Standalone card that lists completed erections for the selected filters."""
 
-    date_picker = dcc.DatePickerRange(
-        id="erections-completion-range",
-        min_date_allowed=datetime(2021, 1, 1),
-        max_date_allowed=TODAY_DATE,
-        start_date=DEFAULT_COMPLETION_DATE,
-        end_date=DEFAULT_COMPLETION_DATE,
-        display_format="DD-MM-YYYY",
-        minimum_nights=0,
-        persistence=True,
-        persistence_type="session",
+    controls = dbc.Row(
+        [
+            dbc.Col(
+                [
+                    html.Div("Erections Completed", className="section-title mb-2"),
+                    html.Div(
+                        "Completion date (defaults to yesterday)",
+                        className="fw-semibold mb-1",
+                    ),
+                    dcc.DatePickerRange(
+                        id="erections-completion-range",
+                        min_date_allowed=datetime(2021, 1, 1),
+                        max_date_allowed=TODAY_DATE,
+                        start_date=DEFAULT_COMPLETION_DATE,
+                        end_date=DEFAULT_COMPLETION_DATE,
+                        display_format="DD-MM-YYYY",
+                        minimum_nights=0,
+                        persistence=True,
+                        persistence_type="session",
+                    ),
+                ],
+                md=6,
+                lg=4,
+            ),
+            dbc.Col(
+                dbc.Input(
+                    id="erections-search",
+                    placeholder="Filter by project, gang, or location",
+                    type="text",
+                    value="",
+                ),
+                md=4,
+                lg=4,
+            ),
+            dbc.Col(
+                dbc.Button(
+                    "Reset",
+                    id="btn-reset-erections",
+                    color="secondary",
+                    outline=True,
+                    className="w-100",
+                ),
+                md=2,
+                lg=2,
+            ),
+        ],
+        className="g-3 align-items-end mb-3",
     )
 
     table = dash_table.DataTable(
@@ -447,6 +484,8 @@ def build_erections_card() -> dbc.Card:
         ],
         data=[],
         page_size=10,
+        sort_action="native",
+        filter_action="native",
         style_table={"overflowX": "auto"},
         style_cell={
             "fontFamily": "Inter, system-ui",
@@ -456,27 +495,7 @@ def build_erections_card() -> dbc.Card:
         style_header={"border": "1px solid var(--border, #e6e9f0)"},
     )
 
-    body = [
-        dbc.Row(
-            [
-                dbc.Col(
-                    [
-                        html.Div("Erections Completed", className="section-title"),
-                        html.Div(
-                            "Completion date (defaults to yesterday)",
-                            className="fw-semibold mb-1",
-                        ),
-                        date_picker,
-                    ],
-                    md=6,
-                    lg=4,
-                ),
-                dbc.Col(md=6, lg=8),
-            ],
-            className="mb-3",
-        ),
-        table,
-    ]
+    body = [controls, table]
 
     return dbc.Card(
         dbc.CardBody(body),

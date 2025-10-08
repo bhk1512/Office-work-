@@ -37,7 +37,7 @@ BENCHMARK_MT_PER_DAY = 9.0
 
 _slug = lambda s: re.sub(r"[^a-z0-9_-]+", "-", str(s).lower()).strip("-")
 
-def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project="â€”", last_date="â€”"):
+def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project="ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â", last_date="ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"):
     badge_cls = "good" if pct >= 80 else ("mid" if pct >= 65 else "low")
     delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
@@ -137,7 +137,7 @@ def register_callbacks(
         const prop   = ctx.triggered[0].prop_id || "";
         const idPart = prop.split(".")[0];
 
-        // --- AVP surfaces (row or overlay) â€” only accept real, timestamped clicks
+        // --- AVP surfaces (row or overlay) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â only accept real, timestamped clicks
         try {
             const pid = JSON.parse(idPart);
             if (pid && (pid.type === "avp-row" || pid.type === "avp-tip")) {
@@ -415,127 +415,137 @@ def register_callbacks(
 
     # ---- Project Overview (dynamic body) -----------------------------------------
     @app.callback(
-        Output("pd-title", "children"),          # header text
-        Output("project-details", "children"),   # body (message OR 3-col grid)
+        Output("pd-title", "children"),
+        Output("project-details", "children"),
         Input("f-project", "value"),
         prevent_initial_call=False,
     )
     def show_project_details(selected_project):
-        """
-        If no selection -> show friendly message.
-        If selection found -> render the 3-column grid with real values.
-        Uses project_info_provider() as in your existing code.
-        """
+        """Render the project overview grid or an informative message."""
+
         default_title = "Project Overview"
 
-        # Normalize list vs string from a multi=True dropdown
+        def _clean_text(raw: Any) -> str:
+            if raw is None:
+                return ""
+            text = str(raw).strip()
+            if not text:
+                return ""
+            if any(marker in text for marker in ("Ã", "Â")):
+                try:
+                    text = text.encode("latin-1").decode("utf-8").strip()
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    pass
+            return text
+
+        def _normalize_for_match(raw: Any) -> str:
+            text = _clean_text(raw)
+            return " ".join(text.lower().split())
+
         if isinstance(selected_project, (list, tuple)):
-            if len(selected_project) != 1:
+            cleaned = [_clean_text(value) for value in selected_project if _clean_text(value)]
+            if len(cleaned) != 1:
                 return (
                     default_title,
                     html.Div("Select a single project to view its details.", className="project-empty"),
                 )
-            selected_project = selected_project[0]
+            selected_project = cleaned[0]
+        else:
+            selected_project = _clean_text(selected_project)
 
-        # 1) No selection -> message
         if not selected_project:
             return (
                 default_title,
                 html.Div("Select a single project to view its details.", className="project-empty"),
             )
 
-        # 2) Source existence checks (same expectations as your current code)
         if not project_info_provider:
             return (
                 default_title,
                 html.Div("No 'Project Details' source configured.", className="project-empty"),
             )
 
-        df_info = project_info_provider()  # must return a DataFrame
+        df_info = project_info_provider()
         if df_info is None or df_info.empty:
             return (
                 default_title,
                 html.Div("No 'Project Details' sheet found in the source workbook.", className="project-empty"),
             )
 
-        pname = str(selected_project).strip()
+        df_info = df_info.copy()
+        target_norm = _normalize_for_match(selected_project)
+        candidate_columns = [col for col in ("Project Name", "project_name", "project_code") if col in df_info.columns]
 
-        # Try exact match first, then normalized match on 'Project Name'
-        row = df_info[df_info.get("Project Name") == pname]
-        if "Project Name" in df_info.columns:
-            row = df_info[df_info["Project Name"].astype(str).str.strip() == pname]
-        
+        row = pd.DataFrame()
+        for col in candidate_columns:
+            mask = df_info[col].apply(_normalize_for_match) == target_norm
+            if mask.any():
+                row = df_info.loc[mask]
+                break
+
         if row.empty and "Project Name" in df_info.columns:
-            norm = lambda s: " ".join(str(s).strip().lower().split())
-            row = df_info[df_info["Project Name"].apply(norm) == norm(pname)]
+            series = df_info["Project Name"].astype(str).apply(_clean_text)
+            mask = series.str.contains(selected_project, case=False, na=False)
+            if mask.any():
+                row = df_info.loc[mask]
 
         if row.empty:
             return (
                 default_title,
-                html.Div(f"No project details found for â€œ{pname}â€.", className="project-empty"),
+                html.Div(f"No project details found for {selected_project}.", className="project-empty"),
             )
 
-        r = row.iloc[0]
+        record = row.iloc[0]
 
-        # Helpers (same as you used)
         def fmt_txt(key: str) -> str:
-            v = r.get(key, "")
-            return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
+            value = record.get(key, "")
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return ""
+            return _clean_text(value)
 
         def fmt_date(key: str) -> str:
-            v = r.get(key, None)
-            if v is None or (isinstance(v, float) and pd.isna(v)):
+            value = record.get(key, None)
+            if value is None or (isinstance(value, float) and pd.isna(value)):
                 return ""
             try:
-                return pd.to_datetime(v).strftime("%d-%m-%Y")
+                return pd.to_datetime(value).strftime("%d-%m-%Y")
             except Exception:
-                return str(v)
+                return _clean_text(value)
 
-        # 3) Build the 3-column body (matches your new CSS skin)
+        display_name = fmt_txt("Project Name") or selected_project
+
         body = html.Div(
             [
-                # Column 1 (Left)
                 html.Div(
                     [
                         html.P("PROJECT CODE", className="project-label"),
                         html.H6(fmt_txt("project_code"), className="project-value"),
-
                         html.P("CLIENT", className="project-label"),
                         html.H6(fmt_txt("client_name"), className="project-value"),
-
                         html.P("NOA START", className="project-label"),
                         html.H6(fmt_date("noa_start"), className="project-value"),
-
                         html.P("LOA END", className="project-label"),
                         html.H6(fmt_date("loa_end"), className="project-value"),
                     ],
                     className="project-col",
                 ),
-
-                # Column 2 (Middle)
                 html.Div(
                     [
                         html.P("PCH", className="project-label"),
                         html.H6(fmt_txt("pch"), className="project-value"),
-
                         html.P("REGIONAL MANAGER", className="project-label"),
                         html.H6(fmt_txt("regional_mgr"), className="project-value"),
-
                         html.P("PROJECT MANAGER", className="project-label"),
                         html.H6(fmt_txt("project_mgr"), className="project-value"),
-
                         html.P("PLANNING ENGINEER", className="project-label"),
                         html.H6(fmt_txt("planning_eng"), className="project-value"),
                     ],
                     className="project-col",
                 ),
-
-                # Column 3 (Right)
                 html.Div(
                     [
                         html.P("SECTION INCHARGE", className="project-label"),
                         html.H6(fmt_txt("section_inch"), className="project-value"),
-
                         html.P("SUPERVISORS", className="project-label"),
                         html.H6(fmt_txt("supervisor"), className="project-value"),
                     ],
@@ -545,11 +555,10 @@ def register_callbacks(
             className="project-grid",
         )
 
-        title = f"{pname} â€“ Project Overview"
+        title = f"{display_name} Project Overview"
         return title, body
 
-
-
+    # --- NEW: responsibilities chart callback ---
     # --- NEW: responsibilities chart callback ---
 
         # Responsibilities: grouped bars + three KPIs
@@ -1044,8 +1053,8 @@ def register_callbacks(
 
         # pretty, null-safe strings for hover (NO KeyError even if meta missing)
         last_date_series = pd.to_datetime(loss_df.get("last_date"), errors="coerce")
-        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("â€”")
-        loss_df["last_project"]  = loss_df.get("last_project").fillna("â€”")
+        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â")
+        loss_df["last_project"]  = loss_df.get("last_project").fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â")
 
         # Build left-card HTML list from loss_df (now that meta is attached)
 
@@ -1143,8 +1152,8 @@ def register_callbacks(
                 # match Top/Bottom customdata shape: [last_project, last_date_str, current_metric, baseline_metric]
                 customdata=np.stack(
                     [
-                        loss_df["last_project"].fillna("â€”"),
-                        loss_df["last_date_str"].fillna("â€”"),
+                        loss_df["last_project"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
+                        loss_df["last_date_str"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
                         loss_df["avg_prod"].fillna(0.0),      # current metric (MT/day)
                         loss_df["baseline"].fillna(0.0),      # baseline (MT/day)
                     ],
@@ -1179,8 +1188,8 @@ def register_callbacks(
                 width=0.95,
                 customdata=np.stack(
                     [
-                        loss_df["last_project"].fillna("â€”"),
-                        loss_df["last_date_str"].fillna("â€”"),
+                        loss_df["last_project"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
+                        loss_df["last_date_str"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
                         loss_df["avg_prod"].fillna(0.0),
                         loss_df["baseline"].fillna(0.0),
                     ],
@@ -1404,6 +1413,7 @@ def register_callbacks(
         gangs,
         months,
         quick_range,
+        search_text,
     ) -> list[dict[str, object]]:
         def _parse_date(value: str | None) -> pd.Timestamp | None:
             if not value:
@@ -1421,10 +1431,11 @@ def register_callbacks(
 
         project_list = _ensure_list(projects)
         gang_list = _ensure_list(gangs)
-        month_list = _ensure_list(months)
+        _unused_months = _ensure_list(months)
+        _unused_quick_range = quick_range  # override shared month filters for this view
 
         df_day = data_provider()
-        months_ts = resolve_months(month_list, quick_range)
+        months_ts = []  # rely on explicit completion range instead of shared Months filter
         scoped = apply_filters(df_day, project_list, months_ts, gang_list).copy()
 
         if scoped.empty or "completion_date" not in scoped.columns:
@@ -1622,7 +1633,36 @@ def register_callbacks(
             }
         )
 
+        if search_text:
+            needle = search_text.strip().lower()
+            if needle:
+                completions_display = completions_display[
+                    completions_display.apply(
+                        lambda row: (
+                            needle in str(row["project_name"]).lower()
+                            or needle in str(row["location_no"]).lower()
+                            or needle in str(row["gang_name"]).lower()
+                        ),
+                        axis=1,
+                    )
+                ]
+
+
         return completions_display.to_dict("records")
+
+    @app.callback(
+        Output("erections-completion-range", "start_date"),
+        Output("erections-completion-range", "end_date"),
+        Output("erections-search", "value"),
+        Input("btn-reset-erections", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def reset_erections_controls(reset_clicks: int | None) -> tuple[str, str, str]:
+        if not reset_clicks:
+            raise PreventUpdate
+
+        default = (pd.Timestamp.today().normalize() - pd.Timedelta(days=1)).date().isoformat()
+        return default, default, ""
 
     @app.callback(
         Output("download-trace-xlsx", "data"),
