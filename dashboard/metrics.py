@@ -27,12 +27,15 @@ def calc_idle_and_loss(
     else:
         idle_days = 0
 
+    baseline: float | None = None
     if baseline_mt_per_day is not None and not pd.isna(baseline_mt_per_day):
         baseline = float(baseline_mt_per_day)
     elif len(group_df):
-        baseline = float(group_df["daily_prod_mt"].mean())
-    else:
-        baseline = 0.0
+        mean_val = group_df["daily_prod_mt"].mean()
+        if not pd.isna(mean_val):
+            baseline = float(mean_val)
+    if baseline is None or baseline <= 0.0:
+        baseline = 5.0
 
     loss_mt = baseline * idle_days
     delivered_mt = float(group_df["daily_prod_mt"].sum())

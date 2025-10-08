@@ -99,6 +99,20 @@ def _ensure_list(value: Sequence[str] | str | None) -> list[str]:
     return list(value)
 
 
+def _format_period_label(months: Sequence[pd.Timestamp]) -> str:
+    if not months:
+        return "(All periods)"
+    periods = sorted({pd.Period(ts, "M") for ts in months})
+    labels = [period.strftime("%b %Y") for period in periods]
+    if len(periods) == 1:
+        return f"({labels[0]})"
+    if all(periods[i] + 1 == periods[i + 1] for i in range(len(periods) - 1)):
+        return f"({labels[0]} - {labels[-1]})"
+    if len(labels) <= 3:
+        return "(" + ", ".join(labels) + ")"
+    return "(" + ", ".join(labels[:3]) + ", ...)"
+
+
 def register_callbacks(
     app: Dash,
     data_provider: Callable[[], pd.DataFrame],
@@ -381,6 +395,23 @@ def register_callbacks(
     def _clear_month_value_on_quick_change(qr):
         # When a quick-range is chosen, let code derive months from it; drop stale manual months.
         return None
+
+
+    @app.callback(
+        Output("label-resp-period", "children"),
+        Output("label-perf-period", "children"),
+        Output("label-gang-period", "children"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+    )
+    def update_period_labels(
+        months: Sequence[str] | None,
+        quick_range: str | None,
+    ) -> tuple[str, str, str]:
+        month_list = _ensure_list(months)
+        months_ts = resolve_months(month_list, quick_range)
+        label = _format_period_label(months_ts)
+        return label, label, label
 
     # ---- Project Overview (dynamic body) -----------------------------------------
     @app.callback(
@@ -845,17 +876,7 @@ def register_callbacks(
             else f"({delta_pct:+.0f}% vs {benchmark:.1f} MT)"
         )
 
-        selected_months = months_ts or []
-        if selected_months:
-            month_start = max(selected_months)
-        else:
-            candidate = scoped if not scoped.empty else df_day
-            last_date = pd.to_datetime(candidate["date"].max())
-            if pd.isna(last_date):
-                month_start = pd.Timestamp.today().to_period("M").to_timestamp()
-            else:
-                month_start = last_date.to_period("M").to_timestamp()
-        month_end = month_start + pd.offsets.MonthBegin(1)
+        has_selected_months = bool(months_ts)
 
         scope_mask = pd.Series(True, index=df_day.index)
         if project_list:
@@ -864,20 +885,25 @@ def register_callbacks(
             scope_mask &= df_day["gang_name"].isin(gang_list)
         scoped_all = df_day.loc[scope_mask].copy()
 
-        loss_scope = scoped_all[
-            (scoped_all["date"] >= month_start) & (scoped_all["date"] < month_end)
-        ].copy()
-        history_scope = scoped_all[scoped_all["date"] < month_start]
+        if has_selected_months and not scoped_all.empty and "month" in scoped_all:
+            month_values = sorted(set(months_ts))
+            period_mask = scoped_all["month"].isin(month_values)
+            loss_scope = scoped_all.loc[period_mask].copy()
+            earliest_month = month_values[0]
+            history_scope = scoped_all.loc[scoped_all["month"] < earliest_month].copy()
+        else:
+            loss_scope = scoped_all.copy()
+            history_scope = scoped_all.copy()
 
         baseline_map = {}
-        if not history_scope.empty:
+        if not history_scope.empty and "gang_name" in history_scope:
             baseline_map = (
-                history_scope.groupby("gang_name")["daily_prod_mt"].mean().fillna(0).to_dict()
+                history_scope.groupby("gang_name")["daily_prod_mt"].mean().dropna().to_dict()
             )
 
         loss_rows: list[dict[str, float]] = []
         for gang_name, gang_df in loss_scope.groupby("gang_name"):
-            override_baseline = baseline_map.get(gang_name, 0.0)
+            override_baseline = baseline_map.get(gang_name)
             idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
                 gang_df,
                 loss_max_gap_days=config.loss_max_gap_days,

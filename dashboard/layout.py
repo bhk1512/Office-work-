@@ -1,5 +1,7 @@
-"""Dash layout composition."""
+﻿"""Dash layout composition."""
 from __future__ import annotations
+
+from datetime import datetime
 
 from dash import dcc, html
 import dash_bootstrap_components as dbc
@@ -22,6 +24,8 @@ CLICK_GRAPH_CONFIG = {
         "resetScale2d",
     ],
 }
+
+CURRENT_MONTH_VALUE = datetime.today().strftime("%Y-%m")
 
 # Inline SVG fragments for simple icons (white strokes)
 _ICON_SHAPES = {
@@ -154,7 +158,7 @@ def _build_trace_contents(
 
 
 def build_controls() -> dbc.Card:
-    """Filter controls: Projects → Gangs → Months; quick range under Months; Reset left."""
+    """Filter controls: Projects â†’ Gangs â†’ Months; quick range under Months; Reset left."""
     return dbc.Card(
         dbc.CardBody(
             [
@@ -197,6 +201,9 @@ def build_controls() -> dbc.Card:
                                         multi=True,
                                         placeholder="Select month(s)",
                                         className="filter-select",
+                                        value=[CURRENT_MONTH_VALUE],
+                                        persistence=True,
+                                        persistence_type="session",
                                     ),
                                 ],
                                 className="filter-field",
@@ -537,7 +544,16 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                 html.Div(
                                                     [
                                                         html.Div("Responsibilities", className="section-title"),
-                                                        html.Div("Target vs Delivered", className="section-sub"),
+                                                        html.Div(
+                                                            [
+                                                                "Target vs Delivered ",
+                                                                html.Span(
+                                                                    "(All periods)",
+                                                                    id="label-resp-period",
+                                                                ),
+                                                            ],
+                                                            className="section-sub",
+                                                        ),
                                                     ]
                                                 ),
                                                 className="d-flex flex-column justify-content-center",
@@ -655,7 +671,25 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     html.Div(
                                         className="section-header",
                                         children=[
-                                            html.Div("Gang Performance: Delivered vs Lost", className="section-title"),
+                                            html.Div(
+                                                [
+                                                    html.Div(
+                                                        "Gang Performance: Delivered vs Lost",
+                                                        className="section-title",
+                                                    ),
+                                                    html.Div(
+                                                        [
+                                                            "Delivered vs Lost ",
+                                                            html.Span(
+                                                                "(All periods)",
+                                                                id="label-gang-period",
+                                                            ),
+                                                        ],
+                                                        className="section-sub",
+                                                    ),
+                                                ],
+                                                className="d-flex flex-column gap-1",
+                                            ),
                                             html.Div(
                                                 className="legend",
                                                 children=[
@@ -694,8 +728,20 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                             dbc.Col(
                                                 html.Div(
                                                     children=[
-                                                        html.Div("Performance Rankings", className="section-title"),
-                                                        html.Div("Top and bottom performing gangs", className="section-sub"),
+                                                        html.Div(
+                                                            "Performance Rankings",
+                                                            className="section-title",
+                                                        ),
+                                                        html.Div(
+                                                            [
+                                                                "Top and bottom performing gangs ",
+                                                                html.Span(
+                                                                    "(All periods)",
+                                                                    id="label-perf-period",
+                                                                ),
+                                                            ],
+                                                            className="section-sub",
+                                                        ),
                                                     ]
                                                 ),
                                                 align="center",
@@ -752,6 +798,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
         fluid=True,
     )
     return layout
+
+
 
 
 
