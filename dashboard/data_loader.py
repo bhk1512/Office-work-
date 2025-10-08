@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -37,14 +37,55 @@ def load_daily_from_dailyexpanded(xl: pd.ExcelFile, sheet: str = "DailyExpanded"
     col_prod = _pick_column(df, ["Productivity", "daily_prod_mt", "avg_daily_prod_mt"])
     col_proj = _pick_column(df, ["Project Name", "project_name"])
     col_gang = _pick_column(df, ["Gang name", "gang_name"])
-    result = pd.DataFrame(
-        {
-            "date": pd.to_datetime(df[col_date], errors="coerce").dt.normalize(),
-            "daily_prod_mt": pd.to_numeric(df[col_prod], errors="coerce"),
-            "project_name": df[col_proj].astype(str).str.strip(),
-            "gang_name": df[col_gang].astype(str).str.strip(),
-        }
-    ).dropna(subset=["date", "daily_prod_mt"])
+    def _pick_optional(frame: pd.DataFrame, options: tuple[str, ...]) -> str | None:
+        try:
+            return _pick_column(frame, options)
+        except KeyError:
+            return None
+
+    def _normalize_text(value: object) -> str:
+        text = str(value).replace("\u00a0", " ").strip()
+        lowered = text.lower()
+        if lowered in {"", "nan", "none", "null"}:
+            return ""
+        return text
+
+    def _normalize_location(value: object) -> str:
+        text = _normalize_text(value)
+        if not text:
+            return ""
+        if text.endswith(".0") and text.replace(".", "", 1).isdigit():
+            text = text.split(".", 1)[0]
+        return text
+
+    data: dict[str, Any] = {
+        "date": pd.to_datetime(df[col_date], errors="coerce").dt.normalize(),
+        "daily_prod_mt": pd.to_numeric(df[col_prod], errors="coerce"),
+        "project_name": df[col_proj].astype(str).str.strip(),
+        "gang_name": df[col_gang].astype(str).str.strip(),
+    }
+
+    col_location = _pick_optional(df, ("Location No.", "location no", "location number", "location"))
+    if col_location:
+        data["location_no"] = df[col_location].map(_normalize_location)
+
+    col_tower = _pick_optional(df, ("Tower Weight", "tower weight", "tower_weight", "tower wt", "tower mt"))
+    if col_tower:
+        data["tower_weight"] = pd.to_numeric(df[col_tower], errors="coerce")
+
+    col_start = _pick_optional(df, ("Start Date", "starting date"))
+    if col_start:
+        data["start_date"] = pd.to_datetime(df[col_start], errors="coerce")
+
+    col_complete = _pick_optional(df, ("Complete Date", "completion date"))
+    if col_complete:
+        data["completion_date"] = pd.to_datetime(df[col_complete], errors="coerce")
+
+    col_status = _pick_optional(df, ("Status",))
+    if col_status:
+        data["status"] = df[col_status].astype(str).str.strip()
+
+    result = pd.DataFrame(data).dropna(subset=["date", "daily_prod_mt"])
     LOGGER.debug("Loaded %d daily rows from DailyExpanded", len(result))
     return result
 
@@ -153,3 +194,4 @@ def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFr
         return out
     except Exception:
         return pd.DataFrame()
+

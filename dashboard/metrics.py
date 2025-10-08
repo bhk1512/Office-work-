@@ -48,6 +48,9 @@ def _iter_idle_segments(
         gap = (dates[index] - dates[index - 1]).days - 1
         if gap < 1:
             continue
+        if gap > loss_max_gap_days:
+            # Treat long gaps as gang off-system; skip loss accounting entirely.
+            continue
 
         interval_start = (dates[index - 1] + pd.Timedelta(days=1)).normalize()
         interval_end = (dates[index] - pd.Timedelta(days=1)).normalize()
@@ -56,6 +59,8 @@ def _iter_idle_segments(
         for seg_start, seg_end in _split_interval_by_month(interval_start, interval_end):
             seg_days = (seg_end - seg_start).days + 1
             capped_days = int(min(seg_days, max(capped_remaining, 0)))
+            if capped_days <= 0:
+                continue
             segments.append(
                 {
                     "gang_name": gang_name,
@@ -213,4 +218,7 @@ def compute_idle_intervals_per_gang(
 
     LOGGER.debug("Identified %d idle interval segments", len(rows))
     return pd.DataFrame(rows)
+
+
+
 

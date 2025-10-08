@@ -1,4 +1,4 @@
-﻿"""Dash callbacks for the productivity dashboard."""
+"""Dash callbacks for the productivity dashboard."""
 
 from __future__ import annotations
 
@@ -1386,6 +1386,243 @@ def register_callbacks(
 
         # mirror into modal tables
         return idle_data, daily_data, idle_data, daily_data
+
+
+    @app.callback(
+        Output("tbl-erections-completed", "data"),
+        Input("erections-completion-range", "start_date"),
+        Input("erections-completion-range", "end_date"),
+        Input("f-project", "value"),
+        Input("f-gang", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+    )
+    def update_erections_completed(
+        start_date,
+        end_date,
+        projects,
+        gangs,
+        months,
+        quick_range,
+    ) -> list[dict[str, object]]:
+        def _parse_date(value: str | None) -> pd.Timestamp | None:
+            if not value:
+                return None
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            return parsed.normalize()
+
+        default_completion_date = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+        range_start = _parse_date(start_date) or default_completion_date
+        range_end = _parse_date(end_date) or range_start
+        if range_start > range_end:
+            range_start, range_end = range_end, range_start
+
+        project_list = _ensure_list(projects)
+        gang_list = _ensure_list(gangs)
+        month_list = _ensure_list(months)
+
+        df_day = data_provider()
+        months_ts = resolve_months(month_list, quick_range)
+        scoped = apply_filters(df_day, project_list, months_ts, gang_list).copy()
+
+        if scoped.empty or "completion_date" not in scoped.columns:
+            return []
+
+        completion_source = scoped.copy()
+        completion_source["date"] = pd.to_datetime(
+            completion_source["date"], errors="coerce"
+        ).dt.normalize()
+        completion_source["completion_date"] = pd.to_datetime(
+            completion_source["completion_date"], errors="coerce"
+        ).dt.normalize()
+        completion_source = completion_source[completion_source["completion_date"].notna()]
+        completion_source = completion_source[
+            completion_source["date"] == completion_source["completion_date"]
+        ]
+        completion_source = completion_source[
+            (completion_source["completion_date"] >= range_start)
+            & (completion_source["completion_date"] <= range_end)
+        ]
+        if completion_source.empty:
+            return []
+
+        completion_source = completion_source.drop_duplicates(
+            subset=["project_name", "location_no", "completion_date", "gang_name"]
+        )
+
+        def _normalize_text(value: object) -> str:
+            text = str(value).replace("\u00a0", " ").strip()
+            lowered = text.lower()
+            if lowered in {"", "nan", "none", "null"}:
+                return ""
+            return text
+
+        def _normalize_lower(value: object) -> str:
+            return _normalize_text(value).lower()
+
+        def _normalize_location(value: object) -> str:
+            txt = _normalize_text(value)
+            if not txt:
+                return ""
+            if txt.endswith(".0") and txt.replace(".", "", 1).isdigit():
+                txt = txt.split(".", 1)[0]
+            return txt
+
+        def _format_decimal(value: float | int | None) -> str:
+            if pd.isna(value):
+                return ""
+            return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+        completion_source["location_no_display"] = (
+            completion_source["location_no"].map(_normalize_location)
+            if "location_no" in completion_source.columns
+            else ""
+        )
+        completion_source["location_no_norm"] = completion_source["location_no_display"]
+
+        completion_source["project_name_display"] = completion_source["project_name"].astype(str).str.strip()
+        completion_source["project_name_norm"] = completion_source["project_name_display"].map(
+            _normalize_lower
+        )
+        completion_source["gang_name_display"] = completion_source["gang_name"].astype(str).str.strip()
+
+        completion_source["tower_weight_value"] = (
+            pd.to_numeric(completion_source["tower_weight"], errors="coerce")
+            if "tower_weight" in completion_source.columns
+            else np.nan
+        )
+        completion_source["daily_prod_value"] = pd.to_numeric(
+            completion_source["daily_prod_mt"], errors="coerce"
+        )
+        completion_source["start_date_value"] = (
+            pd.to_datetime(completion_source["start_date"], errors="coerce").dt.normalize()
+            if "start_date" in completion_source.columns
+            else pd.NaT
+        )
+
+        supervisor_map: dict[tuple[str, str], str] = {}
+        section_map: dict[tuple[str, str], str] = {}
+        revenue_map: dict[tuple[str, str], float] = {}
+
+        if responsibilities_provider is not None:
+            try:
+                resp_source = responsibilities_provider()
+            except Exception as exc:
+                LOGGER.warning(
+                    "Erections card: unable to access responsibilities data: %s",
+                    exc,
+                )
+                resp_source = pd.DataFrame()
+            if resp_source is not None and not resp_source.empty:
+                resp = resp_source.copy()
+                resp["project_name_norm"] = (
+                    resp["project_name"].map(_normalize_lower)
+                    if "project_name" in resp.columns
+                    else ""
+                )
+                resp["location_no_norm"] = (
+                    resp["location_no"].map(_normalize_location)
+                    if "location_no" in resp.columns
+                    else ""
+                )
+                if "entity_name" not in resp.columns:
+                    resp["entity_name"] = ""
+                entity_type_series = (
+                    resp["entity_type"]
+                    if "entity_type" in resp.columns
+                    else pd.Series(["" for _ in range(len(resp))], index=resp.index)
+                )
+                type_map = {
+                    "supervisor": "supervisor",
+                    "supervisors": "supervisor",
+                    "section incharge": "section incharge",
+                    "section-incharge": "section incharge",
+                    "section in-charge": "section incharge",
+                    "section inch": "section incharge",
+                }
+                resp["entity_type_norm"] = entity_type_series.map(
+                    lambda val: type_map.get(_normalize_lower(val), _normalize_lower(val))
+                )
+                resp["entity_name_norm"] = resp["entity_name"].map(_normalize_text)
+
+                planned_series = (
+                    pd.to_numeric(resp["revenue_planned"], errors="coerce")
+                    if "revenue_planned" in resp.columns
+                    else pd.Series(np.nan, index=resp.index)
+                )
+                realised_series = (
+                    pd.to_numeric(resp["revenue_realised"], errors="coerce")
+                    if "revenue_realised" in resp.columns
+                    else pd.Series(np.nan, index=resp.index)
+                )
+                resp["revenue_value"] = realised_series.where(realised_series > 0).fillna(
+                    planned_series
+                )
+
+                def _collapse(series: pd.Series) -> str:
+                    names = [name for name in series if name]
+                    return ", ".join(dict.fromkeys(names))
+
+                supervisor_series = (
+                    resp[resp["entity_type_norm"] == "supervisor"]
+                    .groupby(["project_name_norm", "location_no_norm"])["entity_name_norm"]
+                    .apply(_collapse)
+                )
+                supervisor_map = {key: value for key, value in supervisor_series.items() if value}
+
+                section_series = (
+                    resp[resp["entity_type_norm"] == "section incharge"]
+                    .groupby(["project_name_norm", "location_no_norm"])["entity_name_norm"]
+                    .apply(_collapse)
+                )
+                section_map = {key: value for key, value in section_series.items() if value}
+
+                revenue_series = (
+                    resp.groupby(["project_name_norm", "location_no_norm"])["revenue_value"].max()
+                )
+                revenue_map = {key: value for key, value in revenue_series.items() if pd.notna(value)}
+
+        completion_source["supervisor_name"] = [
+            supervisor_map.get((proj, loc), "")
+            for proj, loc in zip(
+                completion_source["project_name_norm"], completion_source["location_no_norm"]
+            )
+        ]
+        completion_source["section_incharge_name"] = [
+            section_map.get((proj, loc), "")
+            for proj, loc in zip(
+                completion_source["project_name_norm"], completion_source["location_no_norm"]
+            )
+        ]
+        completion_source["revenue_value"] = [
+            revenue_map.get((proj, loc), np.nan)
+            for proj, loc in zip(
+                completion_source["project_name_norm"], completion_source["location_no_norm"]
+            )
+        ]
+
+        completion_source = completion_source.sort_values(
+            ["completion_date", "project_name_display", "location_no_display"]
+        ).reset_index(drop=True)
+
+        completions_display = pd.DataFrame(
+            {
+                "completion_date": completion_source["completion_date"].dt.strftime("%d-%m-%Y").fillna(""),
+                "project_name": completion_source["project_name_display"],
+                "location_no": completion_source["location_no_display"],
+                "tower_weight": completion_source["tower_weight_value"].map(_format_decimal),
+                "daily_prod_mt": completion_source["daily_prod_value"].map(_format_decimal),
+                "gang_name": completion_source["gang_name_display"],
+                "start_date": completion_source["start_date_value"].dt.strftime("%d-%m-%Y").fillna(""),
+                "supervisor_name": completion_source["supervisor_name"].fillna(""),
+                "section_incharge_name": completion_source["section_incharge_name"].fillna(""),
+                "revenue": completion_source["revenue_value"].map(_format_decimal),
+            }
+        )
+
+        return completions_display.to_dict("records")
 
     @app.callback(
         Output("download-trace-xlsx", "data"),

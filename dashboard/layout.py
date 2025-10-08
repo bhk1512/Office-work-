@@ -1,7 +1,7 @@
-﻿"""Dash layout composition."""
+"""Dash layout composition."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dash import dcc, html
 import dash_bootstrap_components as dbc
@@ -26,6 +26,8 @@ CLICK_GRAPH_CONFIG = {
 }
 
 CURRENT_MONTH_VALUE = datetime.today().strftime("%Y-%m")
+TODAY_DATE = datetime.today().date()
+DEFAULT_COMPLETION_DATE = TODAY_DATE - timedelta(days=1)
 
 # Inline SVG fragments for simple icons (white strokes)
 _ICON_SHAPES = {
@@ -158,7 +160,7 @@ def _build_trace_contents(
 
 
 def build_controls() -> dbc.Card:
-    """Filter controls: Projects â†’ Gangs â†’ Months; quick range under Months; Reset left."""
+    """Filter controls: Projects → Gangs → Months; quick range under Months; Reset left."""
     return dbc.Card(
         dbc.CardBody(
             [
@@ -409,6 +411,75 @@ def build_trace_block() -> dbc.Card:
     ])
     return dbc.Card(
         dbc.CardBody(contents),
+        className="mt-4 shadow-sm",
+    )
+
+
+
+def build_erections_card() -> dbc.Card:
+    """Standalone card that lists completed erections for the selected filters."""
+
+    date_picker = dcc.DatePickerRange(
+        id="erections-completion-range",
+        min_date_allowed=datetime(2021, 1, 1),
+        max_date_allowed=TODAY_DATE,
+        start_date=DEFAULT_COMPLETION_DATE,
+        end_date=DEFAULT_COMPLETION_DATE,
+        display_format="DD-MM-YYYY",
+        minimum_nights=0,
+        persistence=True,
+        persistence_type="session",
+    )
+
+    table = dash_table.DataTable(
+        id="tbl-erections-completed",
+        columns=[
+            {"name": "Completion Date", "id": "completion_date"},
+            {"name": "Project", "id": "project_name"},
+            {"name": "Location", "id": "location_no"},
+            {"name": "Tower Weight (MT)", "id": "tower_weight"},
+            {"name": "Productivity (MT/day)", "id": "daily_prod_mt"},
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Start Date", "id": "start_date"},
+            {"name": "Supervisor", "id": "supervisor_name"},
+            {"name": "Section Incharge", "id": "section_incharge_name"},
+            {"name": "Revenue", "id": "revenue"},
+        ],
+        data=[],
+        page_size=10,
+        style_table={"overflowX": "auto"},
+        style_cell={
+            "fontFamily": "Inter, system-ui",
+            "fontSize": 13,
+            "border": "1px solid var(--border, #e6e9f0)",
+        },
+        style_header={"border": "1px solid var(--border, #e6e9f0)"},
+    )
+
+    body = [
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Div("Erections Completed", className="section-title"),
+                        html.Div(
+                            "Completion date (defaults to yesterday)",
+                            className="fw-semibold mb-1",
+                        ),
+                        date_picker,
+                    ],
+                    md=6,
+                    lg=4,
+                ),
+                dbc.Col(md=6, lg=8),
+            ],
+            className="mb-3",
+        ),
+        table,
+    ]
+
+    return dbc.Card(
+        dbc.CardBody(body),
         className="mt-4 shadow-sm",
     )
 
@@ -790,6 +861,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                 className="mb-4",
             ),
             build_trace_block(),
+            build_erections_card(),
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
             dcc.Store(id="store-selected-gang", data=None),   
