@@ -993,7 +993,7 @@ def register_callbacks(
 
         if responsibilities_provider is None and workbook is not None:
             daily_sheet = None
-            for candidate in ("Daily Expanded", "DailyExpanded"):
+            for candidate in ("ProdDailyExpandedSingles", "Prod Daily Expanded", "ProdDailyExpanded"):
                 if candidate in workbook.sheet_names:
                     daily_sheet = candidate
                     break
@@ -1038,7 +1038,7 @@ def register_callbacks(
                         }
             else:
                 LOGGER.info(
-                    "Daily Expanded sheet not found; delivered values fall back to realised revenue only."
+                    "Daily expanded sheets not found; delivered values fall back to realised revenue only."
                 )
 
         sel_norm = _normalize_text(project_value)

@@ -11,7 +11,7 @@ class AppConfig:
     """Immutable configuration for the productivity dashboard."""
 
     data_path: Path = Path("ErectionCompiled_Output_testRun.xlsx")
-    preferred_sheet: str = "DailyExpanded"
+    preferred_sheet: str = "ProdDailyExpandedSingles"
     default_benchmark: float = 9.0
     loss_max_gap_days: int = 15
 

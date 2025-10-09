@@ -28,8 +28,8 @@ def _pick_column(df: pd.DataFrame, options: Iterable[str]) -> str:
     raise KeyError(f"Column not found among {joined}")
 
 
-def load_daily_from_dailyexpanded(xl: pd.ExcelFile, sheet: str = "DailyExpanded") -> pd.DataFrame:
-    """Load daily productivity rows from the DailyExpanded sheet."""
+def load_daily_from_proddailyexpanded(xl: pd.ExcelFile, sheet: str = "ProdDailyExpanded") -> pd.DataFrame:
+    """Load daily productivity rows from a ProdDailyExpanded-style sheet."""
 
     LOGGER.debug("Loading data from sheet '%s'", sheet)
     df = pd.read_excel(xl, sheet_name=sheet)
@@ -86,7 +86,7 @@ def load_daily_from_dailyexpanded(xl: pd.ExcelFile, sheet: str = "DailyExpanded"
         data["status"] = df[col_status].astype(str).str.strip()
 
     result = pd.DataFrame(data).dropna(subset=["date", "daily_prod_mt"])
-    LOGGER.debug("Loaded %d daily rows from DailyExpanded", len(result))
+    LOGGER.debug("Loaded %d daily rows from %s", len(result), sheet)
     return result
 
 
@@ -136,11 +136,26 @@ def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
 
     LOGGER.info("Loading workbook '%s'", config.data_path)
     workbook = pd.ExcelFile(config.data_path)
-    if config.preferred_sheet in workbook.sheet_names:
-        return load_daily_from_dailyexpanded(workbook, config.preferred_sheet)
+
+    candidates: list[str] = []
+    if config.preferred_sheet:
+        candidates.append(config.preferred_sheet)
+    candidates.extend([
+        "ProdDailyExpandedSingles",
+        "ProdDailyExpanded",
+        "Prod Daily Expanded",
+    ])
+
+    seen: set[str] = set()
+    for sheet_name in candidates:
+        if sheet_name and sheet_name not in seen and sheet_name in workbook.sheet_names:
+            return load_daily_from_proddailyexpanded(workbook, sheet_name)
+        seen.add(sheet_name)
+
     if "RawData" in workbook.sheet_names:
         return load_daily_from_rawdata(workbook, "RawData")
-    raise FileNotFoundError("Neither 'DailyExpanded' nor 'RawData' found in workbook.")
+
+    raise FileNotFoundError("Neither 'ProdDailyExpandedSingles' nor fallback sheets found in workbook.")
 
 
 def _pick_tol(df: pd.DataFrame, opts):

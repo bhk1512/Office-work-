@@ -81,7 +81,7 @@ def _load_responsibilities_data(
     daily_sheet = next(
         (
             candidate
-            for candidate in ("Daily Expanded", "DailyExpanded")
+            for candidate in ("ProdDailyExpandedSingles", "Prod Daily Expanded", "ProdDailyExpanded")
             if candidate in workbook.sheet_names
         ),
         None,
@@ -142,7 +142,7 @@ def _load_responsibilities_data(
                 }
     else:
         LOGGER.info(
-            "Daily Expanded sheet not found; delivered values fall back to realised revenue only."
+            "Daily expanded sheets not found; delivered values fall back to realised revenue only."
         )
 
     return df_atomic, completed_keys, None

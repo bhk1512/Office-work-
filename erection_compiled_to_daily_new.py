@@ -4,7 +4,8 @@ Parse 'Erection Compiled' sheets from one or many Excel files, compute productiv
 expand to daily rows, and write a consolidated workbook:
 
 Sheets written:
-  - DailyExpanded     : per-day rows (Work Date + the 6 fields)
+  - ProdDailyExpanded     : per-day rows (Work Date + the 6 fields)
+  - ProdDailyExpandedSingles : per-day rows including single-occurrence gangs
   - RawData           : per-erection (unexpanded) rows (the 6 fields)
   - Data Issues       : row-level problems (requested columns + 'Issues')
   - Issues            : file-level problems (missing sheet/headers, no valid rows, etc.)
@@ -50,6 +51,18 @@ TODAY = pd.Timestamp.today().normalize()
 TOWER_MIN_MT = 10.0
 TOWER_MAX_MT = 200.0
 
+# Column order for per-day expanded output
+PER_DAY_COLUMNS = [
+    "Work Date",
+    "Start Date",
+    "Complete Date",
+    "Gang name",
+    "Tower Weight",
+    "Productivity",
+    "Project Name",
+    "Location No.",
+    "Status",
+]
 
 # ---------- Helpers ----------
 def nrm_header(s: str) -> str:
@@ -264,6 +277,7 @@ def process_file(path: Path):
     """
     Process a single workbook; return:
       per_day         : per-day expanded rows (with Work Date)
+      per_day_with_singles : per-day rows including single-occurrence gangs
       per_erection    : per-erection (unexpanded) rows (the 6 fields)
       diagnostics     : dict (file, project, sheet, detected header row, normalized columns)
       issues          : list[dict] (file-level)
@@ -368,7 +382,7 @@ def process_file(path: Path):
     invalid_mask = missing_dt_mask | non_positive_days_mask | old_start_mask | future_completion_mask | tw_out_of_range_mask
     work_valid = work.loc[~invalid_mask].copy()
 
-   # Identify single-occurrence gangs (per Project + Gang), add to Data Issues, exclude from expansion
+    # Identify single-occurrence gangs (per Project + Gang), add to Data Issues, exclude from expansion
     if not work_valid.empty:
         occ = work_valid.groupby(["Project Name", "Gang name"]).size().rename("n").reset_index()
         singles = occ[occ["n"] == 1][["Project Name", "Gang name"]]
@@ -397,31 +411,41 @@ def process_file(path: Path):
     ]].copy()
 
     # ---- Per-day (EXPANDED) ----
-    rows = []
-    for _, r in work_to_expand.iterrows():
-        for d in pd.date_range(r["Start Date"], r["Complete Date"], freq="D"):
-            rows.append({
-                "Work Date": d.normalize(),
-                "Start Date": r["Start Date"].normalize(),
-                "Complete Date": r["Complete Date"].normalize(),
-                "Gang name": r["Gang name"],
-                "Tower Weight": r["Tower Weight"],
-                "Productivity": r["Productivity"],
-                "Project Name": r["Project Name"],
-                "Location No.": r["Location No."],
-                "Status": r["Status"],
-            })
+    def expand_per_day(source: pd.DataFrame) -> pd.DataFrame:
+        if source.empty:
+            return pd.DataFrame(columns=PER_DAY_COLUMNS)
 
-    per_day = pd.DataFrame(rows)
-    if not per_day.empty:
-        per_day = per_day.sort_values(
+        rows = []
+        for _, r in source.iterrows():
+            for d in pd.date_range(r["Start Date"], r["Complete Date"], freq="D"):
+                rows.append({
+                    "Work Date": d.normalize(),
+                    "Start Date": r["Start Date"].normalize(),
+                    "Complete Date": r["Complete Date"].normalize(),
+                    "Gang name": r["Gang name"],
+                    "Tower Weight": r["Tower Weight"],
+                    "Productivity": r["Productivity"],
+                    "Project Name": r["Project Name"],
+                    "Location No.": r["Location No."],
+                    "Status": r["Status"],
+                })
+
+        result = pd.DataFrame(rows)
+        if result.empty:
+            return result.reindex(columns=PER_DAY_COLUMNS)
+
+        result = result.sort_values(
             ["Project Name", "Work Date", "Gang name", "Start Date"],
             ignore_index=True
         )
+        return result.reindex(columns=PER_DAY_COLUMNS)
+
+    per_day = expand_per_day(work_to_expand)
+    per_day_with_singles = expand_per_day(work_valid)
 
     data_issues_df = pd.concat(data_issues_rows, ignore_index=True) if data_issues_rows else pd.DataFrame()
 
-    return per_day, per_erection, diag, issues, data_issues_df
+    return per_day, per_day_with_singles, per_erection, diag, issues, data_issues_df
 
 
 # ---------- Styling ----------
@@ -497,17 +521,17 @@ def main(argv=None):
     else:
         paths = [Path(p) for p in args.files]
 
-    all_per_day, all_per_erection = [], []
+    all_per_day, all_per_day_with_singles, all_per_erection = [], [], []
     all_issues, all_diag = [], []
     all_data_issues = []
-    all_proj_details = [] 
+    all_proj_details = []
 
     for p in paths:
         if not p.exists():
             all_issues.append({"file": p.name, "issue": "missing"})
             continue
 
-        per_day, per_erection, diag, issues, data_issues_df = process_file(p)
+        per_day, per_day_with_singles, per_erection, diag, issues, data_issues_df = process_file(p)
 
         # --- NEW: attempt to read "Project Details" from this source ---
         try:
@@ -522,6 +546,8 @@ def main(argv=None):
 
         if not per_day.empty:
             all_per_day.append(per_day.assign(_source_file=p.name))
+        if not per_day_with_singles.empty:
+            all_per_day_with_singles.append(per_day_with_singles.assign(_source_file=p.name))
         if not per_erection.empty:
             all_per_erection.append(per_erection.assign(_source_file=p.name))
         if not data_issues_df.empty:
@@ -534,10 +560,13 @@ def main(argv=None):
 
     # Consolidate across all inputs
     per_day_consol = pd.concat(all_per_day, ignore_index=True) if all_per_day else pd.DataFrame()
+    per_day_with_singles_consol = pd.concat(all_per_day_with_singles, ignore_index=True) if all_per_day_with_singles else pd.DataFrame()
     per_erection_consol = pd.concat(all_per_erection, ignore_index=True) if all_per_erection else pd.DataFrame()
     data_issues_consol = pd.concat(all_data_issues, ignore_index=True) if all_data_issues else pd.DataFrame()
     issues_df = pd.DataFrame(all_issues) if all_issues else pd.DataFrame()
     diag_df = pd.DataFrame(all_diag) if all_diag else pd.DataFrame()
+    projdetails_df = pd.DataFrame()
+    projdetails_out = pd.DataFrame()
         # --- NEW: consolidate Project Details across inputs ---
         # --- consolidate Project Details across inputs (NEW) ---
     if all_proj_details:
@@ -592,7 +621,8 @@ def main(argv=None):
         "- Gangs that performed erection only once (per Project+Gang) are not expanded and are logged in 'Data Issues'.",
         "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
         "- Sheets:",
-        "    â€¢ DailyExpanded  : per-day expanded rows used by the dashboard",
+        "    â€¢ ProdDailyExpanded  : per-day expanded rows used by the dashboard",
+        "    â€¢ ProdDailyExpandedSingles : per-day expanded rows including single-occurrence gangs",
         "    â€¢ RawData        : per-erection rows (unexpanded), for traceability",
         "    â€¢ Data Issues    : row-level data problems (reason in 'Issues' column)",
         "    â€¢ Issues         : file-level problems (missing sheet/headers, read/open errors, etc.)",
@@ -606,7 +636,9 @@ def main(argv=None):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         if not per_day_consol.empty:
-            per_day_consol.drop(columns=["_source_file"], errors="ignore").to_excel(w, sheet_name="DailyExpanded", index=False)
+            per_day_consol.drop(columns=["_source_file"], errors="ignore").to_excel(w, sheet_name="ProdDailyExpanded", index=False)
+        if not per_day_with_singles_consol.empty:
+            per_day_with_singles_consol.drop(columns=["_source_file"], errors="ignore").to_excel(w, sheet_name="ProdDailyExpandedSingles", index=False)
         if not per_erection_consol.empty:
             per_erection_consol.drop(columns=["_source_file"], errors="ignore").to_excel(w, sheet_name="RawData", index=False)
         if not data_issues_consol.empty:
@@ -623,7 +655,8 @@ def main(argv=None):
         # Apply styling
         wb = w.book
         for sheet_name, color in [
-            ("DailyExpanded", "BDD7EE"),   # blue
+            ("ProdDailyExpanded", "BDD7EE"),   # blue
+            ("ProdDailyExpandedSingles", "9CC3E6"),  # blue variant including singles
             ("RawData", "C6E0B4"),         # green
             ("Data Issues", "F8CBAD"),     # light red
             ("Issues", "D9D2E9"),          # purple
