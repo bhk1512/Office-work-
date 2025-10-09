@@ -61,25 +61,29 @@ def _build_trace_contents(
         dbc.Row(
             [
                 dbc.Col(
-                    [
-                        html.Label(
-                            "Pick a gang (overrides Gang filter)",
-                            className="fw-semibold mb-1",
-                        ),
-                        dcc.Dropdown(
-                            id=trace_dropdown_id,
-                            options=[],
-                            value=None,
-                            placeholder="Start typing a gang...",
-                            clearable=True,
-                            persistence=True,
-                            persistence_type="session",
-                        ),
-                    ],
+                    html.Div(
+                        [
+                            html.Label(
+                                "Pick a gang (overrides Gang filter)",
+                                className="fw-semibold mb-1",
+                            ),
+                            dcc.Dropdown(
+                                id=trace_dropdown_id,
+                                options=[],
+                                value=None,
+                                placeholder="Start typing a gang...",
+                                clearable=True,
+                                persistence=True,
+                                persistence_type="session",
+                                className="filter-select",
+                            ),
+                        ],
+                        className="filter-field",
+                    ),
                     md=6,
                 ),
             ],
-            className="mb-3",
+            className="mb-3 filter-card",
         ),
         
         dbc.Row(
@@ -422,33 +426,41 @@ def build_erections_card() -> dbc.Card:
     controls = dbc.Row(
         [
             dbc.Col(
-                [
-                    html.Div("Erections Completed", className="section-title mb-2"),
-                    html.Div(
-                        "Completion date (defaults to yesterday)",
-                        className="fw-semibold mb-1",
-                    ),
-                    dcc.DatePickerRange(
-                        id="erections-completion-range",
-                        min_date_allowed=datetime(2021, 1, 1),
-                        max_date_allowed=TODAY_DATE,
-                        start_date=DEFAULT_COMPLETION_DATE,
-                        end_date=DEFAULT_COMPLETION_DATE,
-                        display_format="DD-MM-YYYY",
-                        minimum_nights=0,
-                        persistence=True,
-                        persistence_type="session",
-                    ),
-                ],
+                html.Div(
+                    [
+                        html.Div("Erections Completed", className="section-title mb-2"),
+                        html.Div(
+                            "Completion date (defaults to yesterday)",
+                            className="fw-semibold mb-1",
+                        ),
+                        dcc.DatePickerRange(
+                            id="erections-completion-range",
+                            min_date_allowed=datetime(2021, 1, 1),
+                            max_date_allowed=TODAY_DATE,
+                            start_date=DEFAULT_COMPLETION_DATE,
+                            end_date=DEFAULT_COMPLETION_DATE,
+                            display_format="DD-MM-YYYY",
+                            minimum_nights=0,
+                            persistence=True,
+                            persistence_type="session",
+                            className="filter-date",
+                        ),
+                    ],
+                    className="filter-field",
+                ),
                 md=6,
                 lg=4,
             ),
             dbc.Col(
-                dbc.Input(
-                    id="erections-search",
-                    placeholder="Filter by project, gang, or location",
-                    type="text",
-                    value="",
+                html.Div(
+                    dbc.Input(
+                        id="erections-search",
+                        placeholder="Filter by project, gang, or location",
+                        type="text",
+                        value="",
+                        className="filter-input",
+                    ),
+                    className="filter-field",
                 ),
                 md=4,
                 lg=4,
@@ -465,7 +477,7 @@ def build_erections_card() -> dbc.Card:
                 lg=2,
             ),
         ],
-        className="g-3 align-items-end mb-3",
+        className="g-3 align-items-end mb-3 filter-card",
     )
 
     table = dash_table.DataTable(
@@ -890,6 +902,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
         fluid=True,
     )
     return layout
+
 
 
 

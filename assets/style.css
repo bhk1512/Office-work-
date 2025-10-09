@@ -594,3 +594,85 @@ html {
 .filter-card .filter-reset-btn{ margin-left:0; }
 
 #trace-anchor, #tables-anchor { scroll-margin-top: 80px; }
+
+/* Trace & erection filters styling */
+.filter-card .filter-field > .fw-semibold,
+.filter-card .filter-field > label {
+  color: #0f172a;
+}
+
+.filter-card .filter-field > .fw-semibold {
+  margin-bottom: 6px;
+}
+
+.filter-card .filter-date,
+.filter-card .filter-date .DateRangePicker,
+.filter-card .filter-date .DateRangePickerInput {
+  width: 100%;
+}
+
+.filter-card .filter-date .DateRangePickerInput {
+  border: 1px solid var(--border, #e6e9f0);
+  border-radius: 12px;
+  box-shadow: var(--shadow-1);
+  background: #fff;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-card .filter-date .DateRangePickerInput__withBorder {
+  border: none;
+}
+
+.filter-card .filter-date .DateInput {
+  margin: 0;
+}
+
+.filter-card .filter-date .DateInput_input {
+  border: none;
+  background: transparent;
+  padding: 6px 0;
+  font-family: "Inter", system-ui;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.filter-card .filter-date .DateInput_input__focused {
+  border: none;
+  box-shadow: none;
+}
+
+.filter-card .filter-date .DateRangePickerInput_arrow {
+  padding: 0 6px;
+}
+
+.filter-card .filter-date .DateRangePickerInput_arrow_svg {
+  width: 16px;
+  height: 16px;
+  fill: #64748b;
+}
+
+.filter-card .filter-input.form-control {
+  border: 1px solid var(--border, #e6e9f0);
+  border-radius: 12px;
+  box-shadow: var(--shadow-1);
+  min-height: 44px;
+  background: #fff;
+  font-family: "Inter", system-ui;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.filter-card .filter-input.form-control::placeholder {
+  color: #64748b;
+}
+
+.filter-card .filter-input.form-control:focus {
+  border-color: #2563EB;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+
+
