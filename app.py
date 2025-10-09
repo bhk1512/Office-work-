@@ -247,6 +247,8 @@ def main() -> None:
 
 
 app = create_app(CONFIG)
+app = create_app(CONFIG)
+server = app.server
 
 
 if __name__ == "__main__":
