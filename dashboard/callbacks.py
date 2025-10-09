@@ -659,7 +659,22 @@ def register_callbacks(
     )
     def _clear_month_value_on_quick_change(qr):
         # When a quick-range is chosen, let code derive months from it; drop stale manual months.
-        return None
+        if qr:
+            return None
+        return dash.no_update
+
+    @app.callback(
+        Output("f-quick-range", "value", allow_duplicate=True),
+        Input("f-month", "value"),
+        State("f-quick-range", "value"),
+        prevent_initial_call=True,
+    )
+    def _clear_quick_range_on_month_change(months, quick_range_value):
+        # Reset quick-range when manual months are selected so filters stay mutually exclusive.
+        month_list = _ensure_list(months)
+        if month_list and quick_range_value:
+            return None
+        return dash.no_update
 
 
     @app.callback(
