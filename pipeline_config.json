@@ -1,5 +1,6 @@
 {
-  "input_directory": "Test",
+  "input_directory": "Raw Data/DPRs",
+  "microplan_directory": "Raw Data/Micro Plans",
   "output_file": "ErectionCompiled_Output_testRun.xlsx",
   "pipeline_extra_args": [],
   "dash_host": "0.0.0.0",

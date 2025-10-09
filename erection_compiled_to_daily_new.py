@@ -46,6 +46,7 @@ TARGET_SHEET_REGEX = re.compile(r"^\s*erection\s*.*\s*compiled\s*$", flags=re.I)
 
 # Business rules (centralized here)
 START_CUTOFF = pd.Timestamp("2021-01-01")
+TODAY = pd.Timestamp.today().normalize()
 TOWER_MIN_MT = 10.0
 TOWER_MAX_MT = 200.0
 
@@ -105,7 +106,7 @@ def find_target_sheet(xl: pd.ExcelFile) -> Optional[str]:
 
 
 def to_number_mt(x):
-    """Parse weight values like '5.5 MT', '7 t', '3,200' → float (MT)."""
+    """Parse weight values like '5.5 MT', '7 t', '3,200' â†’ float (MT)."""
     if pd.isna(x):
         return np.nan
     s = str(x).strip().lower().replace(",", "")
@@ -141,7 +142,7 @@ def normalize_gang_name(name: str) -> str:
     """
     - Strip special chars (keep letters, digits, spaces)
     - Each word Title Case
-    - If ends with digits stuck to a letter (e.g., 'Xyz4'), insert a space → 'Xyz 4'
+    - If ends with digits stuck to a letter (e.g., 'Xyz4'), insert a space â†’ 'Xyz 4'
     Examples:
       'sobha devi' -> 'Sobha Devi'
       'sobha-devi' -> 'Sobha Devi'
@@ -151,7 +152,7 @@ def normalize_gang_name(name: str) -> str:
     if name is None:
         return ""
     s = str(name).strip().lower()
-    # keep letters, digits, spaces → replace other runs with a space
+    # keep letters, digits, spaces â†’ replace other runs with a space
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     # Title case
@@ -252,7 +253,7 @@ def load_project_details_from_source(xl: pd.ExcelFile, source_file: Path) -> pd.
     # File name for traceability + pass-through literal "Project Name" label if present
     out["_source_file"] = source_file.name
     if "Project Name" in dfp.columns:
-        # keep the human label from sheet; it’s already ffilled via meta
+        # keep the human label from sheet; itâ€™s already ffilled via meta
         out["Project Name"] = meta.groupby("project_code")["project_name"].first().astype(str).str.strip()
 
     return out
@@ -337,6 +338,7 @@ def process_file(path: Path):
     days = (work["Complete Date"] - work["Start Date"]).dt.days + 1
     non_positive_days_mask = (~missing_dt_mask) & (days <= 0)
     old_start_mask = (~work["Start Date"].isna()) & (work["Start Date"] < START_CUTOFF)
+    future_completion_mask = (~work["Complete Date"].isna()) & (work["Complete Date"] >= TODAY)
     tw_out_of_range_mask = (~work["Tower Weight"].isna()) & (
         (work["Tower Weight"] < TOWER_MIN_MT) | (work["Tower Weight"] > TOWER_MAX_MT)
     )
@@ -359,10 +361,11 @@ def process_file(path: Path):
     push_data_issue(missing_dt_mask, "Missing start/end date (not expanded)")
     push_data_issue(non_positive_days_mask, "Non-positive duration (Start > End or 0) (not expanded)")
     push_data_issue(old_start_mask, f"Start before {START_CUTOFF.date()} (not expanded)")
+    push_data_issue(future_completion_mask, f"Completion on/after {TODAY.date()} (not expanded)")
     push_data_issue(tw_out_of_range_mask, f"Tower Weight out of range (<{TOWER_MIN_MT} or >{TOWER_MAX_MT}) (not expanded)")
 
     # Exclude all above issues from expansion consideration
-    invalid_mask = missing_dt_mask | non_positive_days_mask | old_start_mask | tw_out_of_range_mask
+    invalid_mask = missing_dt_mask | non_positive_days_mask | old_start_mask | future_completion_mask | tw_out_of_range_mask
     work_valid = work.loc[~invalid_mask].copy()
 
    # Identify single-occurrence gangs (per Project + Gang), add to Data Issues, exclude from expansion
@@ -583,16 +586,17 @@ def main(argv=None):
     readme_lines = [
         "Assumptions & Cleaning Rules:",
         f"- Start date cutoff: rows with Start Date before {START_CUTOFF.date()} are not expanded and logged in 'Data Issues'.",
+        f"- Completion date must be before {TODAY.date()} (future completions go to 'Data Issues').",
         f"- Tower Weight range: only [{TOWER_MIN_MT:.0f}, {TOWER_MAX_MT:.0f}] MT is considered valid for expansion; out-of-range rows go to 'Data Issues'.",
         "- Missing or non-positive durations (Start/End missing or Start > End or 0) are logged to 'Data Issues' and not expanded.",
         "- Gangs that performed erection only once (per Project+Gang) are not expanded and are logged in 'Data Issues'.",
-        "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' → 'Xyz 4').",
+        "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
         "- Sheets:",
-        "    • DailyExpanded  : per-day expanded rows used by the dashboard",
-        "    • RawData        : per-erection rows (unexpanded), for traceability",
-        "    • Data Issues    : row-level data problems (reason in 'Issues' column)",
-        "    • Issues         : file-level problems (missing sheet/headers, read/open errors, etc.)",
-        "    • Diagnostics    : which sheet used, detected header row, and normalized header text",
+        "    â€¢ DailyExpanded  : per-day expanded rows used by the dashboard",
+        "    â€¢ RawData        : per-erection rows (unexpanded), for traceability",
+        "    â€¢ Data Issues    : row-level data problems (reason in 'Issues' column)",
+        "    â€¢ Issues         : file-level problems (missing sheet/headers, read/open errors, etc.)",
+        "    â€¢ Diagnostics    : which sheet used, detected header row, and normalized header text",
         "- Dashboard note: a 15-day productivity loss cap is used in downstream analytics.",
     ]
     readme_df = pd.DataFrame({"Notes": readme_lines})

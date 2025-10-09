@@ -10,7 +10,8 @@ from microplan_compile import compile_microplans_to_workbook
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "input_directory": "Test",
+    "input_directory": "Raw Data/DPRs",
+    "microplan_directory": "Raw Data/Micro Plans",
     "output_file": "ErectionCompiled_Output_testRun.xlsx",
     "pipeline_extra_args": [],
     "dash_host": "0.0.0.0",
@@ -100,6 +101,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     cli_input = args.input
     config_input = config.get("input_directory")
+    config_microplan_input = config.get("microplan_directory")
 
     if files and cli_input:
         parser.error("Provide either --files or --input, not both.")
@@ -108,9 +110,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     env_input = os.getenv("PIPELINE_INPUT_DIR")
     env_output = os.getenv("PIPELINE_OUTPUT_FILE")
+    env_microplan_input = os.getenv("MICROPLAN_INPUT_DIR")
 
     input_path = cli_input or env_input or config_input
     output_path = args.output or env_output or config.get("output_file")
+    microplan_input = env_microplan_input or config_microplan_input
 
     if input_path is None and not files:
         parser.error("An input directory or explicit file list is required for the pipeline.")
@@ -120,6 +124,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     resolved_files = _normalise_files(files, BASE_DIR)
     resolved_input = _resolve_path(input_path, BASE_DIR) if input_path else None
     resolved_output = _resolve_path(output_path, BASE_DIR)
+    resolved_microplan_input = _resolve_path(microplan_input, BASE_DIR) if microplan_input else None
 
     extra_args: List[str] = []
     if isinstance(config.get("pipeline_extra_args"), list):
@@ -141,16 +146,24 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         )
                 # --- NEW: Compile Micro Plan responsibilities into the same workbook ---
         # Prefer the input folder; if the user passed explicit files, derive a common parent
-        if resolved_files:
+        if resolved_microplan_input:
+            micro_input_dir = str(resolved_microplan_input)
+        elif resolved_files:
             common_parent = os.path.commonpath([os.path.dirname(str(p)) for p in resolved_files])
             micro_input_dir = common_parent
-        else:
+        elif resolved_input:
             micro_input_dir = str(resolved_input)
-        print(f"[pipeline] MicroPlan: scanning '{micro_input_dir}' and writing to '{resolved_output}'")
-        compile_microplans_to_workbook(
-            input_dir=micro_input_dir,
-            output_path=str(resolved_output),
-        )
+        else:
+            micro_input_dir = None
+
+        if micro_input_dir:
+            print(f"[pipeline] MicroPlan: scanning '{micro_input_dir}' and writing to '{resolved_output}'")
+            compile_microplans_to_workbook(
+                input_dir=micro_input_dir,
+                output_path=str(resolved_output),
+            )
+        else:
+            print("[pipeline] MicroPlan: no input directory configured; skipping.")
     else:
         print("[pipeline] Skipping compilation step as requested.")
 
@@ -175,3 +188,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
