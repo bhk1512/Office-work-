@@ -285,29 +285,30 @@ def process_file(path: Path):
     """
     issues = []
     data_issues_rows = []  # row-level issues here
+    empty_df = pd.DataFrame()
     diag = {"file": path.name, "project": parse_project_from_filename(path.name)}
 
     try:
         xl = pd.ExcelFile(path, engine="openpyxl")
     except Exception as e:
         issues.append({"file": path.name, "issue": f"Excel open error: {e}"})
-        return pd.DataFrame(), pd.DataFrame(), diag, issues, pd.DataFrame()
+        return empty_df, empty_df, empty_df, diag, issues, empty_df
 
     target = find_target_sheet(xl)
     if not target:
         issues.append({"file": path.name, "issue": "Sheet 'Erection Compiled' not found", "sheets": xl.sheet_names})
-        return pd.DataFrame(), pd.DataFrame(), diag, issues, pd.DataFrame()
+        return empty_df, empty_df, empty_df, diag, issues, empty_df
 
     try:
         df_raw = pd.read_excel(xl, sheet_name=target, header=None)
     except Exception as e:
         issues.append({"file": path.name, "issue": f"Read error: {e}", "sheet": target})
-        return pd.DataFrame(), pd.DataFrame(), diag, issues, pd.DataFrame()
+        return empty_df, empty_df, empty_df, diag, issues, empty_df
 
     hdr_row, cols = find_header_row(df_raw, search_rows=30)
     if hdr_row is None:
         issues.append({"file": path.name, "issue": "Could not detect header row automatically", "sheet": target})
-        return pd.DataFrame(), pd.DataFrame(), diag, issues, pd.DataFrame()
+        return empty_df, empty_df, empty_df, diag, issues, empty_df
 
     df = df_raw.iloc[hdr_row + 1:].copy()
     df.columns = cols
@@ -327,7 +328,7 @@ def process_file(path: Path):
             "issue": f"Missing required columns after header-detect: {missing}",
             "columns": list(df.columns)
         })
-        return pd.DataFrame(), pd.DataFrame(), diag, issues, pd.DataFrame()
+        return empty_df, empty_df, empty_df, diag, issues, empty_df
 
     work = df[needed].copy()
 
@@ -695,3 +696,4 @@ def run_pipeline(input_path=None, output_path=None, files=None, extra_args=None)
 
 if __name__ == "__main__":
     main()
+
