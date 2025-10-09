@@ -373,6 +373,8 @@ def build_responsibilities_chart(
     if df.empty:
         return build_empty_responsibilities_figure("No Micro Plan data for the selected project.")
 
+    df = df.copy()
+
     metric = metric if metric in ("revenue", "tower_weight") else "tower_weight"
     axis_title = "Revenue" if metric == "revenue" else "Tower Weight (MT)"
 
@@ -383,8 +385,6 @@ def build_responsibilities_chart(
           .head(top_n)
     )
 
-    # Delivered:
-    # If your data already has a delivered column per entity, use it.
     delivered_col = None
     for cand in ("delivered", "actual_delivered", "achieved", "delivered_mt", "delivered_value"):
         if cand in df.columns:
@@ -399,31 +399,127 @@ def build_responsibilities_chart(
         g = g.merge(d, on="entity_name", how="left")
         g["delivered_plot"] = g[delivered_col].fillna(0)
     else:
-        # Fallback to your earlier convention (10% proxy)
         g["delivered_plot"] = (0.10 * g[metric]).round(2)
+
+    def _normalize_locations(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, float) and np.isnan(value):
+            return []
+        if isinstance(value, list):
+            raw_iter = value
+        elif isinstance(value, (tuple, set)):
+            raw_iter = list(value)
+        elif isinstance(value, str):
+            raw_iter = [part.strip() for part in value.split(",") if part.strip()]
+        else:
+            text = str(value).strip()
+            raw_iter = [text] if text else []
+        cleaned: list[str] = []
+        for item in raw_iter:
+            text = str(item).strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in {"nan", "none"}:
+                continue
+            cleaned.append(text)
+        return cleaned
+
+    def _merge_locations(series: pd.Series) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for raw in series:
+            for loc in _normalize_locations(raw):
+                if loc not in seen:
+                    seen.add(loc)
+                    ordered.append(loc)
+        return ordered
+
+    location_target_map = None
+    if "target_locations" in df.columns:
+        location_target_map = df.groupby("entity_name")["target_locations"].agg(_merge_locations)
+    elif "location_no" in df.columns:
+        location_target_map = df.groupby("entity_name")["location_no"].agg(_merge_locations)
+
+    location_delivered_map = None
+    if "delivered_locations" in df.columns:
+        location_delivered_map = df.groupby("entity_name")["delivered_locations"].agg(_merge_locations)
+
+    if location_target_map is not None:
+        g = g.merge(location_target_map.rename("target_locations"), on="entity_name", how="left")
+    else:
+        g["target_locations"] = [[] for _ in range(len(g))]
+
+    if location_delivered_map is not None:
+        g = g.merge(location_delivered_map.rename("delivered_locations"), on="entity_name", how="left")
+    else:
+        g["delivered_locations"] = [[] for _ in range(len(g))]
+
+    g["target_locations"] = g["target_locations"].apply(_normalize_locations)
+    g["delivered_locations"] = g["delivered_locations"].apply(_normalize_locations)
+
+    def _format_locations(values: list[str]) -> str:
+        if not values:
+            return "\u2014"
+        unique: list[str] = []
+        seen: set[str] = set()
+        for loc in values:
+            if loc not in seen:
+                seen.add(loc)
+                unique.append(loc)
+        if len(unique) <= 6:
+            return "<br>".join(unique)
+        head = unique[:6]
+        remainder = len(unique) - 6
+        return "<br>".join(head + [f"+{remainder} more"])
+
+    g["target_loc_hover"] = g["target_locations"].apply(_format_locations)
+    g["delivered_loc_hover"] = g["delivered_locations"].apply(_format_locations)
+
+    hover_custom = g[["target_loc_hover", "delivered_loc_hover"]].to_numpy()
+
+    if metric == "revenue":
+        target_value_label = "Target: \u20b9%{y:,.0f}"
+        delivered_value_label = "Delivered: \u20b9%{y:,.0f}"
+    else:
+        target_value_label = "Target: %{y:,.0f} MT"
+        delivered_value_label = "Delivered: %{y:,.0f} MT"
+
+    target_hover_template = (
+        "<b>%{x}</b><br>"
+        + target_value_label
+        + "<br>Target locations: %{customdata[0]}<br>"
+        + "Delivered locations: %{customdata[1]}<extra></extra>"
+    )
+    delivered_hover_template = (
+        "<b>%{x}</b><br>"
+        + delivered_value_label
+        + "<br>Delivered locations: %{customdata[1]}<br>"
+        + "Target locations: %{customdata[0]}<extra></extra>"
+    )
 
     fig = go.Figure()
 
-    # Responsibility Target (blue bars)
     fig.add_bar(
         x=g["entity_name"],
         y=g[metric],
         name="Responsibility Target",
         width=0.55,
         marker_color="#3B82F6",
-        hovertemplate="<b>%{x}</b><br>Target: %{y:,.0f}<extra></extra>",
+        customdata=hover_custom,
+        hovertemplate=target_hover_template,
     )
 
-    # Actual Delivered (red bars)
     fig.add_bar(
         x=g["entity_name"],
         y=g["delivered_plot"],
         name="Actual Delivered",
         width=0.55,
         marker_color="#EF4444",
-        hovertemplate="<b>%{x}</b><br>Delivered: %{y:,.0f}<extra></extra>",
+        customdata=hover_custom,
+        hovertemplate=delivered_hover_template,
     )
-
 
     fig.update_layout(
         barmode="group",

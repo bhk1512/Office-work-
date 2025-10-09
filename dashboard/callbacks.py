@@ -1107,6 +1107,62 @@ def register_callbacks(
         )
         aggregated = aggregated.rename(columns={"revenue_planned": "revenue"})
 
+        target_metric_col = "revenue_planned" if metric_value == "revenue" else "tower_weight"
+        delivered_metric_col = ("delivered_revenue" if metric_value == "revenue" else "delivered_tower_weight")
+
+        def _collect_locations(values: pd.Series) -> list[str]:
+            seen: set[str] = set()
+            ordered: list[str] = []
+            for raw in values:
+                if pd.isna(raw):
+                    continue
+                text = str(raw).strip()
+                if not text or text.lower() in {"nan", "none"}:
+                    continue
+                if text not in seen:
+                    seen.add(text)
+                    ordered.append(text)
+            return ordered
+
+        def _ensure_location_list(value: object) -> list[str]:
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            if isinstance(value, (tuple, set)):
+                return [str(item).strip() for item in value if str(item).strip()]
+            if isinstance(value, str):
+                parts = [part.strip() for part in value.split(',') if part.strip()]
+                return parts
+            return []
+
+        filtered_target = df_entity[df_entity[target_metric_col] > 0]
+        if filtered_target.empty:
+            filtered_target = df_entity
+
+        target_locations = (
+            filtered_target.groupby("entity_name")["location_no"]
+            .agg(_collect_locations)
+        )
+        filtered_delivered = df_entity[df_entity[delivered_metric_col] > 0]
+
+        delivered_locations = (
+            filtered_delivered.groupby("entity_name")["location_no"]
+            .agg(_collect_locations)
+        )
+
+        aggregated = aggregated.merge(
+            target_locations.rename("target_locations"),
+            on="entity_name",
+            how="left",
+        )
+        aggregated = aggregated.merge(
+            delivered_locations.rename("delivered_locations"),
+            on="entity_name",
+            how="left",
+        )
+
+        aggregated["target_locations"] = aggregated["target_locations"].apply(_ensure_location_list)
+        aggregated["delivered_locations"] = aggregated["delivered_locations"].apply(_ensure_location_list)
+
         if aggregated.empty:
             return _empty_response("No responsibilities found for the selected filters.")
 
@@ -1879,6 +1935,8 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+
 
 
 
