@@ -1,4 +1,4 @@
-﻿"""Excel workbook export helpers."""
+"""Excel workbook export helpers."""
 from __future__ import annotations
 
 import logging
@@ -31,6 +31,8 @@ def make_trace_workbook_bytes(
     gang_for_sheet: str | None = None,
     config: AppConfig | None = None,
     project_info: pd.DataFrame | None = None,
+    erections_completed: pd.DataFrame | None = None,
+    erections_context: dict[str, object] | None = None,
 ) -> bytes:
     """Build the Excel export with summary, idle intervals, and daily detail."""
 
@@ -95,20 +97,32 @@ def make_trace_workbook_bytes(
         scoped_data.groupby(["project_name", "month"])["daily_prod_mt"].mean().reset_index()
     )
 
-    context_df = pd.DataFrame(
-        [
-            {
-                "projects": ", ".join(projects or []) or "(all)",
-                "gangs": ", ".join(gangs or []) or "(all)",
-                "months": ", ".join(
-                    [timestamp.strftime("%Y-%m") for timestamp in (months_ts or [])]
-                )
-                or "(all / overall)",
-                "benchmark": bench,
-                "loss_cap_days": active_config.loss_max_gap_days,
-            }
-        ]
-    )
+    context_row = {
+        "projects": ", ".join(projects or []) or "(all)",
+        "gangs": ", ".join(gangs or []) or "(all)",
+        "months": ", ".join(
+            [timestamp.strftime("%Y-%m") for timestamp in (months_ts or [])]
+        )
+        or "(all / overall)",
+        "benchmark": bench,
+        "loss_cap_days": active_config.loss_max_gap_days,
+    }
+    if erections_context:
+        def _format_context_date(value: object) -> str:
+            if isinstance(value, pd.Timestamp):
+                return value.strftime("%Y-%m-%d")
+            if value:
+                return str(value)
+            return ""
+        context_row["erections_range_start"] = _format_context_date(
+            erections_context.get("range_start")
+        )
+        context_row["erections_range_end"] = _format_context_date(
+            erections_context.get("range_end")
+        )
+        search_value = erections_context.get("search_text")
+        context_row["erections_search"] = (search_value or "").strip()
+    context_df = pd.DataFrame([context_row])
 
     assumptions = pd.DataFrame(
         {
@@ -129,6 +143,40 @@ def make_trace_workbook_bytes(
         project_month.to_excel(writer, "ProjectsMonthly", index=False)
         context_df.to_excel(writer, "SelectionContext", index=False)
         assumptions.to_excel(writer, "Assumptions", index=False)
+
+        if erections_completed is not None:
+            completions_sheet = erections_completed.copy()
+            if "completion_date" in completions_sheet.columns:
+                completions_sheet["completion_date"] = completions_sheet["completion_date"].apply(
+                    lambda value: value.date() if isinstance(value, pd.Timestamp) else value
+                )
+            if "start_date" in completions_sheet.columns:
+                completions_sheet["start_date"] = completions_sheet["start_date"].apply(
+                    lambda value: value.date() if isinstance(value, pd.Timestamp) else (None if pd.isna(value) else value)
+                )
+            if "supervisor_name" in completions_sheet.columns:
+                completions_sheet["supervisor_name"] = completions_sheet["supervisor_name"].fillna("")
+            else:
+                completions_sheet["supervisor_name"] = ""
+            if "section_incharge_name" in completions_sheet.columns:
+                completions_sheet["section_incharge_name"] = completions_sheet["section_incharge_name"].fillna("")
+            else:
+                completions_sheet["section_incharge_name"] = ""
+            completions_sheet = completions_sheet.rename(
+                columns={
+                    "completion_date": "Completion Date",
+                    "project_name": "Project",
+                    "location_no": "Location",
+                    "tower_weight_mt": "Tower Weight (MT)",
+                    "daily_prod_mt": "Productivity (MT/day)",
+                    "gang_name": "Gang",
+                    "start_date": "Start Date",
+                    "supervisor_name": "Supervisor",
+                    "section_incharge_name": "Section Incharge",
+                    "revenue_value": "Revenue",
+                }
+            )
+            completions_sheet.to_excel(writer, "ErectionsCompleted", index=False)
 
         if gang_for_sheet:
             selected = scoped_data[scoped_data["gang_name"] == gang_for_sheet]
