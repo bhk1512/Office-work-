@@ -325,13 +325,13 @@ def build_kpi_cards() -> dbc.Row:
                 xs=12, sm=6, md=6, lg=3, xl=3,
             ),
 
-            # 3) Total Erection (This Period) (orange for Figma look)
+            # 3) Total Erection (orange for Figma look)
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
                             html.Div(_icon("trend_up"), className="kpi__icon"),
-                            html.Div("Total Erection (This Period)", className="kpi-label"),
+                            html.Div("Total Erection", className="kpi-label"),
                             html.Div(
                                 [ html.Span(id="kpi-total", className="kpi-value") ],
                                 className="kpi-row",
@@ -777,7 +777,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                             html.Div(
                                                 [
                                                     html.Div(
-                                                        "Gang Performance: Delivered vs Lost",
+                                                        "Gang Performance",
                                                         className="section-title",
                                                     ),
                                                     html.Div(
