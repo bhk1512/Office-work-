@@ -81,7 +81,7 @@ def _load_responsibilities_data(
     daily_sheet = next(
         (
             candidate
-            for candidate in ("ProdDailyExpandedSingles", "Prod Daily Expanded", "ProdDailyExpanded")
+            for candidate in ("ProdDailyExpandedSingles")
             if candidate in workbook.sheet_names
         ),
         None,

@@ -25,7 +25,7 @@ from .charts import (
 )
 from .config import AppConfig
 from .filters import apply_filters, resolve_months
-from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang, compute_gang_baseline_maps
+from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang, compute_gang_baseline_maps, compute_project_baseline_maps
 from .workbook import make_trace_workbook_bytes
 
 
@@ -302,7 +302,7 @@ def _prepare_erections_completed(
 
 _slug = lambda s: re.sub(r"[^a-z0-9_-]+", "-", str(s).lower()).strip("-")
 
-def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project="ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â", last_date="ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"):
+def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project=" ", last_date=" "):
     badge_cls = "good" if pct >= 80 else ("mid" if pct >= 65 else "low")
     delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
@@ -993,7 +993,7 @@ def register_callbacks(
 
         if responsibilities_provider is None and workbook is not None:
             daily_sheet = None
-            for candidate in ("ProdDailyExpandedSingles", "Prod Daily Expanded", "ProdDailyExpanded"):
+            for candidate in ("ProdDailyExpandedSingles"):
                 if candidate in workbook.sheet_names:
                     daily_sheet = candidate
                     break
@@ -1266,10 +1266,33 @@ def register_callbacks(
             loss_scope = scoped_all.copy()
             history_scope = scoped_all.copy()
 
-        baseline_overall_map, baseline_monthly_map = compute_gang_baseline_maps(scoped_all)
-        history_overall_map, _ = compute_gang_baseline_maps(history_scope)
-        if history_overall_map:
-            baseline_overall_map.update(history_overall_map)
+        # --- PROJECT-level baselines, then map them onto gangs ---
+        proj_overall_all,  proj_monthly_all  = compute_project_baseline_maps(scoped_all)
+        proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps(history_scope)
+
+        # Prefer history for overall if present (so current month never waters down baselines)
+        if proj_overall_hist:
+            proj_overall_all.update(proj_overall_hist)
+
+        # Monthly baselines → HISTORY ONLY (never let the active month train itself)
+        proj_monthly = proj_monthly_hist
+
+        # Gang → Project bridge
+        gang_to_project = (
+            scoped_all[["gang_name", "project_name"]]
+            .dropna()
+            .drop_duplicates()
+            .set_index("gang_name")["project_name"]
+            .astype(str)
+            .to_dict()
+        )
+
+        # Build the same names your downstream code already expects:
+        baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
+        baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
+
+        baseline_map = baseline_overall_map
+
 
         baseline_map = baseline_overall_map
         loss_rows: list[dict[str, float]] = []
@@ -1445,15 +1468,6 @@ def register_callbacks(
                 )
 
 
-
-
-
-
-
-
-
-
-
         row_px = 56
         topbot_margin = 120
         fig_height = int(row_px * max(1, len(loss_df)) + topbot_margin)
@@ -1488,8 +1502,8 @@ def register_callbacks(
                 # match Top/Bottom customdata shape: [last_project, last_date_str, current_metric, baseline_metric]
                 customdata=np.stack(
                     [
-                        loss_df["last_project"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
-                        loss_df["last_date_str"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
+                        loss_df["last_project"].fillna(" "),
+                        loss_df["last_date_str"].fillna(" "),
                         loss_df["avg_prod"].fillna(0.0),      # current metric (MT/day)
                         loss_df["baseline"].fillna(0.0),      # baseline (MT/day)
                     ],
@@ -1524,8 +1538,8 @@ def register_callbacks(
                 width=0.95,
                 customdata=np.stack(
                     [
-                        loss_df["last_project"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
-                        loss_df["last_date_str"].fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â"),
+                        loss_df["last_project"].fillna(" "),
+                        loss_df["last_date_str"].fillna(" "),
                         loss_df["avg_prod"].fillna(0.0),
                         loss_df["baseline"].fillna(0.0),
                     ],
@@ -1672,7 +1686,21 @@ def register_callbacks(
             baseline_source = baseline_source[baseline_source["project_name"].isin(project_list)]
         if gang_list:
             baseline_source = baseline_source[baseline_source["gang_name"].isin(gang_list)]
-        overall_baseline_map, monthly_baseline_map = compute_gang_baseline_maps(baseline_source)
+        # PROJECT-level baselines for trace/idle view, then map to gang keys
+        proj_overall, proj_monthly = compute_project_baseline_maps(baseline_source)
+
+        g2p = (
+            baseline_source[["gang_name", "project_name"]]
+            .dropna()
+            .drop_duplicates()
+            .set_index("gang_name")["project_name"]
+            .astype(str)
+            .to_dict()
+        )
+
+        overall_baseline_map = {g: proj_overall.get(p) for g, p in g2p.items()}
+        monthly_baseline_map = {g: proj_monthly.get(p, {}) for g, p in g2p.items()}
+
 
         # Idle intervals
         idle_source = pick_gang_scope(gang_focus)

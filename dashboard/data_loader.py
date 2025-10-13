@@ -142,8 +142,6 @@ def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
         candidates.append(config.preferred_sheet)
     candidates.extend([
         "ProdDailyExpandedSingles",
-        "ProdDailyExpanded",
-        "Prod Daily Expanded",
     ])
 
     seen: set[str] = set()

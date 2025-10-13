@@ -113,6 +113,43 @@ def compute_gang_baseline_maps(
     return overall, monthly
 
 
+def compute_project_baseline_maps(
+    data: pd.DataFrame,
+) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """
+    Return (overall_project_map, monthly_project_map) where keys are project_name.
+    Baseline = mean of 'daily_prod_mt' over gang-day rows, i.e., total MT / total gang-days.
+    Requires columns: ['project_name', 'date', 'daily_prod_mt'] (or your equivalent).
+    """
+    if data.empty:
+        return {}, {}
+
+    # Reuse your existing month resolver so month logic is consistent
+    month_series = _resolve_month_series(data)
+    working = data.assign(__baseline_month=month_series)
+
+    # Overall (weighted by gang-days naturally, since it's row-level mean)
+    overall_series = (
+        working.dropna(subset=["project_name", "daily_prod_mt"])
+               .groupby("project_name")["daily_prod_mt"]
+               .mean()
+               .dropna()
+    )
+    overall_map = {str(k): float(v) for k, v in overall_series.items()}
+
+    # Monthly (again mean over gang-day rows inside each month)
+    month_series = (
+        working.dropna(subset=["project_name", "daily_prod_mt", "__baseline_month"])
+               .groupby(["project_name", "__baseline_month"])["daily_prod_mt"]
+               .mean()
+               .dropna()
+    )
+
+    monthly_map: dict[str, dict[pd.Timestamp, float]] = {}
+    for (project, month_ts), val in month_series.items():
+        monthly_map.setdefault(str(project), {})[pd.to_datetime(month_ts)] = float(val)
+
+    return overall_map, monthly_map
 
 def calc_idle_and_loss(
     group_df: pd.DataFrame,
