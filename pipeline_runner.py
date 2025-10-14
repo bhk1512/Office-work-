@@ -5,6 +5,9 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+import duckdb
+import pandas as pd
+
 from erection_compiled_to_daily_new import run_pipeline
 from microplan_compile import compile_microplans_to_workbook
 
@@ -52,6 +55,64 @@ def _normalise_files(raw: Optional[Iterable[str]], base: Path) -> Optional[List[
             continue
         files.append(resolved)
     return files if files else None
+
+
+PARQUET_SHEETS: tuple[str, ...] = (
+    "ProdDailyExpandedSingles",
+    "ProdDailyExpanded",
+    "RawData",
+    "ProjectBaselines",
+    "ProjectBaselinesMonthly",
+    "ProjectDetails",
+    "MicroPlanResponsibilities",
+    "MicroPlanIndex",
+)
+
+
+def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
+    """Persist *df* to *destination* using DuckDB for consistent parquet output."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    with duckdb.connect(database=":memory:") as con:
+        con.register("df_to_write", df)
+        con.execute(
+            "COPY df_to_write TO ? (FORMAT 'parquet', COMPRESSION 'zstd')",
+            [str(destination)],
+        )
+
+
+def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None = None) -> Path:
+    """Export selected workbook sheets to parquet files alongside the workbook."""
+
+    workbook_path = Path(workbook_path)
+    if not workbook_path.exists():
+        raise FileNotFoundError(f"Workbook '{workbook_path}' does not exist.")
+
+    target_dir = workbook_path.parent / f"{workbook_path.stem}_parquet"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    sheet_list = list(sheets) if sheets is not None else list(PARQUET_SHEETS)
+    exported: list[str] = []
+    with pd.ExcelFile(workbook_path) as workbook:
+        available = set(workbook.sheet_names)
+        for sheet in sheet_list:
+            if sheet not in available:
+                continue
+            df = workbook.parse(sheet_name=sheet)
+            if df is None:
+                continue
+            destination = target_dir / f"{sheet}.parquet"
+            _write_parquet(df, destination)
+            exported.append(sheet)
+
+    if not exported:
+        print(f"[pipeline] No matching sheets were exported from {workbook_path}.")
+    else:
+        print(f"[pipeline] Exported sheets to parquet: {', '.join(exported)}")
+
+    return target_dir
 
 
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
@@ -132,11 +193,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if args.extra_args:
         extra_args.extend(args.extra_args)
 
+
+
     if not args.skip_compile:
         if resolved_input:
             print(f"[pipeline] Compiling from folder: {resolved_input}")
         if resolved_files:
-            print("[pipeline] Compiling from files:\n  - " + "\n  - ".join(str(p) for p in resolved_files))
+            print("[pipeline] Compiling from files\n  - " + "\n  - ".join(str(p) for p in resolved_files))
         print(f"[pipeline] Writing output to: {resolved_output}")
         run_pipeline(
             input_path=resolved_input,
@@ -164,23 +227,52 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
         else:
             print("[pipeline] MicroPlan: no input directory configured; skipping.")
+
+        if resolved_output:
+            try:
+                parquet_dir = export_workbook_to_parquet(resolved_output)
+            except Exception as exc:
+                print(f"[pipeline] Failed to export parquet dataset: {exc}")
+                parquet_dir = None
+        else:
+            parquet_dir = None
     else:
         print("[pipeline] Skipping compilation step as requested.")
+        parquet_dir = None
+
+    dataset_path: Path | None = resolved_output
+    if parquet_dir:
+        dataset_path = Path(parquet_dir)
+    elif resolved_output:
+        candidate_dir = resolved_output.parent / f"{resolved_output.stem}_parquet"
+        if candidate_dir.exists():
+            dataset_path = candidate_dir
+    if dataset_path:
+        print(f"[pipeline] Using dataset path: {dataset_path}")
+    else:
+        print("[pipeline] Dataset path unresolved; using dashboard defaults.")
 
     dash_host = os.getenv("DASH_HOST", config.get("dash_host", "0.0.0.0"))
     dash_port = int(os.getenv("DASH_PORT", config.get("dash_port", 8050)))
     dash_debug = os.getenv("DASH_DEBUG", str(config.get("dash_debug", False))).lower() in ("1", "true", "yes")
 
+
     print("[dashboard] Loading Dash app...")
     dashboard = import_module("app")
 
-    if resolved_output:
-        dashboard.DATA_PATH = Path(resolved_output)
-        # dashboard.df_day = dashboard.load_daily(dashboard.DATA_PATH)
-        _reload_dashboard_data(dashboard, dashboard.DATA_PATH)
+    if dataset_path is not None:
+        dataset_target = Path(dataset_path)
     else:
-        # dashboard.df_day = dashboard.load_daily(dashboard.DATA_PATH)
-        _reload_dashboard_data(dashboard, dashboard.DATA_PATH)
+        dataset_target = Path(dashboard.DATA_PATH)
+
+    new_config = dashboard.AppConfig(data_path=dataset_target)
+    dashboard.CONFIG = new_config
+    dashboard.DATA_PATH = dataset_target
+    dashboard.app = dashboard.create_app(new_config)
+    dashboard.server = dashboard.app.server
+
+    _reload_dashboard_data(dashboard, dashboard.DATA_PATH)
+    print(f"[dashboard] Dataset path configured: {dashboard.DATA_PATH}")
 
     print(f"[dashboard] Starting server on http://{dash_host}:{dash_port}")
     dashboard.app.run_server(host=dash_host, port=dash_port, debug=dash_debug)

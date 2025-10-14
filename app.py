@@ -11,7 +11,14 @@ import dash_bootstrap_components as dbc
 
 from dashboard.callbacks import register_callbacks
 from dashboard.config import AppConfig, configure_logging
-from dashboard.data_loader import load_daily as _load_daily, load_project_details, get_project_baseline_maps
+from dashboard.data_loader import (
+    load_daily as _load_daily,
+    load_project_details,
+    get_project_baseline_maps,
+    find_parquet_source,
+    is_parquet_dataset,
+    read_parquet_table,
+)
 from dashboard.layout import build_layout
 
 
@@ -31,6 +38,28 @@ def get_df_projinfo() -> pd.DataFrame:
 def get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
     """Return cached project productivity baselines."""
     return get_project_baseline_maps()
+
+
+def _normalize_text(value: object) -> str:
+    text = str(value).replace("\u00a0", " ").strip()
+    lowered = text.lower()
+    if lowered in {"", "nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _normalize_lower(value: object) -> str:
+    return _normalize_text(value).lower()
+
+
+def _normalize_location(value: object) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+    if text.endswith(".0") and text.replace(".", "", 1).isdigit():
+        text = text.split(".", 1)[0]
+    return text
+
 
 
 df_responsibilities: pd.DataFrame | None = None
@@ -66,90 +95,108 @@ def get_responsibilities_error() -> str | None:
 def _load_responsibilities_data(
     config: AppConfig,
 ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], str | None]:
-    try:
-        workbook = pd.ExcelFile(config.data_path)
-    except FileNotFoundError:
-        LOGGER.warning("Responsibilities workbook not found: %s", config.data_path)
-        return None, set(), "Compiled workbook not found."
-    except Exception as exc:
-        LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
-        return None, set(), "Unable to load Micro Plan data."
+    path = Path(config.data_path)
 
-    sheet_name = "MicroPlanResponsibilities"
-    if sheet_name not in workbook.sheet_names:
-        LOGGER.warning("Sheet '%s' missing in workbook", sheet_name)
-        return pd.DataFrame(), set(), "No Micro Plan data found in the compiled workbook."
+    df_atomic: pd.DataFrame | None = None
+    df_daily: pd.DataFrame | None = None
 
-    df_atomic = pd.read_excel(workbook, sheet_name=sheet_name)
-
-    daily_sheet = next(
-        (
-            candidate
-            for candidate in ("ProdDailyExpandedSingles")
-            if candidate in workbook.sheet_names
-        ),
-        None,
-    )
-    completed_keys: set[tuple[str, str]] = set()
-
-    if daily_sheet:
+    if is_parquet_dataset(path):
         try:
-            df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
+            resp_source = find_parquet_source(path, "MicroPlanResponsibilities")
+        except Exception:
+            resp_source = None
+
+        if not resp_source:
+            LOGGER.warning("Sheet '%s' missing in parquet dataset", "MicroPlanResponsibilities")
+            return pd.DataFrame(), set(), "No Micro Plan data found in the compiled dataset."
+
+        try:
+            df_atomic = read_parquet_table(resp_source)
+        except FileNotFoundError:
+            LOGGER.warning("Responsibilities parquet not found near: %s", path)
+            return pd.DataFrame(), set(), "No Micro Plan data found in the compiled dataset."
         except Exception as exc:
-            LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
-        else:
-            def _normalize_text(value: object) -> str:
-                text = str(value).replace("\u00a0", " ").strip()
-                lowered = text.lower()
-                if lowered in {"", "nan", "none", "null"}:
-                    return ""
-                return text
+            LOGGER.exception("Failed to load responsibilities parquet: %s", exc)
+            return None, set(), "Unable to load Micro Plan data."
 
-            def _normalize_lower(value: object) -> str:
-                return _normalize_text(value).lower()
-
-            def _normalize_location(value: object) -> str:
-                txt = _normalize_text(value)
-                if not txt or txt.lower() in {"nan", "none"}:
-                    return ""
-                if txt.endswith(".0") and txt.replace(".", "", 1).isdigit():
-                    txt = txt.split(".", 1)[0]
-                return txt
-
-            def _pick_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str:
-                mapping = {str(col).strip().lower(): col for col in frame.columns}
-                for candidate in candidates:
-                    key = candidate.strip().lower()
-                    if key in mapping:
-                        return mapping[key]
-                for key, original in mapping.items():
-                    if any(cand.lower() in key for cand in candidates):
-                        return original
-                raise KeyError(candidates)
-
+        candidates = [config.preferred_sheet, "ProdDailyExpandedSingles", "ProdDailyExpanded"]
+        for candidate in [c for c in candidates if c]:
+            source = find_parquet_source(path, candidate)
+            if not source:
+                continue
             try:
-                col_proj = _pick_column(df_daily, ("project_name", "project"))
-                col_loc = _pick_column(
-                    df_daily, ("location_no", "location number", "location")
-                )
-            except KeyError:
-                LOGGER.warning(
-                    "Daily sheet missing project/location columns; delivered will rely on realised values only."
-                )
-            else:
-                cleaned_projects = df_daily[col_proj].map(_normalize_lower)
-                cleaned_locations = df_daily[col_loc].map(_normalize_location)
-                completed_keys = {
-                    (p, loc)
-                    for p, loc in zip(cleaned_projects, cleaned_locations)
-                    if p and loc
-                }
+                df_daily = read_parquet_table(source)
+                break
+            except Exception as exc:
+                LOGGER.warning("Failed to load daily dataset '%s': %s", candidate, exc)
+    else:
+        try:
+            workbook = pd.ExcelFile(path)
+        except FileNotFoundError:
+            LOGGER.warning("Responsibilities workbook not found: %s", config.data_path)
+            return None, set(), "Compiled workbook not found."
+        except Exception as exc:
+            LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
+            return None, set(), "Unable to load Micro Plan data."
+
+        sheet_name = "MicroPlanResponsibilities"
+        if sheet_name not in workbook.sheet_names:
+            LOGGER.warning("Sheet '%s' missing in workbook", sheet_name)
+            return pd.DataFrame(), set(), "No Micro Plan data found in the compiled workbook."
+
+        df_atomic = pd.read_excel(workbook, sheet_name=sheet_name)
+
+        candidates = [config.preferred_sheet, "ProdDailyExpandedSingles", "ProdDailyExpanded"]
+        daily_sheet = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate and candidate in workbook.sheet_names
+            ),
+            None,
+        )
+        if daily_sheet:
+            try:
+                df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
+            except Exception as exc:
+                LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
+
+    completion_keys: set[tuple[str, str]] = set()
+
+    if df_daily is not None and not df_daily.empty:
+
+        def _pick_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str:
+            mapping = {str(col).strip().lower(): col for col in frame.columns}
+            for candidate in candidates:
+                key = candidate.strip().lower()
+                if key in mapping:
+                    return mapping[key]
+            for key, original in mapping.items():
+                if any(cand.lower() in key for cand in candidates):
+                    return original
+            raise KeyError(candidates)
+
+        try:
+            col_proj = _pick_column(df_daily, ("project_name", "project"))
+            col_loc = _pick_column(
+                df_daily, ("location_no", "location number", "location")
+            )
+        except KeyError:
+            LOGGER.warning(
+                "Daily dataset missing project/location columns; delivered will rely on realised values only."
+            )
+        else:
+            cleaned_projects = df_daily[col_proj].map(_normalize_lower)
+            cleaned_locations = df_daily[col_loc].map(_normalize_location)
+            completion_keys = {
+                (p, loc) for p, loc in zip(cleaned_projects, cleaned_locations) if p and loc
+            }
     else:
         LOGGER.info(
-            "Daily expanded sheets not found; delivered values fall back to realised revenue only."
+            "Daily expanded data not found; delivered values fall back to realised revenue only."
         )
 
-    return df_atomic, completed_keys, None
+    return df_atomic, completion_keys, None
 
 
 

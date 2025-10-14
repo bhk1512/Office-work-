@@ -1,10 +1,13 @@
-"""Data loading utilities for the productivity dashboard."""
+﻿"""Data loading utilities for the productivity dashboard."""
 from __future__ import annotations
 
+import functools
 import logging
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
+import duckdb
 import pandas as pd
 
 from .config import AppConfig
@@ -14,9 +17,158 @@ LOGGER = logging.getLogger(__name__)
 PROJECT_BASELINES_SHEET = "ProjectBaselines"
 PROJECT_BASELINES_MONTHLY_SHEET = "ProjectBaselinesMonthly"
 
+PARQUET_SUFFIXES: tuple[str, ...] = (".parquet", ".parq", ".pq")
+CACHE_TTL_SECONDS = 300  # seconds
+CACHE_MAXSIZE = 4
+
 _PROJECT_BASELINE_OVERALL: dict[str, float] = {}
 _PROJECT_BASELINE_MONTHLY: dict[str, dict[pd.Timestamp, float]] = {}
 _PROJECT_BASELINE_SOURCE: Path | None = None
+
+
+def _ttl_lru_cache(maxsize: int, ttl_seconds: int):
+    """Return an LRU cache decorator with simple time-based invalidation."""
+
+    def decorator(func):
+        cached = functools.lru_cache(maxsize=maxsize)(func)
+        expiry = {"value": 0.0}
+
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            now = time.time()
+            if ttl_seconds > 0 and now >= expiry["value"]:
+                cached.cache_clear()
+                expiry["value"] = now + ttl_seconds
+            return cached(*args, **kwargs)
+
+        wrapped.cache_clear = cached.cache_clear  # type: ignore[attr-defined]
+        return wrapped
+
+    return decorator
+
+
+def _parquet_dataset_available(path: Path) -> bool:
+    """Return True if *path* references a Parquet dataset (file or directory)."""
+
+    path = Path(path)
+    if not path.exists():
+        return False
+    if path.is_file():
+        return path.suffix.lower() in PARQUET_SUFFIXES
+    for suffix in PARQUET_SUFFIXES:
+        iterator = path.rglob(f"*{suffix}")
+        if next(iterator, None) is not None:
+            return True
+    return False
+
+
+def _candidate_stems(name: str) -> list[str]:
+    cleaned = name.strip()
+    if not cleaned:
+        return []
+    variants = {
+        cleaned,
+        cleaned.replace(" ", ""),
+        cleaned.replace("_", ""),
+        cleaned.replace("-", ""),
+        cleaned.lower(),
+        cleaned.upper(),
+    }
+    return [variant for variant in variants if variant]
+
+
+def _resolve_search_root(path: Path) -> Path:
+    if path.is_dir():
+        return path
+    if path.is_file():
+        return path.parent
+    return path
+
+
+def _find_parquet_source(path: Path, table: str | None) -> str | None:
+    """Return a DuckDB-compatible parquet path or glob for *table* relative to *path*."""
+
+    if not table:
+        return None
+    table = table.strip()
+    if not table:
+        return None
+
+    path = Path(path)
+    lower_table = table.lower()
+
+    if path.is_file() and path.suffix.lower() in PARQUET_SUFFIXES and path.stem.lower() == lower_table:
+        return str(path)
+
+    root = _resolve_search_root(path)
+    stems = _candidate_stems(table)
+
+    for stem in stems:
+        for suffix in PARQUET_SUFFIXES:
+            candidate = root / f"{stem}{suffix}"
+            if candidate.exists():
+                return str(candidate)
+
+    for stem in stems:
+        directory = root / stem
+        if directory.is_dir():
+            for suffix in PARQUET_SUFFIXES:
+                if any(directory.glob(f"*{suffix}")):
+                    return str(directory / f"*{suffix}")
+
+    if root.is_dir():
+        for suffix in PARQUET_SUFFIXES:
+            match = next(
+                (
+                    candidate
+                    for candidate in root.glob(f"**/*{suffix}")
+                    if candidate.stem.lower() == lower_table
+                ),
+                None,
+            )
+            if match:
+                return str(match)
+    return None
+
+
+def _read_parquet(source: str) -> pd.DataFrame:
+    """Read *source* (file or glob) into a DataFrame via DuckDB."""
+
+    LOGGER.debug("Reading parquet via DuckDB: %s", source)
+    with duckdb.connect(database=":memory:") as con:
+        return con.execute("SELECT * FROM read_parquet(?)", [source]).df()
+
+def is_parquet_dataset(path: Path | str) -> bool:
+    """Return True if *path* references a parquet-backed dataset."""
+
+    return _parquet_dataset_available(Path(path))
+
+
+def find_parquet_source(path: Path | str, table: str) -> str | None:
+    """Resolve the parquet file/glob for *table* relative to *path*."""
+
+    return _find_parquet_source(Path(path), table)
+
+
+def read_parquet_table(source: str) -> pd.DataFrame:
+    """Load *source* into a DataFrame using DuckDB."""
+
+    return _read_parquet(source)
+
+
+
+def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
+    """Persist *df* to *destination* using DuckDB for consistent parquet writes."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    with duckdb.connect(database=":memory:") as con:
+        con.register("df_to_write", df)
+        con.execute(
+            "COPY df_to_write TO ? (FORMAT 'parquet', COMPRESSION 'zstd')",
+            [str(destination)],
+        )
 
 
 def _pick_column(df: pd.DataFrame, options: Iterable[str]) -> str:
@@ -104,6 +256,60 @@ def _compute_project_baseline_maps(
     return overall, monthly
 
 
+def _parse_project_baseline_frames(
+    df_overall: pd.DataFrame | None,
+    df_monthly: pd.DataFrame | None,
+) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """Convert baseline dataframes into cached mapping structures."""
+
+    overall: dict[str, float] = {}
+    monthly: dict[str, dict[pd.Timestamp, float]] = {}
+
+    if df_overall is not None and not df_overall.empty:
+        try:
+            project_col = _pick_column(df_overall, ("project_name", "Project Name"))
+            baseline_col = _pick_column(df_overall, ("baseline_mt_per_day", "Baseline", "baseline"))
+        except KeyError:
+            pass
+        else:
+            cleaned = df_overall[[project_col, baseline_col]].copy()
+            cleaned[project_col] = cleaned[project_col].astype(str).str.strip()
+            cleaned[baseline_col] = pd.to_numeric(cleaned[baseline_col], errors="coerce")
+            cleaned = cleaned.dropna(subset=[project_col, baseline_col])
+            for _, row in cleaned.iterrows():
+                name = str(row[project_col]).strip()
+                value = float(row[baseline_col])
+                if name:
+                    overall[name] = value
+
+    if df_monthly is not None and not df_monthly.empty:
+        try:
+            project_col = _pick_column(df_monthly, ("project_name", "Project Name"))
+            month_col = _pick_column(df_monthly, ("month", "Month"))
+            baseline_col = _pick_column(df_monthly, ("baseline_mt_per_day", "Baseline", "baseline"))
+        except KeyError:
+            pass
+        else:
+            cleaned = df_monthly[[project_col, month_col, baseline_col]].copy()
+            cleaned[project_col] = cleaned[project_col].astype(str).str.strip()
+            cleaned[baseline_col] = pd.to_numeric(cleaned[baseline_col], errors="coerce")
+            cleaned[month_col] = pd.to_datetime(cleaned[month_col], errors="coerce")
+            cleaned = cleaned.dropna(subset=[project_col, month_col, baseline_col])
+            for _, row in cleaned.iterrows():
+                project = str(row[project_col]).strip()
+                month_ts = pd.to_datetime(row[month_col])
+                value = float(row[baseline_col])
+                if project and not pd.isna(month_ts):
+                    monthly.setdefault(project, {})[pd.Timestamp(month_ts)] = value
+
+    return overall, monthly
+
+
+def _baseline_parquet_destination(data_path: Path, sheet_name: str) -> Path:
+    root = data_path if data_path.is_dir() else data_path.parent
+    return root / f"{sheet_name}.parquet"
+
+
 def _persist_project_baselines(
     workbook_path: Path | None,
     overall: dict[str, float],
@@ -114,12 +320,6 @@ def _persist_project_baselines(
     if workbook_path is None:
         return
     path = Path(workbook_path)
-    if not path.exists():
-        LOGGER.warning(
-            "Cannot write project baselines because workbook '%s' is missing.",
-            path,
-        )
-        return
 
     overall_rows = [
         {"project_name": project, "baseline_mt_per_day": float(value)}
@@ -150,6 +350,28 @@ def _persist_project_baselines(
         monthly_df["month"] = pd.to_datetime(monthly_df["month"], errors="coerce")
         monthly_df = monthly_df.dropna(subset=["month"]).sort_values(["project_name", "month"])
 
+    if _parquet_dataset_available(path):
+        try:
+            _write_parquet(overall_df, _baseline_parquet_destination(path, PROJECT_BASELINES_SHEET))
+            _write_parquet(
+                monthly_df,
+                _baseline_parquet_destination(path, PROJECT_BASELINES_MONTHLY_SHEET),
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning(
+                "Failed to write project baselines to '%s' (parquet): %s",
+                path,
+                exc,
+            )
+        return
+
+    if not path.exists():
+        LOGGER.warning(
+            "Cannot write project baselines because workbook '%s' is missing.",
+            path,
+        )
+        return
+
     try:
         with pd.ExcelWriter(path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
             overall_df.to_excel(writer, PROJECT_BASELINES_SHEET, index=False)
@@ -164,7 +386,7 @@ def _persist_project_baselines(
             "Permission denied while writing project baselines to '%s'.",
             path,
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - defensive logging
         LOGGER.warning(
             "Failed to write project baselines to '%s': %s",
             path,
@@ -184,64 +406,52 @@ def _refresh_project_baselines(workbook_path: Path, data: pd.DataFrame) -> None:
     _persist_project_baselines(workbook_path, overall_map, monthly_map)
 
 
-
 def load_project_baselines(
     workbook_path: Path | str,
 ) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
-    """Load precomputed project baselines from the workbook, updating the cache."""
+    """Load precomputed project baselines from storage, updating the cache."""
 
     path = Path(workbook_path)
+
+    if _parquet_dataset_available(path):
+        try:
+            overall_source = _find_parquet_source(path, PROJECT_BASELINES_SHEET)
+            monthly_source = _find_parquet_source(path, PROJECT_BASELINES_MONTHLY_SHEET)
+            if not overall_source and not monthly_source:
+                raise FileNotFoundError(f"No baseline parquet files found near '{path}'.")
+            df_overall = _read_parquet(overall_source) if overall_source else None
+            df_monthly = _read_parquet(monthly_source) if monthly_source else None
+        except FileNotFoundError:
+            LOGGER.warning(
+                "Baseline parquet files not found near '%s'.",
+                path,
+            )
+            _set_project_baseline_cache({}, {}, path)
+            return get_project_baseline_maps()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning(
+                "Unable to load project baselines from '%s': %s",
+                path,
+                exc,
+            )
+            return get_project_baseline_maps()
+        else:
+            overall, monthly = _parse_project_baseline_frames(df_overall, df_monthly)
+            _set_project_baseline_cache(overall, monthly, path)
+            return get_project_baseline_maps()
+
     try:
         with pd.ExcelFile(path) as workbook:
-            overall: dict[str, float] = {}
-            monthly: dict[str, dict[pd.Timestamp, float]] = {}
-
-            if PROJECT_BASELINES_SHEET in workbook.sheet_names:
-                df_overall = pd.read_excel(workbook, sheet_name=PROJECT_BASELINES_SHEET)
-                if not df_overall.empty:
-                    try:
-                        project_col = _pick_column(df_overall, ("project_name", "Project Name"))
-                        baseline_col = _pick_column(
-                            df_overall,
-                            ("baseline_mt_per_day", "Baseline", "baseline"),
-                        )
-                    except KeyError:
-                        pass
-                    else:
-                        cleaned = df_overall[[project_col, baseline_col]].copy()
-                        cleaned[project_col] = cleaned[project_col].astype(str).str.strip()
-                        cleaned[baseline_col] = pd.to_numeric(cleaned[baseline_col], errors="coerce")
-                        cleaned = cleaned.dropna(subset=[project_col, baseline_col])
-                        for _, row in cleaned.iterrows():
-                            name = str(row[project_col]).strip()
-                            value = float(row[baseline_col])
-                            if name:
-                                overall[name] = value
-
-            if PROJECT_BASELINES_MONTHLY_SHEET in workbook.sheet_names:
-                df_monthly = pd.read_excel(workbook, sheet_name=PROJECT_BASELINES_MONTHLY_SHEET)
-                if not df_monthly.empty:
-                    try:
-                        project_col = _pick_column(df_monthly, ("project_name", "Project Name"))
-                        month_col = _pick_column(df_monthly, ("month", "Month"))
-                        baseline_col = _pick_column(
-                            df_monthly,
-                            ("baseline_mt_per_day", "Baseline", "baseline"),
-                        )
-                    except KeyError:
-                        pass
-                    else:
-                        cleaned = df_monthly[[project_col, month_col, baseline_col]].copy()
-                        cleaned[project_col] = cleaned[project_col].astype(str).str.strip()
-                        cleaned[baseline_col] = pd.to_numeric(cleaned[baseline_col], errors="coerce")
-                        cleaned[month_col] = pd.to_datetime(cleaned[month_col], errors="coerce")
-                        cleaned = cleaned.dropna(subset=[project_col, month_col, baseline_col])
-                        for _, row in cleaned.iterrows():
-                            project = str(row[project_col]).strip()
-                            month_ts = pd.to_datetime(row[month_col])
-                            value = float(row[baseline_col])
-                            if project and not pd.isna(month_ts):
-                                monthly.setdefault(project, {})[pd.Timestamp(month_ts)] = value
+            df_overall = (
+                pd.read_excel(workbook, sheet_name=PROJECT_BASELINES_SHEET)
+                if PROJECT_BASELINES_SHEET in workbook.sheet_names
+                else None
+            )
+            df_monthly = (
+                pd.read_excel(workbook, sheet_name=PROJECT_BASELINES_MONTHLY_SHEET)
+                if PROJECT_BASELINES_MONTHLY_SHEET in workbook.sheet_names
+                else None
+            )
     except FileNotFoundError:
         LOGGER.warning(
             "Workbook '%s' not found when loading project baselines.",
@@ -249,7 +459,7 @@ def load_project_baselines(
         )
         _set_project_baseline_cache({}, {}, path)
         return get_project_baseline_maps()
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - defensive logging
         LOGGER.warning(
             "Unable to load project baselines from '%s': %s",
             path,
@@ -257,18 +467,22 @@ def load_project_baselines(
         )
         return get_project_baseline_maps()
 
+    overall, monthly = _parse_project_baseline_frames(df_overall, df_monthly)
     _set_project_baseline_cache(overall, monthly, path)
     return get_project_baseline_maps()
 
 
-
 def load_daily_from_proddailyexpanded(
-    xl: pd.ExcelFile, sheet: str = "ProdDailyExpanded"
+    source: pd.DataFrame | pd.ExcelFile,
+    sheet: str = "ProdDailyExpanded",
 ) -> pd.DataFrame:
     """Load daily productivity rows from a ProdDailyExpanded-style sheet."""
 
     LOGGER.debug("Loading data from sheet '%s'", sheet)
-    df = pd.read_excel(xl, sheet_name=sheet)
+    if isinstance(source, pd.ExcelFile):
+        df = pd.read_excel(source, sheet_name=sheet)
+    else:
+        df = source.copy()
     col_date = _pick_column(df, ["Work Date", "date"])
     col_prod = _pick_column(df, ["Productivity", "daily_prod_mt", "avg_daily_prod_mt"])
     col_proj = _pick_column(df, ["Project Name", "project_name"])
@@ -327,11 +541,14 @@ def load_daily_from_proddailyexpanded(
     return result
 
 
-def load_daily_from_rawdata(xl: pd.ExcelFile, sheet: str = "RawData") -> pd.DataFrame:
+def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "RawData") -> pd.DataFrame:
     """Load daily productivity rows from a RawData sheet by expanding date ranges."""
 
     LOGGER.debug("Loading data from sheet '%s'", sheet)
-    df = pd.read_excel(xl, sheet_name=sheet)
+    if isinstance(source, pd.ExcelFile):
+        df = pd.read_excel(source, sheet_name=sheet)
+    else:
+        df = source.copy()
     start_col = _pick_column(df, ["Start Date", "starting date"])
     end_col = _pick_column(df, ["Complete Date", "completion date"])
     prod_col = _pick_column(df, ["Productivity", "avg_daily_prod_mt", "daily_prod_mt"])
@@ -362,8 +579,80 @@ def load_daily_from_rawdata(xl: pd.ExcelFile, sheet: str = "RawData") -> pd.Data
     return pd.DataFrame(rows)
 
 
+def _load_daily_via_duckdb(data_path: Path, preferred_sheet: str | None) -> pd.DataFrame | None:
+    if not _parquet_dataset_available(data_path):
+        return None
+
+    candidates: list[str] = []
+    if preferred_sheet:
+        candidates.append(preferred_sheet)
+    candidates.extend(["ProdDailyExpandedSingles", "ProdDailyExpanded"])
+
+    for sheet_name in candidates:
+        source = _find_parquet_source(data_path, sheet_name)
+        if source:
+            df = _read_parquet(source)
+            LOGGER.debug("Loaded daily data via DuckDB from '%s' (%s)", data_path, sheet_name)
+            return load_daily_from_proddailyexpanded(df, sheet_name)
+
+    raw_source = _find_parquet_source(data_path, "RawData")
+    if raw_source:
+        df_raw = _read_parquet(raw_source)
+        LOGGER.debug("Loaded raw daily data via DuckDB from '%s' (RawData)", data_path)
+        return load_daily_from_rawdata(df_raw, sheet="RawData")
+
+    return None
+
+
+def _load_daily_via_excel(data_path: Path, preferred_sheet: str | None) -> pd.DataFrame:
+    target = data_path
+    if data_path.is_dir():
+        excel_candidates = sorted(data_path.glob("*.xls*"))
+        if not excel_candidates:
+            raise FileNotFoundError(f"No Excel workbooks found in '{data_path}'.")
+        target = excel_candidates[0]
+
+    with pd.ExcelFile(target) as workbook:
+        candidates: list[str] = []
+        if preferred_sheet:
+            candidates.append(preferred_sheet)
+        candidates.extend(["ProdDailyExpandedSingles"])
+
+        result: pd.DataFrame | None = None
+        seen: set[str] = set()
+        for sheet_name in candidates:
+            if sheet_name and sheet_name not in seen and sheet_name in workbook.sheet_names:
+                LOGGER.debug("Loaded daily data from Excel sheet '%s' in '%s'", sheet_name, target)
+                result = load_daily_from_proddailyexpanded(workbook, sheet_name)
+                break
+            seen.add(sheet_name)
+
+        if result is None and "RawData" in workbook.sheet_names:
+            LOGGER.debug("Falling back to RawData sheet in '%s'", target)
+            result = load_daily_from_rawdata(workbook, "RawData")
+
+    if result is None:
+        raise FileNotFoundError("Neither 'ProdDailyExpandedSingles' nor fallback sheets found in workbook.")
+    return result
+
+
+@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
+def _load_daily_cached(data_path: str, preferred_sheet: str) -> pd.DataFrame:
+    path = Path(data_path)
+    sheet = preferred_sheet or None
+
+    duckdb_df = _load_daily_via_duckdb(path, sheet)
+    if duckdb_df is not None:
+        return duckdb_df
+
+    if _parquet_dataset_available(path):
+        raise FileNotFoundError(f"Parquet dataset for daily productivity not found near '{path}'.")
+    LOGGER.debug("Parquet dataset not available for '%s'; using Excel fallback.", path)
+    return _load_daily_via_excel(path, sheet)
+
+
 def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
-    """Load daily productivity data from a config or explicit workbook path."""
+    """Load daily productivity data from a config or explicit path."""
 
     if isinstance(config_or_path, AppConfig):
         config = config_or_path
@@ -371,81 +660,99 @@ def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
         workbook_path = Path(config_or_path)
         config = AppConfig(data_path=workbook_path)
 
-    LOGGER.info("Loading workbook '%s'", config.data_path)
+    LOGGER.info("Loading dataset '%s'", config.data_path)
 
-    result: pd.DataFrame | None = None
-    with pd.ExcelFile(config.data_path) as workbook:
-        candidates: list[str] = []
-        if config.preferred_sheet:
-            candidates.append(config.preferred_sheet)
-        candidates.extend([
-            "ProdDailyExpandedSingles",
-        ])
+    resolved = str(Path(config.data_path).resolve())
+    try:
+        cached_df = _load_daily_cached(resolved, config.preferred_sheet or "")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Unable to locate productivity dataset at '{config.data_path}'."
+        ) from exc
 
-        seen: set[str] = set()
-        for sheet_name in candidates:
-            if sheet_name and sheet_name not in seen and sheet_name in workbook.sheet_names:
-                result = load_daily_from_proddailyexpanded(workbook, sheet_name)
-                break
-            seen.add(sheet_name)
-
-        if result is None and "RawData" in workbook.sheet_names:
-            result = load_daily_from_rawdata(workbook, "RawData")
-
-    if result is None:
-        raise FileNotFoundError("Neither 'ProdDailyExpandedSingles' nor fallback sheets found in workbook.")
-
-    _refresh_project_baselines(config.data_path, result)
+    result = cached_df.copy()
+    _refresh_project_baselines(Path(config.data_path), result)
     return result
+
+
+load_daily.cache_clear = _load_daily_cached.cache_clear  # type: ignore[attr-defined]
 
 
 def _pick_tol(df: pd.DataFrame, opts):
     m = {str(c).strip().lower(): c for c in df.columns}
     for o in opts:
         key = o.strip().lower()
-        if key in m: return m[key]
+        if key in m:
+            return m[key]
     for k, c in m.items():
         if any(o.lower() in k for o in opts):
             return c
     raise KeyError(f"Column not found among {opts}: have {list(df.columns)}")
 
 
-def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFrame:
+def _prepare_project_details(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
     try:
-        xl = pd.ExcelFile(path)
-        if sheet not in xl.sheet_names:
-            return pd.DataFrame()
-        df = pd.read_excel(xl, sheet_name=sheet)
-
-        col_code   = _pick_tol(df, ["project_code"])
-        col_name   = _pick_tol(df, ["project_name"])
+        col_code = _pick_tol(df, ["project_code"])
+        col_name = _pick_tol(df, ["project_name"])
         col_client = _pick_tol(df, ["client_name"])
-        col_noa    = _pick_tol(df, ["noa_start"])
-        col_loa    = _pick_tol(df, ["loa_end"])
-        col_pe     = _pick_tol(df, ["planning_eng"])
-        col_pch    = _pick_tol(df, ["pch"])
-        col_rm     = _pick_tol(df, ["regional_mgr"])
-        col_pm     = _pick_tol(df, ["project_mgr"])
-        col_si     = _pick_tol(df, ["section_inch"])
-        col_sup    = _pick_tol(df, ["supervisor"])
+        col_noa = _pick_tol(df, ["noa_start"])
+        col_loa = _pick_tol(df, ["loa_end"])
+        col_pe = _pick_tol(df, ["planning_eng"])
+        col_pch = _pick_tol(df, ["pch"])
+        col_rm = _pick_tol(df, ["regional_mgr"])
+        col_pm = _pick_tol(df, ["project_mgr"])
+        col_si = _pick_tol(df, ["section_inch"])
+        col_sup = _pick_tol(df, ["supervisor"])
 
         out = pd.DataFrame({
             "project_code": df[col_code].astype(str).str.strip(),
             "project_name": df[col_name].astype(str).str.strip(),
             "client_name": df[col_client].astype(str).str.strip(),
-            "noa_start":   pd.to_datetime(df[col_noa], errors="coerce"),
-            "loa_end":     pd.to_datetime(df[col_loa], errors="coerce"),
+            "noa_start": pd.to_datetime(df[col_noa], errors="coerce"),
+            "loa_end": pd.to_datetime(df[col_loa], errors="coerce"),
             "planning_eng": df[col_pe].astype(str).str.strip(),
-            "pch":          df[col_pch].astype(str).str.strip(),
+            "pch": df[col_pch].astype(str).str.strip(),
             "regional_mgr": df[col_rm].astype(str).str.strip(),
-            "project_mgr":  df[col_pm].astype(str).str.strip(),
+            "project_mgr": df[col_pm].astype(str).str.strip(),
             "section_inch": df[col_si].astype(str).str.strip(),
-            "supervisor":   df[col_sup].astype(str).str.strip(),
+            "supervisor": df[col_sup].astype(str).str.strip(),
         })
-        out = out[(out["project_name"]!="nan") | (out["project_code"]!="nan")].copy()
+        out = out[(out["project_name"] != "nan") | (out["project_code"] != "nan")].copy()
         out["key_name"] = out["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
         if "Project Name" in df.columns:
             out["Project Name"] = df["Project Name"].astype(str).str.strip()
         return out
     except Exception:
         return pd.DataFrame()
+
+
+@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
+def _load_project_details_cached(data_path: str, sheet: str) -> pd.DataFrame:
+    path = Path(data_path)
+    if _parquet_dataset_available(path):
+        source = _find_parquet_source(path, sheet)
+        if not source:
+            return pd.DataFrame()
+        df = _read_parquet(source)
+    else:
+        try:
+            with pd.ExcelFile(path) as xl:
+                if sheet not in xl.sheet_names:
+                    return pd.DataFrame()
+                df = pd.read_excel(xl, sheet_name=sheet)
+        except FileNotFoundError:
+            return pd.DataFrame()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.debug("Failed to load project details from '%s': %s", path, exc)
+            return pd.DataFrame()
+    return _prepare_project_details(df)
+
+
+def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFrame:
+    cached = _load_project_details_cached(str(Path(path).resolve()), sheet)
+    return cached.copy()
+
+
+load_project_details.cache_clear = _load_project_details_cached.cache_clear  # type: ignore[attr-defined]

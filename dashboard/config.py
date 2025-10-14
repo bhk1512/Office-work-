@@ -6,11 +6,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_WORKBOOK = Path("ErectionCompiled_Output_testRun.xlsx")
+
+
+def _resolve_default_data_path() -> Path:
+    parquet_dir = DEFAULT_WORKBOOK.parent / f"{DEFAULT_WORKBOOK.stem}_parquet"
+    if parquet_dir.exists():
+        return parquet_dir
+    return DEFAULT_WORKBOOK
+
+
+_DEFAULT_DATA_PATH = _resolve_default_data_path()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Immutable configuration for the productivity dashboard."""
 
-    data_path: Path = Path("ErectionCompiled_Output_testRun.xlsx")
+    data_path: Path = _DEFAULT_DATA_PATH
     preferred_sheet: str = "ProdDailyExpandedSingles"
     default_benchmark: float = 9.0
     loss_max_gap_days: int = 15
