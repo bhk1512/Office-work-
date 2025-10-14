@@ -198,10 +198,10 @@ def initialise_data(config: AppConfig) -> Tuple[pd.DataFrame, str]:
 
 
     # --- add project_code into df_day by joining to ProjectDetails on project_name (normalized) ---
-    if df_projinfo is not None and not df_projinfo.empty and "project name" in df.columns:
+    if df_projinfo is not None and not df_projinfo.empty and "project_name" in df.columns:
         df_norm = df.copy()
         df_norm["__key_name__"] = (
-            df_norm["project name"].astype(str).str.lower().str.replace(r"\s+", " ", regex=True)
+            df_norm["project_name"].astype(str).str.lower().str.replace(r"\s+", " ", regex=True)
         )
         map_df = df_projinfo[["key_name", "project_code"]].dropna().drop_duplicates("key_name")
         df_norm = df_norm.merge(map_df, left_on="__key_name__", right_on="key_name", how="left")

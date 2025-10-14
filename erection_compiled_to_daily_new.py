@@ -4,7 +4,6 @@ Parse 'Erection Compiled' sheets from one or many Excel files, compute productiv
 expand to daily rows, and write a consolidated workbook:
 
 Sheets written:
-  - ProdDailyExpanded     : per-day rows (Work Date + the 6 fields)
   - ProdDailyExpandedSingles : per-day rows including single-occurrence gangs
   - RawData           : per-erection (unexpanded) rows (the 6 fields)
   - Data Issues       : row-level problems (requested columns + 'Issues')
@@ -441,12 +440,12 @@ def process_file(path: Path):
         )
         return result.reindex(columns=PER_DAY_COLUMNS)
 
-    per_day = expand_per_day(work_to_expand)
+    # Only build the expanded per-day rows including single-occurrence gangs
     per_day_with_singles = expand_per_day(work_valid)
 
     data_issues_df = pd.concat(data_issues_rows, ignore_index=True) if data_issues_rows else pd.DataFrame()
 
-    return per_day, per_day_with_singles, per_erection, diag, issues, data_issues_df
+    return per_day_with_singles, per_erection, diag, issues, data_issues_df
 
 
 # ---------- Styling ----------
@@ -522,7 +521,7 @@ def main(argv=None):
     else:
         paths = [Path(p) for p in args.files]
 
-    all_per_day, all_per_day_with_singles, all_per_erection = [], [], []
+    all_per_day_with_singles, all_per_erection = [], []
     all_issues, all_diag = [], []
     all_data_issues = []
     all_proj_details = []
@@ -532,7 +531,7 @@ def main(argv=None):
             all_issues.append({"file": p.name, "issue": "missing"})
             continue
 
-        per_day, per_day_with_singles, per_erection, diag, issues, data_issues_df = process_file(p)
+        per_day_with_singles, per_erection, diag, issues, data_issues_df = process_file(p)
 
         # --- NEW: attempt to read "Project Details" from this source ---
         try:
@@ -545,8 +544,6 @@ def main(argv=None):
         except Exception as e:
             all_issues.append({"file": p.name, "issue": f"Project Details read error: {e}"})
 
-        if not per_day.empty:
-            all_per_day.append(per_day.assign(_source_file=p.name))
         if not per_day_with_singles.empty:
             all_per_day_with_singles.append(per_day_with_singles.assign(_source_file=p.name))
         if not per_erection.empty:
@@ -560,7 +557,6 @@ def main(argv=None):
 
 
     # Consolidate across all inputs
-    per_day_consol = pd.concat(all_per_day, ignore_index=True) if all_per_day else pd.DataFrame()
     per_day_with_singles_consol = pd.concat(all_per_day_with_singles, ignore_index=True) if all_per_day_with_singles else pd.DataFrame()
     per_erection_consol = pd.concat(all_per_erection, ignore_index=True) if all_per_erection else pd.DataFrame()
     data_issues_consol = pd.concat(all_data_issues, ignore_index=True) if all_data_issues else pd.DataFrame()
@@ -636,8 +632,6 @@ def main(argv=None):
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
-        if not per_day_consol.empty:
-            per_day_consol.drop(columns=["_source_file"], errors="ignore").to_excel(w, sheet_name="ProdDailyExpanded", index=False)
         if not per_day_with_singles_consol.empty:
             per_day_with_singles_consol.drop(columns=["_source_file"], errors="ignore").to_excel(w, sheet_name="ProdDailyExpandedSingles", index=False)
         if not per_erection_consol.empty:
@@ -656,7 +650,6 @@ def main(argv=None):
         # Apply styling
         wb = w.book
         for sheet_name, color in [
-            ("ProdDailyExpanded", "BDD7EE"),   # blue
             ("ProdDailyExpandedSingles", "9CC3E6"),  # blue variant including singles
             ("RawData", "C6E0B4"),         # green
             ("Data Issues", "F8CBAD"),     # light red
