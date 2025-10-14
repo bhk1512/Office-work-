@@ -11,6 +11,13 @@ from .config import AppConfig
 
 LOGGER = logging.getLogger(__name__)
 
+PROJECT_BASELINES_SHEET = "ProjectBaselines"
+PROJECT_BASELINES_MONTHLY_SHEET = "ProjectBaselinesMonthly"
+
+_PROJECT_BASELINE_OVERALL: dict[str, float] = {}
+_PROJECT_BASELINE_MONTHLY: dict[str, dict[pd.Timestamp, float]] = {}
+_PROJECT_BASELINE_SOURCE: Path | None = None
+
 
 def _pick_column(df: pd.DataFrame, options: Iterable[str]) -> str:
     """Return the first matching column from *options*, raising if none are found."""
@@ -21,14 +28,243 @@ def _pick_column(df: pd.DataFrame, options: Iterable[str]) -> str:
         if key in mapping:
             return mapping[key]
     for key, original in mapping.items():
-        lowered = key.lower()
-        if any(option.lower() in lowered for option in options):
+        if any(option.lower() in key for option in options):
             return original
     joined = ", ".join(options)
     raise KeyError(f"Column not found among {joined}")
 
 
-def load_daily_from_proddailyexpanded(xl: pd.ExcelFile, sheet: str = "ProdDailyExpanded") -> pd.DataFrame:
+def _set_project_baseline_cache(
+    overall: dict[str, float],
+    monthly: dict[str, dict[pd.Timestamp, float]],
+    source: Path | None,
+) -> None:
+    """Store project baseline maps for reuse across the app."""
+
+    global _PROJECT_BASELINE_OVERALL, _PROJECT_BASELINE_MONTHLY, _PROJECT_BASELINE_SOURCE
+    _PROJECT_BASELINE_OVERALL = dict(overall)
+    _PROJECT_BASELINE_MONTHLY = {project: dict(month_map) for project, month_map in monthly.items()}
+    _PROJECT_BASELINE_SOURCE = Path(source) if source else None
+
+
+def get_project_baseline_maps() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """Return cached project baseline maps (overall and monthly)."""
+
+    return (
+        dict(_PROJECT_BASELINE_OVERALL),
+        {project: dict(month_map) for project, month_map in _PROJECT_BASELINE_MONTHLY.items()},
+    )
+
+
+def _compute_project_baseline_maps(
+    data: pd.DataFrame,
+) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """Compute overall and monthly productivity baselines for each project."""
+
+    if data.empty or "project_name" not in data or "daily_prod_mt" not in data:
+        return {}, {}
+
+    working = data.copy()
+    working["project_name"] = working["project_name"].astype(str).str.strip()
+    working["daily_prod_mt"] = pd.to_numeric(working["daily_prod_mt"], errors="coerce")
+    working = working.dropna(subset=["project_name", "daily_prod_mt"])
+    if working.empty:
+        return {}, {}
+
+    month_series = None
+    if "month" in working.columns:
+        month_series = pd.to_datetime(working["month"], errors="coerce")
+        if month_series.notna().any():
+            month_series = month_series.dt.to_period("M").dt.to_timestamp()
+        else:
+            month_series = None
+    if month_series is None:
+        if "date" in working.columns:
+            month_series = pd.to_datetime(working["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        else:
+            month_series = pd.Series(pd.NaT, index=working.index)
+    working["__baseline_month"] = month_series
+
+    overall_series = working.groupby("project_name")["daily_prod_mt"].mean().dropna()
+    overall = {str(project): float(value) for project, value in overall_series.items() if not pd.isna(value)}
+
+    monthly: dict[str, dict[pd.Timestamp, float]] = {}
+    monthly_series = (
+        working.dropna(subset=["__baseline_month"])
+        .groupby(["project_name", "__baseline_month"])["daily_prod_mt"]
+        .mean()
+        .dropna()
+    )
+    for (project, month), value in monthly_series.items():
+        month_ts = pd.to_datetime(month)
+        if pd.isna(month_ts):
+            continue
+        monthly.setdefault(str(project), {})[pd.Timestamp(month_ts)] = float(value)
+
+    return overall, monthly
+
+
+def _persist_project_baselines(
+    workbook_path: Path | None,
+    overall: dict[str, float],
+    monthly: dict[str, dict[pd.Timestamp, float]],
+) -> None:
+    """Persist baseline tables into the compiled workbook for fast reuse."""
+
+    if workbook_path is None:
+        return
+    path = Path(workbook_path)
+    if not path.exists():
+        LOGGER.warning(
+            "Cannot write project baselines because workbook '%s' is missing.",
+            path,
+        )
+        return
+
+    overall_rows = [
+        {"project_name": project, "baseline_mt_per_day": float(value)}
+        for project, value in sorted(overall.items())
+    ]
+    overall_df = (
+        pd.DataFrame(overall_rows)
+        if overall_rows
+        else pd.DataFrame(columns=["project_name", "baseline_mt_per_day"])
+    )
+
+    monthly_rows: list[dict[str, Any]] = []
+    for project, month_map in monthly.items():
+        for month, value in month_map.items():
+            monthly_rows.append(
+                {
+                    "project_name": project,
+                    "month": pd.to_datetime(month),
+                    "baseline_mt_per_day": float(value),
+                }
+            )
+    monthly_df = (
+        pd.DataFrame(monthly_rows)
+        if monthly_rows
+        else pd.DataFrame(columns=["project_name", "month", "baseline_mt_per_day"])
+    )
+    if not monthly_df.empty:
+        monthly_df["month"] = pd.to_datetime(monthly_df["month"], errors="coerce")
+        monthly_df = monthly_df.dropna(subset=["month"]).sort_values(["project_name", "month"])
+
+    try:
+        with pd.ExcelWriter(path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            overall_df.to_excel(writer, PROJECT_BASELINES_SHEET, index=False)
+            monthly_df.to_excel(writer, PROJECT_BASELINES_MONTHLY_SHEET, index=False)
+    except FileNotFoundError:
+        LOGGER.warning(
+            "Workbook '%s' not found when attempting to persist project baselines.",
+            path,
+        )
+    except PermissionError:
+        LOGGER.warning(
+            "Permission denied while writing project baselines to '%s'.",
+            path,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to write project baselines to '%s': %s",
+            path,
+            exc,
+        )
+
+
+def _refresh_project_baselines(workbook_path: Path, data: pd.DataFrame) -> None:
+    """Ensure project baseline sheets and caches reflect the current daily data."""
+
+    if data.empty:
+        load_project_baselines(workbook_path)
+        return
+
+    overall_map, monthly_map = _compute_project_baseline_maps(data)
+    _set_project_baseline_cache(overall_map, monthly_map, workbook_path)
+    _persist_project_baselines(workbook_path, overall_map, monthly_map)
+
+
+
+def load_project_baselines(
+    workbook_path: Path | str,
+) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """Load precomputed project baselines from the workbook, updating the cache."""
+
+    path = Path(workbook_path)
+    try:
+        with pd.ExcelFile(path) as workbook:
+            overall: dict[str, float] = {}
+            monthly: dict[str, dict[pd.Timestamp, float]] = {}
+
+            if PROJECT_BASELINES_SHEET in workbook.sheet_names:
+                df_overall = pd.read_excel(workbook, sheet_name=PROJECT_BASELINES_SHEET)
+                if not df_overall.empty:
+                    try:
+                        project_col = _pick_column(df_overall, ("project_name", "Project Name"))
+                        baseline_col = _pick_column(
+                            df_overall,
+                            ("baseline_mt_per_day", "Baseline", "baseline"),
+                        )
+                    except KeyError:
+                        pass
+                    else:
+                        cleaned = df_overall[[project_col, baseline_col]].copy()
+                        cleaned[project_col] = cleaned[project_col].astype(str).str.strip()
+                        cleaned[baseline_col] = pd.to_numeric(cleaned[baseline_col], errors="coerce")
+                        cleaned = cleaned.dropna(subset=[project_col, baseline_col])
+                        for _, row in cleaned.iterrows():
+                            name = str(row[project_col]).strip()
+                            value = float(row[baseline_col])
+                            if name:
+                                overall[name] = value
+
+            if PROJECT_BASELINES_MONTHLY_SHEET in workbook.sheet_names:
+                df_monthly = pd.read_excel(workbook, sheet_name=PROJECT_BASELINES_MONTHLY_SHEET)
+                if not df_monthly.empty:
+                    try:
+                        project_col = _pick_column(df_monthly, ("project_name", "Project Name"))
+                        month_col = _pick_column(df_monthly, ("month", "Month"))
+                        baseline_col = _pick_column(
+                            df_monthly,
+                            ("baseline_mt_per_day", "Baseline", "baseline"),
+                        )
+                    except KeyError:
+                        pass
+                    else:
+                        cleaned = df_monthly[[project_col, month_col, baseline_col]].copy()
+                        cleaned[project_col] = cleaned[project_col].astype(str).str.strip()
+                        cleaned[baseline_col] = pd.to_numeric(cleaned[baseline_col], errors="coerce")
+                        cleaned[month_col] = pd.to_datetime(cleaned[month_col], errors="coerce")
+                        cleaned = cleaned.dropna(subset=[project_col, month_col, baseline_col])
+                        for _, row in cleaned.iterrows():
+                            project = str(row[project_col]).strip()
+                            month_ts = pd.to_datetime(row[month_col])
+                            value = float(row[baseline_col])
+                            if project and not pd.isna(month_ts):
+                                monthly.setdefault(project, {})[pd.Timestamp(month_ts)] = value
+    except FileNotFoundError:
+        LOGGER.warning(
+            "Workbook '%s' not found when loading project baselines.",
+            path,
+        )
+        _set_project_baseline_cache({}, {}, path)
+        return get_project_baseline_maps()
+    except Exception as exc:
+        LOGGER.warning(
+            "Unable to load project baselines from '%s': %s",
+            path,
+            exc,
+        )
+        return get_project_baseline_maps()
+
+    _set_project_baseline_cache(overall, monthly, path)
+    return get_project_baseline_maps()
+
+
+
+def load_daily_from_proddailyexpanded(
+    xl: pd.ExcelFile, sheet: str = "ProdDailyExpanded"
+) -> pd.DataFrame:
     """Load daily productivity rows from a ProdDailyExpanded-style sheet."""
 
     LOGGER.debug("Loading data from sheet '%s'", sheet)
@@ -37,6 +273,7 @@ def load_daily_from_proddailyexpanded(xl: pd.ExcelFile, sheet: str = "ProdDailyE
     col_prod = _pick_column(df, ["Productivity", "daily_prod_mt", "avg_daily_prod_mt"])
     col_proj = _pick_column(df, ["Project Name", "project_name"])
     col_gang = _pick_column(df, ["Gang name", "gang_name"])
+
     def _pick_optional(frame: pd.DataFrame, options: tuple[str, ...]) -> str | None:
         try:
             return _pick_column(frame, options)
@@ -135,25 +372,31 @@ def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
         config = AppConfig(data_path=workbook_path)
 
     LOGGER.info("Loading workbook '%s'", config.data_path)
-    workbook = pd.ExcelFile(config.data_path)
 
-    candidates: list[str] = []
-    if config.preferred_sheet:
-        candidates.append(config.preferred_sheet)
-    candidates.extend([
-        "ProdDailyExpandedSingles",
-    ])
+    result: pd.DataFrame | None = None
+    with pd.ExcelFile(config.data_path) as workbook:
+        candidates: list[str] = []
+        if config.preferred_sheet:
+            candidates.append(config.preferred_sheet)
+        candidates.extend([
+            "ProdDailyExpandedSingles",
+        ])
 
-    seen: set[str] = set()
-    for sheet_name in candidates:
-        if sheet_name and sheet_name not in seen and sheet_name in workbook.sheet_names:
-            return load_daily_from_proddailyexpanded(workbook, sheet_name)
-        seen.add(sheet_name)
+        seen: set[str] = set()
+        for sheet_name in candidates:
+            if sheet_name and sheet_name not in seen and sheet_name in workbook.sheet_names:
+                result = load_daily_from_proddailyexpanded(workbook, sheet_name)
+                break
+            seen.add(sheet_name)
 
-    if "RawData" in workbook.sheet_names:
-        return load_daily_from_rawdata(workbook, "RawData")
+        if result is None and "RawData" in workbook.sheet_names:
+            result = load_daily_from_rawdata(workbook, "RawData")
 
-    raise FileNotFoundError("Neither 'ProdDailyExpandedSingles' nor fallback sheets found in workbook.")
+    if result is None:
+        raise FileNotFoundError("Neither 'ProdDailyExpandedSingles' nor fallback sheets found in workbook.")
+
+    _refresh_project_baselines(config.data_path, result)
+    return result
 
 
 def _pick_tol(df: pd.DataFrame, opts):
@@ -165,7 +408,6 @@ def _pick_tol(df: pd.DataFrame, opts):
         if any(o.lower() in k for o in opts):
             return c
     raise KeyError(f"Column not found among {opts}: have {list(df.columns)}")
-
 
 
 def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFrame:
@@ -207,4 +449,3 @@ def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFr
         return out
     except Exception:
         return pd.DataFrame()
-

@@ -383,13 +383,23 @@ def register_callbacks(
     data_provider: Callable[[], pd.DataFrame],
     config: AppConfig,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
+    project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
     responsibilities_completion_provider: Callable[[], set[tuple[str, str]]] | None = None,
     responsibilities_error_provider: Callable[[], str | None] | None = None,
 ) -> None:
-    """Register all Dash callbacks on *app*."""
 
     LOGGER.debug("Registering callbacks")
+    def _get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+        if project_baseline_provider is None:
+            return {}, {}
+        try:
+            overall_map, monthly_map = project_baseline_provider()
+        except Exception as exc:
+            LOGGER.warning("Failed to retrieve project baselines: %s", exc)
+            return {}, {}
+        return overall_map or {}, monthly_map or {}
+
 
     # Charts OR AVP rows -> store-click-meta (robust & single source of truth)
     app.clientside_callback(
@@ -1267,16 +1277,48 @@ def register_callbacks(
             history_scope = scoped_all.copy()
 
         # --- PROJECT-level baselines, then map them onto gangs ---
-        proj_overall_all,  proj_monthly_all  = compute_project_baseline_maps(scoped_all)
-        proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps(history_scope)
-
-        # Prefer history for overall if present (so current month never waters down baselines)
-        if proj_overall_hist:
-            proj_overall_all.update(proj_overall_hist)
-
-        # Monthly baselines → HISTORY ONLY (never let the active month train itself)
-        proj_monthly = proj_monthly_hist
-
+        precomputed_overall, precomputed_monthly = _get_project_baselines()
+        use_precomputed = bool(precomputed_overall)
+        proj_overall_all: dict[str, float] = {}
+        proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
+        if use_precomputed:
+            if "project_name" in scoped_all.columns:
+                available_projects = (
+                    scoped_all["project_name"].dropna().astype(str).str.strip().unique().tolist()
+                )
+            else:
+                available_projects = []
+            if available_projects:
+                proj_overall_all = {
+                    project: precomputed_overall.get(project)
+                    for project in available_projects
+                    if precomputed_overall.get(project) is not None
+                }
+                monthly_candidates = {
+                    project: precomputed_monthly.get(project, {})
+                    for project in available_projects
+                }
+            else:
+                proj_overall_all = dict(precomputed_overall)
+                monthly_candidates = dict(precomputed_monthly)
+            if has_selected_months and earliest_month is not None:
+                proj_monthly = {
+                    project: {
+                        month: value
+                        for month, value in month_map.items()
+                        if month < earliest_month
+                    }
+                    for project, month_map in monthly_candidates.items()
+                    if any(month < earliest_month for month in month_map)
+                }
+            else:
+                proj_monthly = monthly_candidates
+        else:
+            proj_overall_all, proj_monthly_all = compute_project_baseline_maps(scoped_all)
+            proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps(history_scope)
+            if proj_overall_hist:
+                proj_overall_all.update(proj_overall_hist)
+            proj_monthly = proj_monthly_hist
         # Gang → Project bridge
         gang_to_project = (
             scoped_all[["gang_name", "project_name"]]
@@ -1687,8 +1729,43 @@ def register_callbacks(
         if gang_list:
             baseline_source = baseline_source[baseline_source["gang_name"].isin(gang_list)]
         # PROJECT-level baselines for trace/idle view, then map to gang keys
-        proj_overall, proj_monthly = compute_project_baseline_maps(baseline_source)
-
+        precomputed_overall, precomputed_monthly = _get_project_baselines()
+        use_precomputed = bool(precomputed_overall)
+        if use_precomputed:
+            if "project_name" in baseline_source.columns:
+                candidate_projects = (
+                    baseline_source["project_name"].dropna().astype(str).str.strip().unique().tolist()
+                )
+            else:
+                candidate_projects = []
+            if candidate_projects:
+                proj_overall = {
+                    project: precomputed_overall.get(project)
+                    for project in candidate_projects
+                    if precomputed_overall.get(project) is not None
+                }
+                monthly_candidates = {
+                    project: precomputed_monthly.get(project, {})
+                    for project in candidate_projects
+                }
+            else:
+                proj_overall = dict(precomputed_overall)
+                monthly_candidates = dict(precomputed_monthly)
+            if months_ts:
+                cutoff_month = min(months_ts)
+                proj_monthly = {
+                    project: {
+                        month: value
+                        for month, value in month_map.items()
+                        if month < cutoff_month
+                    }
+                    for project, month_map in monthly_candidates.items()
+                    if any(month < cutoff_month for month in month_map)
+                }
+            else:
+                proj_monthly = monthly_candidates
+        else:
+            proj_overall, proj_monthly = compute_project_baseline_maps(baseline_source)
         g2p = (
             baseline_source[["gang_name", "project_name"]]
             .dropna()

@@ -11,7 +11,7 @@ import dash_bootstrap_components as dbc
 
 from dashboard.callbacks import register_callbacks
 from dashboard.config import AppConfig, configure_logging
-from dashboard.data_loader import load_daily as _load_daily, load_project_details
+from dashboard.data_loader import load_daily as _load_daily, load_project_details, get_project_baseline_maps
 from dashboard.layout import build_layout
 
 
@@ -28,6 +28,10 @@ LAST_UPDATED_TEXT: str = "N/A"
 df_projinfo: pd.DataFrame | None = None
 def get_df_projinfo() -> pd.DataFrame:
     return df_projinfo if df_projinfo is not None else pd.DataFrame()
+def get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """Return cached project productivity baselines."""
+    return get_project_baseline_maps()
+
 
 df_responsibilities: pd.DataFrame | None = None
 RESP_COMPLETED_KEYS: set[tuple[str, str]] = set()
@@ -233,6 +237,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
         get_df_day,
         active_config,
         project_info_provider=get_df_projinfo,
+        project_baseline_provider=get_project_baselines,
         responsibilities_provider=get_responsibilities_df,
         responsibilities_completion_provider=get_responsibilities_completion_keys,
         responsibilities_error_provider=get_responsibilities_error,
