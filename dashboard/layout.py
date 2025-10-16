@@ -627,13 +627,19 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 ),
                                 dbc.CardBody(
                                     [
-                                        dcc.Graph(id="g-projects-over-months", config={"displayModeBar": False}, style={"marginBottom": "6px"}),
-                                    ]
+                                        dcc.Graph(
+                                            id="g-projects-over-months",
+                                            config={"displayModeBar": False},
+                                            style={"marginBottom": "6px", "height": "360px"},
+                                        ),
+                                    ],
+                                    className="d-flex flex-column",
                                 ),
                             ],
-                            className="viz-card shadow-soft section-gap-top",
+                            className="viz-card shadow-soft section-gap-top flex-fill w-100",
                         ),
                         md=6,
+                        className="d-flex",
                     ),
                     # RIGHT: Responsibilities (Figma-styled card with KPIs)
                     dbc.Col(
@@ -710,7 +716,11 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                 ),
                                 dbc.CardBody(
                                     [
-                                        dcc.Graph(id="g-responsibilities", config={"displayModeBar": False}),
+                                        dcc.Graph(
+                                            id="g-responsibilities",
+                                            config={"displayModeBar": False},
+                                            style={"height": "360px"},
+                                        ),
 
                                         # KPI row
                                         dbc.Row(
@@ -754,15 +764,18 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                             ],
                                             className="g-2 mt-1 kpi-row-compact",
                                         ),
-                                    ]
+                                    ],
+                                    className="d-flex flex-column",
                                 ),
                             ],
-                            className="viz-card shadow-soft section-gap-top"  # matches other cards
+                            className="viz-card shadow-soft section-gap-top flex-fill w-100",  # matches other cards
                         ),
                         md=6,
+                        className="d-flex",
                     ),
                 ],
                 className="mb-4",
+                align="stretch",
             ),
             dbc.Row(
                 [

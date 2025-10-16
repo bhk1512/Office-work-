@@ -275,12 +275,11 @@ def load_project_details_from_source(xl: pd.ExcelFile, source_file: Path) -> pd.
 def process_file(path: Path):
     """
     Process a single workbook; return:
-      per_day         : per-day expanded rows (with Work Date)
       per_day_with_singles : per-day rows including single-occurrence gangs
-      per_erection    : per-erection (unexpanded) rows (the 6 fields)
-      diagnostics     : dict (file, project, sheet, detected header row, normalized columns)
-      issues          : list[dict] (file-level)
-      data_issues_df  : DataFrame with requested columns + 'Issues' (row-level)
+      per_erection         : per-erection (unexpanded) rows (the 6 fields)
+      diagnostics          : dict (file, project, sheet, detected header row, normalized columns)
+      issues               : list[dict] (file-level)
+      data_issues_df       : DataFrame with requested columns + 'Issues' (row-level)
     """
     issues = []
     data_issues_rows = []  # row-level issues here
@@ -291,23 +290,23 @@ def process_file(path: Path):
         xl = pd.ExcelFile(path, engine="openpyxl")
     except Exception as e:
         issues.append({"file": path.name, "issue": f"Excel open error: {e}"})
-        return empty_df, empty_df, empty_df, diag, issues, empty_df
+        return empty_df, empty_df, diag, issues, empty_df
 
     target = find_target_sheet(xl)
     if not target:
         issues.append({"file": path.name, "issue": "Sheet 'Erection Compiled' not found", "sheets": xl.sheet_names})
-        return empty_df, empty_df, empty_df, diag, issues, empty_df
+        return empty_df, empty_df, diag, issues, empty_df
 
     try:
         df_raw = pd.read_excel(xl, sheet_name=target, header=None)
     except Exception as e:
         issues.append({"file": path.name, "issue": f"Read error: {e}", "sheet": target})
-        return empty_df, empty_df, empty_df, diag, issues, empty_df
+        return empty_df, empty_df, diag, issues, empty_df
 
     hdr_row, cols = find_header_row(df_raw, search_rows=30)
     if hdr_row is None:
         issues.append({"file": path.name, "issue": "Could not detect header row automatically", "sheet": target})
-        return empty_df, empty_df, empty_df, diag, issues, empty_df
+        return empty_df, empty_df, diag, issues, empty_df
 
     df = df_raw.iloc[hdr_row + 1:].copy()
     df.columns = cols
@@ -327,7 +326,7 @@ def process_file(path: Path):
             "issue": f"Missing required columns after header-detect: {missing}",
             "columns": list(df.columns)
         })
-        return empty_df, empty_df, empty_df, diag, issues, empty_df
+        return empty_df, empty_df, diag, issues, empty_df
 
     work = df[needed].copy()
 
@@ -382,29 +381,6 @@ def process_file(path: Path):
     invalid_mask = missing_dt_mask | non_positive_days_mask | old_start_mask | future_completion_mask | tw_out_of_range_mask
     work_valid = work.loc[~invalid_mask].copy()
 
-    # Identify single-occurrence gangs (per Project + Gang), add to Data Issues, exclude from expansion
-    if not work_valid.empty:
-        occ = work_valid.groupby(["Project Name", "Gang name"]).size().rename("n").reset_index()
-        singles = occ[occ["n"] == 1][["Project Name", "Gang name"]]
-        if not singles.empty:
-            singles_key = set(map(tuple, singles.to_records(index=False)))
-            single_mask = work_valid.apply(
-                lambda r: (r["Project Name"], r["Gang name"]) in singles_key, axis=1
-            )  # <-- mask aligned to work_valid
-
-            # --- align mask to 'work' before sending to push_data_issue ---
-            single_idx = work_valid.index[single_mask]
-            single_mask_work = work.index.isin(single_idx)
-            push_data_issue(single_mask_work, "Single-occurrence gang (not expanded)")
-            # --------------------------------------------------------------
-
-            work_to_expand = work_valid.loc[~single_mask].copy()
-        else:
-            work_to_expand = work_valid.copy()
-    else:
-        work_to_expand = work_valid.copy()
-
-
     # ---- Per-erection (UNEXPANDED) ----
     per_erection = work[[
         "Start Date", "Complete Date", "Gang name", "Tower Weight", "Productivity", "Project Name", "Location No.", "Status"
@@ -440,7 +416,7 @@ def process_file(path: Path):
         )
         return result.reindex(columns=PER_DAY_COLUMNS)
 
-    # Only build the expanded per-day rows including single-occurrence gangs
+    # Build the expanded per-day rows from all valid records
     per_day_with_singles = expand_per_day(work_valid)
 
     data_issues_df = pd.concat(data_issues_rows, ignore_index=True) if data_issues_rows else pd.DataFrame()
@@ -531,7 +507,12 @@ def main(argv=None):
             all_issues.append({"file": p.name, "issue": "missing"})
             continue
 
-        per_day_with_singles, per_erection, diag, issues, data_issues_df = process_file(p)
+        try:
+            per_day_with_singles, per_erection, diag, issues, data_issues_df = process_file(p)
+        except Exception as e:
+            # Guardrail: never let a single bad file crash the whole pipeline
+            all_issues.append({"file": p.name, "issue": f"Unhandled processing error: {e}"})
+            continue
 
         # --- NEW: attempt to read "Project Details" from this source ---
         try:
@@ -615,7 +596,6 @@ def main(argv=None):
         f"- Completion date must be before {TODAY.date()} (future completions go to 'Data Issues').",
         f"- Tower Weight range: only [{TOWER_MIN_MT:.0f}, {TOWER_MAX_MT:.0f}] MT is considered valid for expansion; out-of-range rows go to 'Data Issues'.",
         "- Missing or non-positive durations (Start/End missing or Start > End or 0) are logged to 'Data Issues' and not expanded.",
-        "- Gangs that performed erection only once (per Project+Gang) are not expanded and are logged in 'Data Issues'.",
         "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
         "- Sheets:",
         "    â€¢ ProdDailyExpanded  : per-day expanded rows used by the dashboard",

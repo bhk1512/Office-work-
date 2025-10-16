@@ -1,13 +1,23 @@
 """Dash application entry point."""
 from __future__ import annotations
 
+import json
 import logging
+import os
+from pickle import NONE
+import time
 from pathlib import Path
 from typing import Tuple
 
 import pandas as pd
+import psutil
 from dash import Dash
-import dash_bootstrap_components as dbc
+from flask import request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_talisman import Talisman
+from pythonjsonlogger import jsonlogger
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from dashboard.callbacks import register_callbacks
 from dashboard.config import AppConfig, configure_logging
@@ -25,7 +35,22 @@ from dashboard.layout import build_layout
 LOGGER = logging.getLogger(__name__)
 
 
+def _ensure_json_logging() -> None:
+    """Attach a JSON formatter to the root logger if not already present."""
+
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if getattr(handler, "_is_json_handler", False):
+            return
+
+    json_handler = logging.StreamHandler()
+    json_handler.setFormatter(jsonlogger.JsonFormatter())
+    json_handler._is_json_handler = True  # type: ignore[attr-defined]
+    root_logger.addHandler(json_handler)
+
+
 CONFIG = AppConfig()
+CONFIG.validate()
 DATA_PATH: Path = CONFIG.data_path
 
 df_day: pd.DataFrame | None = None
@@ -227,6 +252,12 @@ def get_df_day() -> pd.DataFrame:
     return df_day
 
 
+def get_last_updated_text() -> str:
+    """Return the last updated text for health probes."""
+
+    return LAST_UPDATED_TEXT
+
+
 def load_daily(config_or_path) -> pd.DataFrame:  # type: ignore[override]
     """Compatibility wrapper around the refactored data loader."""
 
@@ -272,13 +303,117 @@ def create_app(config: AppConfig | None = None) -> Dash:
     """Create and configure the Dash application instance."""
 
     configure_logging()
+    _ensure_json_logging()
+
     active_config = config or AppConfig()
+    active_config.validate()
     _, last_updated_text = initialise_data(active_config)
 
-    app_instance = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+    app_instance = Dash(__name__)
     app_instance.title = "KEC Productivity"
     app_instance.layout = build_layout(last_updated_text)
 
+    server = app_instance.server
+    server.config["SECRET_KEY"] = active_config.secret_key
+    server.config["SESSION_COOKIE_SECURE"] = True
+    server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    server.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+    if active_config.app_env == "production":
+        if active_config.behind_proxy:
+            server.wsgi_app = ProxyFix(server.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+        # Strict CSP for prod; leave it OFF in dev to avoid blocking Dash inline JS.
+        Talisman(
+            server,
+            force_https=True,
+            strict_transport_security=True,
+            frame_options="DENY",
+            content_security_policy={
+                "default-src": "'self'",
+                "img-src": "'self' data:",
+                "style-src": "'self' 'unsafe-inline'",
+                "script-src": "'self' 'unsafe-inline' 'unsafe-eval'",
+                "connect-src": "'self'",
+                "font-src": "'self'",
+            },
+        )
+
+        Limiter(get_remote_address, app=server, default_limits=["120/minute"])
+    else:
+        # DEV: no CSP, no limiter, no proxy fix (keeps things simple)
+        pass
+    
+    @server.before_request
+    def _capture_request_start() -> None:
+        request.environ["request_start_time"] = time.perf_counter()
+
+    @server.after_request
+    def _log_request(response):  # type: ignore[override]
+        start_time = request.environ.get("request_start_time")
+        duration_ms = 0.0
+        if start_time is not None:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+
+        content_length = response.calculate_content_length() or 0
+        log_data = {
+            "event": "http_request",
+            "path": request.path,
+            "method": request.method,
+            "status": response.status_code,
+            "duration_ms": round(duration_ms, 2),
+            "content_length": content_length,
+        }
+        LOGGER.info("request", extra=log_data)
+
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    @server.get("/__/health")
+    def healthcheck():  # type: ignore[override]
+        process = psutil.Process(os.getpid())
+        rss_mb = process.memory_info().rss / (1024 * 1024)
+        payload = {
+            "status": "ok",
+            "rss_mb": round(rss_mb, 2),
+            "last_updated": get_last_updated_text(),
+        }
+        return server.response_class(
+            response=json.dumps(payload),
+            status=200,
+            mimetype="application/json",
+        )
+
+    @server.get("/__/ready")
+    def readiness():  # type: ignore[override]
+        status = 200
+        rows = 0
+        try:
+            daily_df = get_df_day()
+        except RuntimeError:
+            status = 503
+        else:
+            rows = len(daily_df.index)
+            if daily_df.empty:
+                status = 503
+
+        payload = {
+            "status": "ok" if status == 200 else "unavailable",
+            "rows": rows,
+        }
+        return server.response_class(
+            response=json.dumps(payload),
+            status=status,
+            mimetype="application/json",
+        )
+    
+    @server.errorhandler(403)
+    def _forbidden(e): return {"error":"forbidden"}, 403
+
+    @server.errorhandler(500)
+    def _ise(e): return {"error":"internal server error"}, 500
+    
     register_callbacks(
         app_instance,
         get_df_day,
@@ -298,7 +433,6 @@ def main() -> None:
     app.run_server(host="0.0.0.0", port=8050, debug=False)
 
 
-app = create_app(CONFIG)
 app = create_app(CONFIG)
 server = app.server
 
