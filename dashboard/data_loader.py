@@ -12,14 +12,17 @@ import pandas as pd
 
 from .config import AppConfig
 
+CONFIG = AppConfig()
+
+CACHE_TTL_SECONDS = CONFIG.cache_ttl_seconds
+CACHE_MAXSIZE = CONFIG.cache_maxsize
+
 LOGGER = logging.getLogger(__name__)
 
 PROJECT_BASELINES_SHEET = "ProjectBaselines"
 PROJECT_BASELINES_MONTHLY_SHEET = "ProjectBaselinesMonthly"
 
 PARQUET_SUFFIXES: tuple[str, ...] = (".parquet", ".parq", ".pq")
-CACHE_TTL_SECONDS = 300  # seconds
-CACHE_MAXSIZE = 4
 
 _PROJECT_BASELINE_OVERALL: dict[str, float] = {}
 _PROJECT_BASELINE_MONTHLY: dict[str, dict[pd.Timestamp, float]] = {}

@@ -6,3 +6,11 @@ numpy>=1.26.0
 openpyxl>=3.1.2
 gunicorn>=21.2
 duckdb>=0.10.0
+flask-talisman==1.1.0        # security headers/CSP
+flask-limiter==3.8.0         # rate-limiting
+authlib==1.3.1               # OIDC/SAML (optional SSO)
+prometheus-flask-exporter==0.23.0  # metrics endpoint (optional)
+psutil==5.9.8                # health endpoint memory
+python-json-logger==2.0.7    # structured logs
+waitress==3.0.0
+

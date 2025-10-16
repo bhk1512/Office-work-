@@ -25,6 +25,17 @@ python -m pip install --upgrade pip
 REM pip install -r requirements.txt
 python -m pip install -r requirements.txt
 
-REM Run the pipeline + app orchestrator
-REM python app.py
-python pipeline_runner.py --config pipeline_config.json
+REM Run pipeline only (no dev server) — performs delete + compile sequentially
+python pipeline_runner.py --config pipeline_config.json --no-serve
+if errorlevel 1 (
+    echo [run_app] Pipeline failed; not starting server.
+    exit /b 1
+)
+
+REM Serve via Waitress (prod-like on Windows)
+set DASH_HOST=0.0.0.0
+set DASH_PORT=8050
+set APP_ENV=development
+set ENABLE_HTTPS=0
+set BEHIND_PROXY=0
+waitress-serve --listen=%DASH_HOST%:%DASH_PORT% app:server

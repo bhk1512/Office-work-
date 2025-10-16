@@ -15,7 +15,7 @@
 #
 # How to use (CLI):
 #   python microplan_compile.py --input-dir "<folder with project files>" \
-#                               --output-xlsx "ErectionCompiled_Output_testRun.xlsx"
+#                               --output-xlsx "ErectionCompiled_Output.xlsx"
 #
 # How to use (import):
 #   from microplan_compile import compile_microplans_to_workbook
@@ -455,7 +455,7 @@ def compile_microplans_to_workbook(
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Compile 'Micro Plan' responsibilities into the compiled workbook.")
     p.add_argument("--input-dir", required=True, help="Root folder containing project Excel files (where 'Micro Plan' files reside).")
-    p.add_argument("--output-xlsx", required=True, help="Path to the compiled workbook (e.g., ErectionCompiled_Output_testRun.xlsx).")
+    p.add_argument("--output-xlsx", required=True, help="Path to the compiled workbook (e.g., ErectionCompiled_Output.xlsx).")
     # p.add_argument("--write-raw", action="store_true",
                 #    help="Also write per-project cleaned Micro Plan sheets (MicroPlan_<project_key>).")
     return p

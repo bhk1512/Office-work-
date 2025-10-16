@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -15,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
     "input_directory": "Raw Data/DPRs",
     "microplan_directory": "Raw Data/Micro Plans",
-    "output_file": "ErectionCompiled_Output_testRun.xlsx",
+    "output_file": "ErectionCompiled_Output.xlsx",
     "pipeline_extra_args": [],
     "dash_host": "0.0.0.0",
     "dash_port": 8050,
@@ -91,6 +92,12 @@ def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None
         raise FileNotFoundError(f"Workbook '{workbook_path}' does not exist.")
 
     target_dir = workbook_path.parent / f"{workbook_path.stem}_parquet"
+    # Recreate the parquet directory to ensure a fresh dataset (no stale files)
+    if target_dir.exists():
+        try:
+            shutil.rmtree(target_dir)
+        except Exception as exc:
+            print(f"[pipeline] Warning: failed to clear parquet dir {target_dir}: {exc}")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     sheet_list = list(sheets) if sheets is not None else list(PARQUET_SHEETS)
@@ -139,6 +146,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         "--config",
         default="pipeline_config.json",
         help="Configuration file relative to the project root (default: pipeline_config.json)."
+    )
+    parser.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="Do not start the Dash dev server after pipeline; just prepare app module.",
     )
     parser.add_argument(
         "--extra-arg",
@@ -196,6 +208,25 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 
     if not args.skip_compile:
+        # Ensure fresh outputs on every compile run
+        # 1) Remove any existing compiled workbook
+        # 2) Remove any existing parquet dataset directory
+        if resolved_output:
+            try:
+                if resolved_output.exists() and resolved_output.is_file():
+                    print(f"[pipeline] Removing existing workbook: {resolved_output}")
+                    resolved_output.unlink()
+            except Exception as exc:
+                print(f"[pipeline] Warning: failed to remove workbook {resolved_output}: {exc}")
+
+            try:
+                parquet_dir = resolved_output.parent / f"{resolved_output.stem}_parquet"
+                if parquet_dir.exists() and parquet_dir.is_dir():
+                    print(f"[pipeline] Removing existing parquet dataset: {parquet_dir}")
+                    shutil.rmtree(parquet_dir)
+            except Exception as exc:
+                print(f"[pipeline] Warning: failed to remove parquet dir {parquet_dir}: {exc}")
+
         if resolved_input:
             print(f"[pipeline] Compiling from folder: {resolved_input}")
         if resolved_files:
@@ -274,8 +305,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     _reload_dashboard_data(dashboard, dashboard.DATA_PATH)
     print(f"[dashboard] Dataset path configured: {dashboard.DATA_PATH}")
 
-    print(f"[dashboard] Starting server on http://{dash_host}:{dash_port}")
-    dashboard.app.run_server(host=dash_host, port=dash_port, debug=dash_debug)
+    if not args.no_serve:
+        print(f"[dashboard] Starting server on http://{dash_host}:{dash_port}")
+        dashboard.app.run_server(host=dash_host, port=dash_port, debug=dash_debug)
+    else:
+        print("[dashboard] Skipping dev server (--no-serve). Data reloaded and app module ready.")
 
 
 if __name__ == "__main__":
