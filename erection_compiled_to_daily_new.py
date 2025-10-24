@@ -23,12 +23,24 @@ Usage examples (Windows CMD):
 """
 
 import argparse
+import logging
 import re
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import Callable, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("erection_compiled")
+
+
+class ExcelCOMUnavailable(RuntimeError):
+    """Raised when Excel COM automation cannot be used."""
+
 
 # ---------- Config ----------
 EXPECTED_HEADERS = [
@@ -69,10 +81,19 @@ def nrm_header(s: str) -> str:
         return ""
     s = str(s)
     s = s.replace("\n", " ").replace("\r", " ")
-    s = re.sub(r"\s+", " ", s.strip())
-    s = s.strip().strip(".")
-    s = s.lower()
-    return s
+    s = s.replace("_", " ")
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.lower()
+
+
+def canonical_header_key(s: str) -> str:
+    """Return a compact key (alnum only) for header comparison."""
+    normalized = nrm_header(s)
+    return re.sub(r"\s+", "", normalized)
+
+
+EXPECTED_HEADER_KEYS = {exp: canonical_header_key(exp) for exp in EXPECTED_HEADERS}
 
 
 def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Optional[int], Optional[list]]:
@@ -82,16 +103,21 @@ def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Option
 
     for r in range(nrows):
         row_vals = [nrm_header(x) for x in list(df_raw.iloc[r, :].values)]
+        row_keys = [re.sub(r"\s+", "", val) for val in row_vals]
 
         score = 0
         mapping = {}
-        for i, val in enumerate(row_vals):
-            if not val:
+        used_expected = set()
+        for i, (val, key) in enumerate(zip(row_vals, row_keys)):
+            if not key:
                 continue
-            for exp in EXPECTED_HEADERS:
-                if exp == val or exp.replace(" ", "") in val.replace(" ", ""):
+            for exp, exp_key in EXPECTED_HEADER_KEYS.items():
+                if exp in used_expected:
+                    continue
+                if key == exp_key:
                     mapping[i] = exp
                     score += 1
+                    used_expected.add(exp)
                     break
 
         non_empty = sum(1 for v in row_vals if v)
@@ -107,12 +133,19 @@ def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Option
     return None, None
 
 
-def find_target_sheet(xl: pd.ExcelFile) -> Optional[str]:
-    for s in xl.sheet_names:
+def find_target_sheet(sheet_names: List[str]) -> Optional[str]:
+    for s in sheet_names:
         if s.strip().lower() == "erection compiled":
             return s
-    for s in xl.sheet_names:
+    for s in sheet_names:
         if TARGET_SHEET_REGEX.search(s):
+            return s
+    return None
+
+
+def find_project_details_sheet(sheet_names: List[str]) -> Optional[str]:
+    for s in sheet_names:
+        if s.strip().lower() == "project details":
             return s
     return None
 
@@ -174,12 +207,10 @@ def normalize_gang_name(name: str) -> str:
     return s.strip()
 
 # --- NEW: tolerant loader for a single source file's "Project Details" ---
-def load_project_details_from_source(xl: pd.ExcelFile, source_file: Path) -> pd.DataFrame:
-    # only proceed if a "Project Details" sheet exists
-    if "Project Details" not in xl.sheet_names:
+def load_project_details_from_source(dfp: pd.DataFrame, source_file: Path) -> pd.DataFrame:
+    # only proceed if the sheet produced data
+    if dfp is None or dfp.empty:
         return pd.DataFrame()
-
-    dfp = pd.read_excel(xl, sheet_name="Project Details")
 
     # tolerant column picks (allow minor header variations)
     def pick(df, *opts):
@@ -271,6 +302,201 @@ def load_project_details_from_source(xl: pd.ExcelFile, source_file: Path) -> pd.
     return out
 
 
+SheetSelector = Callable[[List[str]], Optional[str]]
+
+
+def export_sheet_via_excel_to_df(
+    source: Path,
+    selector: SheetSelector,
+    read_csv_kwargs: Optional[dict] = None,
+) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """Open Excel via COM, export the selected sheet to CSV, and load it into pandas."""
+    read_csv_kwargs = read_csv_kwargs or {}
+    try:
+        import win32com.client  # type: ignore
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise ExcelCOMUnavailable("Excel COM automation (win32com) is not available") from exc
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="excel_csv_"))
+    excel = win32com.client.DispatchEx("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
+
+    wb = None
+    csv_path: Optional[Path] = None
+    try:
+        wb = excel.Workbooks.Open(str(source), UpdateLinks=False, ReadOnly=True)
+        sheet_names = [ws.Name for ws in wb.Worksheets]
+        target = selector(sheet_names)
+        if not target:
+            return None, None
+
+        target_ws = next((ws for ws in wb.Worksheets if ws.Name == target), None)
+        if target_ws is None:
+            raise RuntimeError(f"Sheet '{target}' could not be accessed via Excel COM")
+
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", target)
+        csv_path = temp_dir / f"{safe_name}.csv"
+
+        target_ws.Copy()  # make it the active workbook
+        wb_export = excel.ActiveWorkbook
+        try:
+            wb_export.SaveAs(str(csv_path), FileFormat=6)  # xlCSV
+        finally:
+            wb_export.Close(SaveChanges=False)
+
+        df = pd.read_csv(csv_path, **read_csv_kwargs)
+        logger.info("Excel COM CSV export succeeded for sheet '%s' in '%s'", target, source.name)
+        return df, target
+    finally:
+        if wb is not None:
+            wb.Close(SaveChanges=False)
+        excel.Quit()
+        if csv_path and csv_path.exists():
+            csv_path.unlink(missing_ok=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def scrub_defined_names_from_workbook(source: Path) -> Path:
+    """Create a temp copy of the workbook with <definedNames> removed."""
+    temp_dir = Path(tempfile.mkdtemp(prefix="excel_scrub_"))
+    scrubbed_path = temp_dir / f"{source.stem}_scrubbed.xlsx"
+    removed_any = False
+
+    with zipfile.ZipFile(source, "r") as zin, zipfile.ZipFile(scrubbed_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/workbook.xml":
+                try:
+                    root = ET.fromstring(data)
+                    ns_uri = ""
+                    if root.tag.startswith("{"):
+                        ns_uri = root.tag.split("}")[0][1:]
+                    nsmap = {"ns": ns_uri} if ns_uri else {}
+                    defined_nodes = root.findall("ns:definedNames", nsmap) if nsmap else root.findall("definedNames")
+                    if defined_nodes:
+                        for node in defined_nodes:
+                            root.remove(node)
+                        data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+                        removed_any = True
+                except ET.ParseError:
+                    text = data.decode("utf-8", errors="ignore")
+                    if "<definedNames" in text and "</definedNames>" in text:
+                        start = text.find("<definedNames")
+                        end = text.find("</definedNames>")
+                        if start != -1 and end != -1:
+                            end = text.find(">", end)
+                            if end != -1:
+                                text = text[:start] + text[end + 1 :]
+                                removed_any = True
+                    data = text.encode("utf-8")
+            zout.writestr(item, data)
+
+    if removed_any:
+        logger.info("Scrubbed defined names for '%s'", source.name)
+    else:
+        logger.info("Workbook '%s' had no defined names to scrub", source.name)
+    return scrubbed_path
+
+
+def load_sheet_from_scrubbed_copy(
+    source: Path,
+    selector: SheetSelector,
+    read_excel_kwargs: Optional[dict] = None,
+) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """Scrub defined names then reload the desired sheet via openpyxl."""
+    read_excel_kwargs = read_excel_kwargs or {}
+    scrubbed = scrub_defined_names_from_workbook(source)
+    try:
+        with pd.ExcelFile(scrubbed, engine="openpyxl") as xl:
+            sheet_name = selector(list(xl.sheet_names))
+            if not sheet_name:
+                return None, None
+            df = pd.read_excel(xl, sheet_name=sheet_name, **read_excel_kwargs)
+            logger.info("XML scrub load succeeded for sheet '%s' in '%s'", sheet_name, source.name)
+            return df, sheet_name
+    finally:
+        shutil.rmtree(scrubbed.parent, ignore_errors=True)
+
+
+def load_sheet_with_csv_fallback(
+    source: Path,
+    selector: SheetSelector,
+    *,
+    read_excel_kwargs: Optional[dict] = None,
+    read_csv_kwargs: Optional[dict] = None,
+) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[str]]:
+    """
+    Try reading a sheet with openpyxl first; on failure, export to CSV via Excel COM.
+
+    Returns (df, sheet_name, fallback_note). df/sheet_name are None if the selector
+    doesn't find a matching sheet.
+    """
+    read_excel_kwargs = read_excel_kwargs or {}
+    read_csv_kwargs = read_csv_kwargs or {}
+
+    try:
+        with pd.ExcelFile(source, engine="openpyxl") as xl:
+            sheet_name = selector(list(xl.sheet_names))
+            if not sheet_name:
+                return None, None, None
+            df = pd.read_excel(xl, sheet_name=sheet_name, **read_excel_kwargs)
+            logger.debug("Loaded sheet '%s' from '%s' via openpyxl", sheet_name, source.name)
+            return df, sheet_name, None
+    except Exception as primary_error:
+        logger.warning("openpyxl failed to load sheet from '%s': %s", source.name, primary_error)
+        fallback_messages = []
+
+        try:
+            df_csv, sheet_name = export_sheet_via_excel_to_df(
+                source, selector, read_csv_kwargs=read_csv_kwargs
+            )
+        except ExcelCOMUnavailable as com_exc:
+            logger.warning(
+                "Excel COM CSV fallback unavailable for '%s': %s", source.name, com_exc
+            )
+            fallback_messages.append(f"Excel COM CSV fallback unavailable ({com_exc})")
+            try:
+                df_scrub, sheet_name = load_sheet_from_scrubbed_copy(
+                    source, selector, read_excel_kwargs=read_excel_kwargs
+                )
+            except Exception as scrub_error:
+                fallback_messages.append(f"XML scrub fallback failed ({scrub_error})")
+                raise RuntimeError(
+                    f"openpyxl load failed ({primary_error}); " + "; ".join(fallback_messages)
+                ) from scrub_error
+            if sheet_name is None:
+                return None, None, None
+            note = f"XML scrub fallback used for sheet '{sheet_name}'"
+            logger.warning("%s in '%s'", note, source.name)
+            return df_scrub, sheet_name, note
+        except Exception as fallback_error:
+            logger.warning(
+                "Excel COM CSV fallback failed for '%s': %s", source.name, fallback_error
+            )
+            fallback_messages.append(f"Excel COM CSV fallback failed ({fallback_error})")
+            try:
+                df_scrub, sheet_name = load_sheet_from_scrubbed_copy(
+                    source, selector, read_excel_kwargs=read_excel_kwargs
+                )
+            except Exception as scrub_error:
+                fallback_messages.append(f"XML scrub fallback failed ({scrub_error})")
+                raise RuntimeError(
+                    f"openpyxl load failed ({primary_error}); " + "; ".join(fallback_messages)
+                ) from scrub_error
+            if sheet_name is None:
+                return None, None, None
+            note = f"XML scrub fallback used for sheet '{sheet_name}' after COM failure"
+            logger.warning("%s in '%s'", note, source.name)
+            return df_scrub, sheet_name, note
+        else:
+            if sheet_name is None:
+                return None, None, None
+            note = f"Excel COM CSV fallback used for sheet '{sheet_name}'"
+            logger.warning("%s in '%s'", note, source.name)
+            return df_csv, sheet_name, note
+
+
 # ---------- Core (per file) ----------
 def process_file(path: Path):
     """
@@ -287,21 +513,23 @@ def process_file(path: Path):
     diag = {"file": path.name, "project": parse_project_from_filename(path.name)}
 
     try:
-        xl = pd.ExcelFile(path, engine="openpyxl")
+        df_raw, target, fallback_note = load_sheet_with_csv_fallback(
+            path,
+            find_target_sheet,
+            read_excel_kwargs={"header": None},
+            read_csv_kwargs={"header": None},
+        )
     except Exception as e:
-        issues.append({"file": path.name, "issue": f"Excel open error: {e}"})
+        issues.append({"file": path.name, "issue": f"'Erection Compiled' load error: {e}"})
         return empty_df, empty_df, diag, issues, empty_df
 
-    target = find_target_sheet(xl)
-    if not target:
-        issues.append({"file": path.name, "issue": "Sheet 'Erection Compiled' not found", "sheets": xl.sheet_names})
+    if df_raw is None or target is None:
+        issues.append({"file": path.name, "issue": "Sheet 'Erection Compiled' not found"})
         return empty_df, empty_df, diag, issues, empty_df
 
-    try:
-        df_raw = pd.read_excel(xl, sheet_name=target, header=None)
-    except Exception as e:
-        issues.append({"file": path.name, "issue": f"Read error: {e}", "sheet": target})
-        return empty_df, empty_df, diag, issues, empty_df
+    if fallback_note:
+        logger.warning("Fallback note for '%s': %s", path.name, fallback_note)
+        issues.append({"file": path.name, "issue": fallback_note})
 
     hdr_row, cols = find_header_row(df_raw, search_rows=30)
     if hdr_row is None:
@@ -472,6 +700,13 @@ def style_sheet(ws, tab_color="99CCFF"):
 # ---------- Main ----------
 # def main():
 def main(argv=None):
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+        )
+    logger.info("Starting erection compiled pipeline")
+
     ap = argparse.ArgumentParser(
         description="Parse 'Erection Compiled', compute productivity, expand to daily rows."
     )
@@ -516,12 +751,21 @@ def main(argv=None):
 
         # --- NEW: attempt to read "Project Details" from this source ---
         try:
-            xl_src = pd.ExcelFile(p, engine="openpyxl")
-            dfp = load_project_details_from_source(xl_src, p)
-            if not dfp.empty:
-                fn_project_name = parse_project_from_filename(p.name)  # you already use this elsewhere
-                dfp["Project Name"] = fn_project_name                 # <-- NEW (title-case col)
-                all_proj_details.append(dfp)
+            raw_pd, _pd_sheet, pd_note = load_sheet_with_csv_fallback(
+                p,
+                find_project_details_sheet,
+                read_excel_kwargs={},
+                read_csv_kwargs={},
+            )
+            if raw_pd is not None and not raw_pd.empty:
+                dfp = load_project_details_from_source(raw_pd, p)
+                if not dfp.empty:
+                    fn_project_name = parse_project_from_filename(p.name)
+                    dfp["Project Name"] = fn_project_name
+                    all_proj_details.append(dfp)
+            if pd_note:
+                logger.warning("Fallback note for '%s': %s", p.name, pd_note)
+                all_issues.append({"file": p.name, "issue": pd_note})
         except Exception as e:
             all_issues.append({"file": p.name, "issue": f"Project Details read error: {e}"})
 

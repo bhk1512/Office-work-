@@ -2,6 +2,8 @@
 :root{
   --surface:#ffffff;
   --surface-2:#fafbff;
+  /* slightly darker than card body for headers */
+  --surface-header:#f6f8fc;
   --border:#e6e9f0;
   --text:#0f172a;
   --muted:#6b7280;
@@ -547,11 +549,19 @@ html {
 
 /* match other cards' header/body look */
 .viz-card .card-header {
-  background: #ffffff;
+  background: var(--surface-header);
   border-bottom: 1px solid var(--border, #e9eef3);
   padding: 12px 16px;
 }
 .viz-card .card-body {
+  padding: 12px 16px;
+}
+
+/* For cards that render the header inside the body (e.g., Gang Performance) */
+.viz-card .section-header {
+  background: var(--surface-header);
+  /* bleed to card edges so the header spans full width */
+  margin: -12px -16px 6px -16px;
   padding: 12px 16px;
 }
 

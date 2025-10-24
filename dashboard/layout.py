@@ -828,7 +828,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     ),
                                 ]
                             ),
-                            className="same-h card--elev",
+                            className="same-h viz-card shadow-sm",
                         ),
                         md=6,
                     ),
@@ -897,7 +897,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     ]
                                 ),
                             ],
-                            className="same-h shadow-sm",
+                            className="same-h viz-card shadow-sm",
                         ),
                         md=6,
                     ),

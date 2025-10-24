@@ -107,7 +107,7 @@ def _pick_erection_sheet(path: str) -> str:
     Return the sheet whose name contains 'erection' (case-insensitive).
     If none found, fall back to the first sheet.
     """
-    wb = load_workbook(path, read_only=True, data_only=True)
+    wb = load_workbook(path, read_only=True, data_only=True, keep_links=False)
     
     for ws in wb.worksheets:
         if "erection" in ws.title.strip().lower():
