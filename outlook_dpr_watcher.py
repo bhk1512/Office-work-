@@ -7,7 +7,7 @@ import win32com.client as win32
 
 # ---------------- CONFIG ----------------
 FOLDER_PATH = "Inbox/DPRs"           # <-- use exact Outlook path for your folder
-DOWNLOAD_DIR = r"C:\Users\kaushikb\Desktop\Raw Data\DPRs"
+DOWNLOAD_DIR = r"C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs"
 
 ALLOWED_SENDERS = {
     "palp04@kecrpg.com","chaudharys1@kecrpg.com","janvendrak@kecrpg.com",
@@ -26,7 +26,7 @@ SUBJECT_PATTERNS = [
 ATTACHMENT_MUST_CONTAIN = [r"d\W*p\W*r"]   # dpr, d.p.r, d p r, d-p-r, etc.
 
 # Allowed extensions (set to None to allow all)
-ALLOWED_EXTS = {".pdf",".xlsx",".xls",".csv",".docx",".pptx",".zip"}
+ALLOWED_EXTS = {".xlsx",".xls"}
 
 # Backfill window
 BACKFILL_DAYS = 1
