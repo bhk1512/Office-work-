@@ -11,6 +11,14 @@ import duckdb
 import pandas as pd
 
 from .config import AppConfig
+from .stringing import (
+    expand_stringing_to_daily,
+    normalize_stringing_columns,
+    summarize_date_parsing,
+    add_length_units,
+    read_stringing_sheet_robust,
+    parse_project_code_from_filename,
+)
 
 CONFIG = AppConfig()
 
@@ -158,6 +166,347 @@ def read_parquet_table(source: str) -> pd.DataFrame:
 
     return _read_parquet(source)
 
+
+# -----------------------------
+# Stringing compiled (stub)
+# -----------------------------
+def _try_read_excel_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    """Return DataFrame for sheet if present; else empty DataFrame.
+
+    This is a non-expanding reader and returns raw columns as-is.
+    """
+    try:
+        with pd.ExcelFile(path) as xl:
+            if sheet_name not in xl.sheet_names:
+                LOGGER.warning(
+                    "Stringing sheet '%s' not found in Excel workbook '%s'.",
+                    sheet_name,
+                    path,
+                )
+                return pd.DataFrame()
+        # Use robust header detection (handles leading garbage rows)
+        return read_stringing_sheet_robust(str(path), sheet_name)
+    except FileNotFoundError:
+        LOGGER.warning("Workbook '%s' not found for stringing sheet read.", path)
+        return pd.DataFrame()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        LOGGER.warning("Failed reading stringing sheet '%s' from '%s': %s", sheet_name, path, exc)
+        return pd.DataFrame()
+
+
+def _find_stringing_parquet_source(root: Path, sheet_name: str, probe_dirs: tuple[str, ...]) -> str | None:
+    """Return a parquet file/glob for the stringing dataset, if any.
+
+    Strategy:
+    - Prefer an exact table match via the given sheet name (normalized stems).
+    - Else probe configured directory names that may contain parquet files.
+    Returns a DuckDB-compatible source (file path or directory glob) or None.
+    """
+    # 1) Try direct table/filename match using existing helper
+    source = _find_parquet_source(root, sheet_name)
+    if source:
+        return source
+
+    # 2) Probe configured directory names (e.g., 'StringingCompiled_Output_parquet')
+    search_root = _resolve_search_root(root)
+    for dirname in probe_dirs:
+        candidate_dir = search_root / dirname
+        if candidate_dir.is_dir():
+            for suffix in PARQUET_SUFFIXES:
+                if any(candidate_dir.glob(f"*{suffix}")):
+                    return str(candidate_dir / f"*{suffix}")
+
+    # 3) Fallback: search recursively for a matching stem based on sheet name variants
+    #    This mirrors _find_parquet_source behavior but broadens search if needed.
+    stems = _candidate_stems(sheet_name)
+    if search_root.is_dir():
+        for suffix in PARQUET_SUFFIXES:
+            for candidate in search_root.glob(f"**/*{suffix}"):
+                lowered = candidate.stem.lower()
+                if any(stem.lower() == lowered for stem in stems):
+                    return str(candidate)
+    return None
+
+
+def _stringing_output_paths(base: Path) -> tuple[Path, Path]:
+    """Return (workbook_path, parquet_dir) for stringing artifacts near base.
+
+    Preferred layout:
+    - Parquets/Erection -> write under sibling Parquets/Stringing
+    Fallback:
+    - Write next to the given base root.
+    """
+    root = _resolve_search_root(base)
+    # Try sibling "Stringing" beside the current root (e.g., Parquets/Erection -> Parquets/Stringing)
+    sibling_stringing = root.parent / "Stringing"
+    try:
+        if sibling_stringing.parent.name == "Parquets":
+            target = sibling_stringing
+        else:
+            target = sibling_stringing if sibling_stringing.exists() else root
+    except Exception:
+        target = root
+
+    workbook_path = target / "StringingCompiled_Output.xlsx"
+    parquet_dir = target / "StringingCompiled_Output_parquet"
+    return workbook_path, parquet_dir
+
+
+def _export_stringing_compiled_artifacts(base: Path, sheet_name: str, df_raw: pd.DataFrame) -> None:
+    """Write a compiled stringing workbook and a simple parquet dataset.
+
+    - Creates `StringingCompiled_Output.xlsx` with sheets:
+        - the original `sheet_name` (raw or lightly normalized)
+        - `Diagnostics` with presence/health info
+        - `Issues` listing rows with invalid/missing critical dates
+        - `README_Assumptions` noting basic rules
+    - Creates `StringingCompiled_Output_parquet` and writes a parquet file
+      for the raw compiled table for faster subsequent loads.
+
+    This mirrors the erection flow at a lightweight level and is idempotent
+    (overwrites workbook; recreates parquet directory on each call).
+    """
+    if df_raw is None or df_raw.empty:
+        return
+    workbook_path, parquet_dir = _stringing_output_paths(base)
+
+    # Build diagnostics and issues
+    try:
+        normalized, norm_report = normalize_stringing_columns(df_raw)
+    except Exception:
+        normalized, norm_report = df_raw.copy(), {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
+
+    try:
+        date_metrics = summarize_date_parsing(df_raw)
+    except Exception:
+        date_metrics = {"po_start_date_parsed_count": 0, "fs_complete_date_parsed_count": 0, "invalid_date_rows": 0}
+
+    try:
+        _, length_metrics = add_length_units(normalized)
+    except Exception:
+        length_metrics = {"total_length_km": 0.0, "min_length_km": 0.0, "max_length_km": 0.0}
+
+    # Prepare issues table
+    issues_df = pd.DataFrame()
+    try:
+        work = normalized.copy()
+        po_col = "po_start_date"
+        end_col = "fs_complete_date"
+        if po_col in work.columns and end_col in work.columns:
+            po_val = work[po_col]
+            end_val = work[end_col]
+            po_parsed = pd.to_datetime(po_val, errors="coerce").dt.normalize()
+            end_parsed = pd.to_datetime(end_val, errors="coerce").dt.normalize()
+            po_filled = po_val.astype(str).str.strip().ne("") & po_val.notna()
+            end_filled = end_val.astype(str).str.strip().ne("") & end_val.notna()
+            po_invalid = po_filled & po_parsed.isna()
+            end_invalid = end_filled & end_parsed.isna()
+            missing_po = ~po_filled
+            missing_end = ~end_filled
+            any_issue = po_invalid | end_invalid | missing_po | missing_end
+            if any_issue.any():
+                tmp = work.loc[any_issue].copy()
+                def _mk_issue(row):
+                    msgs = []
+                    if pd.isna(pd.to_datetime(row.get(po_col), errors="coerce")) and str(row.get(po_col, "")).strip():
+                        msgs.append("Invalid PO Start Date")
+                    if pd.isna(pd.to_datetime(row.get(end_col), errors="coerce")) and str(row.get(end_col, "")).strip():
+                        msgs.append("Invalid F/S Complete Date")
+                    if not str(row.get(po_col, "")).strip():
+                        msgs.append("Missing PO Start Date")
+                    if not str(row.get(end_col, "")).strip():
+                        msgs.append("Missing F/S Complete Date")
+                    return "; ".join(msgs)
+                tmp["Issues"] = tmp.apply(_mk_issue, axis=1)
+                issues_df = tmp
+    except Exception:
+        issues_df = pd.DataFrame()
+
+    source_name = str(Path(base).name)
+    project_guess = parse_project_code_from_filename(source_name)
+    diagnostics_rows = [{
+        "sheet": sheet_name,
+        "rows": int(len(df_raw.index)),
+        "source": source_name,
+        "project_code_guess": project_guess,
+        "normalized_columns_ok": bool(norm_report.get("normalized_columns_ok", False)),
+        "present_columns": ", ".join(norm_report.get("present", [])),
+        "missing_columns": ", ".join(norm_report.get("missing", [])),
+        "po_start_date_parsed_count": int(date_metrics.get("po_start_date_parsed_count", 0)),
+        "fs_complete_date_parsed_count": int(date_metrics.get("fs_complete_date_parsed_count", 0)),
+        "invalid_date_rows": int(date_metrics.get("invalid_date_rows", 0)),
+        "total_length_km": float(length_metrics.get("total_length_km", 0.0)),
+        "min_length_km": float(length_metrics.get("min_length_km", 0.0)),
+        "max_length_km": float(length_metrics.get("max_length_km", 0.0)),
+    }]
+    diagnostics_df = pd.DataFrame(diagnostics_rows)
+
+    readme_df = pd.DataFrame([
+        {
+            "Note": "Stringing compiled workbook generated by dashboard loader.",
+            "Rules": "Dates parsed with pandas to_datetime (coerce); PO start to F/S complete inclusive; basic column normalization applied.",
+        }
+    ])
+
+    try:
+        with pd.ExcelWriter(workbook_path, engine="openpyxl") as writer:
+            df_raw.to_excel(writer, sheet_name=sheet_name[:31] or "Stringing", index=False)
+            diagnostics_df.to_excel(writer, sheet_name="Diagnostics", index=False)
+            if not issues_df.empty:
+                issues_df.to_excel(writer, sheet_name="Issues", index=False)
+            readme_df.to_excel(writer, sheet_name="README_Assumptions", index=False)
+        LOGGER.info("Wrote stringing compiled workbook to %s", workbook_path)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("Failed to write stringing workbook '%s': %s", workbook_path, exc)
+
+    try:
+        if parquet_dir.exists():
+            for p in parquet_dir.glob("**/*"):
+                try:
+                    if p.is_file():
+                        p.unlink()
+                except Exception:
+                    pass
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        compiled_parquet = parquet_dir / "StringingCompiled.parquet"
+        _write_parquet(df_raw, compiled_parquet)
+        LOGGER.info("Wrote stringing compiled parquet to %s", compiled_parquet)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("Failed to write stringing compiled parquet near '%s': %s", parquet_dir, exc)
+
+@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
+def _load_stringing_compiled_raw_cached(data_path: str, sheet_name: str, probe_dirs: tuple[str, ...]) -> pd.DataFrame:
+    """Internal cached loader for the Stringing Compiled stub.
+
+    Returns raw DataFrame if found; else an empty DataFrame.
+    """
+    path = Path(data_path)
+
+    # Parquet-first strategy to align with the rest of the app
+    if _parquet_dataset_available(path):
+        try:
+            source = _find_stringing_parquet_source(path, sheet_name, probe_dirs)
+            if source:
+                LOGGER.debug("Reading stringing compiled via DuckDB: %s", source)
+                return _read_parquet(source)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning("Failed reading stringing parquet near '%s': %s", path, exc)
+            return pd.DataFrame()
+        # If parquet dataset is the chosen mode but nothing matched, return empty
+        LOGGER.warning(
+            "Stringing dataset not found near parquet root '%s' (sheet='%s', probes=%s)",
+            path,
+            sheet_name,
+            list(probe_dirs),
+        )
+        return pd.DataFrame()
+
+    # Excel fallback
+    df = _try_read_excel_sheet(path, sheet_name)
+    if df is not None and not df.empty:
+        _export_stringing_compiled_artifacts(path, sheet_name, df)
+    return df
+
+
+def load_stringing_compiled_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    """Safe, non-expanding reader for the 'Stringing Compiled' dataset.
+
+    - Detects presence via sheet name for Excel or via parquet files/dirs.
+    - Returns a DataFrame with raw columns as-is.
+    - Returns an empty DataFrame (and logs a warning) if not found.
+    - Caches results for a short TTL to avoid expensive health probes.
+    """
+    if isinstance(config_or_path, AppConfig):
+        config = config_or_path
+    else:
+        config = AppConfig(data_path=Path(config_or_path))
+
+    resolved = str(Path(config.data_path).resolve())
+    df = _load_stringing_compiled_raw_cached(
+        resolved,
+        config.stringing_sheet_name,
+        tuple(getattr(config, "stringing_parquet_dirs", ())) or tuple(),
+    )
+    return df.copy()
+
+
+# -----------------------------
+# Stringing daily (expanded)
+# -----------------------------
+def _guarded_write_stringing_daily(root: Path, table: str, df: pd.DataFrame) -> None:
+    """Persist daily df to a directory named like a parquet table under root.
+
+    Mirrors erection flow: a subdirectory with the table name contains parquet file(s).
+    If parquet files already exist, do not overwrite.
+    """
+    search_root = _resolve_search_root(root)
+    target_dir = search_root / table
+    target_dir.mkdir(parents=True, exist_ok=True)
+    has_parquet = any(target_dir.rglob("*.parquet")) or any(target_dir.rglob("*.parq")) or any(target_dir.rglob("*.pq"))
+    if has_parquet:
+        return
+    # Write a single file for simplicity
+    target_file = target_dir / "stringing_daily.parquet"
+    try:
+        _write_parquet(df, target_file)
+        LOGGER.info("Wrote stringing daily parquet to %s", target_file)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("Failed to write stringing daily parquet to '%s': %s", target_file, exc)
+
+
+@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
+def _load_stringing_daily_cached(
+    data_path: str,
+    sheet_name: str,
+    probe_dirs: tuple[str, ...],
+    daily_table: str,
+) -> pd.DataFrame:
+    """Load expanded per-day stringing rows via parquet-first, else Excel fallback.
+
+    - If a parquet dataset exists under `daily_dirname`, loads via DuckDB.
+    - Else reads the compiled raw dataset (parquet/Excel), expands, and writes
+      the parquet dataset guarded into `daily_dirname` for next runs.
+    """
+    path = Path(data_path)
+    # 1) Parquet-first (table lookup mirrors erection behavior)
+    source = _find_parquet_source(path, daily_table)
+    if source:
+        try:
+            LOGGER.debug("Reading stringing daily via DuckDB: %s", source)
+            return _read_parquet(source)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Failed reading stringing daily parquet from '%s': %s", source, exc)
+
+    # 2) Build from compiled raw (which already prefers parquet if available)
+    compiled = _load_stringing_compiled_raw_cached(data_path, sheet_name, probe_dirs)
+    if compiled is None or compiled.empty:
+        return pd.DataFrame()
+
+    daily = expand_stringing_to_daily(compiled)
+    # 3) Persist guarded for future runs
+    if daily is not None and not daily.empty:
+        _guarded_write_stringing_daily(Path(data_path), daily_table, daily)
+    return daily
+
+
+def load_stringing_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    """Public loader for expanded per-day stringing rows.
+
+    Parquet-first; Excel fallback via compiled raw + expansion. Caches via TTL.
+    """
+    if isinstance(config_or_path, AppConfig):
+        config = config_or_path
+    else:
+        config = AppConfig(data_path=Path(config_or_path))
+
+    resolved = str(Path(config.data_path).resolve())
+    df = _load_stringing_daily_cached(
+        resolved,
+        config.stringing_sheet_name,
+        tuple(getattr(config, "stringing_parquet_dirs", ())) or tuple(),
+        getattr(config, "stringing_daily_table", "StringingDaily"),
+    )
+    return df.copy()
 
 
 def _write_parquet(df: pd.DataFrame, destination: Path) -> None:

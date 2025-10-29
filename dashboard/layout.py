@@ -331,7 +331,7 @@ def build_kpi_cards() -> dbc.Row:
                     dbc.CardBody(
                         [
                             html.Div(_icon("trend_up"), className="kpi__icon"),
-                            html.Div("Total Erection", className="kpi-label"),
+                            html.Div(id="label-total", children="Total Erection", className="kpi-label"),
                             html.Div(
                                 [ html.Span(id="kpi-total", className="kpi-value") ],
                                 className="kpi-row",
@@ -349,7 +349,7 @@ def build_kpi_cards() -> dbc.Row:
                     dbc.CardBody(
                         [
                             html.Div(_icon("trend_down"), className="kpi__icon"),
-                            html.Div("Lost Units", className="kpi-label"),
+                            html.Div(id="label-lost", children="Lost Units", className="kpi-label"),
                             html.Div(
                                 [
                                     html.Span(id="kpi-loss", className="kpi-value"),
@@ -578,6 +578,37 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
         style={"width": "16px", "height": "16px", "marginRight": "8px"},
     )
 
+    # Mode banner + toggle (top-right)
+    mode_controls = html.Div(
+        [
+            html.Span(
+                "Erection mode",
+                id="mode-banner",
+                style={
+                    "fontSize": "12px",
+                    "color": "#64748B",
+                    "background": "#F1F5F9",
+                    "padding": "4px 8px",
+                    "borderRadius": "8px",
+                },
+            ),
+            dcc.RadioItems(
+                id="mode-toggle",
+                options=[
+                    {"label": "Erection", "value": "erection"},
+                    {"label": "Stringing", "value": "stringing"},
+                ],
+                value="erection",
+                inline=True,
+                style={"fontSize": "12px"},
+                inputStyle={"marginRight": "6px"},
+                labelStyle={"display": "inline-flex", "gap": "0", "marginRight": "10px"},
+            ),
+        ],
+        className="topbar__mode",
+        style={"marginLeft": "auto", "display": "flex", "gap": "10px", "alignItems": "center"},
+    )
+
     return html.Div(
         [
             html.Div(  # left icon badge
@@ -594,6 +625,7 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
                 ],
                 className="topbar__text",
             ),
+            mode_controls,
         ],
         className="topbar",
     )
@@ -909,15 +941,14 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
             dcc.Store(id="store-selected-gang", data=None),   
+            dcc.Store(id="store-mode", data="erection"),
+            html.Div(id="mode-data-debug", style={"display": "none"}),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
         ],
         fluid=True,
     )
     return layout
-
-
-
 
 
 

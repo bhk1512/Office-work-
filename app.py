@@ -28,8 +28,15 @@ from dashboard.data_loader import (
     find_parquet_source,
     is_parquet_dataset,
     read_parquet_table,
+    load_stringing_compiled_raw as _load_stringing_compiled_raw,
+    load_stringing_daily as _load_stringing_daily,
 )
 from dashboard.layout import build_layout
+from dashboard.stringing import (
+    normalize_stringing_columns,
+    summarize_date_parsing,
+    add_length_units,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -374,11 +381,110 @@ def create_app(config: AppConfig | None = None) -> Dash:
     def healthcheck():  # type: ignore[override]
         process = psutil.Process(os.getpid())
         rss_mb = process.memory_info().rss / (1024 * 1024)
+        # Probe stringing dataset safely (non-expanding, cached)
+        stringing_df = pd.DataFrame()
+        try:
+            stringing_df = _load_stringing_compiled_raw(CONFIG)
+        except Exception:
+            # Keep health lightweight and resilient; treat as not found on errors
+            stringing_df = pd.DataFrame()
+        stringing_found = not stringing_df.empty
+        stringing_rows = int(len(stringing_df.index)) if stringing_found else 0
+
+        # Column normalization probe for Stringing dataset (map-only)
+        normalized_ok = False
+        normalized_missing: list[str] = []
+        date_parse_metrics = {
+            "po_start_date_parsed_count": 0,
+            "fs_complete_date_parsed_count": 0,
+            "invalid_date_rows": 0,
+        }
+        length_metrics = {
+            "total_length_km": 0.0,
+            "min_length_km": 0.0,
+            "max_length_km": 0.0,
+        }
+        stringing_daily_rows = 0
+        if stringing_found:
+            normalized_df = stringing_df
+            try:
+                normalized_df, norm_report = normalize_stringing_columns(stringing_df)
+                normalized_ok = bool(norm_report.get("normalized_columns_ok", False))
+                normalized_missing = list(norm_report.get("missing", []))
+            except Exception:
+                normalized_ok = False
+                normalized_missing = []
+            # Date parse metrics (no expansion) using the same semantics as erection dates
+            try:
+                date_parse_metrics = summarize_date_parsing(stringing_df)
+            except Exception:
+                date_parse_metrics = {
+                    "po_start_date_parsed_count": 0,
+                    "fs_complete_date_parsed_count": 0,
+                    "invalid_date_rows": 0,
+                }
+            # Length sanity in km (units-only normalization)
+            try:
+                _, length_metrics = add_length_units(normalized_df)
+            except Exception:
+                length_metrics = {
+                    "total_length_km": 0.0,
+                    "min_length_km": 0.0,
+                    "max_length_km": 0.0,
+                }
+            # Expanded per-day stringing row count (parquet-first, Excel fallback)
+            try:
+                daily_df = _load_stringing_daily(CONFIG)
+                stringing_daily_rows = int(len(daily_df.index))
+            except Exception:
+                stringing_daily_rows = 0
         payload = {
             "status": "ok",
             "rss_mb": round(rss_mb, 2),
             "last_updated": get_last_updated_text(),
+            # Stringing placeholders (no reads yet)
+            "stringing_enabled": bool(CONFIG.enable_stringing),
+            "stringing_sheet": CONFIG.stringing_sheet_name,
+            "stringing_parquet_dirs": list(getattr(CONFIG, "stringing_parquet_dirs", ())),
+            # Stub reader probe results
+            "stringing_sheet_found": bool(stringing_found),
+            "stringing_row_count": stringing_rows,
+            # Normalization report
+            "normalized_columns_ok": bool(normalized_ok),
+            "normalized_missing": normalized_missing,
+            # Date parsing metrics
+            "po_start_date_parsed_count": int(date_parse_metrics.get("po_start_date_parsed_count", 0)),
+            "fs_complete_date_parsed_count": int(date_parse_metrics.get("fs_complete_date_parsed_count", 0)),
+            "invalid_date_rows": int(date_parse_metrics.get("invalid_date_rows", 0)),
+            # Length metrics (km)
+            "total_length_km": float(length_metrics.get("total_length_km", 0.0)),
+            "min_length_km": float(length_metrics.get("min_length_km", 0.0)),
+            "max_length_km": float(length_metrics.get("max_length_km", 0.0)),
+            # Stringing daily expanded probe
+            "stringing_daily_rows": int(stringing_daily_rows),
         }
+
+        # Emit a log line summarizing normalization and date parsing health
+        try:
+            LOGGER.info(
+                "stringing_health",
+                extra={
+                    "event": "stringing_health",
+                    "found": bool(stringing_found),
+                    "rows": stringing_rows,
+                    "normalized_columns_ok": bool(normalized_ok),
+                    "normalized_missing": normalized_missing,
+                    "po_start_date_parsed_count": payload["po_start_date_parsed_count"],
+                    "fs_complete_date_parsed_count": payload["fs_complete_date_parsed_count"],
+                    "invalid_date_rows": payload["invalid_date_rows"],
+                    "total_length_km": payload["total_length_km"],
+                    "min_length_km": payload["min_length_km"],
+                    "max_length_km": payload["max_length_km"],
+                    "stringing_daily_rows": payload["stringing_daily_rows"],
+                },
+            )
+        except Exception:
+            pass
         return server.response_class(
             response=json.dumps(payload),
             status=200,
@@ -439,10 +545,3 @@ server = app.server
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-

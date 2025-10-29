@@ -11,9 +11,33 @@ DEFAULT_WORKBOOK = Path("ErectionCompiled_Output.xlsx")
 
 
 def _resolve_default_data_path() -> Path:
+    """Resolve the default dataset root.
+
+    Priority:
+    1) New standard layout: Parquets/Erection (preferred root for erection data)
+    2) Legacy layout: ErectionCompiled_Output_parquet directory next to workbook
+    3) Legacy workbook path: ErectionCompiled_Output.xlsx
+    """
+    # 1) Preferred: Parquets/Erection
+    parquets_root = Path("Parquets")
+    erection_root = parquets_root / "Erection"
+    try:
+        if erection_root.exists():
+            # Use it if it already contains parquet files (common in builds)
+            if any(erection_root.rglob("*.parquet")) or any(erection_root.rglob("*.parq")) or any(erection_root.rglob("*.pq")):
+                return erection_root
+            # Even if empty, prefer the directory so writers will populate it
+            return erection_root
+    except Exception:
+        # Fall through to legacy paths if any FS error occurs
+        pass
+
+    # 2) Legacy compiled parquet directory
     parquet_dir = DEFAULT_WORKBOOK.parent / f"{DEFAULT_WORKBOOK.stem}_parquet"
     if parquet_dir.exists():
         return parquet_dir
+
+    # 3) Legacy workbook file
     return DEFAULT_WORKBOOK
 
 
@@ -47,6 +71,24 @@ class AppConfig:
     default_benchmark: float = 9.0
     data_path: Path = _DEFAULT_DATA_PATH
     allowed_data_root: Path = Path(os.getenv("ALLOWED_DATA_ROOT", ".")).resolve()
+
+    # Stringing (uses sibling folder under Parquets by default)
+    enable_stringing: bool = os.getenv("ENABLE_STRINGING", "1") in {"1", "true", "True"}
+    stringing_sheet_name: str = os.getenv("STRINGING_SHEET_NAME", "Stringing Compiled")
+    # Comma-separated list of parquet directory names to probe when stringing is enabled
+    stringing_parquet_dirs: tuple[str, ...] = tuple(
+        d.strip()
+        for d in os.getenv(
+            "STRINGING_PARQUET_DIRS",
+            # Prefer Parquets/Stringing (as sibling of Parquets/Erection). Fallbacks retained.
+            "../Stringing,StringingCompiled_Output_parquet,Stringing_Output_parquet",
+        ).split(",")
+        if d.strip()
+    )
+    # Parquet table name for expanded per-day stringing rows (mirrors erection style)
+    # A directory with this name is created under the dataset root, with parquet files inside.
+    # Default to a sibling under Parquets/Stringing so reads/writes land there
+    stringing_daily_table: str = os.getenv("STRINGING_DAILY_TABLE", "../Stringing/StringingDaily")
 
     def validate(self) -> None:
         """Ensure configured paths stay within the permitted root."""

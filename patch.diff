@@ -1,0 +1,37 @@
+*** Begin Patch
+*** Update File: dashboard/callbacks.py
+@@
+-            scope_mask = pd.Series(True, index=df_day.index)
+-            if project_list:
+-                scope_mask &= df_day["project_name"].isin(project_list)
+-            if gang_list:
+-                scope_mask &= df_day["gang_name"].isin(gang_list)
++            scope_mask = pd.Series(True, index=df_day.index)
++            if project_list and ("project_name" in df_day.columns):
++                scope_mask &= df_day["project_name"].isin(project_list)
++            if gang_list and ("gang_name" in df_day.columns):
++                scope_mask &= df_day["gang_name"].isin(gang_list)
+             scoped_all = df_day.loc[scope_mask].copy()
+@@
+-        # Gang ?+' Project bridge
+-            gang_to_project = (
+-                scoped_all[["gang_name", "project_name"]]
+-                .dropna()
+-                .drop_duplicates()
+-                .set_index("gang_name")["project_name"]
+-                .astype(str)
+-                .to_dict()
+-            )
++        # Gang ? Project bridge (guard columns)
++            if {"gang_name", "project_name"}.issubset(scoped_all.columns):
++                gang_to_project = (
++                    scoped_all[["gang_name", "project_name"]]
++                    .dropna()
++                    .drop_duplicates()
++                    .set_index("gang_name")["project_name"]
++                    .astype(str)
++                    .to_dict()
++                )
++            else:
++                gang_to_project = {}
+*** End Patch

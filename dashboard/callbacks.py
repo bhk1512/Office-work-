@@ -6,6 +6,7 @@ import logging
 import dash_bootstrap_components as dbc 
 import pandas as pd
 from io import BytesIO
+import traceback
 from typing import Any, Callable, Sequence
 
 import dash
@@ -13,6 +14,7 @@ import re
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
+from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
 
@@ -24,14 +26,25 @@ from .charts import (
     build_empty_responsibilities_figure,
 )
 from .config import AppConfig
+from .data_loader import load_stringing_daily as _load_stringing_daily
 from .filters import apply_filters, resolve_months
-from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang, compute_gang_baseline_maps, compute_project_baseline_maps
+from .metrics import (
+    calc_idle_and_loss,
+    calc_idle_and_loss_for_column,
+    compute_idle_intervals_per_gang,
+    compute_gang_baseline_maps,
+    compute_project_baseline_maps,
+    compute_project_baseline_maps_for,
+)
 from .workbook import make_trace_workbook_bytes
 
 
 LOGGER = logging.getLogger(__name__)
 
 BENCHMARK_MT_PER_DAY = 9.0
+
+# App-wide config instance for callback logic
+config = AppConfig()
 
 
 _ERECTIONS_EXPORT_COLUMNS = [
@@ -390,6 +403,45 @@ def register_callbacks(
 ) -> None:
 
     LOGGER.debug("Registering callbacks")
+
+    # Tiny selector to swap daily dataset based on mode
+    def _select_daily(mode_value: str | None) -> pd.DataFrame:
+        mode = (mode_value or "erection").strip().lower()
+        if mode == "stringing":
+            df = _load_stringing_daily(config)
+        else:
+            df = data_provider()
+        # Normalize required columns and provide consistent aliases across modes
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.DataFrame()
+        df = df.copy()
+        # Ensure date and month fields exist and are typed
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"]).copy()
+            if "month" not in df.columns:
+                df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
+        # Provide a unified project column for filters/options
+        if "project_name" not in df.columns:
+            if "project" in df.columns:
+                df["project_name"] = df["project"].astype(str).str.strip()
+        # Provide a unified daily metric alias when using stringing data
+        if mode == "stringing" and "daily_km" in df.columns and "daily_prod_mt" not in df.columns:
+            # For downstream components that expect daily_prod_mt (charts/helpers)
+            df["daily_prod_mt"] = df["daily_km"]
+        return df
+
+    # --- Mode toggle -> store + banner text ---
+    @app.callback(
+        Output("store-mode", "data"),
+        Output("mode-banner", "children"),
+        Input("mode-toggle", "value"),
+        prevent_initial_call=True,
+    )
+    def _sync_mode_store_and_banner(mode_value: str | None):
+        mode = (mode_value or "erection").strip().lower()
+        banner = "Erection mode" if mode == "erection" else "Stringing mode"
+        return mode, banner
     def _get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
         if project_baseline_provider is None:
             return {}, {}
@@ -565,19 +617,26 @@ def register_callbacks(
         Output("f-quick-range", "value"),
         Input("btn-reset-filters", "n_clicks"),
         Input("link-clear-quick-range", "n_clicks"),
+        Input("mode-toggle", "value"),
         prevent_initial_call=True,
     )
     def handle_filter_reset(
         reset_clicks: int | None,
         clear_quick_clicks: int | None,
+        mode_value: str | None,
     ) -> tuple[Any, Any, Any, Any]:
         ctx = dash.callback_context
         if not ctx.triggered:
             raise PreventUpdate
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        # Clear only quick range if that link was clicked
         if trigger_id == "link-clear-quick-range":
             return dash.no_update, dash.no_update, dash.no_update, None
-        return None, None, None, None
+        # On mode toggle or Reset click: reset all filters to defaults
+        if trigger_id in {"mode-toggle", "btn-reset-filters"}:
+            default_month = datetime.today().strftime("%Y-%m")
+            return None, [default_month], None, None
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
 
     @app.callback(
@@ -585,82 +644,182 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
     )
     def update_project_options(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
+        mode_value: str | None,
+        toggle_value: str | None,
     ) -> list[dict[str, str]]:
-        df_day = data_provider()
-        months_ts = resolve_months(_ensure_list(months), quick_range)
+        try:
+            # Prefer the live toggle for immediate switching; fall back to stored mode
+            eff_mode = (toggle_value or mode_value or "erection")
+            df_day = _select_daily(eff_mode)
+            if df_day is None or df_day.empty:
+                return []
+            # Derive month if missing (belt-and-braces)
+            if "month" not in df_day.columns and "date" in df_day.columns:
+                work = df_day.copy()
+                work["date"] = pd.to_datetime(work["date"], errors="coerce")
+                work = work.dropna(subset=["date"])  # keep valid only
+                work["month"] = work["date"].dt.to_period("M").dt.to_timestamp()
+            else:
+                work = df_day.copy()
 
-        filtered = df_day.copy()
-        if months_ts:
-            filtered = filtered[filtered["month"].isin(months_ts)]
-        gang_list = _ensure_list(gangs)
-        if gang_list:
-            filtered = filtered[filtered["gang_name"].isin(gang_list)]
+            months_ts = resolve_months(_ensure_list(months), quick_range)
 
-        projects = sorted(filtered["project_name"].dropna().unique())
-        if not projects:
-            projects = sorted(df_day["project_name"].dropna().unique())
-        return [{"label": project, "value": project} for project in projects]
+            filtered = work
+            if months_ts and "month" in filtered.columns:
+                filtered = filtered[filtered["month"].isin(months_ts)]
+            gang_list = _ensure_list(gangs)
+            if gang_list and "gang_name" in filtered.columns:
+                filtered = filtered[filtered["gang_name"].isin(gang_list)]
+
+            # Project column may be aliased
+            proj_col = "project_name" if "project_name" in filtered.columns else ("project" if "project" in filtered.columns else None)
+            if not proj_col:
+                return []
+            projects = sorted(pd.Series(filtered[proj_col]).dropna().astype(str).str.strip().unique())
+            if not projects:
+                projects = sorted(pd.Series(work[proj_col]).dropna().astype(str).str.strip().unique())
+            return [{"label": p, "value": p} for p in projects]
+        except Exception as exc:
+            LOGGER.exception("Failed to build project options: %s", exc)
+            # Return an empty list instead of 500 to keep UI responsive
+            return []
 
     @app.callback(
         Output("f-gang", "options"),
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
     )
     def update_gang_options(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
+        mode_value: str | None,
+        toggle_value: str | None,
     ) -> list[dict[str, str]]:
-        df_day = data_provider()
-        filtered = df_day.copy()
-        project_list = _ensure_list(projects)
-        if project_list:
-            filtered = filtered[filtered["project_name"].isin(project_list)]
-        months_ts = resolve_months(_ensure_list(months), quick_range)
-        if months_ts:
-            filtered = filtered[filtered["month"].isin(months_ts)]
+        try:
+            # Prefer the live toggle for immediate switching; fall back to stored mode
+            eff_mode = (toggle_value or mode_value or "erection")
+            df_day = _select_daily(eff_mode)
+            if df_day is None or df_day.empty:
+                return []
+            work = df_day.copy()
+            if "month" not in work.columns and "date" in work.columns:
+                work["date"] = pd.to_datetime(work["date"], errors="coerce")
+                work = work.dropna(subset=["date"])
+                work["month"] = work["date"].dt.to_period("M").dt.to_timestamp()
 
-        gangs = sorted(filtered["gang_name"].dropna().unique())
-        if not gangs:
-            gangs = sorted(df_day["gang_name"].dropna().unique())
-        return [{"label": gang, "value": gang} for gang in gangs]
+            filtered = work
+            project_list = _ensure_list(projects)
+            proj_col = "project_name" if "project_name" in filtered.columns else ("project" if "project" in filtered.columns else None)
+            if project_list and proj_col:
+                filtered = filtered[filtered[proj_col].isin(project_list)]
+            months_ts = resolve_months(_ensure_list(months), quick_range)
+            if months_ts and "month" in filtered.columns:
+                filtered = filtered[filtered["month"].isin(months_ts)]
+
+            if "gang_name" not in filtered.columns:
+                return []
+            gangs = sorted(filtered["gang_name"].dropna().astype(str).str.strip().unique())
+            if not gangs:
+                gangs = sorted(work.get("gang_name", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique())
+            return [{"label": g, "value": g} for g in gangs]
+        except Exception as exc:
+            LOGGER.exception("Failed to build gang options: %s", exc)
+            return []
 
     @app.callback(
         Output("f-month", "options"),
         Input("f-project", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
     )
     def update_month_options(
         projects: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
+        mode_value: str | None,
+        toggle_value: str | None,
     ) -> list[dict[str, str]]:
-        df_day = data_provider()
-        filtered = df_day.copy()
-        project_list = _ensure_list(projects)
-        if project_list:
-            filtered = filtered[filtered["project_name"].isin(project_list)]
-        gang_list = _ensure_list(gangs)
-        if gang_list:
-            filtered = filtered[filtered["gang_name"].isin(gang_list)]
+        try:
+            # Prefer the live toggle for immediate switching; fall back to stored mode
+            eff_mode = (toggle_value or mode_value or "erection")
+            df_day = _select_daily(eff_mode)
+            if df_day is None or df_day.empty:
+                return []
+            work = df_day.copy()
+            # Ensure month exists from date
+            if "month" not in work.columns and "date" in work.columns:
+                work["date"] = pd.to_datetime(work["date"], errors="coerce")
+                work = work.dropna(subset=["date"]).copy()
+                work["month"] = work["date"].to_period("M").dt.to_timestamp()
 
-        months = sorted(filtered["month"].dropna().unique())
-        if quick_range:
-            months_range = resolve_months(None, quick_range)
-            months = [month for month in months if month in months_range]
-        if not months:
-            months = sorted(df_day["month"].dropna().unique())
-        return [
-            {"label": month.strftime("%b %Y"), "value": month.strftime("%Y-%m")}
-            for month in months
-        ]
+            filtered = work
+            project_list = _ensure_list(projects)
+            proj_col = "project_name" if "project_name" in filtered.columns else ("project" if "project" in filtered.columns else None)
+            if project_list and proj_col:
+                filtered = filtered[filtered[proj_col].isin(project_list)]
+            gang_list = _ensure_list(gangs)
+            if gang_list and "gang_name" in filtered.columns:
+                filtered = filtered[filtered["gang_name"].isin(gang_list)]
+
+            if "month" not in filtered.columns:
+                return []
+            months = sorted(pd.to_datetime(filtered["month"].dropna().unique()))
+            if quick_range:
+                months_range = resolve_months(None, quick_range)
+                months = [m for m in months if m in months_range]
+            if not months and "month" in work.columns:
+                months = sorted(pd.to_datetime(work["month"].dropna().unique()))
+            return [{"label": m.strftime("%b %Y"), "value": m.strftime("%Y-%m")} for m in months]
+        except Exception as exc:
+            LOGGER.exception("Failed to build month options: %s", exc)
+            return []
+
+    @app.callback(
+        Output("f-month", "value", allow_duplicate=True),
+        Input("f-month", "options"),
+        Input("store-mode", "data"),
+        State("f-month", "value"),
+        prevent_initial_call='initial_duplicate',
+    )
+    def ensure_default_month(options, mode_value, current_value):
+        try:
+            # If a month already selected and appears in options, keep it
+            if current_value:
+                selected = set(current_value if isinstance(current_value, (list, tuple)) else [current_value])
+                opt_values = {opt.get("value") for opt in (options or [])}
+                if selected & opt_values:
+                    return dash.no_update
+            # Prefer current month if available, else pick latest option
+            opt_values = [opt.get("value") for opt in (options or []) if isinstance(opt, dict)]
+            if not opt_values:
+                return dash.no_update
+            today_val = datetime.today().strftime("%Y-%m")
+            if today_val in opt_values:
+                return [today_val]
+            # Parse to pick latest
+            def _parse(val: str):
+                try:
+                    y, m = val.split("-")
+                    return int(y) * 100 + int(m)
+                except Exception:
+                    return -1
+            latest = max(opt_values, key=_parse)
+            return [latest]
+        except Exception:
+            return dash.no_update
 
     @app.callback(
         Output("f-month", "value", allow_duplicate=True),
@@ -1229,6 +1388,8 @@ def register_callbacks(
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
         Input("f-topbot-metric", "value"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
     )
     def update_dashboard(
         projects: Sequence[str] | None,
@@ -1236,221 +1397,256 @@ def register_callbacks(
         quick_range: str | None,
         gangs: Sequence[str] | None,
         topbot_metric: str | None,         
+        mode_value: str | None,
+        toggle_value: str | None,
     ) -> tuple:
-        project_list = _ensure_list(projects)
-        month_list = _ensure_list(months)
-        gang_list = _ensure_list(gangs)
+        if True:
+            project_list = _ensure_list(projects)
+            month_list = _ensure_list(months)
+            gang_list = _ensure_list(gangs)
+            # Prefer the live toggle for immediate switching; fall back to stored mode
+            eff_mode = (toggle_value or mode_value or "erection")
+            df_day = _select_daily(eff_mode)
+            months_ts = resolve_months(month_list, quick_range)
 
-        df_day = data_provider()
-        months_ts = resolve_months(month_list, quick_range)
+            scoped = apply_filters(df_day, project_list, months_ts, gang_list)
+            scoped_top_bottom = apply_filters(df_day, project_list, months_ts, [])
 
-        scoped = apply_filters(df_day, project_list, months_ts, gang_list)
-        scoped_top_bottom = apply_filters(df_day, project_list, months_ts, [])
+            is_stringing = (str(eff_mode or "erection").strip().lower() == "stringing")
+            metric_col = "daily_km" if is_stringing else "daily_prod_mt"
+            unit_short = "KM" if is_stringing else "MT"
+            benchmark = BENCHMARK_MT_PER_DAY
+            avg_prod = scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
+            delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
+            kpi_avg = f"{avg_prod:.2f} {unit_short}"
+            kpi_delta = (
+                "(n/a)"
+                if delta_pct is None
+                else f"({delta_pct:+.0f}% vs {benchmark:.1f} {unit_short})"
+            )
 
-        benchmark = BENCHMARK_MT_PER_DAY
-        avg_prod = scoped["daily_prod_mt"].mean() if len(scoped) else 0.0
-        delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
-        kpi_avg = f"{avg_prod:.2f} MT"
-        kpi_delta = (
-            "(n/a)"
-            if delta_pct is None
-            else f"({delta_pct:+.0f}% vs {benchmark:.1f} MT)"
-        )
+            has_selected_months = bool(months_ts)
 
-        has_selected_months = bool(months_ts)
+            scope_mask = pd.Series(True, index=df_day.index)
+            if project_list and ("project_name" in df_day.columns):
+                scope_mask &= df_day["project_name"].isin(project_list)
+            if gang_list and ("gang_name" in df_day.columns):
+                scope_mask &= df_day["gang_name"].isin(gang_list)
+            scoped_all = df_day.loc[scope_mask].copy()
+            # Ensure expected keys exist to avoid KeyError on selection
+            if "gang_name" not in scoped_all.columns:
+                scoped_all["gang_name"] = pd.Series(dtype=str)
+            if "project_name" not in scoped_all.columns:
+                scoped_all["project_name"] = pd.Series(dtype=str)
 
-        scope_mask = pd.Series(True, index=df_day.index)
-        if project_list:
-            scope_mask &= df_day["project_name"].isin(project_list)
-        if gang_list:
-            scope_mask &= df_day["gang_name"].isin(gang_list)
-        scoped_all = df_day.loc[scope_mask].copy()
-
-        if has_selected_months and not scoped_all.empty and "month" in scoped_all:
-            month_values = sorted(set(months_ts))
-            period_mask = scoped_all["month"].isin(month_values)
-            loss_scope = scoped_all.loc[period_mask].copy()
-            earliest_month = month_values[0]
-            history_scope = scoped_all.loc[scoped_all["month"] < earliest_month].copy()
-        else:
-            loss_scope = scoped_all.copy()
-            history_scope = scoped_all.copy()
-
-        # --- PROJECT-level baselines, then map them onto gangs ---
-        precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = bool(precomputed_overall)
-        proj_overall_all: dict[str, float] = {}
-        proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
-        if use_precomputed:
-            if "project_name" in scoped_all.columns:
-                available_projects = (
-                    scoped_all["project_name"].dropna().astype(str).str.strip().unique().tolist()
-                )
+            if has_selected_months and not scoped_all.empty and "month" in scoped_all:
+                month_values = sorted(set(months_ts))
+                period_mask = scoped_all["month"].isin(month_values)
+                loss_scope = scoped_all.loc[period_mask].copy()
+                earliest_month = month_values[0]
+                history_scope = scoped_all.loc[scoped_all["month"] < earliest_month].copy()
             else:
-                available_projects = []
-            if available_projects:
-                proj_overall_all = {
-                    project: precomputed_overall.get(project)
-                    for project in available_projects
-                    if precomputed_overall.get(project) is not None
-                }
-                monthly_candidates = {
-                    project: precomputed_monthly.get(project, {})
-                    for project in available_projects
-                }
-            else:
-                proj_overall_all = dict(precomputed_overall)
-                monthly_candidates = dict(precomputed_monthly)
-            if has_selected_months and earliest_month is not None:
-                proj_monthly = {
-                    project: {
-                        month: value
-                        for month, value in month_map.items()
-                        if month < earliest_month
+                loss_scope = scoped_all.copy()
+                history_scope = scoped_all.copy()
+
+            # --- PROJECT-level baselines, then map them onto gangs ---
+            precomputed_overall, precomputed_monthly = _get_project_baselines()
+            use_precomputed = (not is_stringing) and bool(precomputed_overall)
+            proj_overall_all: dict[str, float] = {}
+            proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
+            if use_precomputed:
+                if "project_name" in scoped_all.columns:
+                    available_projects = (
+                        scoped_all["project_name"].dropna().astype(str).str.strip().unique().tolist()
+                    )
+                else:
+                    available_projects = []
+                if available_projects:
+                    proj_overall_all = {
+                        project: precomputed_overall.get(project)
+                        for project in available_projects
+                        if precomputed_overall.get(project) is not None
                     }
-                    for project, month_map in monthly_candidates.items()
-                    if any(month < earliest_month for month in month_map)
-                }
+                    monthly_candidates = {
+                        project: precomputed_monthly.get(project, {})
+                        for project in available_projects
+                    }
+                else:
+                    proj_overall_all = dict(precomputed_overall)
+                    monthly_candidates = dict(precomputed_monthly)
+                if has_selected_months and earliest_month is not None:
+                    proj_monthly = {
+                        project: {
+                            month: value
+                            for month, value in month_map.items()
+                            if month < earliest_month
+                        }
+                        for project, month_map in monthly_candidates.items()
+                        if any(month < earliest_month for month in month_map)
+                    }
+                else:
+                    proj_monthly = monthly_candidates
             else:
-                proj_monthly = monthly_candidates
-        else:
-            proj_overall_all, proj_monthly_all = compute_project_baseline_maps(scoped_all)
-            proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps(history_scope)
-            if proj_overall_hist:
-                proj_overall_all.update(proj_overall_hist)
-            proj_monthly = proj_monthly_hist
+                if is_stringing:
+                    proj_overall_all, proj_monthly_all = compute_project_baseline_maps_for(scoped_all, metric_col)
+                    proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps_for(history_scope, metric_col)
+                else:
+                    proj_overall_all, proj_monthly_all = compute_project_baseline_maps(scoped_all)
+                    proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps(history_scope)
+                if proj_overall_hist:
+                    proj_overall_all.update(proj_overall_hist)
+                proj_monthly = proj_monthly_hist
         # Gang → Project bridge
-        gang_to_project = (
-            scoped_all[["gang_name", "project_name"]]
-            .dropna()
-            .drop_duplicates()
-            .set_index("gang_name")["project_name"]
-            .astype(str)
-            .to_dict()
-        )
-
-        # Build the same names your downstream code already expects:
-        baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
-        baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
-
-        baseline_map = baseline_overall_map
-
-
-        baseline_map = baseline_overall_map
-        loss_rows: list[dict[str, float]] = []
-        for gang_name, gang_df in loss_scope.groupby("gang_name"):
-            overall_baseline = baseline_overall_map.get(gang_name)
-            idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
-                gang_df,
-                loss_max_gap_days=config.loss_max_gap_days,
-                baseline_mt_per_day=overall_baseline,
-                baseline_by_month=baseline_monthly_map.get(gang_name),
-            )
-            loss_rows.append(
-                {
-                    "gang_name": gang_name,
-                    "delivered": delivered,
-                    "lost": loss_mt,
-                    "potential": potential,
-                    "avg_prod": gang_df["daily_prod_mt"].mean(),
-                    "baseline": baseline,
-                }
-            )
-        if loss_rows:
-
-            loss_df = pd.DataFrame(loss_rows)
-
-            deliv = loss_df["delivered"].astype(float)
-
-            lost = loss_df["lost"].astype(float)
-
-            potential = loss_df["potential"].astype(float)
-
-            sum_series = deliv.add(lost)
-
-            use_sum = deliv.notna() & lost.notna()
-
-            potential_fallback = potential.where(potential.notna(), sum_series)
-
-            total_series = pd.Series(
-
-                np.where(use_sum, sum_series, potential_fallback),
-
-                index=loss_df.index,
-
-            ).fillna(0.0)
-
-            efficiency_series = np.where(
-
-                total_series > 0.0,
-
-                (deliv.fillna(0.0) / total_series) * 100.0,
-
-                0.0,
-
+            gang_to_project = (
+                scoped_all[["gang_name", "project_name"]]
+                .dropna()
+                .drop_duplicates()
+                .set_index("gang_name")["project_name"]
+                .astype(str)
+                .to_dict()
             )
 
-            loss_df = (
+            # Build the same names your downstream code already expects:
+            baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
+            baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
 
-                loss_df.assign(
+            baseline_map = baseline_overall_map
 
-                    efficiency_pct=efficiency_series,
 
-                    total_mt=total_series,
+            baseline_map = baseline_overall_map
+            loss_rows: list[dict[str, float]] = []
+            for gang_name, gang_df in loss_scope.groupby("gang_name"):
+                overall_baseline = baseline_overall_map.get(gang_name)
+                if is_stringing:
+                    idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss_for_column(
+                        gang_df,
+                        metric_column=metric_col,
+                        loss_max_gap_days=config.loss_max_gap_days,
+                        baseline_per_day=overall_baseline,
+                        baseline_by_month=baseline_monthly_map.get(gang_name),
+                    )
+                else:
+                    idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
+                        gang_df,
+                        loss_max_gap_days=config.loss_max_gap_days,
+                        baseline_mt_per_day=overall_baseline,
+                        baseline_by_month=baseline_monthly_map.get(gang_name),
+                    )
+                loss_rows.append(
+                    {
+                        "gang_name": gang_name,
+                        "delivered": delivered,
+                        "lost": loss_mt,
+                        "potential": potential,
+                        "avg_prod": (gang_df[metric_col].mean() if metric_col in gang_df.columns else 0.0),
+                        "baseline": baseline,
+                    }
+                )
+            if loss_rows:
+
+                loss_df = pd.DataFrame(loss_rows)
+
+                deliv = loss_df["delivered"].astype(float)
+
+                lost = loss_df["lost"].astype(float)
+
+                potential = loss_df["potential"].astype(float)
+
+                sum_series = deliv.add(lost)
+
+                use_sum = deliv.notna() & lost.notna()
+
+                potential_fallback = potential.where(potential.notna(), sum_series)
+
+                total_series = pd.Series(
+
+                    np.where(use_sum, sum_series, potential_fallback),
+
+                    index=loss_df.index,
+
+                ).fillna(0.0)
+
+                efficiency_series = np.where(
+
+                    total_series > 0.0,
+
+                    (deliv.fillna(0.0) / total_series) * 100.0,
+
+                    0.0,
 
                 )
 
-                .sort_values("efficiency_pct", ascending=True)
+                loss_df = (
 
-                .reset_index(drop=True)
+                    loss_df.assign(
 
-            )
+                        efficiency_pct=efficiency_series,
 
-        else:
+                        total_mt=total_series,
 
-            loss_df = pd.DataFrame(
+                    )
 
-                columns=[
+                    .sort_values("efficiency_pct", ascending=True)
 
-                    "gang_name",
+                    .reset_index(drop=True)
 
-                    "delivered",
+                )
 
-                    "lost",
+            else:
 
-                    "potential",
+                loss_df = pd.DataFrame(
 
-                    "avg_prod",
+                    columns=[
 
-                    "baseline",
+                        "gang_name",
 
-                    "efficiency_pct",
+                        "delivered",
 
-                    "total_mt",
+                        "lost",
 
-                ]
+                        "potential",
 
-            )
+                        "avg_prod",
+
+                        "baseline",
+
+                        "efficiency_pct",
+
+                        "total_mt",
+
+                    ]
+
+                )
 
 
 
 
 
 
+
+        
 
         # --- meta for hover: last project & last worked date per gang (within current filters)
         meta_ready = {"gang_name", "project_name", "date"}.issubset(scoped_all.columns) and not scoped_all.empty
 
         if meta_ready:
-            idx_last = scoped_all.sort_values("date").groupby("gang_name")["date"].idxmax()
-            meta = (
-                scoped_all.loc[idx_last, ["gang_name", "project_name", "date"]]
-                .rename(columns={"project_name": "last_project", "date": "last_date"})
-            )
-            loss_df = loss_df.merge(meta, on="gang_name", how="left")
+                idx_last = scoped_all.sort_values("date").groupby("gang_name")["date"].idxmax()
+                base_cols = ["gang_name", "project_name", "date"]
+                meta = (
+                    scoped_all.loc[idx_last, base_cols]
+                    .rename(columns={"project_name": "last_project", "date": "last_date"})
+                )
+                # Attach stringing meta if present at the last row per gang
+                extra_cols = ["from_ap", "to_ap", "method", "po_id", "status"]
+                present_extras = [c for c in extra_cols if c in scoped_all.columns]
+                if present_extras:
+                    extras = scoped_all.loc[idx_last, ["gang_name", *present_extras]].copy()
+                    meta = meta.merge(extras, on="gang_name", how="left")
+                loss_df = loss_df.merge(meta, on="gang_name", how="left")
         else:
-            # guarantee columns exist even when we couldn't compute meta
-            loss_df = loss_df.assign(last_project=np.nan, last_date=pd.NaT)
+                # guarantee columns exist even when we couldn't compute meta
+                loss_df = loss_df.assign(last_project=np.nan, last_date=pd.NaT)
+        
 
         # pretty, null-safe strings for hover (NO KeyError even if meta missing)
         last_date_series = pd.to_datetime(loss_df.get("last_date"), errors="coerce")
@@ -1515,15 +1711,16 @@ def register_callbacks(
         fig_height = int(row_px * max(1, len(loss_df)) + topbot_margin)
 
         active_gangs = loss_scope["gang_name"].nunique()
-        total_period_mt = float(loss_scope["daily_prod_mt"].sum()) if not loss_scope.empty else 0.0
+        # totals and units by mode
+        total_metric = float(loss_scope[metric_col].sum()) if (not loss_scope.empty and metric_col in loss_scope.columns) else 0.0
         total_delivered = float(loss_df["delivered"].sum()) if not loss_df.empty else 0.0
         total_lost = float(loss_df["lost"].sum()) if not loss_df.empty else 0.0
         total_potential = total_delivered + total_lost
         lost_pct = (total_lost / total_potential * 100) if total_potential > 0 else 0.0
 
         kpi_active = f"{active_gangs}"
-        kpi_total = f"{total_period_mt:.1f} MT"
-        kpi_loss = f"{total_lost:.1f} MT"
+        kpi_total = f"{total_metric:.1f} {unit_short}"
+        kpi_loss = f"{total_lost:.1f} {unit_short}"
         kpi_loss_delta = f"{lost_pct:.1f}%"
 
 
@@ -1531,6 +1728,15 @@ def register_callbacks(
 
         fig_loss = go.Figure()
         if not loss_df.empty:
+            # Determine if stringing extra fields are available for hover
+            has_stringing_meta = all(c in loss_df.columns for c in ["from_ap", "to_ap", "method", "po_id", "status"]) if is_stringing else False
+            hover_extra = (
+                "From AP: %{customdata[4]}<br>"
+                "To AP: %{customdata[5]}<br>"
+                "Method: %{customdata[6]}<br>"
+                "PO: %{customdata[7]}<br>"
+                "Status: %{customdata[8]}<br>"
+            ) if has_stringing_meta else ""
             # --- Delivered bar (replace the existing fig_loss.add_bar block) ---
             fig_loss.add_bar(
                 x=loss_df["delivered"],
@@ -1542,21 +1748,33 @@ def register_callbacks(
                 name="Delivered",
                 width=0.95,
                 # match Top/Bottom customdata shape: [last_project, last_date_str, current_metric, baseline_metric]
-                customdata=np.stack(
-                    [
-                        loss_df["last_project"].fillna(" "),
-                        loss_df["last_date_str"].fillna(" "),
-                        loss_df["avg_prod"].fillna(0.0),      # current metric (MT/day)
-                        loss_df["baseline"].fillna(0.0),      # baseline (MT/day)
-                    ],
-                    axis=-1,
+                customdata=(
+                    np.stack(
+                        [
+                            loss_df["last_project"].fillna(" "),
+                            loss_df["last_date_str"].fillna(" "),
+                            loss_df["avg_prod"].fillna(0.0),      # current metric
+                            loss_df["baseline"].fillna(0.0),      # baseline
+                            *(
+                                [
+                                    loss_df.get("from_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("to_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("method", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("po_id", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("status", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                ] if has_stringing_meta else []
+                            ),
+                        ],
+                        axis=-1,
+                    )
                 ),
                 hovertemplate=(
                     "%{y}<br>"
                     "Project: %{customdata[0]}<br>"
                     "Last worked at: %{customdata[1]}<br>"
-                    "Current MT/day: %{customdata[2]:.2f}<br>"
-                    "Baseline MT/day: %{customdata[3]:.2f}<extra></extra>"
+                    f"Current {unit_short}/day: %{{customdata[2]:.2f}}<br>"
+                    f"Baseline {unit_short}/day: %{{customdata[3]:.2f}}<br>"
+                    + hover_extra + "<extra></extra>"
                 ),
                 hoverlabel=dict(
                     bgcolor="rgba(255,255,255,0.95)",
@@ -1578,21 +1796,33 @@ def register_callbacks(
                 name="Loss",
                 base=loss_df["delivered"],
                 width=0.95,
-                customdata=np.stack(
-                    [
-                        loss_df["last_project"].fillna(" "),
-                        loss_df["last_date_str"].fillna(" "),
-                        loss_df["avg_prod"].fillna(0.0),
-                        loss_df["baseline"].fillna(0.0),
-                    ],
-                    axis=-1,
+                customdata=(
+                    np.stack(
+                        [
+                            loss_df["last_project"].fillna(" "),
+                            loss_df["last_date_str"].fillna(" "),
+                            loss_df["avg_prod"].fillna(0.0),
+                            loss_df["baseline"].fillna(0.0),
+                            *(
+                                [
+                                    loss_df.get("from_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("to_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("method", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("po_id", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                    loss_df.get("status", pd.Series([" "] * len(loss_df))).fillna(" "),
+                                ] if has_stringing_meta else []
+                            ),
+                        ],
+                        axis=-1,
+                    )
                 ),
                 hovertemplate=(
                     "%{y}<br>"
                     "Project: %{customdata[0]}<br>"
                     "Last worked at: %{customdata[1]}<br>"
-                    "Current MT/day: %{customdata[2]:.2f}<br>"
-                    "Baseline MT/day: %{customdata[3]:.2f}<extra></extra>"
+                    f"Current {unit_short}/day: %{{customdata[2]:.2f}}<br>"
+                    f"Baseline {unit_short}/day: %{{customdata[3]:.2f}}<br>"
+                    + hover_extra + "<extra></extra>"
                 ),
                 hoverlabel=dict(
                     bgcolor="rgba(255,255,255,0.95)",
@@ -1607,7 +1837,7 @@ def register_callbacks(
                 fig_loss.add_annotation(
                     x=row["potential"],
                     y=row["gang_name"],
-                    text=f"{row['avg_prod']:.2f} MT/day (Baseline: {row['baseline']:.2f} MT/day)",
+                    text=f"{row['avg_prod']:.2f} {unit_short}/day (Baseline: {row['baseline']:.2f} {unit_short}/day)",
                     showarrow=False,
                     xanchor="left",
                     yanchor="middle",
@@ -1618,7 +1848,7 @@ def register_callbacks(
             bargap=0.02,
             height=fig_height,
             margin=dict(l=140, r=120, t=30, b=30),
-            xaxis_title="Potential (MT)",
+            xaxis_title=f"Potential ({unit_short})",
             yaxis_title="Gang",
             plot_bgcolor="#fafafa",
             paper_bgcolor="#ffffff",
@@ -1629,13 +1859,88 @@ def register_callbacks(
         fig_loss.update_yaxes(showspikes=False, fixedrange=True, type="category")
         
         # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
-        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(scoped_top_bottom, metric=(topbot_metric or "prod"), baseline_map=baseline_map)
+        charts_scope = scoped_top_bottom.copy()
+        projects_scope = df_day.copy()
+        if is_stringing:
+            if "daily_km" in charts_scope.columns:
+                charts_scope["daily_prod_mt"] = charts_scope["daily_km"]
+            if "daily_km" in projects_scope.columns:
+                projects_scope["daily_prod_mt"] = projects_scope["daily_km"]
+        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(
+            charts_scope, metric=(topbot_metric or "prod"), baseline_map=baseline_map
+        )
         fig_project = create_project_lines_chart(
-            df_day,
+            projects_scope,
             selected_projects=project_list or None,
             bench=benchmark,
-            avg_line=avg_prod,   # NEW: show Average (Avg Output / Gang / Day) line
+            avg_line=avg_prod,   # show Average (Avg Output / Gang / Day) line
         )
+
+        # If in stringing mode, adapt figure labels/annotations to KM-based units
+        if is_stringing:
+            # Top/Bottom charts: replace MT -> KM in hover and y-axis title
+            # Build extras map from last activity rows per gang if available
+            extras_map: dict[str, tuple[str, str, str, str, str]] = {}
+            try:
+                if meta_ready:
+                    # meta_ready computed earlier for loss chart on scoped_all
+                    # reuse scoped_all last-row index and columns if present
+                    idx_last_tb = charts_scope.sort_values("date").groupby("gang_name")["date"].idxmax()
+                    needed = ["gang_name", "from_ap", "to_ap", "method", "po_id", "status"]
+                    if all(c in charts_scope.columns for c in needed):
+                        subset = charts_scope.loc[idx_last_tb, needed].copy()
+                        for _, row in subset.iterrows():
+                            extras_map[str(row["gang_name"])]=(
+                                str(row.get("from_ap", " ") or " "),
+                                str(row.get("to_ap", " ") or " "),
+                                str(row.get("method", " ") or " "),
+                                str(row.get("po_id", " ") or " "),
+                                str(row.get("status", " ") or " "),
+                            )
+            except Exception:
+                extras_map = {}
+
+            for fig in (fig_top5, fig_bottom5):
+                try:
+                    ytitle = fig.layout.yaxis.title.text or ""
+                    if ytitle:
+                        fig.update_yaxes(title_text=ytitle.replace("MT/day", "KM/day").replace("MT", "KM"))
+                except Exception:
+                    pass
+                try:
+                    for tr in fig.data:
+                        # augment hovertemplate and customdata with extras if available
+                        if extras_map and hasattr(tr, "customdata") and isinstance(tr.customdata, (list, tuple, np.ndarray)):
+                            xcats = list(tr.x) if hasattr(tr, "x") else []
+                            if xcats:
+                                new_cd = []
+                                for i, gname in enumerate(xcats):
+                                    base = list(tr.customdata[i]) if isinstance(tr.customdata, (list, tuple, np.ndarray)) else []
+                                    extra = list(extras_map.get(str(gname), (" ", " ", " ", " ", " ")))
+                                    new_cd.append(base + extra)
+                                tr.customdata = np.array(new_cd)
+                            # extend hovertemplate
+                            if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
+                                extra_ht = ("<br>From AP: %{customdata[4]}<br>To AP: %{customdata[5]}<br>Method: %{customdata[6]}<br>PO: %{customdata[7]}<br>Status: %{customdata[8]}")
+                                if extra_ht not in tr.hovertemplate:
+                                    tr.hovertemplate = tr.hovertemplate.replace("<extra>", f"{extra_ht}<extra>")
+                        if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
+                            tr.hovertemplate = tr.hovertemplate.replace(" MT/day", " KM/day").replace(" MT", " KM")
+                except Exception:
+                    pass
+            # Projects-over-months chart: replace MT labels in axis + annotations
+            try:
+                ytitle = fig_project.layout.yaxis.title.text or ""
+                if ytitle:
+                    fig_project.update_yaxes(title_text=ytitle.replace("(MT)", "(KM)"))
+                annots = list(getattr(fig_project.layout, "annotations", []) or [])
+                if annots:
+                    for a in annots:
+                        if hasattr(a, "text") and isinstance(a.text, str):
+                            a.text = a.text.replace(" MT/day", " KM/day")
+                    fig_project.update_layout(annotations=annots)
+            except Exception:
+                pass
 
         return (
             kpi_avg,
@@ -1644,15 +1949,14 @@ def register_callbacks(
             kpi_total,
             kpi_loss,
             kpi_loss_delta,
-            avp_children,  
+            avp_children,
             fig_loss,   # kept but hidden in layout to preserve clickData wiring
             # fig_monthly,
             fig_top5,
             fig_bottom5,
             fig_project,
         )
-
-
+        
     CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
 
     @app.callback(
@@ -1667,6 +1971,7 @@ def register_callbacks(
         State("f-month", "value"),
         State("f-quick-range", "value"),
         State("f-gang", "value"),
+        State("store-mode", "data"),
         prevent_initial_call=True,
     )
     def update_trace_tables(
@@ -1677,6 +1982,7 @@ def register_callbacks(
         months,
         quick_range,
         gangs,
+        mode_value: str | None,
     ):
         ctx = dash.callback_context
         if not ctx.triggered:
@@ -1704,11 +2010,14 @@ def register_callbacks(
         month_list   = _ensure_list(months)
         gang_list    = _ensure_list(gangs)
 
-        df_day = data_provider()
+        df_day = _select_daily(mode_value)
         months_ts = resolve_months(month_list, quick_range)
 
         base_scope = apply_filters(df_day, project_list, months_ts, []).copy()
         scoped     = apply_filters(df_day, project_list, months_ts, gang_list).copy()
+
+        is_stringing = (str(mode_value or "erection").strip().lower() == "stringing")
+        metric_col = "daily_km" if is_stringing else "daily_prod_mt"
 
         def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
             if not target_gang:
@@ -1730,7 +2039,7 @@ def register_callbacks(
             baseline_source = baseline_source[baseline_source["gang_name"].isin(gang_list)]
         # PROJECT-level baselines for trace/idle view, then map to gang keys
         precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = bool(precomputed_overall)
+        use_precomputed = (not is_stringing) and bool(precomputed_overall)
         if use_precomputed:
             if "project_name" in baseline_source.columns:
                 candidate_projects = (
@@ -1765,15 +2074,21 @@ def register_callbacks(
             else:
                 proj_monthly = monthly_candidates
         else:
-            proj_overall, proj_monthly = compute_project_baseline_maps(baseline_source)
-        g2p = (
-            baseline_source[["gang_name", "project_name"]]
-            .dropna()
-            .drop_duplicates()
-            .set_index("gang_name")["project_name"]
-            .astype(str)
-            .to_dict()
-        )
+            if is_stringing:
+                proj_overall, proj_monthly = compute_project_baseline_maps_for(baseline_source, metric_col)
+            else:
+                proj_overall, proj_monthly = compute_project_baseline_maps(baseline_source)
+        if {"gang_name", "project_name"}.issubset(baseline_source.columns):
+            g2p = (
+                baseline_source[["gang_name", "project_name"]]
+                .dropna()
+                .drop_duplicates()
+                .set_index("gang_name")["project_name"]
+                .astype(str)
+                .to_dict()
+            )
+        else:
+            g2p = {}
 
         overall_baseline_map = {g: proj_overall.get(p) for g, p in g2p.items()}
         monthly_baseline_map = {g: proj_monthly.get(p, {}) for g, p in g2p.items()}
@@ -1820,18 +2135,23 @@ def register_callbacks(
         daily_source = pick_gang_scope(gang_focus)
         if daily_source.empty:
             daily_source = scoped if not scoped.empty else base_scope
-        daily_source = daily_source.sort_values(["gang_name", "date"])[
-            ["date", "gang_name", "project_name", "daily_prod_mt"]
-        ]
+        sort_cols = ["gang_name", "date"]
+        daily_source = daily_source.sort_values(sort_cols)
+        _cols = ["date", "gang_name", metric_col]
+        if "project_name" in daily_source.columns:
+            _cols.insert(2, "project_name")
+        daily_source = daily_source[_cols]
         if not daily_source.empty:
             daily_source = daily_source.assign(
                 date=daily_source["date"].dt.strftime("%d-%m-%Y"),
                 daily_prod_mt=(
-                    daily_source["daily_prod_mt"].round(2).map(
+                    pd.to_numeric(daily_source[metric_col], errors="coerce").round(2).map(
                         lambda v: "" if pd.isna(v) else f"{v:.2f}".rstrip("0").rstrip(".")
                     )
                 ),
             )
+            # align to expected column id for the table
+            daily_source = daily_source.drop(columns=[metric_col])
         daily_data = daily_source.to_dict("records")
 
         # mirror into modal tables
@@ -1846,6 +2166,8 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("erections-search", "value"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
     )
     def update_erections_completed(
         start_date,
@@ -1855,6 +2177,8 @@ def register_callbacks(
         months,
         quick_range,
         search_text,
+        mode_value: str | None,
+        toggle_value: str | None,
     ) -> list[dict[str, object]]:
         range_start = _parse_completion_date(start_date) or _default_completion_date()
         range_end = _parse_completion_date(end_date) or range_start
@@ -1866,7 +2190,8 @@ def register_callbacks(
         _unused_months = _ensure_list(months)
         _unused_quick_range = quick_range
 
-        df_day = data_provider()
+        eff_mode = (toggle_value or mode_value or "erection")
+        df_day = _select_daily(eff_mode)
         scoped = apply_filters(df_day, project_list, [], gang_list).copy()
 
         export_df, display_df = _prepare_erections_completed(
@@ -1909,6 +2234,7 @@ def register_callbacks(
         State("erections-completion-range", "start_date"),
         State("erections-completion-range", "end_date"),
         State("erections-search", "value"),
+        State("store-mode", "data"),
         prevent_initial_call=True,
     )
     def export_trace(
@@ -1923,6 +2249,7 @@ def register_callbacks(
         erections_start: str | None,
         erections_end: str | None,
         erections_search: str | None,
+        mode_value: str | None,
     ):
         if not (main_clicks or modal_clicks):
             raise PreventUpdate
@@ -1931,7 +2258,7 @@ def register_callbacks(
         month_list = _ensure_list(months)
         gang_list = _ensure_list(gangs)
 
-        df_day = data_provider()
+        df_day = _select_daily(mode_value)
         months_ts = resolve_months(month_list, quick_range)
         scoped = apply_filters(df_day, project_list, months_ts, gang_list)
         gang_for_sheet = trace_gang_value or selected_gang
@@ -1983,6 +2310,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("store-selected-gang", "data"),
+        Input("store-mode", "data"),
         State("trace-gang", "value"),
     )
     def update_trace_gang_options(
@@ -1990,15 +2318,24 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         clicked_gang: str | None,
+        mode_value: str | None,
         current_value: str | None,
     ) -> tuple[list[dict[str, str]], str | None, list[dict[str, str]], str | None]:
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
 
-        df_day = data_provider()
+        df_day = _select_daily(mode_value)
         months_ts = resolve_months(month_list, quick_range)
         base = apply_filters(df_day, project_list, months_ts, [])
-        gangs = sorted(base["gang_name"].dropna().unique().tolist())
+        # Be defensive when switching to Stringing with no data configured
+        if not isinstance(base, pd.DataFrame) or base.empty or "gang_name" not in base.columns:
+            options: list[dict[str, str]] = []
+            value = None
+            return options, value, options, value
+        gangs = (
+            base["gang_name"].dropna().astype(str).str.strip().unique().tolist()
+        )
+        gangs = sorted([g for g in gangs if g])
         options = [{"label": gang, "value": gang} for gang in gangs]
 
         if clicked_gang and clicked_gang in gangs:
@@ -2008,6 +2345,22 @@ def register_callbacks(
         else:
             value = None
         return options, value, options, value
+
+    # Hidden debug text to confirm source switching
+    @app.callback(
+        Output("mode-data-debug", "children"),
+        Input("store-mode", "data"),
+        prevent_initial_call=False,
+    )
+    def _debug_mode_data(mode_value: str | None) -> str:
+        try:
+            df = _select_daily(mode_value)
+            rows = int(len(df.index)) if hasattr(df, "index") else 0
+            mode = (mode_value or "erection").strip().lower()
+            return f"mode={mode}; rows={rows}"
+        except Exception as exc:  # pragma: no cover
+            mode = (mode_value or "erection").strip().lower()
+            return f"mode={mode}; error={type(exc).__name__}"
 
 
 
@@ -2042,21 +2395,38 @@ def register_callbacks(
         raise PreventUpdate
 
 
+    # Mode-aware labels and table column headers
+    @app.callback(
+        Output("label-total", "children"),
+        Output("label-lost", "children"),
+        Output("tbl-idle-intervals", "columns"),
+        Output("modal-tbl-idle-intervals", "columns"),
+        Output("tbl-daily-prod", "columns"),
+        Output("modal-tbl-daily-prod", "columns"),
+        Input("store-mode", "data"),
+        prevent_initial_call=False,
+    )
+    def _mode_labels_and_tables(mode_value: str | None):
+        mode = (mode_value or "erection").strip().lower()
+        is_stringing = mode == "stringing"
+        unit_short = "KM" if is_stringing else "MT"
 
+        total_label = "Delivered (KM)" if is_stringing else "Total Erection"
+        lost_label = "Lost (KM)" if is_stringing else "Lost Units"
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        idle_cols = [
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Interval Start", "id": "interval_start"},
+            {"name": "Interval End", "id": "interval_end"},
+            {"name": "Raw Gap (days)", "id": "raw_gap_days"},
+            {"name": "Idle Counted (days)", "id": "idle_days_capped"},
+            {"name": f"Baseline ({unit_short}/day)", "id": "baseline"},
+            {"name": f"Cumulative Loss ({unit_short})", "id": "cumulative_loss"},
+        ]
+        daily_cols = [
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Project", "id": "project_name"},
+            {"name": "Date", "id": "date"},
+            {"name": f"{unit_short}/day", "id": "daily_prod_mt"},
+        ]
+        return total_label, lost_label, idle_cols, idle_cols, daily_cols, daily_cols
