@@ -234,7 +234,9 @@ def _stringing_output_paths(base: Path) -> tuple[Path, Path]:
     Preferred layout:
     - Parquets/Erection -> write under sibling Parquets/Stringing
     Fallback:
-    - Write next to the given base root.
+    - Write under/next to the given base root.
+    New behavior: parquet files are written directly under the Stringing
+    folder (no legacy "*_parquet" directory).
     """
     root = _resolve_search_root(base)
     # Try sibling "Stringing" beside the current root (e.g., Parquets/Erection -> Parquets/Stringing)
@@ -248,7 +250,7 @@ def _stringing_output_paths(base: Path) -> tuple[Path, Path]:
         target = root
 
     workbook_path = target / "StringingCompiled_Output.xlsx"
-    parquet_dir = target / "StringingCompiled_Output_parquet"
+    parquet_dir = target
     return workbook_path, parquet_dir
 
 
@@ -260,11 +262,12 @@ def _export_stringing_compiled_artifacts(base: Path, sheet_name: str, df_raw: pd
         - `Diagnostics` with presence/health info
         - `Issues` listing rows with invalid/missing critical dates
         - `README_Assumptions` noting basic rules
-    - Creates `StringingCompiled_Output_parquet` and writes a parquet file
-      for the raw compiled table for faster subsequent loads.
+    - Writes parquet files directly under the `Parquets/Stringing` folder
+      for the raw compiled table (faster subsequent loads).
 
     This mirrors the erection flow at a lightweight level and is idempotent
-    (overwrites workbook; recreates parquet directory on each call).
+    (overwrites workbook; refreshes parquet files on each call without using
+    the legacy *_parquet directories).
     """
     if df_raw is None or df_raw.empty:
         return

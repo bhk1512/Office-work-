@@ -1,7 +1,7 @@
 {
   "input_directory": "Raw Data/DPRs",
   "microplan_directory": "Raw Data/Micro Plans",
-  "output_file": "ErectionCompiled_Output.xlsx",
+  "output_file": "Parquets/Erection/ErectionCompiled_Output.xlsx",
   "pipeline_extra_args": [],
   "dash_host": "0.0.0.0",
   "dash_port": 8050,

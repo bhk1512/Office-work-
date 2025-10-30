@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_WORKBOOK = Path("ErectionCompiled_Output.xlsx")
+# Default workbook path used as a legacy fallback. The application now
+# prefers the Parquets/Erection layout and writes/reads from there.
+DEFAULT_WORKBOOK = Path("Parquets") / "Erection" / "ErectionCompiled_Output.xlsx"
 
 
 def _resolve_default_data_path() -> Path:
@@ -114,3 +116,4 @@ def configure_logging(level: int = logging.INFO) -> None:
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
+

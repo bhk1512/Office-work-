@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
     "input_directory": "Raw Data/DPRs",
     "microplan_directory": "Raw Data/Micro Plans",
-    "output_file": "ErectionCompiled_Output.xlsx",
+    "output_file": "Parquets/Erection/ErectionCompiled_Output.xlsx",
     "pipeline_extra_args": [],
     "dash_host": "0.0.0.0",
     "dash_port": 8050,
@@ -94,19 +94,17 @@ def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
 
 
 def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None = None) -> Path:
-    """Export selected workbook sheets to parquet files alongside the workbook."""
+    """Export selected workbook sheets to parquet files under the dataset folder.
+
+    New behavior: writes directly into the workbook's parent directory (e.g.,
+    Parquets/Erection) instead of creating a sibling "*_parquet" directory.
+    """
 
     workbook_path = Path(workbook_path)
     if not workbook_path.exists():
         raise FileNotFoundError(f"Workbook '{workbook_path}' does not exist.")
 
-    target_dir = workbook_path.parent / f"{workbook_path.stem}_parquet"
-    # Recreate the parquet directory to ensure a fresh dataset (no stale files)
-    if target_dir.exists():
-        try:
-            shutil.rmtree(target_dir)
-        except Exception as exc:
-            print(f"[pipeline] Warning: failed to clear parquet dir {target_dir}: {exc}")
+    target_dir = workbook_path.parent
     target_dir.mkdir(parents=True, exist_ok=True)
 
     sheet_list = list(sheets) if sheets is not None else list(PARQUET_SHEETS)
@@ -160,7 +158,8 @@ def _write_stringing_artifacts(output_path: Path, raw_df: pd.DataFrame, sheet_na
     # Output workbook + parquet dirs
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    parquet_dir = output_path.parent / "StringingCompiled_Output_parquet"
+    # Write parquet files directly under Parquets/Stringing (no legacy *_parquet dir)
+    parquet_dir = output_path.parent
 
     # Diagnostics and issues
     try:
@@ -471,7 +470,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         # --- NEW: Compile Stringing from the same DPR sources ---
         try:
-            stringing_out = resolved_output.parent / "StringingCompiled_Output.xlsx"
+            # Prefer writing stringing outputs to a sibling Parquets/Stringing folder
+            base_dir = resolved_output.parent if resolved_output else BASE_DIR
+            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+                stringing_base = base_dir.parent / "Stringing"
+            else:
+                # Fallback: put stringing next to the current base
+                stringing_base = base_dir / "Stringing" if base_dir.name != "Stringing" else base_dir
+            stringing_base.mkdir(parents=True, exist_ok=True)
+            stringing_out = stringing_base / "StringingCompiled_Output.xlsx"
             print(f"[pipeline] Stringing: compiling to {stringing_out}")
             stringing_parquet_dir = compile_stringing_to_workbook(
                 resolved_input,
@@ -530,6 +537,5 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
