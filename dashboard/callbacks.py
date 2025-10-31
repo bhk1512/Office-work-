@@ -42,6 +42,7 @@ from .workbook import make_trace_workbook_bytes
 LOGGER = logging.getLogger(__name__)
 
 BENCHMARK_MT_PER_DAY = 9.0
+BENCHMARK_KM_PER_MONTH = 5.0
 
 # App-wide config instance for callback logic
 config = AppConfig()
@@ -99,6 +100,25 @@ def _format_decimal(value: float | int | None) -> str:
     if pd.isna(value):
         return ""
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+# --- helper: average days across selected months (fallback 30) ---
+def _avg_days_in_selected_months(months_ts) -> float:
+    import pandas as pd
+    days_factor = 30.0
+    try:
+        if months_ts:
+            month_days = []
+            for m in months_ts:
+                try:
+                    p = m if isinstance(m, pd.Period) else pd.Period(m, freq="M")
+                    month_days.append(int(p.days_in_month))
+                except Exception:
+                    continue
+            if month_days:
+                days_factor = float(sum(month_days) / len(month_days))
+    except Exception:
+        pass
+    return days_factor
 
 
 def _prepare_erections_completed(
@@ -312,10 +332,94 @@ def _prepare_erections_completed(
 
     return export_df, display_df
 
+# --- NEW ---
+def _prepare_stringing_completed(
+    scoped: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    search_text: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Build export/display data for the 'completed' table in STRINGING mode.
+    Uses daily_km as the numeric measure (KM/day).
+    """
+    if scoped.empty:
+        empty = pd.DataFrame(columns=_ERECTIONS_EXPORT_COLUMNS)
+        return empty, empty
+
+    working = scoped.copy()
+
+    # date range gate
+    working["date"] = pd.to_datetime(working["date"], errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"])
+    in_range = (working["date"] >= range_start) & (working["date"] <= range_end)
+    working = working.loc[in_range].copy()
+    if working.empty:
+        empty = pd.DataFrame(columns=_ERECTIONS_EXPORT_COLUMNS)
+        return empty, empty
+
+    # normalize display fields
+    working["project_name_display"] = working.get("project_name", "").astype(str).str.strip()
+    working["gang_name_display"] = working.get("gang_name", "").astype(str).str.strip()
+    from_ap = working.get("from_ap", pd.Series([""] * len(working), index=working.index)).astype(str).str.strip()
+    to_ap   = working.get("to_ap",   pd.Series([""] * len(working), index=working.index)).astype(str).str.strip()
+    working["span_display"] = (from_ap + " \u2192 " + to_ap).str.strip(" \u2192 ")  # From→To
+
+    # search filter (project/gang/from/to)
+    if search_text:
+        needle = _normalize_lower(search_text)
+        mask = (
+            working["project_name_display"].map(_normalize_lower).str.contains(needle, na=False)
+            | working["gang_name_display"].map(_normalize_lower).str.contains(needle, na=False)
+            | from_ap.map(_normalize_lower).str.contains(needle, na=False)
+            | to_ap.map(_normalize_lower).str.contains(needle, na=False)
+        )
+        working = working.loc[mask]
+
+    if working.empty:
+        empty = pd.DataFrame(columns=_ERECTIONS_EXPORT_COLUMNS)
+        return empty, empty
+
+    # export frame (reuse erection schema so downstream stays happy)
+    export_df = pd.DataFrame(
+        {
+            "completion_date": working["date"],
+            "project_name": working["project_name_display"],
+            "location_no": working["span_display"],  # show From→To in the 'Location' column
+            "tower_weight_mt": pd.to_numeric(working.get("daily_km", np.nan), errors="coerce"),  # will display as KM
+            "daily_prod_mt":  pd.to_numeric(working.get("daily_km", np.nan), errors="coerce"),  # KM/day
+            "gang_name": working["gang_name_display"],
+            "start_date": working["date"],           # fallback (F/S start may not be present in daily)
+            "supervisor_name": "",
+            "section_incharge_name": "",
+            "revenue_value": np.nan,
+        }
+    ).sort_values(["completion_date", "project_name", "gang_name"])
+
+    # display frame for DataTable
+    display_df = pd.DataFrame(
+        {
+            "completion_date": export_df["completion_date"].apply(lambda dt: dt.strftime("%d-%m-%Y") if pd.notna(dt) else ""),
+            "project_name": export_df["project_name"],
+            "location_no": export_df["location_no"].fillna(""),
+            "tower_weight": export_df["tower_weight_mt"].map(_format_decimal),  # shows numeric as text
+            "daily_prod_mt": export_df["daily_prod_mt"].map(_format_decimal),
+            "gang_name": export_df["gang_name"],
+            "start_date": export_df["start_date"].apply(lambda dt: dt.strftime("%d-%m-%Y") if pd.notna(dt) else ""),
+            "supervisor_name": export_df["supervisor_name"],
+            "section_incharge_name": export_df["section_incharge_name"],
+            "revenue": export_df["revenue_value"].map(_format_decimal),
+        }
+    )
+
+    return export_df, display_df
+
+
 
 _slug = lambda s: re.sub(r"[^a-z0-9_-]+", "-", str(s).lower()).strip("-")
 
-def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project=" ", last_date=" "):
+def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project=" ", last_date=" ", rate_label="MT/day", unit_total="MT"):
     badge_cls = "good" if pct >= 80 else ("mid" if pct >= 65 else "low")
     delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
@@ -339,8 +443,8 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                 html.Div(className="avp-lost", style={"left": f"{delivered_pct}%", "width": f"{lost_pct}%"}),
             ]),
             html.Div(className="avp-meta", children=[
-                html.Span([html.Span(f"{delivered:.0f} MT", className="del"), " vs ", html.Span(f"{lost:.0f} MT lost", className="los")]),
-                html.Span(f"{total:.0f} MT", className="tot"),
+                html.Span(f"{delivered:,.0f} {unit_total} vs {lost:,.0f} {unit_total} lost"),
+                html.Div(f"{total:,.0f} {unit_total}", className="text-muted ..."),
             ]),
             
 
@@ -359,8 +463,8 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                     html.Div(html.B(gang)),
                     html.Div(f"Project: {last_project}"),
                     html.Div(f"Last worked at: {last_date}"),
-                    html.Div(f"Current MT/day: {avg_prod:.2f}"),
-                    html.Div(f"Baseline MT/day: {baseline:.2f}"),
+                    html.Div(f"Current {rate_label}: {avg_prod:.2f}"),
+                    html.Div(f"Baseline {rate_label}: {baseline:.2f}"),
                 ],
                 target=row_tip_id,
                 placement="right",
@@ -607,6 +711,15 @@ def register_callbacks(
     #     ],
     # )
     
+    @app.callback(
+        Output("lbl-erections-title", "children"),
+        Input("mode-toggle", "value"),
+        Input("store-mode", "data"),
+    )
+    def _title_for_completed(toggle_value, mode_value):
+        eff_mode = (toggle_value or mode_value or "erection").strip().lower()
+        return "Stringing Completed" if eff_mode == "stringing" else "Erections Completed"
+
 
     
 
@@ -670,6 +783,7 @@ def register_callbacks(
                 work = df_day.copy()
 
             months_ts = resolve_months(_ensure_list(months), quick_range)
+            days_factor = _avg_days_in_selected_months(months_ts)
 
             filtered = work
             if months_ts and "month" in filtered.columns:
@@ -1408,6 +1522,7 @@ def register_callbacks(
             eff_mode = (toggle_value or mode_value or "erection")
             df_day = _select_daily(eff_mode)
             months_ts = resolve_months(month_list, quick_range)
+            days_factor = _avg_days_in_selected_months(months_ts)
 
             scoped = apply_filters(df_day, project_list, months_ts, gang_list)
             scoped_top_bottom = apply_filters(df_day, project_list, months_ts, [])
@@ -1415,15 +1530,37 @@ def register_callbacks(
             is_stringing = (str(eff_mode or "erection").strip().lower() == "stringing")
             metric_col = "daily_km" if is_stringing else "daily_prod_mt"
             unit_short = "KM" if is_stringing else "MT"
-            benchmark = BENCHMARK_MT_PER_DAY
-            avg_prod = scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
-            delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
-            kpi_avg = f"{avg_prod:.2f} {unit_short}"
-            kpi_delta = (
-                "(n/a)"
-                if delta_pct is None
-                else f"({delta_pct:+.0f}% vs {benchmark:.1f} {unit_short})"
-            )
+
+            if is_stringing:
+                # Monthly KPI and benchmark for stringing mode
+                benchmark = BENCHMARK_KM_PER_MONTH
+                if not scoped.empty and metric_col in scoped.columns:
+                    monthly_totals = (
+                        scoped.groupby(["gang_name", "month"], dropna=True)[metric_col]
+                              .sum()
+                              .reset_index(name="monthly_value")
+                    )
+                    avg_prod = float(monthly_totals["monthly_value"].mean()) if not monthly_totals.empty else 0.0
+                else:
+                    avg_prod = 0.0
+                delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
+                kpi_avg = f"{avg_prod:.2f} KM/month"
+                kpi_delta = (
+                    "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} KM/month)"
+                )
+                # Keep project chart lines in per-day units for readability
+                project_bench = BENCHMARK_KM_PER_MONTH
+                avg_line_for_project = (scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0)
+            else:
+                benchmark = BENCHMARK_MT_PER_DAY
+                avg_prod = scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
+                delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
+                kpi_avg = f"{avg_prod:.2f} {unit_short}"
+                kpi_delta = (
+                    "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} {unit_short})"
+                )
+                project_bench = benchmark
+                avg_line_for_project = avg_prod
 
             has_selected_months = bool(months_ts)
 
@@ -1545,6 +1682,11 @@ def register_callbacks(
             if loss_rows:
 
                 loss_df = pd.DataFrame(loss_rows)
+                # --- convert per-day metrics to per-month for stringing ---
+                if is_stringing and not loss_df.empty:
+                    loss_df["avg_prod"] = loss_df["avg_prod"].astype(float) * days_factor
+                    loss_df["baseline"] = loss_df["baseline"].astype(float) * days_factor
+
 
                 deliv = loss_df["delivered"].astype(float)
 
@@ -1684,7 +1826,8 @@ def register_callbacks(
                 if total > 0.0 and pct == 0.0:
 
                     pct = (100.0 * float(r["delivered"]) / total)
-
+                rate_label = "KM/month" if is_stringing else f"{unit_short}/day"
+                unit_total = "KM" if is_stringing else unit_short
                 avp_children.append(
 
                     _render_avp_row(
@@ -1700,6 +1843,8 @@ def register_callbacks(
                         last_project=str(r.get("last_project", "\uFFFD")),
 
                         last_date=str(r.get("last_date_str", "\uFFFD")),
+                        rate_label=rate_label,
+                        unit_total=unit_total,
 
                     )
 
@@ -1772,8 +1917,9 @@ def register_callbacks(
                     "%{y}<br>"
                     "Project: %{customdata[0]}<br>"
                     "Last worked at: %{customdata[1]}<br>"
-                    f"Current {unit_short}/day: %{{customdata[2]:.2f}}<br>"
-                    f"Baseline {unit_short}/day: %{{customdata[3]:.2f}}<br>"
+                    f"Current {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[2]:.2f}}<br>"
+                    f"Baseline {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[3]:.2f}}<br>"
+
                     + hover_extra + "<extra></extra>"
                 ),
                 hoverlabel=dict(
@@ -1820,8 +1966,9 @@ def register_callbacks(
                     "%{y}<br>"
                     "Project: %{customdata[0]}<br>"
                     "Last worked at: %{customdata[1]}<br>"
-                    f"Current {unit_short}/day: %{{customdata[2]:.2f}}<br>"
-                    f"Baseline {unit_short}/day: %{{customdata[3]:.2f}}<br>"
+                    f"Current {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[2]:.2f}}<br>"
+                    f"Baseline {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[3]:.2f}}<br>"
+
                     + hover_extra + "<extra></extra>"
                 ),
                 hoverlabel=dict(
@@ -1837,7 +1984,12 @@ def register_callbacks(
                 fig_loss.add_annotation(
                     x=row["potential"],
                     y=row["gang_name"],
-                    text=f"{row['avg_prod']:.2f} {unit_short}/day (Baseline: {row['baseline']:.2f} {unit_short}/day)",
+                    text=(
+                        f"{row['avg_prod']:.2f} "
+                        f"{'KM/month' if is_stringing else unit_short + '/day'} "
+                        f"(Baseline: {row['baseline']:.2f} "
+                        f"{'KM/month' if is_stringing else unit_short + '/day'})"
+                    ),
                     showarrow=False,
                     xanchor="left",
                     yanchor="middle",
@@ -1866,19 +2018,43 @@ def register_callbacks(
                 charts_scope["daily_prod_mt"] = charts_scope["daily_km"]
             if "daily_km" in projects_scope.columns:
                 projects_scope["daily_prod_mt"] = projects_scope["daily_km"]
+
+            # Convert Top/Bottom input to per-month values (KM/month)
+            try:
+                monthly_cur = (
+                    charts_scope.groupby(["gang_name", "month"], dropna=True)["daily_prod_mt"].sum().reset_index()
+                )
+                monthly_cur = monthly_cur.groupby("gang_name")["daily_prod_mt"].mean().reset_index()
+                monthly_cur = monthly_cur.rename(columns={"daily_prod_mt": "monthly_value"})
+                charts_scope = monthly_cur.rename(columns={"monthly_value": "daily_prod_mt"})
+            except Exception:
+                pass
+
+            # Scale baseline map to KM/month using average days in selected months (fallback 30)
+            if baseline_map:
+                days_factor = 30.0
+                try:
+                    if months_ts:
+                        month_days = [pd.to_datetime(m).to_period("M").days_in_month if not isinstance(m, pd.Period) else m.days_in_month for m in months_ts]
+                        if month_days:
+                            days_factor = float(sum(month_days) / len(month_days))
+                except Exception:
+                    days_factor = 30.0
+                baseline_map = {g: (float(v) * days_factor if v is not None and not pd.isna(v) else 0.0) for g, v in baseline_map.items()}
+
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(
             charts_scope, metric=(topbot_metric or "prod"), baseline_map=baseline_map
         )
         fig_project = create_project_lines_chart(
             projects_scope,
             selected_projects=project_list or None,
-            bench=benchmark,
-            avg_line=avg_prod,   # show Average (Avg Output / Gang / Day) line
+            bench=project_bench,
+            avg_line=avg_line_for_project,   # Average line remains per-day for project chart
         )
 
-        # If in stringing mode, adapt figure labels/annotations to KM-based units
+        # If in stringing mode, adapt figure labels/annotations to KM/month units
         if is_stringing:
-            # Top/Bottom charts: replace MT -> KM in hover and y-axis title
+            # Top/Bottom charts: replace MT/day -> KM/month and MT -> KM in hover and y-axis title
             # Build extras map from last activity rows per gang if available
             extras_map: dict[str, tuple[str, str, str, str, str]] = {}
             try:
@@ -1904,7 +2080,7 @@ def register_callbacks(
                 try:
                     ytitle = fig.layout.yaxis.title.text or ""
                     if ytitle:
-                        fig.update_yaxes(title_text=ytitle.replace("MT/day", "KM/day").replace("MT", "KM"))
+                        fig.update_yaxes(title_text=ytitle.replace("MT/day", "KM/month").replace("MT", "KM"))
                 except Exception:
                     pass
                 try:
@@ -1920,12 +2096,12 @@ def register_callbacks(
                                     new_cd.append(base + extra)
                                 tr.customdata = np.array(new_cd)
                             # extend hovertemplate
-                            if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
-                                extra_ht = ("<br>From AP: %{customdata[4]}<br>To AP: %{customdata[5]}<br>Method: %{customdata[6]}<br>PO: %{customdata[7]}<br>Status: %{customdata[8]}")
-                                if extra_ht not in tr.hovertemplate:
-                                    tr.hovertemplate = tr.hovertemplate.replace("<extra>", f"{extra_ht}<extra>")
                         if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
-                            tr.hovertemplate = tr.hovertemplate.replace(" MT/day", " KM/day").replace(" MT", " KM")
+                            extra_ht = ("<br>From AP: %{customdata[4]}<br>To AP: %{customdata[5]}<br>Method: %{customdata[6]}<br>PO: %{customdata[7]}<br>Status: %{customdata[8]}")
+                            if extra_ht not in tr.hovertemplate:
+                                tr.hovertemplate = tr.hovertemplate.replace("<extra>", f"{extra_ht}<extra>")
+                        if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
+                            tr.hovertemplate = tr.hovertemplate.replace(" MT/day", " KM/month").replace(" MT", " KM")
                 except Exception:
                     pass
             # Projects-over-months chart: replace MT labels in axis + annotations
@@ -1937,7 +2113,7 @@ def register_callbacks(
                 if annots:
                     for a in annots:
                         if hasattr(a, "text") and isinstance(a.text, str):
-                            a.text = a.text.replace(" MT/day", " KM/day")
+                            a.text = a.text.replace(" MT/day", " KM/month")
                     fig_project.update_layout(annotations=annots)
             except Exception:
                 pass
@@ -2158,6 +2334,7 @@ def register_callbacks(
         return idle_data, daily_data, idle_data, daily_data
 
     @app.callback(
+        Output("tbl-erections-completed", "columns"),
         Output("tbl-erections-completed", "data"),
         Input("erections-completion-range", "start_date"),
         Input("erections-completion-range", "end_date"),
@@ -2194,18 +2371,50 @@ def register_callbacks(
         df_day = _select_daily(eff_mode)
         scoped = apply_filters(df_day, project_list, [], gang_list).copy()
 
-        export_df, display_df = _prepare_erections_completed(
-            scoped,
-            range_start=range_start,
-            range_end=range_end,
-            responsibilities_provider=responsibilities_provider,
-            search_text=search_text,
-        )
+        if str(eff_mode).strip().lower() == "stringing":
+                export_df, display_df = _prepare_stringing_completed(
+                    scoped,
+                    range_start=range_start,
+                    range_end=range_end,
+                    search_text=search_text,
+                )
+                columns = [
+                    {"name": "Completion Date",           "id": "completion_date"},
+                    {"name": "Project",                   "id": "project_name"},
+                    {"name": "Span (From→To)",            "id": "location_no"},   # we render From→To here
+                    {"name": "Length (KM)",               "id": "tower_weight"},  # was Tower Weight (MT)
+                    {"name": "Productivity (KM/day)",     "id": "daily_prod_mt"}, # was MT/day
+                    {"name": "Gang",                      "id": "gang_name"},
+                    {"name": "F/S Start Date",            "id": "start_date"},
+                    {"name": "Supervisor",                "id": "supervisor_name"},
+                    {"name": "Section Incharge",          "id": "section_incharge_name"},
+                    {"name": "Revenue",                   "id": "revenue"},
+                ]
+        else:
+                export_df, display_df = _prepare_erections_completed(
+                    scoped,
+                    range_start=range_start,
+                    range_end=range_end,
+                    responsibilities_provider=responsibilities_provider,
+                    search_text=search_text,
+                )
+                columns = [
+                    {"name": "Completion Date",           "id": "completion_date"},
+                    {"name": "Project",                   "id": "project_name"},
+                    {"name": "Location",                  "id": "location_no"},
+                    {"name": "Tower Weight (MT)",         "id": "tower_weight"},
+                    {"name": "Productivity (MT/day)",     "id": "daily_prod_mt"},
+                    {"name": "Gang",                      "id": "gang_name"},
+                    {"name": "Start Date",                "id": "start_date"},
+                    {"name": "Supervisor",                "id": "supervisor_name"},
+                    {"name": "Section Incharge",          "id": "section_incharge_name"},
+                    {"name": "Revenue",                   "id": "revenue"},
+                ]
 
+            # return columns + rows (empty list if nothing)
         if display_df.empty:
-            return []
-
-        return display_df.to_dict("records")
+            return columns, []
+        return columns, display_df.to_dict("records")
 
     @app.callback(
         Output("erections-completion-range", "start_date"),
@@ -2397,6 +2606,7 @@ def register_callbacks(
 
     # Mode-aware labels and table column headers
     @app.callback(
+        Output("label-avg", "children"),
         Output("label-total", "children"),
         Output("label-lost", "children"),
         Output("tbl-idle-intervals", "columns"),
@@ -2410,7 +2620,7 @@ def register_callbacks(
         mode = (mode_value or "erection").strip().lower()
         is_stringing = mode == "stringing"
         unit_short = "KM" if is_stringing else "MT"
-
+        avg_label = "Avg Output / Gang / Month" if is_stringing else "Avg Output / Gang / Day"
         total_label = "Delivered (KM)" if is_stringing else "Total Erection"
         lost_label = "Lost (KM)" if is_stringing else "Lost Units"
 
@@ -2429,4 +2639,4 @@ def register_callbacks(
             {"name": "Date", "id": "date"},
             {"name": f"{unit_short}/day", "id": "daily_prod_mt"},
         ]
-        return total_label, lost_label, idle_cols, idle_cols, daily_cols, daily_cols
+        return avg_label, total_label, lost_label, idle_cols, idle_cols, daily_cols, daily_cols

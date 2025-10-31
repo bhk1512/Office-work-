@@ -292,7 +292,7 @@ def build_kpi_cards() -> dbc.Row:
                     dbc.CardBody(
                         [
                             html.Div(_icon("trend_down"), className="kpi__icon"),
-                            html.Div("Avg Output / Gang / Day", className="kpi-label"),
+                            html.Div(id="label-avg", children="Avg Output / Gang / Day", className="kpi-label"),
                             html.Div(
                                 [
                                     html.Span(id="kpi-avg", className="kpi-value"),
@@ -428,7 +428,7 @@ def build_erections_card() -> dbc.Card:
             dbc.Col(
                 html.Div(
                     [
-                        html.Div("Erections Completed", className="section-title mb-2"),
+                        html.Div("Erections Completed", className="section-title mb-2", id="lbl-erections-title"),
                         html.Div(
                             "Completion date (defaults to yesterday)",
                             className="fw-semibold mb-1",
