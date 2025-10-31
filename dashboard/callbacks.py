@@ -981,9 +981,11 @@ def register_callbacks(
         Output("pd-title", "children"),
         Output("project-details", "children"),
         Input("f-project", "value"),
+        Input("store-mode", "data"),    # NEW: re-render when mode changes
+        Input("mode-toggle", "value"),  # NEW: also react to the visible toggle
         prevent_initial_call=False,
     )
-    def show_project_details(selected_project):
+    def show_project_details(selected_project, _mode_value, _toggle_value):
         """Render the project overview grid or an informative message."""
 
         default_title = "Project Overview"
