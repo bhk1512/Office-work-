@@ -271,6 +271,54 @@ def build_controls() -> dbc.Card:
                     ],
                     className="g-2 mt-1",
                 ),
+                                # Row 3: Stringing-only filters (Line kV + Method)
+                html.Div(
+                    [
+                        dbc.Row(
+                            [
+                                # Left: Line kV chips
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Div("Line (kV)", className="filter-label mb-1"),
+                                            dbc.Checklist(
+                                                id="f-kv",
+                                                options=[
+                                                    {"label": "400 kV", "value": "400"},
+                                                    {"label": "765 kV", "value": "765"},
+                                                ],
+                                                value=["400", "765"],  # default: overall (both)
+                                                inline=True,
+                                            ),
+                                        ]
+                                    ),
+                                    md=6,
+                                ),
+                                # Right: Method chips
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Div("Method", className="filter-label mb-1"),
+                                            dbc.Checklist(
+                                                id="f-method",
+                                                options=[
+                                                    {"label": "Manual", "value": "manual"},
+                                                    {"label": "TSE", "value": "tse"},
+                                                ],
+                                                value=["manual", "tse"],  # default: overall (both)
+                                                inline=True,
+                                            ),
+                                        ]
+                                    ),
+                                    md=6,
+                                ),
+                            ],
+                            className="g-2",
+                        )
+                    ],
+                    id="stringing-filters-wrap",
+                    style={"display": "none"},  # shown only in stringing mode by callback
+                ),
             ]
         ),
         className="mb-3 shadow-sm filter-card",

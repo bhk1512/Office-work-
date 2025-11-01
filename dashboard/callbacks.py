@@ -101,6 +101,16 @@ def _format_decimal(value: float | int | None) -> str:
         return ""
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
 
+def _infer_kv_from_text(name: object) -> str | None:
+    """Return '765' or '400' if found in a project name, else None."""
+    s = "" if name is None else str(name).lower()
+    if "765" in s:
+        return "765"
+    if "400" in s:
+        return "400"
+    return None
+
+
 # --- helper: average days across selected months (fallback 30) ---
 def _avg_days_in_selected_months(months_ts) -> float:
     import pandas as pd
@@ -534,6 +544,68 @@ def register_callbacks(
             # For downstream components that expect daily_prod_mt (charts/helpers)
             df["daily_prod_mt"] = df["daily_km"]
         return df
+    
+        # --- helper: attach __line_kv__ by looking up Project Details "Project Name" ---
+    def _attach_line_kv(work: pd.DataFrame) -> pd.DataFrame:
+        """
+        Adds __line_kv__ ('765'|'400'|NA) inferred from Project Details.
+        Tries BOTH mappings: project name and project code.
+        If mapping fails, falls back to the row's own project text.
+        """
+        try:
+            if work is None or work.empty:
+                return work
+
+            proj_col = "project_name" if "project_name" in work.columns else ("project" if "project" in work.columns else None)
+            if not proj_col:
+                return work
+
+            out = work.copy()
+            out["__kv_source__"] = out[proj_col].astype(str).str.strip()
+
+            dfpi = project_info_provider() if project_info_provider is not None else None
+            if dfpi is not None and not dfpi.empty:
+                dpi = dfpi.copy()
+
+                def _norm_key(x: object) -> str:
+                    return re.sub(r"\s+", " ", ("" if x is None else str(x)).strip().lower())
+
+                # Build normalized keys on both name and code
+                if "project_name" in dpi.columns:
+                    dpi["__name_key__"] = dpi["project_name"].astype(str).map(_norm_key)
+                else:
+                    dpi["__name_key__"] = ""
+
+                if "project_code" in dpi.columns:
+                    dpi["__code_key__"] = dpi["project_code"].astype(str).map(_norm_key)
+                else:
+                    dpi["__code_key__"] = ""
+
+                # Which column is the descriptive text? Prefer "Project Name"
+                desc_col = "Project Name" if "Project Name" in dpi.columns else ("project_name" if "project_name" in dpi.columns else None)
+
+                if desc_col:
+                    name_map = dict(zip(dpi["__name_key__"], dpi[desc_col].astype(str)))
+                    code_map = dict(zip(dpi["__code_key__"], dpi[desc_col].astype(str)))
+
+                    row_key = out[proj_col].astype(str).map(_norm_key)
+                    mapped_name = row_key.map(name_map)
+                    mapped_code = row_key.map(code_map)
+                    # Prefer name-map, fall back to code-map, then original project text
+                    desc_series = mapped_name.where(mapped_name.notna(), mapped_code)
+                    out["__kv_source__"] = desc_series.where(desc_series.notna(), out[proj_col].astype(str))
+
+            src = out["__kv_source__"].astype(str).str.lower()
+            out["__line_kv__"] = np.where(
+                src.str.contains("765"),
+                "765",
+                np.where(src.str.contains("400"), "400", pd.NA),
+            )
+            return out
+        except Exception:
+            return work
+
+
 
     # --- Mode toggle -> store + banner text ---
     @app.callback(
@@ -654,63 +726,6 @@ def register_callbacks(
     )
 
 
-
-
-    # # ONE unified clientside callback for BOTH graph clicks and AVP row clicks
-    # app.clientside_callback(
-    #     """
-    #     function(lossClick, topClick, bottomClick, rowClicks, rowIds, prev) {
-    #     const C = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
-    #     if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
-    #     const trg = ctx.triggered[0].prop_id || "";
-
-    #     // ---- robust: parse the pattern id JSON instead of relying on key order
-    #     try {
-    #         const idPart = trg.split(".")[0];
-    #         const pid = JSON.parse(idPart);
-    #         if (pid && pid.type === "avp-row") {
-    #         if (!rowClicks || !rowClicks.length) return NO;
-    #         let last = -1;
-    #         for (let i = 0; i < rowClicks.length; i++) { if (rowClicks[i]) last = i; }
-    #         if (last < 0) return NO;
-    #         const gang = rowIds && rowIds[last] && rowIds[last].index;
-    #         return gang || NO;
-    #         }
-    #     } catch (e) { /* ignore and fall through to chart clicks */ }
-
-    #     // ---- charts (unchanged)
-    #     let cd = null;
-    #     if (trg.startsWith("g-actual-vs-bench.")) cd = lossClick;
-    #     else if (trg.startsWith("g-top5."))        cd = topClick;
-    #     else if (trg.startsWith("g-bottom5."))     cd = bottomClick;
-    #     else return NO;
-
-    #     if (!cd || !cd.points || !cd.points.length) return NO;
-    #     const pt = cd.points[0];
-    #     let gang = null;
-    #     if (typeof pt.y === "string")      gang = pt.y;
-    #     else if (typeof pt.x === "string") gang = pt.x;
-    #     else if (pt.customdata) {
-    #         if (typeof pt.customdata === "string")       gang = pt.customdata;
-    #         else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
-    #         else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
-    #     }
-    #     return gang || NO;
-    #     }
-    #     """,
-    #     Output("store-selected-gang", "data"),
-    #     [
-    #     Input("g-actual-vs-bench", "clickData"),
-    #     Input("g-top5", "clickData"),
-    #     Input("g-bottom5", "clickData"),
-    #     Input({"type":"avp-row","index": dash.dependencies.ALL}, "n_clicks"),
-    #     ],
-    #     [
-    #     State({"type":"avp-row","index": dash.dependencies.ALL}, "id"),
-    #     State("store-selected-gang", "data"),
-    #     ],
-    # )
-    
     @app.callback(
         Output("lbl-erections-title", "children"),
         Input("mode-toggle", "value"),
@@ -719,6 +734,26 @@ def register_callbacks(
     def _title_for_completed(toggle_value, mode_value):
         eff_mode = (toggle_value or mode_value or "erection").strip().lower()
         return "Stringing Completed" if eff_mode == "stringing" else "Erections Completed"
+
+    @app.callback(
+        Output("stringing-filters-wrap", "style"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
+    )
+    def _toggle_stringing_filters(mode_value, toggle_value):
+        mode = (toggle_value or mode_value or "erection").strip().lower()
+        return {"display": "block"} if mode == "stringing" else {"display": "none"}
+    
+    @app.callback(
+        Output("f-kv", "value"),
+        Output("f-method", "value"),
+        Input("btn-reset-filters", "n_clicks"),
+        Input("mode-toggle", "value"),
+        prevent_initial_call=True,
+    )
+    def _reset_stringing_filters(_n, _mode_value):
+        # Default = overall view (both selected)
+        return ["400", "765"], ["manual", "tse"]
 
 
     
@@ -757,6 +792,8 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
+        Input("f-kv", "value"),         # NEW
+        Input("f-method", "value"),     # NEW
         Input("store-mode", "data"),
         Input("mode-toggle", "value"),
     )
@@ -764,6 +801,8 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
+        kv_values: Sequence[str] | None,       # NEW
+        method_values: Sequence[str] | None,   # NEW
         mode_value: str | None,
         toggle_value: str | None,
     ) -> list[dict[str, str]]:
@@ -781,6 +820,23 @@ def register_callbacks(
                 work["month"] = work["date"].dt.to_period("M").dt.to_timestamp()
             else:
                 work = df_day.copy()
+
+                        # --- Stringing-only filters: Line kV + Method ---
+            eff_mode = (toggle_value or mode_value or "erection").strip().lower()
+            if eff_mode == "stringing":
+                work = _attach_line_kv(work)
+
+                # --- kV chips: apply filter only if the selection is a proper subset ---
+                kv_set = set(kv_values or [])
+                if kv_set and kv_set != {"400", "765"}:
+                    work = work[work["__line_kv__"].isin(kv_set)]
+
+                # --- Method chips: same subset rule ---
+                mset = set((m or "").lower() for m in (method_values or []))
+                if mset and mset != {"manual", "tse"} and "method" in work.columns:
+                    work = work[work["method"].astype(str).str.lower().isin(mset)]
+
+
 
             months_ts = resolve_months(_ensure_list(months), quick_range)
             days_factor = _avg_days_in_selected_months(months_ts)
@@ -810,6 +866,8 @@ def register_callbacks(
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
+        Input("f-kv", "value"),         # NEW
+        Input("f-method", "value"),     # NEW
         Input("store-mode", "data"),
         Input("mode-toggle", "value"),
     )
@@ -817,6 +875,8 @@ def register_callbacks(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
+        kv_values: Sequence[str] | None,       # NEW
+        method_values: Sequence[str] | None,   # NEW
         mode_value: str | None,
         toggle_value: str | None,
     ) -> list[dict[str, str]]:
@@ -827,6 +887,22 @@ def register_callbacks(
             if df_day is None or df_day.empty:
                 return []
             work = df_day.copy()
+            eff_mode = (toggle_value or mode_value or "erection").strip().lower()
+            if eff_mode == "stringing":
+                work = _attach_line_kv(work)
+
+                # --- kV chips: apply filter only if the selection is a proper subset ---
+                kv_set = set(kv_values or [])
+                if kv_set and kv_set != {"400", "765"}:
+                    work = work[work["__line_kv__"].isin(kv_set)]
+
+                # --- Method chips: same subset rule ---
+                mset = set((m or "").lower() for m in (method_values or []))
+                if mset and mset != {"manual", "tse"} and "method" in work.columns:
+                    work = work[work["method"].astype(str).str.lower().isin(mset)]
+
+
+
             if "month" not in work.columns and "date" in work.columns:
                 work["date"] = pd.to_datetime(work["date"], errors="coerce")
                 work = work.dropna(subset=["date"])
@@ -856,6 +932,8 @@ def register_callbacks(
         Input("f-project", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
+        Input("f-kv", "value"),         # NEW
+        Input("f-method", "value"),     # NEW
         Input("store-mode", "data"),
         Input("mode-toggle", "value"),
     )
@@ -863,6 +941,8 @@ def register_callbacks(
         projects: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
+        kv_values: Sequence[str] | None,       # NEW
+        method_values: Sequence[str] | None,   # NEW
         mode_value: str | None,
         toggle_value: str | None,
     ) -> list[dict[str, str]]:
@@ -873,6 +953,22 @@ def register_callbacks(
             if df_day is None or df_day.empty:
                 return []
             work = df_day.copy()
+            eff_mode = (toggle_value or mode_value or "erection").strip().lower()
+            if eff_mode == "stringing":
+                work = _attach_line_kv(work)
+
+                # --- kV chips: apply filter only if the selection is a proper subset ---
+                kv_set = set(kv_values or [])
+                if kv_set and kv_set != {"400", "765"}:
+                    work = work[work["__line_kv__"].isin(kv_set)]
+
+                # --- Method chips: same subset rule ---
+                mset = set((m or "").lower() for m in (method_values or []))
+                if mset and mset != {"manual", "tse"} and "method" in work.columns:
+                    work = work[work["method"].astype(str).str.lower().isin(mset)]
+
+
+
             # Ensure month exists from date
             if "month" not in work.columns and "date" in work.columns:
                 work["date"] = pd.to_datetime(work["date"], errors="coerce")
@@ -1503,6 +1599,8 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
+        Input("f-kv", "value"),         # NEW
+        Input("f-method", "value"),     # NEW
         Input("f-topbot-metric", "value"),
         Input("store-mode", "data"),
         Input("mode-toggle", "value"),
@@ -1512,6 +1610,8 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
+        kv_values: Sequence[str] | None,       # NEW
+        method_values: Sequence[str] | None,   # NEW
         topbot_metric: str | None,         
         mode_value: str | None,
         toggle_value: str | None,
@@ -1523,6 +1623,20 @@ def register_callbacks(
             # Prefer the live toggle for immediate switching; fall back to stored mode
             eff_mode = (toggle_value or mode_value or "erection")
             df_day = _select_daily(eff_mode)
+                        # --- Stringing-only filters: Line kV + Method ---
+            if eff_mode == "stringing" and isinstance(df_day, pd.DataFrame) and not df_day.empty:
+                df_day = _attach_line_kv(df_day)
+
+                kv_set = set(kv_values or [])
+                if kv_set and kv_set != {"400", "765"}:
+                    df_day = df_day[df_day["__line_kv__"].isin(kv_set)]
+
+                mset = set((m or "").lower() for m in (method_values or []))
+                if mset and mset != {"manual", "tse"} and "method" in df_day.columns:
+                    df_day = df_day[df_day["method"].astype(str).str.lower().isin(mset)]
+
+
+
             months_ts = resolve_months(month_list, quick_range)
             days_factor = _avg_days_in_selected_months(months_ts)
 
