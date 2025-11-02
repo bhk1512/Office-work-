@@ -1164,17 +1164,39 @@ def register_callbacks(
         candidate_columns = [col for col in ("Project Name", "project_name", "project_code") if col in df_info.columns]
 
         row = pd.DataFrame()
+        # 1) strict normalized equality against known identifier columns
         for col in candidate_columns:
-            mask = df_info[col].apply(_normalize_for_match) == target_norm
+            try:
+                mask = df_info[col].apply(_normalize_for_match) == target_norm
+            except Exception:
+                mask = pd.Series(False, index=df_info.index)
             if mask.any():
                 row = df_info.loc[mask]
                 break
 
-        if row.empty and "Project Name" in df_info.columns:
-            series = df_info["Project Name"].astype(str).apply(_clean_text)
-            mask = series.str.contains(selected_project, case=False, na=False)
-            if mask.any():
-                row = df_info.loc[mask]
+        # 2) relaxed contains on human name fields
+        if row.empty:
+            for human_col in ("Project Name", "project_name"):
+                if human_col in df_info.columns:
+                    series = df_info[human_col].astype(str).apply(_clean_text)
+                    mask = series.str.contains(selected_project, case=False, na=False)
+                    if mask.any():
+                        row = df_info.loc[mask]
+                        break
+
+        # 3) compact code match (remove non-alphanumerics) for project_code
+        if row.empty and "project_code" in df_info.columns:
+            import re as _re
+            def _compact(s: str) -> str:
+                return _re.sub(r"[^a-z0-9]", "", s.lower())
+            target_comp = _compact(selected_project)
+            try:
+                comp_series = df_info["project_code"].astype(str).map(_clean_text).map(_compact)
+                mask = comp_series == target_comp
+                if mask.any():
+                    row = df_info.loc[mask]
+            except Exception:
+                pass
 
         if row.empty:
             return (
@@ -1199,7 +1221,7 @@ def register_callbacks(
             except Exception:
                 return _clean_text(value)
 
-        display_name = fmt_txt("Project Name") or selected_project
+        display_name = fmt_txt("Project Name") or fmt_txt("project_name") or selected_project
 
         body = html.Div(
             [
@@ -2802,6 +2824,222 @@ def register_callbacks(
             return f"mode={mode}; error={type(exc).__name__}"
 
 
+    # --- KPI Details Modal: open/close and populate tables ---
+    @app.callback(
+        Output("kpi-modal", "is_open"),
+        Output("kpi-modal-title", "children"),
+        Output("store-kpi-modal-source", "data"),
+        Input("kpi-card-total-nos", "n_clicks"),
+        Input("kpi-card-total-mt", "n_clicks"),
+        Input("kpi-modal-close", "n_clicks"),
+        State("kpi-modal", "is_open"),
+        State("store-mode", "data"),
+        prevent_initial_call=True,
+    )
+    def _toggle_kpi_modal(n_nos: int | None, n_mt: int | None, n_close: int | None, is_open: bool, mode_value: str | None):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trig = ctx.triggered[0]["prop_id"].split(".")[0]
+        mode = (mode_value or "erection").strip().lower()
+        if trig == "kpi-modal-close":
+            return False, dash.no_update, dash.no_update
+        if mode != "erection":
+            raise PreventUpdate
+        if trig == "kpi-card-total-nos":
+            return True, "Towers Erected - PCH Wise Planned vs Delivered", {"source": "nos"}
+        if trig == "kpi-card-total-mt":
+            return True, "Volume Units Erected - PCH Wise Planned vs Delivered", {"source": "mt"}
+        raise PreventUpdate
+
+    @app.callback(
+        Output("tbl-kpi-pch", "data"),
+        Input("kpi-modal", "is_open"),
+        State("store-kpi-modal-source", "data"),
+        State("f-project", "value"),
+        State("f-month", "value"),
+        State("f-quick-range", "value"),
+        State("store-mode", "data"),
+        prevent_initial_call=True,
+    )
+    def _populate_kpi_pch(is_open: bool, source_meta, projects, months, quick_range, mode_value: str | None):
+        if not is_open:
+            raise PreventUpdate
+        mode = (mode_value or "erection").strip().lower()
+        if mode != "erection":
+            return []
+
+        project_list = _ensure_list(projects)
+        month_list = _ensure_list(months)
+        months_ts = resolve_months(month_list, quick_range)
+
+        if months_ts:
+            range_start = pd.Timestamp(min(months_ts)).normalize()
+            range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
+        else:
+            today = pd.Timestamp.today().normalize()
+            range_start = today.to_period("M").start_time.normalize()
+            range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+
+        df_day = _select_daily("erection")
+        scoped = apply_filters(df_day, project_list, months_ts, [])
+        export_df, _ = _prepare_erections_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            responsibilities_provider=None,
+            search_text=None,
+        )
+        if not isinstance(export_df, pd.DataFrame):
+            export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
+
+        df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
+        if df_mp is None or df_mp.empty:
+            return []
+        mp = df_mp.copy()
+        if "completion_month" in mp.columns and months_ts:
+            mp = mp[mp["completion_month"].isin(months_ts)].copy()
+        if project_list:
+            proj_names = set(str(p).strip().lower() for p in project_list)
+            name_lc = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
+            key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
+            mp = mp[(name_lc.isin(proj_names)) | (key_lc.isin(proj_names))].copy()
+
+        mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
+        mp["project_name_display"] = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str))
+        mp["pch_display"] = (mp.get("pch", pd.Series([""] * len(mp), index=mp.index)).astype(str))
+        if "tower_weight" in mp.columns:
+            mp["_tw_"] = pd.to_numeric(mp["tower_weight"], errors="coerce").fillna(0.0)
+        else:
+            mp["_tw_"] = 0.0
+
+        planned_mt = mp.groupby(["pch_display", "project_name_display"], dropna=False)["_tw_"].sum()
+        planned_nos = (
+            mp.dropna(subset=["location_no_norm"]).drop_duplicates(["pch_display", "project_name_display", "location_no_norm"]).groupby(["pch_display", "project_name_display"]).size()
+        )
+
+        ed = export_df.copy()
+        ed["project_name_display"] = (ed.get("project_name", pd.Series([""] * len(ed), index=ed.index)).astype(str))
+        ed["location_no_norm"] = (ed.get("location_no", pd.Series([""] * len(ed), index=ed.index)).map(_normalize_location))
+        delivered_mt = ed.groupby(["project_name_display"]) ["tower_weight_mt"].sum()
+        delivered_nos = ed.dropna(subset=["location_no_norm"]).drop_duplicates(["project_name_display", "location_no_norm"]).groupby(["project_name_display"]).size()
+
+        # Project directory for meta
+        try:
+            info_df = project_info_provider() if callable(project_info_provider) else None
+        except Exception:
+            info_df = None
+        if isinstance(info_df, pd.DataFrame) and not info_df.empty:
+            info = info_df.copy()
+            info["project_name_display"] = info.get("Project Name", info.get("project_name", "")).astype(str)
+        else:
+            info = pd.DataFrame(columns=["project_name_display", "pch", "regional_mgr", "project_mgr", "planning_eng"])            
+
+        out_rows = []
+        if isinstance(planned_mt, pd.Series):
+            for (pch, proj), mt in planned_mt.items():
+                nos_planned = int(planned_nos.get((pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
+                mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
+                nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
+                meta = info[info["project_name_display"].astype(str) == str(proj)].iloc[:1]
+                out_rows.append({
+                    "pch": pch,
+                    "project_name": proj,
+                    "planned_mt": round(float(mt), 1),
+                    "delivered_mt": round(float(mt_del), 1),
+                    "planned_nos": nos_planned,
+                    "delivered_nos": nos_del,
+                    "regional_mgr": (meta["regional_mgr"].iloc[0] if not meta.empty and "regional_mgr" in meta.columns else ""),
+                    "project_mgr": (meta["project_mgr"].iloc[0] if not meta.empty and "project_mgr" in meta.columns else ""),
+                    "planning_eng": (meta["planning_eng"].iloc[0] if not meta.empty and "planning_eng" in meta.columns else ""),
+                })
+        return out_rows
+
+    @app.callback(
+        Output("kpi-location-box", "style"),
+        Output("tbl-kpi-project-locations", "data"),
+        Input("tbl-kpi-pch", "active_cell"),
+        State("tbl-kpi-pch", "data"),
+        State("f-month", "value"),
+        State("f-quick-range", "value"),
+        prevent_initial_call=True,
+    )
+    def _populate_location_box(active_cell, table_data, months, quick_range):
+        if not active_cell or not table_data:
+            return {"display": "none"}, []
+        row_idx = active_cell.get("row") if isinstance(active_cell, dict) else None
+        if row_idx is None or row_idx < 0 or row_idx >= len(table_data):
+            return {"display": "none"}, []
+        sel = table_data[row_idx]
+        project_value = sel.get("project_name")
+        if not project_value:
+            return {"display": "none"}, []
+
+        months_ts = resolve_months(_ensure_list(months), quick_range)
+        if months_ts:
+            range_start = pd.Timestamp(min(months_ts)).normalize()
+            range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
+        else:
+            today = pd.Timestamp.today().normalize()
+            range_start = today.to_period("M").start_time.normalize()
+            range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+
+        df_day = _select_daily("erection")
+        scoped = apply_filters(df_day, [project_value], months_ts, [])
+        export_df, _ = _prepare_erections_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            responsibilities_provider=None,
+            search_text=None,
+        )
+        if not isinstance(export_df, pd.DataFrame):
+            export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
+
+        df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
+        if isinstance(df_mp, pd.DataFrame) and not df_mp.empty:
+            mp = df_mp.copy()
+            if months_ts and "completion_month" in mp.columns:
+                mp = mp[mp["completion_month"].isin(months_ts)].copy()
+            target = str(project_value).strip().lower()
+            name_lc = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
+            key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
+            mp = mp[(name_lc == target) | (key_lc == target)].copy()
+            mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
+            planned_loc = (
+                mp.groupby("location_no_norm")["tower_weight"].sum().rename("planned_mt") if "tower_weight" in mp.columns else pd.Series(dtype=float)
+            )
+        else:
+            planned_loc = pd.Series(dtype=float)
+
+        ed = export_df.copy()
+        ed["location_no_norm"] = (ed.get("location_no", pd.Series([""] * len(ed), index=ed.index)).map(_normalize_location))
+        delivered_loc = ed.groupby("location_no_norm")["tower_weight_mt"].sum().rename("delivered_mt")
+        meta_cols = ["daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"]
+        meta_map = (
+            ed.sort_values("completion_date").drop_duplicates("location_no_norm", keep="last")[["location_no_norm", *[c for c in meta_cols if c in ed.columns]]]
+            if not ed.empty else pd.DataFrame(columns=["location_no_norm", *meta_cols])
+        )
+        meta_map = meta_map.set_index("location_no_norm") if not meta_map.empty else meta_map
+
+        keys = set(planned_loc.index.tolist()) | set(delivered_loc.index.tolist())
+        out = []
+        for loc in sorted(k for k in keys if k):
+            planned = float(planned_loc.get(loc, 0.0)) if hasattr(planned_loc, 'get') else 0.0
+            delivered = float(delivered_loc.get(loc, 0.0)) if hasattr(delivered_loc, 'get') else 0.0
+            meta = meta_map.loc[loc] if (isinstance(meta_map, pd.DataFrame) and (loc in getattr(meta_map, 'index', []))) else None
+            out.append({
+                "location_no": loc,
+                "planned_mt": round(planned, 1),
+                "delivered_mt": round(delivered, 1),
+                "daily_prod_mt": (float(meta["daily_prod_mt"]) if (isinstance(meta, pd.Series) and "daily_prod_mt" in meta) else None),
+                "gang_name": (str(meta["gang_name"]) if (isinstance(meta, pd.Series) and "gang_name" in meta) else ""),
+                "supervisor_name": (str(meta["supervisor_name"]) if (isinstance(meta, pd.Series) and "supervisor_name" in meta) else ""),
+                "section_incharge_name": (str(meta["section_incharge_name"]) if (isinstance(meta, pd.Series) and "section_incharge_name" in meta) else ""),
+            })
+
+        style = {"display": "none"} if not out else {"display": "block"}
+        return style, out
 
     @app.callback(
         Output("trace-modal", "is_open"),
