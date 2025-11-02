@@ -1380,17 +1380,44 @@ def _prepare_project_details(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     try:
-        col_code = _pick_tol(df, ["project_code"])
-        col_name = _pick_tol(df, ["project_name"])
-        col_client = _pick_tol(df, ["client_name"])
-        col_noa = _pick_tol(df, ["noa_start"])
-        col_loa = _pick_tol(df, ["loa_end"])
-        col_pe = _pick_tol(df, ["planning_eng"])
-        col_pch = _pick_tol(df, ["pch"])
-        col_rm = _pick_tol(df, ["regional_mgr"])
-        col_pm = _pick_tol(df, ["project_mgr"])
-        col_si = _pick_tol(df, ["section_inch"])
-        col_sup = _pick_tol(df, ["supervisor"])
+        # Robust column resolver: treat spaces/underscores/dashes equally
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
+        # Build lookup maps once
+        cols = list(df.columns)
+        map_exact = {str(c).strip().lower(): c for c in cols}
+        map_norm = {_norm(c): c for c in cols}
+
+        def pick_any(options: list[str]) -> str:
+            for o in options:
+                key = str(o).strip().lower()
+                if key in map_exact:
+                    return map_exact[key]
+            for o in options:
+                nkey = _norm(o)
+                if nkey in map_norm:
+                    return map_norm[nkey]
+            # last resort: contains on normalized keys
+            for o in options:
+                nkey = _norm(o)
+                for k_norm, orig in map_norm.items():
+                    if nkey and nkey in k_norm:
+                        return orig
+            raise KeyError(options)
+
+        # Accept both snake_case and human labels from the DPR sheet
+        col_code   = pick_any(["project_code", "Project Code", "ProjectCode"])  # often present in compiled
+        col_name   = pick_any(["project_name", "Project Name"])                  # DPR sheet uses 'Project Name'
+        col_client = pick_any(["client_name", "Client Name", "Client"])         
+        col_noa    = pick_any(["noa_start", "NOA Start", "NOA Date", "NOA"])
+        col_loa    = pick_any(["loa_end", "LOA End", "LOA Date", "LOA"])
+        col_pe     = pick_any(["planning_eng", "Planning Engineer"])            
+        col_pch    = pick_any(["pch", "PCH"])                                   
+        col_rm     = pick_any(["regional_mgr", "Regional Manager"])             
+        col_pm     = pick_any(["project_mgr", "Project Manager"])               
+        col_si     = pick_any(["section_inch", "Section Incharge", "Section Incharge/Engineer", "Section Incharge/Engg"])
+        col_sup    = pick_any(["supervisor", "Supervisors", "Supervisor"])      
 
         out = pd.DataFrame({
             "project_code": df[col_code].astype(str).str.strip(),
@@ -1407,8 +1434,13 @@ def _prepare_project_details(df: pd.DataFrame) -> pd.DataFrame:
         })
         out = out[(out["project_name"] != "nan") | (out["project_code"] != "nan")].copy()
         out["key_name"] = out["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
-        if "Project Name" in df.columns:
-            out["Project Name"] = df["Project Name"].astype(str).str.strip()
+        # Preserve original DPR label if present for clarity
+        # Recover actual source column for 'Project Name' if present under any spacing/case variant
+        try:
+            src_col = next(c for c in df.columns if _norm(c) == _norm("Project Name"))
+            out["Project Name"] = df[src_col].astype(str).str.strip()
+        except StopIteration:
+            pass
         return out
     except Exception:
         return pd.DataFrame()

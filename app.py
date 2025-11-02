@@ -61,6 +61,8 @@ CONFIG.validate()
 DATA_PATH: Path = CONFIG.data_path
 
 df_day: pd.DataFrame | None = None
+# Preloaded stringing daily dataset (optional, warmed up at app start)
+df_stringing_day: pd.DataFrame | None = None
 LAST_UPDATED_DATE: pd.Timestamp | None = None
 LAST_UPDATED_TEXT: str = "N/A"
 
@@ -265,6 +267,16 @@ def get_last_updated_text() -> str:
     return LAST_UPDATED_TEXT
 
 
+# --- Stringing dataset accessors (mirrors erection flow) ---
+def set_df_stringing_day(df: pd.DataFrame) -> None:
+    global df_stringing_day
+    df_stringing_day = df.copy()
+
+
+def get_df_stringing_day() -> pd.DataFrame:
+    return df_stringing_day.copy() if isinstance(df_stringing_day, pd.DataFrame) else pd.DataFrame()
+
+
 def load_daily(config_or_path) -> pd.DataFrame:  # type: ignore[override]
     """Compatibility wrapper around the refactored data loader."""
 
@@ -284,6 +296,24 @@ def initialise_data(config: AppConfig) -> Tuple[pd.DataFrame, str]:
     df_projinfo = load_project_details(config.data_path)
     resp_df, resp_keys, resp_error = _load_responsibilities_data(config)
     _set_responsibilities_data(resp_df, resp_keys, resp_error)
+
+    # Warm up stringing daily dataset so switching views is instant
+    try:
+        if config.enable_stringing:
+            s_df = _load_stringing_daily(config)
+            # Basic normalization consistent with callbacks expectations
+            if not s_df.empty:
+                s_df = s_df.copy()
+                if "date" in s_df.columns:
+                    s_df["date"] = pd.to_datetime(s_df["date"], errors="coerce")
+                    s_df = s_df.dropna(subset=["date"]).copy()
+                    if "month" not in s_df.columns:
+                        s_df["month"] = s_df["date"].dt.to_period("M").dt.to_timestamp()
+            set_df_stringing_day(s_df)
+            LOGGER.info("Preloaded stringing daily rows: %d", len(s_df))
+    except Exception as exc:
+        # Keep startup resilient; stringing remains optional
+        LOGGER.warning("Stringing preload failed: %s", exc)
 
 
     # --- add project_code into df_day by joining to ProjectDetails on project_name (normalized) ---
@@ -524,6 +554,8 @@ def create_app(config: AppConfig | None = None) -> Dash:
         app_instance,
         get_df_day,
         active_config,
+        # Provide a preloaded stringing data provider for instant switching
+        stringing_data_provider=get_df_stringing_day,
         project_info_provider=get_df_projinfo,
         project_baseline_provider=get_project_baselines,
         responsibilities_provider=get_responsibilities_df,

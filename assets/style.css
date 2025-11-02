@@ -48,7 +48,6 @@ html {
 .kpi{
   position: relative;
   padding:18px 22px;
-  padding-right: 58px;
   border-radius:16px;
   border: none;
   color:#fff;                  /* White text on vibrant cards */
@@ -80,6 +79,7 @@ html {
   align-items:baseline;
   justify-content:space-between;
   gap:8px;
+  flex-wrap: wrap;             /* allow secondary line */
 }
 
 .kpi-value{
@@ -135,12 +135,11 @@ html {
   max-width: 100%;
 }
 
-/* Ensure the row never wraps and the pill doesn't squeeze the value */
-.kpi-row{
-  flex-wrap: nowrap;       /* <-- no wrapping inside the row */
-}
+/* Secondary metric on its own line */
 .kpi-delta{
-  flex-shrink: 0;          /* <-- pill keeps its width, doesn't crush value */
+  flex: 0 0 100%;          /* take full width on next line */
+  text-align: right;       /* align to the right edge */
+  margin-top: 4px;
 }
 
 
@@ -689,4 +688,28 @@ html {
 }
 
 
+/* === KPI tidy overrides (consistency across modes) === */
+/* keep cards the same height regardless of label length */
+.kpi { min-height: 138px; }
 
+/* center everything inside KPI tiles */
+.kpi .card-body { align-items: center; text-align: center; }
+.kpi .kpi-label { text-align: center; width: 100%; white-space: normal; overflow: visible; text-overflow: clip; }
+.kpi .kpi-row { justify-content: center; gap: 6px; flex-direction: column; align-items: center; }
+
+/* make secondary metric a neat pill, content-sized and centered */
+.kpi .kpi-delta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.24);
+  color: #fff;
+  white-space: nowrap;
+  margin-top: 4px;
+  margin-left: 0;             /* center under value */
+  flex: 0 0 auto !important;  /* override earlier full-width rule */
+}

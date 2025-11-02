@@ -509,6 +509,8 @@ def register_callbacks(
     app: Dash,
     data_provider: Callable[[], pd.DataFrame],
     config: AppConfig,
+    *,
+    stringing_data_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
@@ -522,7 +524,10 @@ def register_callbacks(
     def _select_daily(mode_value: str | None) -> pd.DataFrame:
         mode = (mode_value or "erection").strip().lower()
         if mode == "stringing":
-            df = _load_stringing_daily(config)
+            if callable(stringing_data_provider):
+                df = stringing_data_provider()
+            else:
+                df = _load_stringing_daily(config)
         else:
             df = data_provider()
         # Normalize required columns and provide consistent aliases across modes
@@ -743,6 +748,27 @@ def register_callbacks(
     def _toggle_stringing_filters(mode_value, toggle_value):
         mode = (toggle_value or mode_value or "erection").strip().lower()
         return {"display": "block"} if mode == "stringing" else {"display": "none"}
+
+    # Make KPI row span full width in Stringing (4 cards) vs 5 in Erection
+    @app.callback(
+        Output("kpi-row", "className"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
+    )
+    def _kpi_row_class(mode_value, toggle_value):
+        base = "g-3 align-items-stretch row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 "
+        mode = (toggle_value or mode_value or "erection").strip().lower()
+        # Stringing shows 4 KPI tiles — use 4 cols on xl as well
+        return base + ("row-cols-xl-4" if mode == "stringing" else "row-cols-xl-5")
+    
+    @app.callback(
+        Output("card-total-nos", "style"),
+        Input("store-mode", "data"),
+        Input("mode-toggle", "value"),
+    )
+    def _toggle_total_nos_card(mode_value, toggle_value):
+        mode = (toggle_value or mode_value or "erection").strip().lower()
+        return {} if mode == "erection" else {"display": "none"}
     
     @app.callback(
         Output("f-kv", "value"),
@@ -1179,8 +1205,8 @@ def register_callbacks(
             [
                 html.Div(
                     [
-                        html.P("PROJECT CODE", className="project-label"),
-                        html.H6(fmt_txt("project_code"), className="project-value"),
+                        html.P("PROJECT NAME", className="project-label"),
+                        html.H6(fmt_txt("project_name") or fmt_txt("Project Name"), className="project-value"),
                         html.P("CLIENT", className="project-label"),
                         html.H6(fmt_txt("client_name"), className="project-value"),
                         html.P("NOA START", className="project-label"),
@@ -1587,6 +1613,9 @@ def register_callbacks(
         Output("kpi-delta", "children"),
         Output("kpi-active", "children"),
         Output("kpi-total", "children"),
+        Output("kpi-total-planned", "children"),
+        Output("kpi-total-nos", "children"),
+        Output("kpi-total-nos-planned", "children"),
         Output("kpi-loss", "children"),
         Output("kpi-loss-delta", "children"),   # <--- add this line
         Output("avp-list", "children"),            # <-- NEW (HTML children)
@@ -1981,6 +2010,88 @@ def register_callbacks(
 
         kpi_active = f"{active_gangs}"
         kpi_total = f"{total_metric:.1f} {unit_short}"
+        # Secondary planned layer from Micro Plan (erection mode only)
+        kpi_total_planned = ""
+        kpi_total_nos_planned = ""
+        if not is_stringing:
+            try:
+                active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
+                if active_months and callable(responsibilities_provider):
+                    resp = responsibilities_provider()
+                    if isinstance(resp, pd.DataFrame) and not resp.empty:
+                        df_mp = resp.copy()
+                        # completion month
+                        if 'completion_date' in df_mp.columns:
+                            df_mp['completion_month'] = pd.to_datetime(df_mp['completion_date'], errors='coerce').dt.to_period('M').dt.to_timestamp()
+                        else:
+                            df_mp['completion_month'] = pd.NaT
+                        # normalize project + location
+                        def _norm_txt(x):
+                            s = "" if x is None else str(x).replace("\u00a0", " ").strip()
+                            return "" if s.lower() in {"", "nan", "none", "null"} else s
+                        def _norm_lc(x):
+                            return _norm_txt(x).lower()
+                        def _norm_loc(x):
+                            t = _norm_txt(x)
+                            if not t:
+                                return ""
+                            if t.endswith('.0') and t.replace('.', '', 1).isdigit():
+                                t = t.split('.', 1)[0]
+                            return t
+                        for c in ("project_name", "project_key", "location_no"):
+                            if c not in df_mp.columns:
+                                df_mp[c] = ""
+                            df_mp[c] = df_mp[c].map(_norm_txt)
+                        df_mp['project_name_lc'] = df_mp['project_name'].map(_norm_lc)
+                        df_mp['project_key_lc'] = df_mp['project_key'].map(_norm_lc)
+                        df_mp['location_no_norm'] = df_mp['location_no'].map(_norm_loc)
+                        # filter by selected projects present in current scope
+                        if "project_name" in scoped_all.columns and not scoped_all.empty:
+                            sel_projects = set(scoped_all["project_name"].dropna().astype(str).str.strip().str.lower())
+                        else:
+                            sel_projects = set()
+                        if sel_projects:
+                            mask_project = df_mp['project_name_lc'].isin(sel_projects) | df_mp['project_key_lc'].isin(sel_projects)
+                            df_mp = df_mp.loc[mask_project].copy()
+                        # filter by selected months
+                        df_mp = df_mp[df_mp['completion_month'].isin(active_months)].copy()
+                        if not df_mp.empty:
+                            # planned MT is sum of tower_weight
+                            if 'tower_weight' in df_mp.columns:
+                                planned_mt = pd.to_numeric(df_mp['tower_weight'], errors='coerce').fillna(0.0).sum()
+                            else:
+                                planned_mt = 0.0
+                            # planned towers = unique locations per project
+                            planned_tower_count = int(df_mp[['project_name_lc', 'location_no_norm']].dropna().drop_duplicates().shape[0])
+                            kpi_total_planned = f"Planned: {planned_mt:.1f} MT"
+                            kpi_total_nos_planned = f"Planned: {planned_tower_count}"
+            except Exception:
+                # leave planned KPIs blank on any failure
+                kpi_total_planned = ""
+                kpi_total_nos_planned = ""
+        # Compute number of towers erected in the selected month window (erection mode only)
+        try:
+            if not is_stringing:
+                if months_ts:
+                    range_start = pd.Timestamp(min(months_ts)).normalize()
+                    range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
+                else:
+                    today = pd.Timestamp.today().normalize()
+                    range_start = today.to_period("M").start_time.normalize()
+                    range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+                export_df, _ = _prepare_erections_completed(
+                    loss_scope,
+                    range_start=range_start,
+                    range_end=range_end,
+                    responsibilities_provider=None,
+                    search_text=None,
+                )
+                tower_count = int(len(export_df)) if isinstance(export_df, pd.DataFrame) else 0
+                kpi_total_nos = f"{tower_count}"
+            else:
+                kpi_total_nos = ""
+        except Exception:
+            kpi_total_nos = ""
         kpi_loss = f"{total_lost:.1f} {unit_short}"
         kpi_loss_delta = f"{lost_pct:.1f}%"
 
@@ -2239,6 +2350,9 @@ def register_callbacks(
             kpi_delta,
             kpi_active,
             kpi_total,
+            kpi_total_planned,
+            kpi_total_nos,
+            kpi_total_nos_planned,
             kpi_loss,
             kpi_loss_delta,
             avp_children,
@@ -2737,7 +2851,7 @@ def register_callbacks(
         is_stringing = mode == "stringing"
         unit_short = "KM" if is_stringing else "MT"
         avg_label = "Avg Output / Gang / Month" if is_stringing else "Avg Output / Gang / Day"
-        total_label = "Delivered (KM)" if is_stringing else "Total Erection"
+        total_label = "Delivered (KM)" if is_stringing else "Volume Units Erected"
         lost_label = "Lost (KM)" if is_stringing else "Lost Units"
 
         idle_cols = [

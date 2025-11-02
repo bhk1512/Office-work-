@@ -339,7 +339,6 @@ def build_kpi_cards() -> dbc.Row:
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("trend_down"), className="kpi__icon"),
                             html.Div(id="label-avg", children="Avg Output / Gang / Day", className="kpi-label"),
                             html.Div(
                                 [
@@ -351,8 +350,7 @@ def build_kpi_cards() -> dbc.Row:
                         ]
                     ),
                     className="kpi kpi--blue",
-                ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
+                ),           
             ),
 
             # 2) Active Projects (purple)
@@ -360,7 +358,6 @@ def build_kpi_cards() -> dbc.Row:
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("users"), className="kpi__icon"),
                             html.Div("Active Gangs", className="kpi-label"),
                             html.Div(
                                 [ html.Span(id="kpi-active", className="kpi-value") ],
@@ -370,25 +367,45 @@ def build_kpi_cards() -> dbc.Row:
                     ),
                     className="kpi kpi--purple",
                 ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
-            ),
+           ),
 
-            # 3) Total Erection (orange for Figma look)
+            # 3) Towers Erected — visible only in erection mode
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("trend_up"), className="kpi__icon"),
-                            html.Div(id="label-total", children="Total Erection", className="kpi-label"),
+                            html.Div(id="label-total-nos", children="Towers Erected", className="kpi-label"),
                             html.Div(
-                                [ html.Span(id="kpi-total", className="kpi-value") ],
+                                [
+                                    html.Span(id="kpi-total-nos", className="kpi-value"),
+                                    html.Span(id="kpi-total-nos-planned", className="kpi-delta"),
+                                ],
                                 className="kpi-row",
                             ),
                         ]
                     ),
                     className="kpi kpi--green",
                 ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
+                id="card-total-nos",
+            ),
+
+            # 3b) Total Erection (Nos) — visible only in erection mode
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div(id="label-total", children="Volume Units Erected", className="kpi-label"),
+                            html.Div(
+                                [
+                                    html.Span(id="kpi-total", className="kpi-value"),
+                                    html.Span(id="kpi-total-planned", className="kpi-delta"),
+                                ],
+                                className="kpi-row",
+                            ),
+                        ]
+                    ),
+                    className="kpi kpi--green",
+                ),   
             ),
 
             # 4) Lost Units (red)
@@ -396,7 +413,6 @@ def build_kpi_cards() -> dbc.Row:
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("trend_down"), className="kpi__icon"),
                             html.Div(id="label-lost", children="Lost Units", className="kpi-label"),
                             html.Div(
                                 [
@@ -409,10 +425,10 @@ def build_kpi_cards() -> dbc.Row:
                     ),
                     className="kpi kpi--red",
                 ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
             ),
         ],
-        className="g-3 align-items-stretch",
+        id="kpi-row",
+        className="g-3 align-items-stretch row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-5",
     )
 
 
@@ -997,6 +1013,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
         fluid=True,
     )
     return layout
+
 
 
 
