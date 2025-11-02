@@ -13,7 +13,7 @@ import dash
 import re
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, dcc, html
+from dash import Dash, Input, Output, State, dcc, html, dash_table
 from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
@@ -1161,7 +1161,18 @@ def register_callbacks(
 
         df_info = df_info.copy()
         target_norm = _normalize_for_match(selected_project)
-        candidate_columns = [col for col in ("Project Name", "project_name", "project_code") if col in df_info.columns]
+        # Accept multiple identifier variants for robust matching
+        candidate_columns = [
+            col
+            for col in (
+                "Project Name",
+                "project_name",
+                "project_code",
+                "Project Code",
+                "key_name",
+            )
+            if col in df_info.columns
+        ]
 
         row = pd.DataFrame()
         # 1) strict normalized equality against known identifier columns
@@ -1174,29 +1185,39 @@ def register_callbacks(
                 row = df_info.loc[mask]
                 break
 
-        # 2) relaxed contains on human name fields
+        # 2) relaxed contains on human name fields (normalized)
         if row.empty:
             for human_col in ("Project Name", "project_name"):
                 if human_col in df_info.columns:
-                    series = df_info[human_col].astype(str).apply(_clean_text)
-                    mask = series.str.contains(selected_project, case=False, na=False)
+                    series = df_info[human_col].astype(str).apply(_normalize_for_match)
+                    mask = series.str.contains(target_norm, case=False, na=False)
                     if mask.any():
                         row = df_info.loc[mask]
                         break
 
-        # 3) compact code match (remove non-alphanumerics) for project_code
-        if row.empty and "project_code" in df_info.columns:
+        # 3) compact code match (remove non-alphanumerics) for project codes (any case variant)
+        if row.empty:
             import re as _re
+
             def _compact(s: str) -> str:
-                return _re.sub(r"[^a-z0-9]", "", s.lower())
+                return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
             target_comp = _compact(selected_project)
-            try:
-                comp_series = df_info["project_code"].astype(str).map(_clean_text).map(_compact)
-                mask = comp_series == target_comp
-                if mask.any():
-                    row = df_info.loc[mask]
-            except Exception:
-                pass
+            for code_col in ("project_code", "Project Code"):
+                if code_col in df_info.columns:
+                    try:
+                        comp_series = (
+                            df_info[code_col]
+                            .astype(str)
+                            .map(_clean_text)
+                            .map(_compact)
+                        )
+                        mask = comp_series == target_comp
+                        if mask.any():
+                            row = df_info.loc[mask]
+                            break
+                    except Exception:
+                        continue
 
         if row.empty:
             return (
@@ -1264,7 +1285,7 @@ def register_callbacks(
             className="project-grid",
         )
 
-        title = f"{display_name} Project Overview"
+        title = f"Project Overview"
         return title, body
 
     # --- NEW: responsibilities chart callback ---
@@ -2853,7 +2874,7 @@ def register_callbacks(
         raise PreventUpdate
 
     @app.callback(
-        Output("tbl-kpi-pch", "data"),
+        Output("kpi-pch-accordion", "children"),
         Input("kpi-modal", "is_open"),
         State("store-kpi-modal-source", "data"),
         State("f-project", "value"),
@@ -2905,26 +2926,38 @@ def register_callbacks(
             key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
             mp = mp[(name_lc.isin(proj_names)) | (key_lc.isin(proj_names))].copy()
 
+        # Normalized helper columns
         mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
         mp["project_name_display"] = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str))
         mp["pch_display"] = (mp.get("pch", pd.Series([""] * len(mp), index=mp.index)).astype(str))
-        if "tower_weight" in mp.columns:
-            mp["_tw_"] = pd.to_numeric(mp["tower_weight"], errors="coerce").fillna(0.0)
-        else:
-            mp["_tw_"] = 0.0
+        mp["_tw_"] = pd.to_numeric(mp.get("tower_weight", 0.0), errors="coerce").fillna(0.0)
 
+        # Project-level planned
         planned_mt = mp.groupby(["pch_display", "project_name_display"], dropna=False)["_tw_"].sum()
         planned_nos = (
-            mp.dropna(subset=["location_no_norm"]).drop_duplicates(["pch_display", "project_name_display", "location_no_norm"]).groupby(["pch_display", "project_name_display"]).size()
+            mp.dropna(subset=["location_no_norm"])\
+              .drop_duplicates(["pch_display", "project_name_display", "location_no_norm"])\
+              .groupby(["pch_display", "project_name_display"]).size()
         )
 
+        # Delivered aggregates and meta (by project and location)
         ed = export_df.copy()
-        ed["project_name_display"] = (ed.get("project_name", pd.Series([""] * len(ed), index=ed.index)).astype(str))
-        ed["location_no_norm"] = (ed.get("location_no", pd.Series([""] * len(ed), index=ed.index)).map(_normalize_location))
+        ed["project_name_display"] = ed.get("project_name", "").astype(str)
+        ed["location_no_norm"] = ed.get("location_no", "").map(_normalize_location)
         delivered_mt = ed.groupby(["project_name_display"]) ["tower_weight_mt"].sum()
-        delivered_nos = ed.dropna(subset=["location_no_norm"]).drop_duplicates(["project_name_display", "location_no_norm"]).groupby(["project_name_display"]).size()
+        delivered_nos = (
+            ed.dropna(subset=["location_no_norm"])\
+              .drop_duplicates(["project_name_display", "location_no_norm"])\
+              .groupby(["project_name_display"]).size()
+        )
+        meta_cols = ["daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name", "start_date"]
+        loc_meta = (
+            ed.sort_values("completion_date").drop_duplicates("location_no_norm", keep="last")[
+                ["location_no_norm", *[c for c in meta_cols if c in ed.columns]]
+            ] if not ed.empty else pd.DataFrame(columns=["location_no_norm", *meta_cols])
+        ).set_index("location_no_norm") if not ed.empty else pd.DataFrame()
 
-        # Project directory for meta
+        # Project meta (regional/project manager, planning engineer) + PCH mapping strictly from Project Details
         try:
             info_df = project_info_provider() if callable(project_info_provider) else None
         except Exception:
@@ -2932,114 +2965,237 @@ def register_callbacks(
         if isinstance(info_df, pd.DataFrame) and not info_df.empty:
             info = info_df.copy()
             info["project_name_display"] = info.get("Project Name", info.get("project_name", "")).astype(str)
+            # Find a PCH column in a forgiving way
+            pch_col = None
+            for cand in ("PCH", "pch", "PCH Name", "PCHName", "pch_name"):
+                if cand in info.columns:
+                    pch_col = cand
+                    break
+            if pch_col is None:
+                info["pch"] = ""
+                pch_col = "pch"
         else:
             info = pd.DataFrame(columns=["project_name_display", "pch", "regional_mgr", "project_mgr", "planning_eng"])            
 
-        out_rows = []
-        if isinstance(planned_mt, pd.Series):
-            for (pch, proj), mt in planned_mt.items():
-                nos_planned = int(planned_nos.get((pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
-                mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
-                nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
-                meta = info[info["project_name_display"].astype(str) == str(proj)].iloc[:1]
-                out_rows.append({
-                    "pch": pch,
-                    "project_name": proj,
-                    "planned_mt": round(float(mt), 1),
-                    "delivered_mt": round(float(mt_del), 1),
-                    "planned_nos": nos_planned,
-                    "delivered_nos": nos_del,
-                    "regional_mgr": (meta["regional_mgr"].iloc[0] if not meta.empty and "regional_mgr" in meta.columns else ""),
-                    "project_mgr": (meta["project_mgr"].iloc[0] if not meta.empty and "project_mgr" in meta.columns else ""),
-                    "planning_eng": (meta["planning_eng"].iloc[0] if not meta.empty and "planning_eng" in meta.columns else ""),
+        # Build hierarchy: PCH -> Projects -> Locations
+        # Ensure we always have a PCH value; fall back to project-info mapping if blank
+        proj_info_pch = {}
+        if not info.empty and "pch" in info.columns:
+            proj_info_pch = dict(zip(info["project_name_display"], info["pch"].astype(str)))
+
+        projects_rows = {}
+        for (pch, proj), mt in planned_mt.items():
+            nos_planned = int(planned_nos.get((pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
+            mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
+            nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
+            meta = info[info["project_name_display"].astype(str) == str(proj)].iloc[:1]
+            # normalize pch label
+            # STRICT: take PCH only from Project Details
+            pch_label = (str(meta[pch_col].iloc[0]).strip() if (not meta.empty and pch_col in meta.columns) else "Unassigned")
+            rec = {
+                "pch": pch_label,
+                "project_name": proj,
+                "planned_mt": round(float(mt), 1),
+                "delivered_mt": round(float(mt_del), 1),
+                "planned_nos": nos_planned,
+                "delivered_nos": nos_del,
+                "regional_mgr": (meta["regional_mgr"].iloc[0] if not meta.empty and "regional_mgr" in meta.columns else ""),
+                "project_mgr": (meta["project_mgr"].iloc[0] if not meta.empty and "project_mgr" in meta.columns else ""),
+                "planning_eng": (meta["planning_eng"].iloc[0] if not meta.empty and "planning_eng" in meta.columns else ""),
+            }
+            projects_rows.setdefault(pch_label, []).append(rec)
+
+        def _project_locations(project_name: str) -> list[dict]:
+            # Planned per location (tower weight) for the project
+            mp_proj = mp[mp["project_name_display"].astype(str) == str(project_name)].copy()
+            planned_loc = mp_proj.groupby("location_no_norm")["_tw_"].sum().rename("planned_mt") if not mp_proj.empty else pd.Series(dtype=float)
+            ed_proj = ed[ed["project_name_display"].astype(str) == str(project_name)].copy()
+            delivered_loc = ed_proj.groupby("location_no_norm")["tower_weight_mt"].sum().rename("delivered_mt") if not ed_proj.empty else pd.Series(dtype=float)
+            keys = set(planned_loc.index.tolist()) | set(delivered_loc.index.tolist())
+            out = []
+            for loc in sorted(k for k in keys if k):
+                meta = loc_meta.loc[loc] if (isinstance(loc_meta, pd.DataFrame) and (loc in getattr(loc_meta, 'index', []))) else None
+                out.append({
+                    "location_no": loc,
+                    "planned_mt": round(float(planned_loc.get(loc, 0.0) or 0.0), 1),
+                    "delivered_mt": round(float(delivered_loc.get(loc, 0.0) or 0.0), 1),
+                    "daily_prod_mt": (float(meta["daily_prod_mt"]) if (isinstance(meta, pd.Series) and "daily_prod_mt" in meta) else None),
+                    "gang_name": (str(meta["gang_name"]) if (isinstance(meta, pd.Series) and "gang_name" in meta) else ""),
+                    "supervisor_name": (str(meta["supervisor_name"]) if (isinstance(meta, pd.Series) and "supervisor_name" in meta) else ""),
+                    "section_incharge_name": (str(meta["section_incharge_name"]) if (isinstance(meta, pd.Series) and "section_incharge_name" in meta) else ""),
                 })
-        return out_rows
+            return out
+
+        pch_sections = []
+        for pch, rows in projects_rows.items():
+            # Totals per PCH
+            p_planned_mt = sum(r["planned_mt"] for r in rows)
+            p_delivered_mt = sum(r["delivered_mt"] for r in rows)
+            p_planned_nos = sum(r["planned_nos"] for r in rows)
+            p_delivered_nos = sum(r["delivered_nos"] for r in rows)
+
+            header = dbc.Row([
+                dbc.Col(html.H6(str(pch), className="mb-0"), md=3),
+                dbc.Col(
+                    html.Div([
+                        dbc.Badge(f"Nos {p_delivered_nos}/{p_planned_nos}", color="primary", className="me-2"),
+                        dbc.Badge(f"MT {p_delivered_mt:.1f}/{p_planned_mt:.1f}", color="dark", className="me-2"),
+                    ]), md=9
+                ),
+            ], className="pch-header align-items-center py-2")
+
+            # Nested accordion for projects within this PCH
+            project_items = []
+            for r in sorted(rows, key=lambda x: str(x["project_name"])):
+                title = html.Div([
+                    html.Span(str(r["project_name"]), className="fw-bold me-3"),
+                    html.Span(className="proj-badges", children=[
+                        dbc.Badge(f"Nos {r['delivered_nos']}/{r['planned_nos']}", color="primary", className="me-2"),
+                        dbc.Badge(f"MT {r['delivered_mt']:.1f}/{r['planned_mt']:.1f}", color="dark", className="me-2"),
+                    ]),
+                ])
+
+                # Build Section Incharge -> Supervisor summary (planned/delivered) using Micro Plan responsibilities first
+                def _section_supervisor_summary(project: str):
+                    mp_proj = mp[mp["project_name_display"].astype(str) == str(project)].copy()
+                    # normalize labels and fields
+                    std_map = {
+                        "gangs": "Gang", "gang": "Gang",
+                        "section incharges": "Section Incharge", "section incharge": "Section Incharge", "section in-charge": "Section Incharge",
+                        "supervisors": "Supervisor", "supervisor": "Supervisor",
+                    }
+                    et = mp_proj.get("entity_type", "").astype(str).str.lower()
+                    mp_proj["entity_type_std"] = et.map(lambda v: std_map.get(v, v.title()))
+                    mp_proj["location_no_norm"] = mp_proj.get("location_no", "").map(_normalize_location)
+                    mp_proj["tower_weight_val"] = pd.to_numeric(mp_proj.get("tower_weight", 0.0), errors="coerce").fillna(0.0)
+
+                    # completion markers
+                    completed: set[tuple[str, str]] = set()
+                    try:
+                        if callable(responsibilities_completion_provider):
+                            completed = set(responsibilities_completion_provider())
+                    except Exception:
+                        completed = set()
+                    proj_lc = str(project).strip().lower()
+
+                    # collapse to location granularity to avoid double-counting
+                    # section map per location
+                    sec_map = (
+                        mp_proj[mp_proj["entity_type_std"] == "Section Incharge"][
+                            ["location_no_norm", "entity_name"]
+                        ]
+                        .dropna()
+                        .drop_duplicates("location_no_norm", keep="last")
+                        .rename(columns={"entity_name": "section"})
+                    )
+                    sup_map = (
+                        mp_proj[mp_proj["entity_type_std"] == "Supervisor"][
+                            ["location_no_norm", "entity_name"]
+                        ]
+                        .dropna()
+                        .drop_duplicates("location_no_norm", keep="last")
+                        .rename(columns={"entity_name": "supervisor"})
+                    )
+
+                    loc = (
+                        mp_proj.groupby("location_no_norm", as_index=False)["tower_weight_val"].max()
+                    )
+                    loc["is_completed"] = [
+                        (proj_lc, _normalize_lower(loc_id)) in completed for loc_id in loc["location_no_norm"]
+                    ]
+                    loc = loc.merge(sec_map, on="location_no_norm", how="left").merge(sup_map, on="location_no_norm", how="left")
+                    loc["section"] = loc["section"].fillna("Unassigned").astype(str)
+                    loc["supervisor"] = loc["supervisor"].fillna("Unassigned").astype(str)
+                    loc["delivered_mt_val"] = np.where(loc["is_completed"], loc["tower_weight_val"], 0.0)
+                    loc["delivered_n"] = np.where(loc["is_completed"], 1, 0)
+
+                    # section aggregates
+                    sec_g = loc.groupby("section", as_index=False).agg(
+                        planned_nos=("location_no_norm", "nunique"),
+                        planned_mt=("tower_weight_val", "sum"),
+                        delivered_nos=("delivered_n", "sum"),
+                        delivered_mt=("delivered_mt_val", "sum"),
+                    )
+                    result = {
+                        str(row["section"]): {
+                            "planned_nos": int(row["planned_nos"]),
+                            "planned_mt": float(row["planned_mt"]),
+                            "delivered_nos": int(row["delivered_nos"]),
+                            "delivered_mt": float(row["delivered_mt"]),
+                            "supervisors": [],
+                        }
+                        for _, row in sec_g.iterrows()
+                    }
+
+                    # supervisor aggregates within each section
+                    for sec_name, sub in loc.groupby("section"):
+                        sup_g = sub.groupby("supervisor", as_index=False).agg(
+                            planned_nos=("location_no_norm", "nunique"),
+                            planned_mt=("tower_weight_val", "sum"),
+                            delivered_nos=("delivered_n", "sum"),
+                            delivered_mt=("delivered_mt_val", "sum"),
+                        )
+                        for _, row in sup_g.iterrows():
+                            result.setdefault(str(sec_name), {"planned_nos":0,"planned_mt":0.0,"delivered_nos":0,"delivered_mt":0.0,"supervisors":[]})
+                            result[str(sec_name)]["supervisors"].append({
+                                "name": str(row["supervisor"]),
+                                "planned_nos": int(row["planned_nos"]),
+                                "planned_mt": float(row["planned_mt"]),
+                                "delivered_nos": int(row["delivered_nos"]),
+                                "delivered_mt": float(row["delivered_mt"]),
+                            })
+                    return result
+
+                summary = _section_supervisor_summary(r["project_name"])
+                sections_children = []
+                for sec_name in sorted(summary.keys()):
+                    sec_data = summary[sec_name]
+                    sup_children = []
+                    for sup_item in sorted(sec_data["supervisors"], key=lambda x: x["name"]):
+                        sup_children.append(html.Div([
+                            html.Span(sup_item["name"], className="me-2 fw-semibold"),
+                            dbc.Badge(f"Nos {sup_item['delivered_nos']}/{sup_item['planned_nos']}", color="primary", className="me-2"),
+                            dbc.Badge(f"MT {sup_item['delivered_mt']:.1f}/{sup_item['planned_mt']:.1f}", color="dark"),
+                        ], className="mb-1"))
+                    sections_children.append(html.Div([
+                        html.Div([
+                            html.Span("Section Incharge: ", className="text-muted"), html.Strong(sec_name),
+                            html.Span(" ", className="me-1"),
+                            dbc.Badge(f"Nos {sec_data['delivered_nos']}/{sec_data['planned_nos']}", color="primary", className="ms-2 me-2"),
+                            dbc.Badge(f"MT {sec_data['delivered_mt']:.1f}/{sec_data['planned_mt']:.1f}", color="dark"),
+                        ], className="mb-2"),
+                        *sup_children
+                    ], className="mb-3"))
+
+                meta_line = html.Div([
+                    dbc.Badge(r.get("regional_mgr", "") or "-", color="light", text_color="dark", className="me-2"),
+                    dbc.Badge(r.get("project_mgr", "") or "-", color="light", text_color="dark", className="me-2"),
+                    dbc.Badge(r.get("planning_eng", "") or "-", color="light", text_color="dark"),
+                ], className="mb-2")
+                project_items.append(
+                    dbc.AccordionItem(
+                        [meta_line, *sections_children],
+                        title=title,
+                    )
+                )
+
+            pch_sections.append(
+                html.Div([
+                    header,
+                    dbc.Accordion(project_items, start_collapsed=True, always_open=False, className="mb-3"),
+                ], className="pch-section mb-4")
+            )
+
+        return pch_sections
 
     @app.callback(
         Output("kpi-location-box", "style"),
-        Output("tbl-kpi-project-locations", "data"),
-        Input("tbl-kpi-pch", "active_cell"),
-        State("tbl-kpi-pch", "data"),
-        State("f-month", "value"),
-        State("f-quick-range", "value"),
+        Input("kpi-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _populate_location_box(active_cell, table_data, months, quick_range):
-        if not active_cell or not table_data:
-            return {"display": "none"}, []
-        row_idx = active_cell.get("row") if isinstance(active_cell, dict) else None
-        if row_idx is None or row_idx < 0 or row_idx >= len(table_data):
-            return {"display": "none"}, []
-        sel = table_data[row_idx]
-        project_value = sel.get("project_name")
-        if not project_value:
-            return {"display": "none"}, []
-
-        months_ts = resolve_months(_ensure_list(months), quick_range)
-        if months_ts:
-            range_start = pd.Timestamp(min(months_ts)).normalize()
-            range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
-        else:
-            today = pd.Timestamp.today().normalize()
-            range_start = today.to_period("M").start_time.normalize()
-            range_end = (today + pd.offsets.MonthEnd(0)).normalize()
-
-        df_day = _select_daily("erection")
-        scoped = apply_filters(df_day, [project_value], months_ts, [])
-        export_df, _ = _prepare_erections_completed(
-            scoped,
-            range_start=range_start,
-            range_end=range_end,
-            responsibilities_provider=None,
-            search_text=None,
-        )
-        if not isinstance(export_df, pd.DataFrame):
-            export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
-
-        df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
-        if isinstance(df_mp, pd.DataFrame) and not df_mp.empty:
-            mp = df_mp.copy()
-            if months_ts and "completion_month" in mp.columns:
-                mp = mp[mp["completion_month"].isin(months_ts)].copy()
-            target = str(project_value).strip().lower()
-            name_lc = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
-            key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
-            mp = mp[(name_lc == target) | (key_lc == target)].copy()
-            mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
-            planned_loc = (
-                mp.groupby("location_no_norm")["tower_weight"].sum().rename("planned_mt") if "tower_weight" in mp.columns else pd.Series(dtype=float)
-            )
-        else:
-            planned_loc = pd.Series(dtype=float)
-
-        ed = export_df.copy()
-        ed["location_no_norm"] = (ed.get("location_no", pd.Series([""] * len(ed), index=ed.index)).map(_normalize_location))
-        delivered_loc = ed.groupby("location_no_norm")["tower_weight_mt"].sum().rename("delivered_mt")
-        meta_cols = ["daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"]
-        meta_map = (
-            ed.sort_values("completion_date").drop_duplicates("location_no_norm", keep="last")[["location_no_norm", *[c for c in meta_cols if c in ed.columns]]]
-            if not ed.empty else pd.DataFrame(columns=["location_no_norm", *meta_cols])
-        )
-        meta_map = meta_map.set_index("location_no_norm") if not meta_map.empty else meta_map
-
-        keys = set(planned_loc.index.tolist()) | set(delivered_loc.index.tolist())
-        out = []
-        for loc in sorted(k for k in keys if k):
-            planned = float(planned_loc.get(loc, 0.0)) if hasattr(planned_loc, 'get') else 0.0
-            delivered = float(delivered_loc.get(loc, 0.0)) if hasattr(delivered_loc, 'get') else 0.0
-            meta = meta_map.loc[loc] if (isinstance(meta_map, pd.DataFrame) and (loc in getattr(meta_map, 'index', []))) else None
-            out.append({
-                "location_no": loc,
-                "planned_mt": round(planned, 1),
-                "delivered_mt": round(delivered, 1),
-                "daily_prod_mt": (float(meta["daily_prod_mt"]) if (isinstance(meta, pd.Series) and "daily_prod_mt" in meta) else None),
-                "gang_name": (str(meta["gang_name"]) if (isinstance(meta, pd.Series) and "gang_name" in meta) else ""),
-                "supervisor_name": (str(meta["supervisor_name"]) if (isinstance(meta, pd.Series) and "supervisor_name" in meta) else ""),
-                "section_incharge_name": (str(meta["section_incharge_name"]) if (isinstance(meta, pd.Series) and "section_incharge_name" in meta) else ""),
-            })
-
-        style = {"display": "none"} if not out else {"display": "block"}
-        return style, out
+    def _hide_legacy_location_box(is_open: bool):
+        # Locations now render inside each project accordion item; keep legacy box hidden.
+        return {"display": "none"}
 
     @app.callback(
         Output("trace-modal", "is_open"),

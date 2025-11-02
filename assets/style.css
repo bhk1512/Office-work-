@@ -240,6 +240,30 @@ html {
   cursor: pointer !important;
 }
 
+/* --- KPI Modal (PCH → Projects → Locations) --- */
+.pch-header{
+  background: var(--surface-header);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin: 6px 0 12px;
+}
+.pch-section .accordion-item{
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.pch-section .accordion-button{
+  font-weight: 700;
+}
+.pch-section .badge{ font-weight: 700; }
+
+/* Bigger numbers on project tiles for readability */
+.proj-badges .badge{
+  font-size: 1rem;    /* increase number size */
+  padding: 6px 10px;
+}
+
 
 
 /* === Topbar (Figma-like) === */

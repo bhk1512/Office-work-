@@ -369,43 +369,55 @@ def build_kpi_cards() -> dbc.Row:
                 ),
            ),
 
-            # 3) Towers Erected — visible only in erection mode
+            # 3) Towers Erected - visible only in erection mode (clickable)
             dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div(id="label-total-nos", children="Towers Erected", className="kpi-label"),
-                            html.Div(
+                html.Div(
+                    id="kpi-card-total-nos",
+                    n_clicks=0,
+                    children=
+                        dbc.Card(
+                            dbc.CardBody(
                                 [
-                                    html.Span(id="kpi-total-nos", className="kpi-value"),
-                                    html.Span(id="kpi-total-nos-planned", className="kpi-delta"),
-                                ],
-                                className="kpi-row",
+                                    html.Div(id="label-total-nos", children="Towers Erected", className="kpi-label"),
+                                    html.Div(
+                                        [
+                                            html.Span(id="kpi-total-nos", className="kpi-value"),
+                                            html.Span(id="kpi-total-nos-planned", className="kpi-delta"),
+                                        ],
+                                        className="kpi-row",
+                                    ),
+                                ]
                             ),
-                        ]
-                    ),
-                    className="kpi kpi--green",
+                            className="kpi kpi--green",
+                        ),
+                    style={"cursor": "pointer"},
                 ),
                 id="card-total-nos",
             ),
 
-            # 3b) Total Erection (Nos) — visible only in erection mode
+            # 3b) Total Erection (MT) – visible only in erection mode (clickable)
             dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div(id="label-total", children="Volume Units Erected", className="kpi-label"),
-                            html.Div(
+                html.Div(
+                    id="kpi-card-total-mt",
+                    n_clicks=0,
+                    children=
+                        dbc.Card(
+                            dbc.CardBody(
                                 [
-                                    html.Span(id="kpi-total", className="kpi-value"),
-                                    html.Span(id="kpi-total-planned", className="kpi-delta"),
-                                ],
-                                className="kpi-row",
+                                    html.Div(id="label-total", children="Volume Units Erected", className="kpi-label"),
+                                    html.Div(
+                                        [
+                                            html.Span(id="kpi-total", className="kpi-value"),
+                                            html.Span(id="kpi-total-planned", className="kpi-delta"),
+                                        ],
+                                        className="kpi-row",
+                                    ),
+                                ]
                             ),
-                        ]
-                    ),
-                    className="kpi kpi--green",
-                ),   
+                            className="kpi kpi--green",
+                        ),
+                    style={"cursor": "pointer"},
+                ),
             ),
 
             # 4) Lost Units (red)
@@ -612,6 +624,49 @@ def build_trace_modal() -> dbc.Modal:
     )
 
 
+def build_kpi_details_modal() -> dbc.Modal:
+    """Modal showing PCH-wise drilldown using nested accordions.
+
+    Structure:
+    - PCH header line with totals
+    - Under each PCH, clickable project rows; expanding a project reveals
+      a location-wise table with gang/productivity/responsible names.
+    """
+
+    # Container populated by a callback with an Accordion hierarchy
+    modal_body = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(id="kpi-pch-accordion"),
+                # Hidden legacy elements (to avoid missing-callback errors
+                # during hot reloads). They remain empty and invisible.
+                html.Div(id="kpi-location-box", style={"display": "none"}),
+            ]
+        ),
+        className="shadow-sm",
+    )
+
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle(id="kpi-modal-title"), close_button=True),
+            dbc.ModalBody(modal_body),
+            dbc.ModalFooter(
+                dbc.Button(
+                    "Close",
+                    id="kpi-modal-close",
+                    className="ms-auto",
+                    n_clicks=0,
+                )
+            ),
+        ],
+        id="kpi-modal",
+        is_open=False,
+        size="xl",
+        scrollable=True,
+        backdrop=True,
+        keyboard=True,
+    )
+
 def build_header(title: str, last_updated_text: str) -> html.Div:
     """Top section: icon + big title, and 'Last Updated On' line under it."""
 
@@ -702,6 +757,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     controls = build_controls()
     
     trace_modal = build_trace_modal()
+    kpi_modal = build_kpi_details_modal()
     layout = dbc.Container(
         [
             build_header("Productivity Dashboard", last_updated_text),
@@ -1009,6 +1065,9 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             html.Div(id="mode-data-debug", style={"display": "none"}),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
+            kpi_modal,
+            dcc.Store(id="store-kpi-modal-source", data=None),
+            dcc.Store(id="store-kpi-selected-project", data=None),
         ],
         fluid=True,
     )
