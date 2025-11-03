@@ -1054,7 +1054,20 @@ def register_callbacks(
             return dash.no_update, dash.no_update, dash.no_update, None
         # On mode toggle or Reset click: reset all filters to defaults
         if trigger_id in {"mode-toggle", "btn-reset-filters"}:
-            default_month = datetime.today().strftime("%Y-%m")
+            # Compute default month from the latest data date in the active mode's dataset
+            try:
+                eff_mode = (mode_value or "erection").strip().lower()
+                df = _select_daily(eff_mode)
+                latest_date = None
+                if isinstance(df, pd.DataFrame) and not df.empty and "date" in df.columns:
+                    dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+                    if not dates.empty:
+                        latest_date = dates.max()
+                default_month = (
+                    pd.Timestamp(latest_date).strftime("%Y-%m") if latest_date is not None else datetime.today().strftime("%Y-%m")
+                )
+            except Exception:
+                default_month = datetime.today().strftime("%Y-%m")
             return None, [default_month], None, None
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
@@ -1284,14 +1297,11 @@ def register_callbacks(
                 opt_values = {opt.get("value") for opt in (options or [])}
                 if selected & opt_values:
                     return dash.no_update
-            # Prefer current month if available, else pick latest option
+            # Pick the latest available month option (based on data), not today's month
             opt_values = [opt.get("value") for opt in (options or []) if isinstance(opt, dict)]
             if not opt_values:
                 return dash.no_update
-            today_val = datetime.today().strftime("%Y-%m")
-            if today_val in opt_values:
-                return [today_val]
-            # Parse to pick latest
+            # Parse values like YYYY-MM and choose the max
             def _parse(val: str):
                 try:
                     y, m = val.split("-")

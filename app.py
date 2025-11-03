@@ -63,8 +63,13 @@ DATA_PATH: Path = CONFIG.data_path
 df_day: pd.DataFrame | None = None
 # Preloaded stringing daily dataset (optional, warmed up at app start)
 df_stringing_day: pd.DataFrame | None = None
-LAST_UPDATED_DATE: pd.Timestamp | None = None
-LAST_UPDATED_TEXT: str = "N/A"
+
+# Metadata:
+# - LAST_DATA_DATE[_TEXT]: derived from the max "date" in the loaded dataset
+# - LAST_LOADED_TEXT: when data was last loaded into the app (server-side time)
+LAST_DATA_DATE: pd.Timestamp | None = None
+LAST_DATA_DATE_TEXT: str = "N/A"
+LAST_LOADED_TEXT: str = "N/A"
 
 df_projinfo: pd.DataFrame | None = None
 def get_df_projinfo() -> pd.DataFrame:
@@ -235,22 +240,27 @@ def _load_responsibilities_data(
 
 
 def _update_last_updated_metadata(df: pd.DataFrame) -> None:
-    """Update module-level metadata derived from *df*."""
+    """Update derived metadata from the dataset: latest data date string."""
 
-    global LAST_UPDATED_DATE, LAST_UPDATED_TEXT
+    global LAST_DATA_DATE, LAST_DATA_DATE_TEXT
     last_date = df["date"].max()
-    LAST_UPDATED_DATE = pd.to_datetime(last_date) if pd.notna(last_date) else None
-    LAST_UPDATED_TEXT = (
-        LAST_UPDATED_DATE.strftime("%d-%m-%Y") if LAST_UPDATED_DATE is not None else "N/A"
+    LAST_DATA_DATE = pd.to_datetime(last_date) if pd.notna(last_date) else None
+    LAST_DATA_DATE_TEXT = (
+        LAST_DATA_DATE.strftime("%d-%m-%Y") if LAST_DATA_DATE is not None else "N/A"
     )
 
 
 def set_df_day(df: pd.DataFrame) -> None:
     """Set the global daily dataframe and refresh derived metadata."""
 
-    global df_day
+    global df_day, LAST_LOADED_TEXT
     df_day = df
     _update_last_updated_metadata(df)
+    # Mark when the app loaded/refreshed its dataset (displayed as "Last Updated On")
+    try:
+        LAST_LOADED_TEXT = pd.Timestamp.now().strftime("%d-%m-%Y")
+    except Exception:
+        LAST_LOADED_TEXT = "N/A"
 
 
 def get_df_day() -> pd.DataFrame:
@@ -262,9 +272,9 @@ def get_df_day() -> pd.DataFrame:
 
 
 def get_last_updated_text() -> str:
-    """Return the last updated text for health probes."""
+    """Return the app data load timestamp text (for header/health)."""
 
-    return LAST_UPDATED_TEXT
+    return LAST_LOADED_TEXT
 
 
 # --- Stringing dataset accessors (mirrors erection flow) ---
@@ -333,7 +343,7 @@ def initialise_data(config: AppConfig) -> Tuple[pd.DataFrame, str]:
         config.data_path, len(df), list(df.columns), 0 if df_projinfo is None else len(df_projinfo)
     )
 
-    return df, LAST_UPDATED_TEXT
+    return df, LAST_LOADED_TEXT
 
 
 def create_app(config: AppConfig | None = None) -> Dash:
