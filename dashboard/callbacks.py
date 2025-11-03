@@ -758,6 +758,10 @@ def register_callbacks(
             aggregated["delivered_tower_weight"],
         )
 
+        # Ensure chart builder has the target column by metric name
+        if "revenue_planned" in aggregated.columns and "revenue" not in aggregated.columns:
+            aggregated["revenue"] = aggregated["revenue_planned"]
+
         if aggregated.empty:
             return _empty_response("No responsibilities found for the selected filters.")
 
@@ -3584,11 +3588,10 @@ def register_callbacks(
         Input("proj-resp-metric", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
-        State("proj-resp-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _render_proj_resp(code_value, entity_value, metric_value, months_value, quick_value, is_open):
-        if not is_open or not code_value:
+    def _render_proj_resp(code_value, entity_value, metric_value, months_value, quick_value):
+        if not code_value:
             raise PreventUpdate
         return _build_responsibilities_for_project(
             project_value=code_value,
