@@ -404,7 +404,7 @@ def build_kpi_cards() -> dbc.Row:
                         dbc.Card(
                             dbc.CardBody(
                                 [
-                                    html.Div(id="label-total", children="Volume Units Erected", className="kpi-label"),
+                                    html.Div(id="label-total", children="Volume Erected", className="kpi-label"),
                                     html.Div(
                                         [
                                             html.Span(id="kpi-total", className="kpi-value"),
@@ -625,21 +625,14 @@ def build_trace_modal() -> dbc.Modal:
 
 
 def build_kpi_details_modal() -> dbc.Modal:
-    """Modal showing PCH-wise drilldown using nested accordions.
-
-    Structure:
-    - PCH header line with totals
-    - Under each PCH, clickable project rows; expanding a project reveals
-      a location-wise table with gang/productivity/responsible names.
-    """
+    """Modal showing PCH-wise drilldown using nested accordions."""
 
     # Container populated by a callback with an Accordion hierarchy
     modal_body = dbc.Card(
         dbc.CardBody(
             [
                 html.Div(id="kpi-pch-accordion"),
-                # Hidden legacy elements (to avoid missing-callback errors
-                # during hot reloads). They remain empty and invisible.
+                # Hidden legacy elements (to avoid missing-callback errors during hot reloads)
                 html.Div(id="kpi-location-box", style={"display": "none"}),
             ]
         ),
@@ -660,6 +653,77 @@ def build_kpi_details_modal() -> dbc.Modal:
             ),
         ],
         id="kpi-modal",
+        is_open=False,
+        size="xl",
+        scrollable=True,
+        backdrop=True,
+        keyboard=True,
+    )
+
+def build_project_responsibilities_modal() -> dbc.Modal:
+    """Nested mini-modal to show Responsibilities chart for a selected project."""
+    body = dbc.Card(
+        dbc.CardBody(
+            [
+                dcc.Graph(
+                    id="proj-resp-graph",
+                    config={"displayModeBar": False},
+                    style={"height": "360px"},
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-resp-kpi-target", className="kpi-value"),
+                                        html.Div("Total Target", className="kpi-sub"),
+                                    ]
+                                ),
+                                className="kpi kpi-blue",
+                            ),
+                            md=4,
+                        ),
+                        dbc.Col(
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-resp-kpi-delivered", className="kpi-value"),
+                                        html.Div("Delivered", className="kpi-sub"),
+                                    ]
+                                ),
+                                className="kpi kpi-green",
+                            ),
+                            md=4,
+                        ),
+                        dbc.Col(
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-resp-kpi-ach", className="kpi-value"),
+                                        html.Div("Achievement", className="kpi-sub"),
+                                    ]
+                                ),
+                                className="kpi kpi-red",
+                            ),
+                            md=4,
+                        ),
+                    ],
+                    className="kpi-row-compact",
+                ),
+            ]
+        ),
+        className="shadow-sm",
+    )
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle(id="proj-resp-modal-title"), close_button=True),
+            dbc.ModalBody(body),
+            dbc.ModalFooter(
+                dbc.Button("Close", id="proj-resp-modal-close", className="ms-auto")
+            ),
+        ],
+        id="proj-resp-modal",
         is_open=False,
         size="xl",
         scrollable=True,
@@ -1066,8 +1130,10 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
             kpi_modal,
+            build_project_responsibilities_modal(),
             dcc.Store(id="store-kpi-modal-source", data=None),
             dcc.Store(id="store-kpi-selected-project", data=None),
+            dcc.Store(id="store-proj-resp-code", data=None),
         ],
         fluid=True,
     )

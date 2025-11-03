@@ -14,7 +14,7 @@ import re
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html, dash_table
-from dash.dependencies import MATCH
+from dash.dependencies import MATCH, ALL
 from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
@@ -550,6 +550,244 @@ def register_callbacks(
             # For downstream components that expect daily_prod_mt (charts/helpers)
             df["daily_prod_mt"] = df["daily_km"]
         return df
+
+    # --- shared: responsibilities figure + KPIs for a single project selection ---
+    def _build_responsibilities_for_project(
+        project_value: str | None,
+        entity_value: str | None,
+        metric_value: str | None,
+        months_value: Sequence[str] | None,
+        quick_range_value: str | None,
+    ):
+        def _empty_response(message: str):
+            empty_fig = build_empty_responsibilities_figure(message)
+            return empty_fig, "\u2014", "\u2014", "\u2014"
+
+        if not project_value:
+            return _empty_response("Select a single project to view its details.")
+
+        project_value = str(project_value).strip()
+        entity = (entity_value or "Supervisor").strip()
+        metric = (metric_value or "tower_weight").strip()
+        metric = metric if metric in {"revenue", "tower_weight"} else "tower_weight"
+
+        load_error_msg: str | None = None
+        completed_keys: set[tuple[str, str]] = set()
+        df_atomic: pd.DataFrame | None = None
+        workbook: pd.ExcelFile | None = None
+
+        if responsibilities_provider is not None:
+            try:
+                df_atomic = responsibilities_provider()
+            except RuntimeError as exc:
+                LOGGER.warning("Responsibilities data unavailable: %s", exc)
+                return _empty_response(str(exc))
+            except Exception as exc:
+                LOGGER.exception("Failed to access responsibilities data: %s", exc)
+                return _empty_response("Unable to load Micro Plan data.")
+            else:
+                df_atomic = df_atomic.copy()
+                if responsibilities_completion_provider is not None:
+                    try:
+                        completed_keys = set(responsibilities_completion_provider())
+                    except Exception as exc:
+                        LOGGER.warning("Failed to resolve responsibilities completion keys: %s", exc)
+                        completed_keys = set()
+                if responsibilities_error_provider is not None:
+                    try:
+                        load_error_msg = responsibilities_error_provider()
+                    except Exception:
+                        load_error_msg = None
+        else:
+            cfg = config
+            try:
+                workbook = pd.ExcelFile(cfg.data_path)
+            except FileNotFoundError:
+                LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
+                return _empty_response("Compiled workbook not found.")
+            except Exception as exc:
+                LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
+                return _empty_response("Unable to load Micro Plan data.")
+
+            atomic_sheet = "MicroPlanResponsibilities"
+            if atomic_sheet not in workbook.sheet_names:
+                LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
+                return _empty_response("No Micro Plan data found in the compiled workbook.")
+
+            df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
+
+        if df_atomic is None or df_atomic.empty:
+            message = load_error_msg or "No Micro Plan data found in the compiled workbook."
+            return _empty_response(message)
+
+        df_atomic = df_atomic.copy()
+
+        month_list = _ensure_list(months_value)
+        months_ts = resolve_months(month_list, quick_range_value)
+        active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
+
+        if 'completion_date' in df_atomic.columns:
+            df_atomic['completion_month'] = pd.to_datetime(
+                df_atomic['completion_date'], errors='coerce'
+            ).dt.to_period('M').dt.to_timestamp()
+        else:
+            df_atomic['completion_month'] = pd.NaT
+
+        # text normalizers (copy from local scope to avoid shadowing)
+        def _norm_text(v: object) -> str:
+            s = str(v).replace("\u00a0", " ").strip()
+            low = s.lower()
+            if low in {"", "nan", "none", "null"}:
+                return ""
+            return s
+
+        def _norm_lc(v: object) -> str:
+            return _norm_text(v).lower()
+
+        def _norm_loc(v: object) -> str:
+            t = _norm_text(v)
+            if not t:
+                return ""
+            if t.endswith(".0") and t.replace(".", "", 1).isdigit():
+                t = t.split(".", 1)[0]
+            return t
+
+        for c in ("project_key", "project_name", "entity_type", "entity_name", "location_no"):
+            if c not in df_atomic.columns:
+                df_atomic[c] = ""
+        df_atomic["project_name_lc"] = df_atomic["project_name"].map(_norm_lc)
+        df_atomic["project_key_lc"] = df_atomic["project_key"].astype(str).map(_norm_lc)
+        df_atomic["location_no_norm"] = df_atomic["location_no"].map(_norm_loc)
+
+        # Filter to selected months
+        if active_months:
+            df_atomic = df_atomic[df_atomic["completion_month"].isin(active_months)].copy()
+
+        # Filter by project (supports name or code; robust compact match)
+        sel = _norm_lc(project_value)
+        mask_name_or_key = (
+            (df_atomic["project_name_lc"] == sel) | (df_atomic["project_key_lc"] == sel)
+        )
+        if not mask_name_or_key.any():
+            import re as _re
+            sel_compact = _re.sub(r"[^a-z0-9]", "", sel)
+            project_name_compact = df_atomic["project_name_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+            project_key_compact = df_atomic["project_key_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+            mask_name_or_key = (
+                (project_name_compact == sel_compact) | (project_key_compact == sel_compact)
+            )
+        df_entity = df_atomic[mask_name_or_key].copy()
+
+        # Entity filter (Supervisor / Section Incharge / Gang)
+        ent_map = {
+            "supervisor": "supervisor",
+            "supervisors": "supervisor",
+            "section incharge": "section incharge",
+            "section-incharge": "section incharge",
+            "section in-charge": "section incharge",
+            "gang": "gang",
+            "gangs": "gang",
+        }
+        entity_norm = ent_map.get(entity.lower(), entity.lower())
+        df_entity["entity_type_lc"] = df_entity["entity_type"].map(_norm_lc)
+        df_entity = df_entity[df_entity["entity_type_lc"] == entity_norm].copy()
+
+        if df_entity.empty:
+            return _empty_response("No responsibilities found for the selected filters.")
+
+        df_entity["is_completed"] = [
+            (proj, loc) in completed_keys
+            for proj, loc in zip(df_entity["project_name_lc"], df_entity["location_no_norm"])
+        ]
+
+        df_entity["revenue_planned"] = pd.to_numeric(df_entity.get("revenue_planned", 0.0), errors="coerce").fillna(0.0)
+        df_entity["revenue_realised"] = pd.to_numeric(df_entity.get("revenue_realised", 0.0), errors="coerce").fillna(0.0)
+        df_entity["tower_weight"] = pd.to_numeric(df_entity.get("tower_weight", 0.0), errors="coerce").fillna(0.0)
+
+        df_entity["delivered_revenue"] = np.where(
+            df_entity["revenue_realised"] > 0,
+            df_entity["revenue_realised"],
+            np.where(df_entity["is_completed"], df_entity["revenue_planned"], 0.0),
+        )
+        df_entity["delivered_tower_weight"] = np.where(
+            df_entity["is_completed"], df_entity["tower_weight"], 0.0
+        )
+
+        df_entity = df_entity[df_entity.get("entity_name", "").astype(bool)].copy()
+        if df_entity.empty:
+            return _empty_response("No responsibilities found for the selected filters.")
+
+        aggregated = (
+            df_entity.groupby("entity_name", as_index=False)[
+                [
+                    "revenue_planned",
+                    "delivered_revenue",
+                    "tower_weight",
+                    "delivered_tower_weight",
+                    "location_no",
+                ]
+            ].agg({
+                "revenue_planned": "sum",
+                "delivered_revenue": "sum",
+                "tower_weight": "sum",
+                "delivered_tower_weight": "sum",
+                "location_no": lambda s: [str(v).strip() for v in s if str(v).strip()],
+            })
+        )
+
+        target_metric_col = "revenue_planned" if metric == "revenue" else "tower_weight"
+        delivered_metric_col = ("delivered_revenue" if metric == "revenue" else "delivered_tower_weight")
+
+        # Derive location lists
+        filtered_target = df_entity[df_entity[target_metric_col] > 0]
+        if filtered_target.empty:
+            filtered_target = df_entity
+        target_locations = (
+            filtered_target.groupby("entity_name")["location_no"].apply(list).rename("target_locations")
+        )
+        filtered_delivered = df_entity[df_entity[delivered_metric_col] > 0]
+        delivered_locations = (
+            filtered_delivered.groupby("entity_name")["location_no"].apply(list).rename("delivered_locations")
+        )
+        aggregated = aggregated.merge(target_locations, on="entity_name", how="left")
+        aggregated = aggregated.merge(delivered_locations, on="entity_name", how="left")
+
+        aggregated["delivered_value"] = np.where(
+            metric == "revenue",
+            aggregated["delivered_revenue"],
+            aggregated["delivered_tower_weight"],
+        )
+
+        if aggregated.empty:
+            return _empty_response("No responsibilities found for the selected filters.")
+
+        fig = build_responsibilities_chart(
+            aggregated,
+            entity_label=entity,
+            metric=metric,
+            title=None,
+            top_n=20,
+        )
+
+        if metric == "revenue":
+            total_target = float(aggregated["revenue_planned"].sum())
+            total_delivered = float(aggregated["delivered_revenue"].sum())
+        else:
+            total_target = float(aggregated["tower_weight"].sum())
+            total_delivered = float(aggregated["delivered_tower_weight"].sum())
+
+        achievement = 0.0 if total_target == 0 else (total_delivered / total_target) * 100.0
+
+        def fmt_num(value: float) -> str:
+            if metric == "revenue":
+                return f"\u20b9{value:,.0f}"
+            return f"{value:,.0f} MT"
+
+        kpi_target_txt = fmt_num(total_target)
+        kpi_deliv_txt = fmt_num(total_delivered)
+        kpi_ach_txt = f"{achievement:.0f}%"
+
+        return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
     
         # --- helper: attach __line_kv__ by looking up Project Details "Project Name" ---
     def _attach_line_kv(work: pd.DataFrame) -> pd.DataFrame:
@@ -3040,6 +3278,12 @@ def register_callbacks(
                 aggregated[key] = {
                     "pch": pch_label,
                     "project_name": proj,
+                    "project_code": (
+                        (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
+                            meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
+                        ))
+                        if isinstance(meta, pd.DataFrame) else ""
+                    ),
                     "planned_mt": 0.0,
                     "delivered_mt": mt_del,
                     "planned_nos": 0,
@@ -3231,6 +3475,7 @@ def register_callbacks(
 
                 # Build the grid tile representation used for the new layout
                 key = f"{pch}::{proj_name}"
+                proj_code = r.get("project_code") or r.get("project_key") or proj_name
                 tile_body = html.Div([
                     html.Div(html.Strong(proj_name), className="mb-2"),
                     html.Div([
@@ -3249,8 +3494,12 @@ def register_callbacks(
                         html.Span("Volume Units Erected : ", className="me-2"),
                         dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
-                    dbc.Button("View Responsibilities", id={"type": "proj-resp-toggle", "key": key}, color="link", className="p-0"),
-                    dbc.Collapse(html.Div(sections_children, className="mt-2"), id={"type": "proj-resp-collapse", "key": key}, is_open=False),
+                    dbc.Button(
+                        "View Responsibilities",
+                        id={"type": "proj-resp-open", "code": proj_code},
+                        color="link",
+                        className="p-0",
+                    ),
                 ])
 
                 tile_cols.append(
@@ -3289,6 +3538,58 @@ def register_callbacks(
         if not n:
             raise PreventUpdate
         return not bool(is_open)
+
+    # --- Project Responsibilities mini-modal: open/close and set project code ---
+    @app.callback(
+        Output("proj-resp-modal", "is_open"),
+        Output("proj-resp-modal-title", "children"),
+        Output("store-proj-resp-code", "data"),
+        Input({"type": "proj-resp-open", "code": ALL}, "n_clicks"),
+        Input("proj-resp-modal-close", "n_clicks"),
+        State("proj-resp-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def _toggle_proj_resp_modal(open_clicks, close_clicks, is_open):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trig = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trig == "proj-resp-modal-close":
+            return False, dash.no_update, dash.no_update
+        # Parse dict ID to get project code
+        try:
+            import json as _json
+            id_obj = _json.loads(trig)
+            code = id_obj.get("code")
+        except Exception:
+            code = None
+        title = f"Responsibilities \u2014 {code}" if code else "Responsibilities"
+        return True, title, code
+
+    # --- Render responsibilities inside the project mini-modal ---
+    @app.callback(
+        Output("proj-resp-graph", "figure"),
+        Output("proj-resp-kpi-target", "children"),
+        Output("proj-resp-kpi-delivered", "children"),
+        Output("proj-resp-kpi-ach", "children"),
+        Input("store-proj-resp-code", "data"),
+        Input("f-resp-entity", "value"),
+        Input("f-resp-metric", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        State("proj-resp-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def _render_proj_resp(code_value, entity_value, metric_value, months_value, quick_value, is_open):
+        if not is_open or not code_value:
+            raise PreventUpdate
+        return _build_responsibilities_for_project(
+            project_value=code_value,
+            entity_value=entity_value,
+            metric_value=metric_value,
+            months_value=months_value,
+            quick_range_value=quick_value,
+        )
 
     @app.callback(
         Output("trace-modal", "is_open"),
