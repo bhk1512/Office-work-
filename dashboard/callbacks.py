@@ -27,7 +27,10 @@ from .charts import (
     build_empty_responsibilities_figure,
 )
 from .config import AppConfig
-from .data_loader import load_stringing_daily as _load_stringing_daily
+from .data_loader import (
+    load_stringing_daily as _load_stringing_daily,
+    load_stringing_compiled_raw as _load_stringing_compiled_raw,
+)
 from .filters import apply_filters, resolve_months
 from .metrics import (
     calc_idle_and_loss,
@@ -3115,12 +3118,16 @@ def register_callbacks(
         mode = (mode_value or "erection").strip().lower()
         if trig == "kpi-modal-close":
             return False, dash.no_update, dash.no_update
-        if mode != "erection":
-            raise PreventUpdate
-        if trig == "kpi-card-total-nos":
-            return True, "Towers Erected - PCH Wise Planned vs Delivered", {"source": "nos"}
-        if trig == "kpi-card-total-mt":
-            return True, "Volume Erected - PCH Wise Planned vs Delivered", {"source": "mt"}
+        # Erection: open for both Nos and MT
+        if mode == "erection":
+            if trig == "kpi-card-total-nos":
+                return True, "Towers Erected - PCH Wise Planned vs Delivered", {"source": "nos"}
+            if trig == "kpi-card-total-mt":
+                return True, "Volume Erected - PCH Wise Planned vs Delivered", {"source": "mt"}
+        # Stringing: open for KM (reuse MT card click)
+        if mode == "stringing":
+            if trig == "kpi-card-total-mt":
+                return True, "Length Stringed - PCH Wise Planned vs Delivered", {"source": "km"}
         raise PreventUpdate
 
     @app.callback(
@@ -3137,8 +3144,201 @@ def register_callbacks(
         if not is_open:
             raise PreventUpdate
         mode = (mode_value or "erection").strip().lower()
-        if mode != "erection":
-            return []
+        # Erection mode (existing flow)
+        if mode != "stringing":
+            # fall through to original erection implementation below
+            pass
+        else:
+            # Stringing mode: build PCH-wise planned vs delivered (KM)
+            project_list = _ensure_list(projects)
+            month_list = _ensure_list(months)
+            months_ts = resolve_months(month_list, quick_range)
+
+            # Month range for display/derivations
+            if months_ts:
+                range_start = pd.Timestamp(min(months_ts)).normalize()
+                range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
+            else:
+                today = pd.Timestamp.today().normalize()
+                range_start = today.to_period("M").start_time.normalize()
+                range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+
+            # Delivered KM from per-day stringing dataset
+            df_day = _select_daily("stringing")
+            scoped = apply_filters(df_day, project_list, months_ts, [])
+            if isinstance(scoped, pd.DataFrame) and not scoped.empty:
+                proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
+                if proj_col is None:
+                    return []
+                delivered_km_by_project = (
+                    scoped.groupby(scoped[proj_col].astype(str))
+                          .agg({"daily_km": "sum"})
+                          .rename(columns={"daily_km": "delivered_km"})
+                ) if "daily_km" in scoped.columns else pd.DataFrame(columns=["delivered_km"])
+            else:
+                delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
+
+            # Planned KM from compiled stringing dataset (section-level total length)
+            try:
+                df_compiled = _load_stringing_compiled_raw(config)
+            except Exception:
+                df_compiled = pd.DataFrame()
+            planned_km_by_project = pd.DataFrame(columns=["planned_km"])
+            if isinstance(df_compiled, pd.DataFrame) and not df_compiled.empty:
+                comp = df_compiled.copy()
+                # Detect project/name column robustly
+                comp_proj_col = None
+                for cand in ("project_name", "project", "Project Name", "Project"):
+                    if cand in comp.columns:
+                        comp_proj_col = cand
+                        break
+                if comp_proj_col is not None:
+                    # Try to filter by month using FS completion or PO start month if present
+                    date_col = None
+                    for dc in ("fs_complete_date", "fs_completed_date", "fs_date", "po_start_date", "date"):
+                        if dc in comp.columns:
+                            date_col = dc
+                            break
+                    if date_col is not None and months_ts:
+                        comp[date_col] = pd.to_datetime(comp[date_col], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                        comp = comp[comp[date_col].isin(months_ts)].copy()
+                    # Ensure length_km exists
+                    if "length_km" not in comp.columns and "length_m" in comp.columns:
+                        comp["length_km"] = pd.to_numeric(comp["length_m"], errors="coerce") / 1000.0
+                    comp["length_km"] = pd.to_numeric(comp.get("length_km", np.nan), errors="coerce")
+                    planned_km_by_project = (
+                        comp.groupby(comp[comp_proj_col].astype(str))["length_km"].sum().to_frame("planned_km")
+                    )
+
+            # Merge planned and delivered into a projects table
+            projects_df = (
+                planned_km_by_project
+                .join(delivered_km_by_project, how="outer")
+                .fillna(0.0)
+                .reset_index()
+                .rename(columns={"index": "project_name"})
+            )
+            if "project_name" not in projects_df.columns:
+                # If group key preserved original name
+                for cand in ("project_name", "project", "Project Name"):
+                    if cand in projects_df.columns:
+                        projects_df = projects_df.rename(columns={cand: "project_name"})
+                        break
+            projects_df["project_name_display"] = projects_df["project_name"].astype(str)
+
+            # Project meta (PCH, managers) from Project Details
+            try:
+                info_df = project_info_provider() if callable(project_info_provider) else None
+            except Exception:
+                info_df = None
+            if isinstance(info_df, pd.DataFrame) and not info_df.empty:
+                info = info_df.copy()
+                info["project_name_display"] = info.get("Project Name", info.get("project_name", "")).astype(str)
+                info["project_name_norm"] = info["project_name_display"].map(_normalize_lower)
+                pch_col = None
+                for cand in ("PCH", "pch", "PCH Name", "PCHName", "pch_name"):
+                    if cand in info.columns:
+                        pch_col = cand
+                        break
+                if pch_col is None:
+                    info["pch"] = ""
+                    pch_col = "pch"
+            else:
+                info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])
+
+            proj_info_pch = {}
+            if not info.empty and "pch" in info.columns:
+                proj_info_pch = dict(zip(info["project_name_display"], info["pch"].astype(str)))
+
+            try:
+                from .pch_normalizer import normalize_pch as _normalize_pch, CANONICAL_PCH_PRIMARY as _PCH_ORDER
+            except Exception:
+                def _normalize_pch(v):
+                    return str(v or "").strip()
+                _PCH_ORDER = ()
+
+            # Build structure: PCH -> list of project tiles
+            projects_rows: dict[str, list[dict[str, Any]]] = {}
+            for _, row in projects_df.iterrows():
+                proj = str(row.get("project_name_display", "")).strip()
+                if not proj:
+                    continue
+                planned_km = float(row.get("planned_km", 0.0) or 0.0)
+                delivered_km = float(row.get("delivered_km", 0.0) or 0.0)
+                # Meta join
+                meta = info[info.get("project_name_norm", "").astype(str) == _normalize_lower(proj)].iloc[:1] if not info.empty else pd.DataFrame()
+                raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
+                pch_label = _normalize_pch(raw_pch) or "Unassigned"
+                rec = {
+                    "project_name": proj,
+                    "project_code": (meta.get("project_code", pd.Series([proj])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else proj),
+                    "regional_mgr": (meta.get("regional_mgr", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "regional_mgr" in meta.columns) else ""),
+                    "project_mgr": (meta.get("project_mgr", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_mgr" in meta.columns) else ""),
+                    "planning_eng": (meta.get("planning_eng", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "planning_eng" in meta.columns) else ""),
+                    # store KM in MT fields to reuse downstream structure but change labels to KM
+                    "planned_mt": round(planned_km, 1),
+                    "delivered_mt": round(delivered_km, 1),
+                    # counts not applicable for stringing
+                    "planned_nos": 0,
+                    "delivered_nos": 0,
+                }
+                projects_rows.setdefault(pch_label, []).append(rec)
+
+            def _pch_sort_key(name: str) -> tuple[int, str]:
+                if name == "Unassigned":
+                    return (2, "")
+                try:
+                    idx = list(_PCH_ORDER).index(name)
+                    return (0, f"{idx:03d}")
+                except ValueError:
+                    return (1, str(name))
+
+            pch_sections = []
+            for pch in sorted(projects_rows.keys(), key=_pch_sort_key):
+                rows = projects_rows[pch]
+                p_planned_km = sum(r["planned_mt"] for r in rows)
+                p_delivered_km = sum(r["delivered_mt"] for r in rows)
+
+                header = dbc.Row([
+                    dbc.Col(html.H6(str(pch), className="mb-0"), md=3),
+                    dbc.Col(html.Div([dbc.Badge(f"KM {p_delivered_km:.1f}/{p_planned_km:.1f}", color="dark", className="me-2")]), md=9),
+                ], className="pch-header align-items-center py-2")
+
+                tile_cols = []
+                for r in sorted(rows, key=lambda x: str(x["project_name"])):
+                    proj_name = str(r["project_name"]).strip()
+                    proj_code = r.get("project_code") or proj_name
+                    tile_body = html.Div([
+                        html.Div(html.Strong(proj_name), className="mb-2"),
+                        html.Div([
+                            html.Span("Regional Manager : ", className="text-muted me-1"),
+                            dbc.Badge(r.get("regional_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
+                        ], className="mb-1"),
+                        html.Div([
+                            html.Span("Project Manager : ", className="text-muted me-1"),
+                            dbc.Badge(r.get("project_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
+                        ], className="mb-2"),
+                        html.Div([
+                            html.Span("Length Stringed : ", className="me-2"),
+                            dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} KM", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
+                        ], className="mb-2"),
+                        dbc.Button(
+                            "View Responsibilities",
+                            id={"type": "proj-resp-open", "code": proj_code},
+                            color="link",
+                            className="p-0",
+                        ),
+                    ])
+                    tile_cols.append(
+                        dbc.Col(
+                            dbc.Card(dbc.CardBody(tile_body), className="h-100 shadow-sm"),
+                            xs=12, sm=12, md=6, lg=4, className="mb-3"
+                        )
+                    )
+
+                pch_sections.append(html.Div([header, dbc.Row(tile_cols, className="g-3")], className="pch-section mb-4"))
+
+            return pch_sections
 
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
