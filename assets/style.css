@@ -561,6 +561,30 @@ html {
 .card:has(#g-responsibilities) #g-responsibilities { margin-bottom: 0.25rem; }
 
 
+/* === Responsibilities mini-modal (project) KPI chips ===
+   The generic .kpi style sets text color to white for vibrant cards.
+   Inside the Responsibilities project modal our KPI chips use light
+   backgrounds, so we need to override colors similarly to the main card. */
+.modal-content:has(#proj-resp-graph) .kpi {
+  padding: 6px 10px;
+  min-height: 56px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-1);
+  background: #fff;
+  color: #0f172a; /* override white text from generic .kpi */
+}
+.modal-content:has(#proj-resp-graph) .kpi .card-body { padding: 8px 10px; row-gap: 2px; }
+.modal-content:has(#proj-resp-graph) .kpi .kpi-value { font-size: 22px; font-weight: 800; line-height: 1.1; color: inherit; }
+.modal-content:has(#proj-resp-graph) .kpi .kpi-sub   { font-size: 13px; margin-top: 1px; color: #6b7280; }
+.modal-content:has(#proj-resp-graph) .kpi.kpi-blue  { background-color: #F1F5FF; }
+.modal-content:has(#proj-resp-graph) .kpi.kpi-red   { background-color: #FFF4F4; }
+.modal-content:has(#proj-resp-graph) .kpi.kpi-green { background-color: #F0FFF6; }
+.modal-content:has(#proj-resp-graph) .kpi.kpi-blue  .kpi-value  { color: #2563EB; }
+.modal-content:has(#proj-resp-graph) .kpi.kpi-red   .kpi-value  { color: #DC2626; }
+.modal-content:has(#proj-resp-graph) .kpi.kpi-green .kpi-value  { color: #16A34A; }
+
+
 
 /* === Standard viz card chrome (border, radius, shadow) === */
 .viz-card {
