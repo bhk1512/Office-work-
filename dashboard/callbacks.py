@@ -14,6 +14,7 @@ import re
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html, dash_table
+from dash.dependencies import MATCH
 from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
@@ -1244,6 +1245,13 @@ def register_callbacks(
 
         display_name = fmt_txt("Project Name") or fmt_txt("project_name") or selected_project
 
+        # Normalize PCH display using centralized normalizer if present
+        try:
+            from .pch_normalizer import normalize_pch as _norm_pch_display
+        except Exception:
+            def _norm_pch_display(v):
+                return str(v or "").strip()
+
         body = html.Div(
             [
                 html.Div(
@@ -1262,7 +1270,7 @@ def register_callbacks(
                 html.Div(
                     [
                         html.P("PCH", className="project-label"),
-                        html.H6(fmt_txt("pch"), className="project-value"),
+                        html.H6(_norm_pch_display(record.get("pch")), className="project-value"),
                         html.P("REGIONAL MANAGER", className="project-label"),
                         html.H6(fmt_txt("regional_mgr"), className="project-value"),
                         html.P("PROJECT MANAGER", className="project-label"),
@@ -2957,7 +2965,7 @@ def register_callbacks(
             ] if not ed.empty else pd.DataFrame(columns=["location_no_norm", *meta_cols])
         ).set_index("location_no_norm") if not ed.empty else pd.DataFrame()
 
-        # Project meta (regional/project manager, planning engineer) + PCH mapping strictly from Project Details
+        # Project meta (regional/project manager, planning engineer) + PCH mapping from Project Details
         try:
             info_df = project_info_provider() if callable(project_info_provider) else None
         except Exception:
@@ -2965,6 +2973,8 @@ def register_callbacks(
         if isinstance(info_df, pd.DataFrame) and not info_df.empty:
             info = info_df.copy()
             info["project_name_display"] = info.get("Project Name", info.get("project_name", "")).astype(str)
+            # Prepare normalized key for robust matching (case-insensitive, trimmed)
+            info["project_name_norm"] = info["project_name_display"].map(_normalize_lower)
             # Find a PCH column in a forgiving way
             pch_col = None
             for cand in ("PCH", "pch", "PCH Name", "PCHName", "pch_name"):
@@ -2975,7 +2985,7 @@ def register_callbacks(
                 info["pch"] = ""
                 pch_col = "pch"
         else:
-            info = pd.DataFrame(columns=["project_name_display", "pch", "regional_mgr", "project_mgr", "planning_eng"])            
+            info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])            
 
         # Build hierarchy: PCH -> Projects -> Locations
         # Ensure we always have a PCH value; fall back to project-info mapping if blank
@@ -2983,27 +2993,70 @@ def register_callbacks(
         if not info.empty and "pch" in info.columns:
             proj_info_pch = dict(zip(info["project_name_display"], info["pch"].astype(str)))
 
-        projects_rows = {}
-        for (pch, proj), mt in planned_mt.items():
-            nos_planned = int(planned_nos.get((pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
-            mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
-            nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
-            meta = info[info["project_name_display"].astype(str) == str(proj)].iloc[:1]
-            # normalize pch label
-            # STRICT: take PCH only from Project Details
-            pch_label = (str(meta[pch_col].iloc[0]).strip() if (not meta.empty and pch_col in meta.columns) else "Unassigned")
-            rec = {
-                "pch": pch_label,
-                "project_name": proj,
-                "planned_mt": round(float(mt), 1),
-                "delivered_mt": round(float(mt_del), 1),
-                "planned_nos": nos_planned,
-                "delivered_nos": nos_del,
-                "regional_mgr": (meta["regional_mgr"].iloc[0] if not meta.empty and "regional_mgr" in meta.columns else ""),
-                "project_mgr": (meta["project_mgr"].iloc[0] if not meta.empty and "project_mgr" in meta.columns else ""),
-                "planning_eng": (meta["planning_eng"].iloc[0] if not meta.empty and "planning_eng" in meta.columns else ""),
-            }
-            projects_rows.setdefault(pch_label, []).append(rec)
+        # Import PCH normalizer to canonicalize labels for grouping and display
+        try:
+            from .pch_normalizer import normalize_pch as _normalize_pch, CANONICAL_PCH_PRIMARY as _PCH_ORDER
+        except Exception:
+            def _normalize_pch(v):
+                return str(v or "").strip()
+            _PCH_ORDER = ()
+
+        # Aggregate per (normalized PCH, project) to avoid duplicates when Micro Plan has variant PCHs
+        aggregated = {}
+        for (mp_pch, proj), mt in planned_mt.items():
+            nos_planned = int(planned_nos.get((mp_pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
+            # Robust lookup of Project Details row using normalized name; if not found, try compact code match
+            proj_norm = _normalize_lower(proj)
+            meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
+            if (not isinstance(meta, pd.DataFrame)) or meta.empty:
+                try:
+                    import re as _re
+                    def _compact_code(s: str) -> str:
+                        return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                    target_comp = _compact_code(str(proj))
+                    for code_col in ("project_code", "Project Code"):
+                        if code_col in getattr(info, 'columns', []):
+                            try:
+                                comp_series = (
+                                    info[code_col]
+                                    .astype(str)
+                                    .map(lambda x: _compact_code(x))
+                                )
+                                mask = comp_series == target_comp
+                                if mask.any():
+                                    meta = info.loc[mask].iloc[:1]
+                                    break
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+            raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
+            # Normalize PCH; if missing in Project Details, fallback to Micro Plan's PCH
+            pch_label = _normalize_pch(raw_pch) or _normalize_pch(mp_pch) or "Unassigned"
+            key = (pch_label, proj)
+            if key not in aggregated:
+                mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
+                nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
+                aggregated[key] = {
+                    "pch": pch_label,
+                    "project_name": proj,
+                    "planned_mt": 0.0,
+                    "delivered_mt": mt_del,
+                    "planned_nos": 0,
+                    "delivered_nos": nos_del,
+                    "regional_mgr": (meta["regional_mgr"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "regional_mgr" in meta.columns else ""),
+                    "project_mgr": (meta["project_mgr"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "project_mgr" in meta.columns else ""),
+                    "planning_eng": (meta["planning_eng"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "planning_eng" in meta.columns else ""),
+                }
+            aggregated[key]["planned_mt"] += float(mt)
+            aggregated[key]["planned_nos"] += nos_planned
+
+        # Build rows grouped by normalized PCH
+        projects_rows: dict[str, list[dict]] = {}
+        for (_pch_label, _proj), rec in aggregated.items():
+            rec["planned_mt"] = round(float(rec["planned_mt"]), 1)
+            rec["delivered_mt"] = round(float(rec["delivered_mt"]), 1)
+            projects_rows.setdefault(_pch_label, []).append(rec)
 
         def _project_locations(project_name: str) -> list[dict]:
             # Planned per location (tower weight) for the project
@@ -3026,8 +3079,19 @@ def register_callbacks(
                 })
             return out
 
+        # Order PCH sections: canonical order first, then alphabetical; keep 'Unassigned' last
+        def _pch_sort_key(name: str) -> tuple[int, str]:
+            if name == "Unassigned":
+                return (2, "")
+            try:
+                idx = list(_PCH_ORDER).index(name)
+                return (0, f"{idx:03d}")
+            except ValueError:
+                return (1, str(name))
+
         pch_sections = []
-        for pch, rows in projects_rows.items():
+        for pch in sorted(projects_rows.keys(), key=_pch_sort_key):
+            rows = projects_rows[pch]
             # Totals per PCH
             p_planned_mt = sum(r["planned_mt"] for r in rows)
             p_delivered_mt = sum(r["delivered_mt"] for r in rows)
@@ -3044,16 +3108,12 @@ def register_callbacks(
                 ),
             ], className="pch-header align-items-center py-2")
 
-            # Nested accordion for projects within this PCH
-            project_items = []
+            # Nested tiles for projects within this PCH
+            project_items = []  # legacy; no longer used
+            tile_cols = []
             for r in sorted(rows, key=lambda x: str(x["project_name"])):
-                title = html.Div([
-                    html.Span(str(r["project_name"]), className="fw-bold me-3"),
-                    html.Span(className="proj-badges", children=[
-                        dbc.Badge(f"Nos {r['delivered_nos']}/{r['planned_nos']}", color="primary", className="me-2"),
-                        dbc.Badge(f"MT {r['delivered_mt']:.1f}/{r['planned_mt']:.1f}", color="dark", className="me-2"),
-                    ]),
-                ])
+                proj_name = str(r["project_name"]).strip()
+                # (legacy header removed)
 
                 # Build Section Incharge -> Supervisor summary (planned/delivered) using Micro Plan responsibilities first
                 def _section_supervisor_summary(project: str):
@@ -3167,22 +3227,43 @@ def register_callbacks(
                         *sup_children
                     ], className="mb-3"))
 
-                meta_line = html.Div([
-                    dbc.Badge(r.get("regional_mgr", "") or "-", color="light", text_color="dark", className="me-2"),
-                    dbc.Badge(r.get("project_mgr", "") or "-", color="light", text_color="dark", className="me-2"),
-                    dbc.Badge(r.get("planning_eng", "") or "-", color="light", text_color="dark"),
-                ], className="mb-2")
-                project_items.append(
-                    dbc.AccordionItem(
-                        [meta_line, *sections_children],
-                        title=title,
+                # (legacy accordion meta/details removed)
+
+                # Build the grid tile representation used for the new layout
+                key = f"{pch}::{proj_name}"
+                tile_body = html.Div([
+                    html.Div(html.Strong(proj_name), className="mb-2"),
+                    html.Div([
+                        html.Span("Regional Manager : ", className="text-muted me-1"),
+                        dbc.Badge(r.get("regional_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
+                    ], className="mb-1"),
+                    html.Div([
+                        html.Span("Project Manager : ", className="text-muted me-1"),
+                        dbc.Badge(r.get("project_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
+                    ], className="mb-2"),
+                    html.Div([
+                        html.Span("Towers Erected : ", className="me-2"),
+                        dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}),
+                    ], className="mb-2"),
+                    html.Div([
+                        html.Span("Volume Units Erected : ", className="me-2"),
+                        dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
+                    ], className="mb-2"),
+                    dbc.Button("View Responsibilities", id={"type": "proj-resp-toggle", "key": key}, color="link", className="p-0"),
+                    dbc.Collapse(html.Div(sections_children, className="mt-2"), id={"type": "proj-resp-collapse", "key": key}, is_open=False),
+                ])
+
+                tile_cols.append(
+                    dbc.Col(
+                        dbc.Card(dbc.CardBody(tile_body), className="h-100 shadow-sm"),
+                        xs=12, sm=12, md=6, lg=4, className="mb-3"
                     )
                 )
 
             pch_sections.append(
                 html.Div([
                     header,
-                    dbc.Accordion(project_items, start_collapsed=True, always_open=False, className="mb-3"),
+                    dbc.Row(tile_cols, className="g-3"),
                 ], className="pch-section mb-4")
             )
 
@@ -3196,6 +3277,18 @@ def register_callbacks(
     def _hide_legacy_location_box(is_open: bool):
         # Locations now render inside each project accordion item; keep legacy box hidden.
         return {"display": "none"}
+
+    # Toggle responsibilities visibility inside each project tile (pattern-matching IDs)
+    @app.callback(
+        Output({"type": "proj-resp-collapse", "key": MATCH}, "is_open"),
+        Input({"type": "proj-resp-toggle", "key": MATCH}, "n_clicks"),
+        State({"type": "proj-resp-collapse", "key": MATCH}, "is_open"),
+        prevent_initial_call=True,
+    )
+    def _toggle_tile_resp(n, is_open):
+        if not n:
+            raise PreventUpdate
+        return not bool(is_open)
 
     @app.callback(
         Output("trace-modal", "is_open"),
