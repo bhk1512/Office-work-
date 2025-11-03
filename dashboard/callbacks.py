@@ -3116,7 +3116,7 @@ def register_callbacks(
         if trig == "kpi-card-total-nos":
             return True, "Towers Erected - PCH Wise Planned vs Delivered", {"source": "nos"}
         if trig == "kpi-card-total-mt":
-            return True, "Volume Units Erected - PCH Wise Planned vs Delivered", {"source": "mt"}
+            return True, "Volume Erected - PCH Wise Planned vs Delivered", {"source": "mt"}
         raise PreventUpdate
 
     @app.callback(
@@ -3491,7 +3491,7 @@ def register_callbacks(
                         dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
                     html.Div([
-                        html.Span("Volume Units Erected : ", className="me-2"),
+                        html.Span("Volume Erected : ", className="me-2"),
                         dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
                     dbc.Button(
@@ -3544,18 +3544,25 @@ def register_callbacks(
         Output("proj-resp-modal", "is_open"),
         Output("proj-resp-modal-title", "children"),
         Output("store-proj-resp-code", "data"),
-        Input({"type": "proj-resp-open", "code": ALL}, "n_clicks"),
+        Input({"type": "proj-resp-open", "code": ALL}, "n_clicks_timestamp"),
         Input("proj-resp-modal-close", "n_clicks"),
         State("proj-resp-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _toggle_proj_resp_modal(open_clicks, close_clicks, is_open):
+    def _toggle_proj_resp_modal(open_clicks_ts, close_clicks, is_open):
         ctx = dash.callback_context
         if not ctx.triggered:
             raise PreventUpdate
         trig = ctx.triggered[0]["prop_id"].split(".")[0]
         if trig == "proj-resp-modal-close":
             return False, dash.no_update, dash.no_update
+        # Only react to real user clicks (timestamp > 0)
+        try:
+            ts_value = int(ctx.triggered[0].get("value") or 0)
+        except Exception:
+            ts_value = 0
+        if ts_value <= 0:
+            raise PreventUpdate
         # Parse dict ID to get project code
         try:
             import json as _json
@@ -3573,8 +3580,8 @@ def register_callbacks(
         Output("proj-resp-kpi-delivered", "children"),
         Output("proj-resp-kpi-ach", "children"),
         Input("store-proj-resp-code", "data"),
-        Input("f-resp-entity", "value"),
-        Input("f-resp-metric", "value"),
+        Input("proj-resp-entity", "value"),
+        Input("proj-resp-metric", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         State("proj-resp-modal", "is_open"),
@@ -3639,7 +3646,7 @@ def register_callbacks(
         is_stringing = mode == "stringing"
         unit_short = "KM" if is_stringing else "MT"
         avg_label = "Avg Output / Gang / Month" if is_stringing else "Avg Output / Gang / Day"
-        total_label = "Delivered (KM)" if is_stringing else "Volume Units Erected"
+        total_label = "Delivered (KM)" if is_stringing else "Volume Erected"
         lost_label = "Lost (KM)" if is_stringing else "Lost Units"
 
         idle_cols = [

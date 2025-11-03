@@ -715,9 +715,62 @@ def build_project_responsibilities_modal() -> dbc.Modal:
         ),
         className="shadow-sm",
     )
+    # Header with title on left and local filter pills on right (mirrors main card)
+    header = dbc.ModalHeader(
+        dbc.Row(
+            [
+                dbc.Col(
+                    dbc.ModalTitle(id="proj-resp-modal-title"),
+                    className="d-flex align-items-center",
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.Div(
+                                className="segment segment-xxs",
+                                children=[
+                                    dcc.RadioItems(
+                                        id="proj-resp-entity",
+                                        options=[
+                                            {"label": "Gangs", "value": "Gang"},
+                                            {"label": "Section Incharges", "value": "Section Incharge"},
+                                            {"label": "Supervisors", "value": "Supervisor"},
+                                        ],
+                                        value="Supervisor",
+                                        labelStyle={"display": "inline-flex", "gap": "0"},
+                                        inputStyle={"marginRight": "6px"},
+                                    )
+                                ],
+                            ),
+                            html.Div(
+                                className="segment segment-xxs",
+                                children=[
+                                    dcc.RadioItems(
+                                        id="proj-resp-metric",
+                                        options=[
+                                            {"label": "Tower Weight", "value": "tower_weight"},
+                                            {"label": "Revenue", "value": "revenue"},
+                                        ],
+                                        value="tower_weight",
+                                        labelStyle={"display": "inline-flex", "gap": "0"},
+                                        inputStyle={"marginRight": "6px"},
+                                    )
+                                ],
+                            ),
+                        ],
+                        className="header-pills d-flex flex-row align-items-center justify-content-end",
+                    ),
+                    width="auto",
+                ),
+            ],
+            className="align-items-center  justify-content-between g-2",
+        ),
+        close_button=True,
+    )
+
     return dbc.Modal(
         [
-            dbc.ModalHeader(dbc.ModalTitle(id="proj-resp-modal-title"), close_button=True),
+            header,
             dbc.ModalBody(body),
             dbc.ModalFooter(
                 dbc.Button("Close", id="proj-resp-modal-close", className="ms-auto")
