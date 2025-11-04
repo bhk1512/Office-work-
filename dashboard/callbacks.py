@@ -2375,16 +2375,37 @@ def register_callbacks(
                 # leave planned KPIs blank on any failure
                 kpi_total_planned = ""
                 kpi_total_nos_planned = ""
-        # Compute number of towers erected in the selected month window (erection mode only)
+        # Compute number of towers erected matching the current scope
+        # If no months are selected, include the full available range in scope
         try:
             if not is_stringing:
                 if months_ts:
                     range_start = pd.Timestamp(min(months_ts)).normalize()
                     range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
                 else:
-                    today = pd.Timestamp.today().normalize()
-                    range_start = today.to_period("M").start_time.normalize()
-                    range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+                    # Derive an all-time window from the scoped data
+                    if isinstance(loss_scope, pd.DataFrame) and not loss_scope.empty:
+                        comp_series = pd.to_datetime(loss_scope.get("completion_date"), errors="coerce")
+                        comp_series = comp_series[comp_series.notna()]
+                        if len(comp_series):
+                            range_start = pd.Timestamp(comp_series.min()).normalize()
+                            range_end = pd.Timestamp(comp_series.max()).normalize()
+                        else:
+                            date_series = pd.to_datetime(loss_scope.get("date"), errors="coerce")
+                            date_series = date_series[date_series.notna()]
+                            if len(date_series):
+                                range_start = pd.Timestamp(date_series.min()).normalize()
+                                range_end = pd.Timestamp(date_series.max()).normalize()
+                            else:
+                                # Fallback to current month if no dates are available
+                                today = pd.Timestamp.today().normalize()
+                                range_start = today.to_period("M").start_time.normalize()
+                                range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+                    else:
+                        today = pd.Timestamp.today().normalize()
+                        range_start = today.to_period("M").start_time.normalize()
+                        range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+
                 export_df, _ = _prepare_erections_completed(
                     loss_scope,
                     range_start=range_start,
@@ -3377,6 +3398,8 @@ def register_callbacks(
             export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
 
         df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
+        # Keep an unfiltered copy to test project-level availability (any month)
+        mp_all = df_mp.copy() if isinstance(df_mp, pd.DataFrame) else None
         # Do not block the modal if Micro Plan is unavailable; proceed with empty frame
         if df_mp is None:
             mp = pd.DataFrame(columns=["project_name", "project_key", "location_no", "entity_type", "entity_name", "tower_weight", "pch", "completion_month"])
@@ -3389,6 +3412,11 @@ def register_callbacks(
             name_lc = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
             key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
             mp = mp[(name_lc.isin(proj_names)) | (key_lc.isin(proj_names))].copy()
+            # Apply same project filter to unfiltered copy used for availability checks
+            if isinstance(mp_all, pd.DataFrame) and not mp_all.empty:
+                name_lc_all = (mp_all.get("project_name", pd.Series([""] * len(mp_all), index=mp_all.index)).astype(str).str.strip().str.lower())
+                key_lc_all = (mp_all.get("project_key", pd.Series([""] * len(mp_all), index=mp_all.index)).astype(str).str.strip().str.lower())
+                mp_all = mp_all[(name_lc_all.isin(proj_names)) | (key_lc_all.isin(proj_names))].copy()
 
         # Normalized helper columns
         mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
@@ -3717,12 +3745,31 @@ def register_callbacks(
             for r in sorted(rows, key=lambda x: str(x["project_name"])):
                 proj_name = str(r["project_name"]).strip()
                 # (legacy header removed)
-                # Detect if Micro Plan rows exist for this project
-                has_mp = False
-                try:
-                    has_mp = not mp[mp.get("project_name_display", mp.get("project_name", "")).astype(str).eq(str(proj_name))].empty
-                except Exception:
-                    has_mp = False
+                # Detect if Micro Plan rows exist for this project using robust name/code matching
+                import re as _re
+                sel_name = str(proj_name).strip().lower()
+                sel_compact = _re.sub(r"[^a-z0-9]", "", sel_name)
+
+                def _has_project(frame: pd.DataFrame | None) -> bool:
+                    try:
+                        if not isinstance(frame, pd.DataFrame) or frame.empty:
+                            return False
+                        name_lc = (frame.get("project_name", pd.Series([""] * len(frame), index=frame.index))
+                                   .astype(str).str.strip().str.lower())
+                        key_lc = (frame.get("project_key", pd.Series([""] * len(frame), index=frame.index))
+                                  .astype(str).str.strip().str.lower())
+                        name_compact = name_lc.str.replace(r"[^a-z0-9]", "", regex=True)
+                        key_compact = key_lc.str.replace(r"[^a-z0-9]", "", regex=True)
+                        mask = (
+                            (name_lc == sel_name) | (key_lc == sel_name) |
+                            (name_compact == sel_compact) | (key_compact == sel_compact)
+                        )
+                        return bool(mask.any())
+                    except Exception:
+                        return False
+
+                has_mp = _has_project(mp)
+                has_mp_any = _has_project(mp_all)
 
                 # Build Section Incharge -> Supervisor summary (planned/delivered) using Micro Plan responsibilities first
                 def _section_supervisor_summary(project: str):
@@ -3871,7 +3918,7 @@ def register_callbacks(
                         ),
                     ])
                 else:
-                    # Micro Plan not available for this project: show fixed text and note
+                    # For projects with Micro Plan outside the selected month, still show the button
                     tile_body_children.extend([
                         html.Div([
                             html.Span("Towers Erected : ", className="me-2"),
@@ -3879,8 +3926,18 @@ def register_callbacks(
                         html.Div([
                             html.Span("Volume Erected : ", className="me-2"),
                         ], className="mb-2"),
-                        html.Div("Micro Plan not available.", className="text-muted"),
                     ])
+                    if has_mp_any:
+                        tile_body_children.append(
+                            dbc.Button(
+                                "View Responsibilities",
+                                id={"type": "proj-resp-open", "code": proj_code},
+                                color="link",
+                                className="p-0",
+                            )
+                        )
+                    else:
+                        tile_body_children.append(html.Div("Micro Plan not available.", className="text-muted"))
 
                 tile_body = html.Div(tile_body_children)
 
