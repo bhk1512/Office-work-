@@ -3278,7 +3278,8 @@ def register_callbacks(
                 # Meta join
                 meta = info[info.get("project_name_norm", "").astype(str) == _normalize_lower(proj)].iloc[:1] if not info.empty else pd.DataFrame()
                 raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
-                pch_label = _normalize_pch(raw_pch) or "Unassigned"
+                # Use normalized PCH if known; otherwise keep the original as-is (no 'Unassigned')
+                pch_label = _normalize_pch(raw_pch) or str(raw_pch or "").strip()
                 rec = {
                     "project_name": proj,
                     "project_code": (meta.get("project_code", pd.Series([proj])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else proj),
@@ -3295,7 +3296,8 @@ def register_callbacks(
                 projects_rows.setdefault(pch_label, []).append(rec)
 
             def _pch_sort_key(name: str) -> tuple[int, str]:
-                if name == "Unassigned":
+                # Put empty/blank PCH last; then canonical order; then alphabetical
+                if not str(name or "").strip():
                     return (2, "")
                 try:
                     idx = list(_PCH_ORDER).index(name)
@@ -3375,9 +3377,11 @@ def register_callbacks(
             export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
 
         df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
-        if df_mp is None or df_mp.empty:
-            return []
-        mp = df_mp.copy()
+        # Do not block the modal if Micro Plan is unavailable; proceed with empty frame
+        if df_mp is None:
+            mp = pd.DataFrame(columns=["project_name", "project_key", "location_no", "entity_type", "entity_name", "tower_weight", "pch", "completion_month"])
+        else:
+            mp = df_mp.copy()
         if "completion_month" in mp.columns and months_ts:
             mp = mp[mp["completion_month"].isin(months_ts)].copy()
         if project_list:
@@ -3436,8 +3440,27 @@ def register_callbacks(
             if pch_col is None:
                 info["pch"] = ""
                 pch_col = "pch"
+            # Build compact key map for robust project lookup across datasets (e.g., 'TA418' vs 'TA 418')
+            try:
+                import re as _re
+                def _compact_code(s: str) -> str:
+                    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                info_key_map: dict[str, int] = {}
+                name_keys = info["project_name_display"].astype(str).map(_compact_code)
+                for idx, key in zip(info.index, name_keys):
+                    if key and key not in info_key_map:
+                        info_key_map[key] = idx
+                for code_col in ("project_code", "Project Code"):
+                    if code_col in info.columns:
+                        code_keys = info[code_col].astype(str).map(_compact_code)
+                        for idx, key in zip(info.index, code_keys):
+                            if key and key not in info_key_map:
+                                info_key_map[key] = idx
+            except Exception:
+                info_key_map = {}
         else:
             info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])            
+            info_key_map = {}
 
         # Build hierarchy: PCH -> Projects -> Locations
         # Ensure we always have a PCH value; fall back to project-info mapping if blank
@@ -3455,49 +3478,50 @@ def register_callbacks(
 
         # Aggregate per (normalized PCH, project) to avoid duplicates when Micro Plan has variant PCHs
         aggregated = {}
+        aggregated_by_proj_key: dict[str, tuple[str, str]] = {}
         for (mp_pch, proj), mt in planned_mt.items():
             nos_planned = int(planned_nos.get((mp_pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
             # Robust lookup of Project Details row using normalized name; if not found, try compact code match
             proj_norm = _normalize_lower(proj)
+            # Use normalized-name match, then compact-key map fallback
             meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
             if (not isinstance(meta, pd.DataFrame)) or meta.empty:
                 try:
                     import re as _re
                     def _compact_code(s: str) -> str:
                         return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
-                    target_comp = _compact_code(str(proj))
-                    for code_col in ("project_code", "Project Code"):
-                        if code_col in getattr(info, 'columns', []):
-                            try:
-                                comp_series = (
-                                    info[code_col]
-                                    .astype(str)
-                                    .map(lambda x: _compact_code(x))
-                                )
-                                mask = comp_series == target_comp
-                                if mask.any():
-                                    meta = info.loc[mask].iloc[:1]
-                                    break
-                            except Exception:
-                                continue
+                    target_key = _compact_code(str(proj))
+                    if target_key and target_key in info_key_map:
+                        meta = info.loc[[info_key_map[target_key]]]
                 except Exception:
                     pass
             raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
-            # Normalize PCH; if missing in Project Details, fallback to Micro Plan's PCH
-            pch_label = _normalize_pch(raw_pch) or _normalize_pch(mp_pch) or "Unassigned"
-            key = (pch_label, proj)
+            # Determine PCH solely from Project Details; if unrecognized, keep original
+            pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
+            # Derive display heading and identity key using code when available
+            try:
+                proj_code = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
+                    meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
+                )) if isinstance(meta, pd.DataFrame) else ""
+            except Exception:
+                proj_code = ""
+            proj_display_name = str(meta.get("project_name_display", pd.Series([proj])).iloc[0]) if isinstance(meta, pd.DataFrame) and not meta.empty else str(proj)
+            proj_display = f"{proj_code} : {proj_display_name}".strip(" :") if proj_code else proj_display_name
+            try:
+                import re as _re
+                def _compact_code(s: str) -> str:
+                    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                proj_key = _compact_code(proj_code) or _compact_code(proj_display_name) or _compact_code(proj)
+            except Exception:
+                proj_key = proj_norm
+            key = (pch_label, proj_display)
             if key not in aggregated:
                 mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
                 nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
                 aggregated[key] = {
                     "pch": pch_label,
-                    "project_name": proj,
-                    "project_code": (
-                        (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
-                            meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
-                        ))
-                        if isinstance(meta, pd.DataFrame) else ""
-                    ),
+                    "project_name": proj_display,
+                    "project_code": proj_code,
                     "planned_mt": 0.0,
                     "delivered_mt": mt_del,
                     "planned_nos": 0,
@@ -3508,6 +3532,124 @@ def register_callbacks(
                 }
             aggregated[key]["planned_mt"] += float(mt)
             aggregated[key]["planned_nos"] += nos_planned
+            # Track by compact project key to prevent duplicates across sources
+            try:
+                aggregated_by_proj_key[proj_key] = key
+            except Exception:
+                pass
+
+        # Also include projects that only have delivered data (no Micro Plan rows)
+        try:
+            delivered_projects = list(getattr(delivered_mt, 'index', []))
+        except Exception:
+            delivered_projects = []
+        for proj in map(lambda x: str(x), delivered_projects):
+            if not proj or not str(proj).strip():
+                continue
+            proj_norm = _normalize_lower(proj)
+            # If this project already exists from the planned aggregation, update delivered values instead of duplicating
+            try:
+                import re as _re
+                def _compact_code(s: str) -> str:
+                    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                # Prefer code if we can resolve it from info
+                meta_lookup = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
+                proj_code_lookup = (meta_lookup.get("project_code").iloc[0] if (isinstance(meta_lookup, pd.DataFrame) and not meta_lookup.empty and "project_code" in meta_lookup.columns) else (
+                    meta_lookup.get("Project Code").iloc[0] if (isinstance(meta_lookup, pd.DataFrame) and not meta_lookup.empty and "Project Code" in meta_lookup.columns) else ""
+                )) if isinstance(meta_lookup, pd.DataFrame) else ""
+                proj_key = _compact_code(proj_code_lookup) or _compact_code(proj)
+            except Exception:
+                proj_key = proj_norm
+            if proj_key in aggregated_by_proj_key:
+                try:
+                    existing_key = aggregated_by_proj_key[proj_key]
+                    mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
+                    nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
+                    aggregated[existing_key]["delivered_mt"] = mt_del
+                    aggregated[existing_key]["delivered_nos"] = nos_del
+                    continue
+                except Exception:
+                    # fallback to normal add path
+                    pass
+            meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
+            if (not isinstance(meta, pd.DataFrame)) or meta.empty:
+                # Try compact-key lookup
+                if proj_key and proj_key in info_key_map:
+                    meta = info.loc[[info_key_map[proj_key]]]
+            raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
+            pch_label = (
+                _normalize_pch(raw_pch)
+                or str(raw_pch or "").strip()
+            )
+            # Build display and project code for heading
+            try:
+                proj_code2 = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
+                    meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
+                )) if isinstance(meta, pd.DataFrame) else ""
+            except Exception:
+                proj_code2 = ""
+            proj_display_name2 = str(meta.get("project_name_display", pd.Series([proj])).iloc[0]) if isinstance(meta, pd.DataFrame) and not meta.empty else str(proj)
+            proj_display2 = f"{proj_code2} : {proj_display_name2}".strip(" :") if proj_code2 else proj_display_name2
+            key = (pch_label, proj_display2)
+            if key in aggregated:
+                continue
+            mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, 'get') else 0.0
+            nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, 'get') else 0
+            aggregated[key] = {
+                "pch": pch_label,
+                "project_name": proj_display2,
+                "project_code": proj_code2,
+                "planned_mt": 0.0,
+                "delivered_mt": mt_del,
+                "planned_nos": 0,
+                "delivered_nos": nos_del,
+                "regional_mgr": (meta["regional_mgr"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "regional_mgr" in meta.columns else ""),
+                "project_mgr": (meta["project_mgr"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "project_mgr" in meta.columns else ""),
+                "planning_eng": (meta["planning_eng"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "planning_eng" in meta.columns else ""),
+            }
+            try:
+                aggregated_by_proj_key[proj_key] = key
+            except Exception:
+                pass
+
+        # Finally, include any projects present only in Project Details (no delivered and no MP)
+        try:
+            # Use selected projects filter if provided; otherwise consider all info rows
+            info_iter = info.copy()
+            if project_list:
+                pl = set(str(p).strip().lower() for p in project_list)
+                info_iter = info_iter[info_iter["project_name_display"].astype(str).str.strip().str.lower().isin(pl)]
+        except Exception:
+            info_iter = info
+        for _, meta_row in info_iter.iterrows():
+            try:
+                import re as _re
+                def _compact_code(s: str) -> str:
+                    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                proj = str(meta_row.get("project_name_display", "")).strip()
+                code = str(meta_row.get("project_code", meta_row.get("Project Code", "")))
+                proj_key = _compact_code(code) or _compact_code(proj)
+                if not proj or proj_key in aggregated_by_proj_key:
+                    continue
+                raw_pch = str(meta_row.get(pch_col, "")) if pch_col in meta_row.index else ""
+                pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
+                proj_display = f"{code} : {proj}".strip(" :") if code else proj
+                key = (pch_label, proj_display)
+                aggregated[key] = {
+                    "pch": pch_label,
+                    "project_name": proj_display,
+                    "project_code": (str(meta_row.get("project_code", meta_row.get("Project Code", ""))) if isinstance(meta_row, pd.Series) else ""),
+                    "planned_mt": 0.0,
+                    "delivered_mt": 0.0,
+                    "planned_nos": 0,
+                    "delivered_nos": 0,
+                    "regional_mgr": str(meta_row.get("regional_mgr", "")),
+                    "project_mgr": str(meta_row.get("project_mgr", "")),
+                    "planning_eng": str(meta_row.get("planning_eng", "")),
+                }
+                aggregated_by_proj_key[proj_key] = key
+            except Exception:
+                continue
 
         # Build rows grouped by normalized PCH
         projects_rows: dict[str, list[dict]] = {}
@@ -3518,9 +3660,12 @@ def register_callbacks(
 
         def _project_locations(project_name: str) -> list[dict]:
             # Planned per location (tower weight) for the project
-            mp_proj = mp[mp["project_name_display"].astype(str) == str(project_name)].copy()
+            # project_name in the aggregated rows may be "CODE : NAME"; match using NAME part
+            pname = str(project_name)
+            base_name = pname.split(" : ", 1)[1] if " : " in pname else pname
+            mp_proj = mp[mp["project_name_display"].astype(str) == str(base_name)].copy()
             planned_loc = mp_proj.groupby("location_no_norm")["_tw_"].sum().rename("planned_mt") if not mp_proj.empty else pd.Series(dtype=float)
-            ed_proj = ed[ed["project_name_display"].astype(str) == str(project_name)].copy()
+            ed_proj = ed[ed["project_name_display"].astype(str) == str(base_name)].copy()
             delivered_loc = ed_proj.groupby("location_no_norm")["tower_weight_mt"].sum().rename("delivered_mt") if not ed_proj.empty else pd.Series(dtype=float)
             keys = set(planned_loc.index.tolist()) | set(delivered_loc.index.tolist())
             out = []
@@ -3537,9 +3682,9 @@ def register_callbacks(
                 })
             return out
 
-        # Order PCH sections: canonical order first, then alphabetical; keep 'Unassigned' last
+        # Order PCH sections: canonical order first, then alphabetical; keep empty last
         def _pch_sort_key(name: str) -> tuple[int, str]:
-            if name == "Unassigned":
+            if not str(name or "").strip():
                 return (2, "")
             try:
                 idx = list(_PCH_ORDER).index(name)
@@ -3572,6 +3717,12 @@ def register_callbacks(
             for r in sorted(rows, key=lambda x: str(x["project_name"])):
                 proj_name = str(r["project_name"]).strip()
                 # (legacy header removed)
+                # Detect if Micro Plan rows exist for this project
+                has_mp = False
+                try:
+                    has_mp = not mp[mp.get("project_name_display", mp.get("project_name", "")).astype(str).eq(str(proj_name))].empty
+                except Exception:
+                    has_mp = False
 
                 # Build Section Incharge -> Supervisor summary (planned/delivered) using Micro Plan responsibilities first
                 def _section_supervisor_summary(project: str):
@@ -3664,33 +3815,34 @@ def register_callbacks(
                             })
                     return result
 
-                summary = _section_supervisor_summary(r["project_name"])
                 sections_children = []
-                for sec_name in sorted(summary.keys()):
-                    sec_data = summary[sec_name]
-                    sup_children = []
-                    for sup_item in sorted(sec_data["supervisors"], key=lambda x: x["name"]):
-                        sup_children.append(html.Div([
-                            html.Span(sup_item["name"], className="me-2 fw-semibold"),
-                            dbc.Badge(f"Nos {sup_item['delivered_nos']}/{sup_item['planned_nos']}", color="primary", className="me-2"),
-                            dbc.Badge(f"MT {sup_item['delivered_mt']:.1f}/{sup_item['planned_mt']:.1f}", color="dark"),
-                        ], className="mb-1"))
-                    sections_children.append(html.Div([
-                        html.Div([
-                            html.Span("Section Incharge: ", className="text-muted"), html.Strong(sec_name),
-                            html.Span(" ", className="me-1"),
-                            dbc.Badge(f"Nos {sec_data['delivered_nos']}/{sec_data['planned_nos']}", color="primary", className="ms-2 me-2"),
-                            dbc.Badge(f"MT {sec_data['delivered_mt']:.1f}/{sec_data['planned_mt']:.1f}", color="dark"),
-                        ], className="mb-2"),
-                        *sup_children
-                    ], className="mb-3"))
+                if has_mp:
+                    summary = _section_supervisor_summary(r["project_name"])
+                    for sec_name in sorted(summary.keys()):
+                        sec_data = summary[sec_name]
+                        sup_children = []
+                        for sup_item in sorted(sec_data["supervisors"], key=lambda x: x["name"]):
+                            sup_children.append(html.Div([
+                                html.Span(sup_item["name"], className="me-2 fw-semibold"),
+                                dbc.Badge(f"Nos {sup_item['delivered_nos']}/{sup_item['planned_nos']}", color="primary", className="me-2"),
+                                dbc.Badge(f"MT {sup_item['delivered_mt']:.1f}/{sup_item['planned_mt']:.1f}", color="dark"),
+                            ], className="mb-1"))
+                        sections_children.append(html.Div([
+                            html.Div([
+                                html.Span("Section Incharge: ", className="text-muted"), html.Strong(sec_name),
+                                html.Span(" ", className="me-1"),
+                                dbc.Badge(f"Nos {sec_data['delivered_nos']}/{sec_data['planned_nos']}", color="primary", className="ms-2 me-2"),
+                                dbc.Badge(f"MT {sec_data['delivered_mt']:.1f}/{sec_data['planned_mt']:.1f}", color="dark"),
+                            ], className="mb-2"),
+                            *sup_children
+                        ], className="mb-3"))
 
                 # (legacy accordion meta/details removed)
 
                 # Build the grid tile representation used for the new layout
                 key = f"{pch}::{proj_name}"
                 proj_code = r.get("project_code") or r.get("project_key") or proj_name
-                tile_body = html.Div([
+                tile_body_children = [
                     html.Div(html.Strong(proj_name), className="mb-2"),
                     html.Div([
                         html.Span("Regional Manager : ", className="text-muted me-1"),
@@ -3700,21 +3852,37 @@ def register_callbacks(
                         html.Span("Project Manager : ", className="text-muted me-1"),
                         dbc.Badge(r.get("project_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
                     ], className="mb-2"),
-                    html.Div([
-                        html.Span("Towers Erected : ", className="me-2"),
-                        dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}),
-                    ], className="mb-2"),
-                    html.Div([
-                        html.Span("Volume Erected : ", className="me-2"),
-                        dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
-                    ], className="mb-2"),
-                    dbc.Button(
-                        "View Responsibilities",
-                        id={"type": "proj-resp-open", "code": proj_code},
-                        color="link",
-                        className="p-0",
-                    ),
-                ])
+                ]
+                if has_mp:
+                    tile_body_children.extend([
+                        html.Div([
+                            html.Span("Towers Erected : ", className="me-2"),
+                            dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}),
+                        ], className="mb-2"),
+                        html.Div([
+                            html.Span("Volume Erected : ", className="me-2"),
+                            dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
+                        ], className="mb-2"),
+                        dbc.Button(
+                            "View Responsibilities",
+                            id={"type": "proj-resp-open", "code": proj_code},
+                            color="link",
+                            className="p-0",
+                        ),
+                    ])
+                else:
+                    # Micro Plan not available for this project: show fixed text and note
+                    tile_body_children.extend([
+                        html.Div([
+                            html.Span("Towers Erected : ", className="me-2"),
+                        ], className="mb-2"),
+                        html.Div([
+                            html.Span("Volume Erected : ", className="me-2"),
+                        ], className="mb-2"),
+                        html.Div("Micro Plan not available.", className="text-muted"),
+                    ])
+
+                tile_body = html.Div(tile_body_children)
 
                 tile_cols.append(
                     dbc.Col(
