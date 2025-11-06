@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Tuple
 
+import duckdb
+import numpy as np
 import pandas as pd
 
 from .config import AppConfig
@@ -21,6 +23,9 @@ from .services.responsibilities import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+DUCKDB_TABLE_ERECTION = "appdata_erection_daily"
+DUCKDB_TABLE_STRINGING = "appdata_stringing_daily"
 
 
 @dataclass
@@ -55,6 +60,10 @@ class AppDataStore:
         self._project_info: pd.DataFrame | None = None
         self._responsibilities: ResponsibilitiesSnapshot = ResponsibilitiesSnapshot(None, set(), None)
         self.metadata = DatasetMetadata()
+        self._daily_version = 0
+        self._stringing_version = 0
+        self._duckdb_conn = self._create_duckdb_connection()
+        self._duckdb_lock = RLock()
 
     def bootstrap(self, config: AppConfig | None = None) -> Tuple[pd.DataFrame, str]:
         """Hydrate the cache from disk and return (daily_df, last_loaded_text)."""
@@ -86,8 +95,13 @@ class AppDataStore:
 
     def set_daily(self, df: pd.DataFrame) -> None:
         with self._lock:
-            self._daily = df.copy()
+            self._daily_version += 1
+            working = df.copy()
+            working.attrs["_appdata_mode"] = "erection"
+            working.attrs["_appdata_version"] = self._daily_version
+            self._daily = working
             self.metadata.update_from_df(self._daily)
+            self._register_duckdb_table(DUCKDB_TABLE_ERECTION, self._daily)
 
     def get_daily(self) -> pd.DataFrame:
         with self._lock:
@@ -97,7 +111,13 @@ class AppDataStore:
 
     def set_stringing(self, df: pd.DataFrame) -> None:
         with self._lock:
-            self._stringing_daily = df.copy()
+            self._stringing_version += 1
+            working = df.copy()
+            working.attrs["_appdata_mode"] = "stringing"
+            working.attrs["_appdata_version"] = self._stringing_version
+            self._augment_stringing_frame(working)
+            self._stringing_daily = working
+            self._register_duckdb_table(DUCKDB_TABLE_STRINGING, self._stringing_daily)
 
     def get_stringing(self) -> pd.DataFrame:
         with self._lock:
@@ -122,6 +142,9 @@ class AppDataStore:
     def get_responsibilities_error(self) -> str | None:
         with self._lock:
             return self._responsibilities.error
+
+    def get_duckdb_connection(self) -> duckdb.DuckDBPyConnection:
+        return self._duckdb_conn
 
     def _maybe_preload_stringing(self, config: AppConfig) -> None:
         if not config.enable_stringing:
@@ -166,5 +189,57 @@ class AppDataStore:
         enriched = enriched.drop(columns=["__key_name__", "key_name"])
         return enriched
 
+    def _create_duckdb_connection(self) -> duckdb.DuckDBPyConnection:
+        conn = duckdb.connect(database=":memory:", read_only=False)
+        conn.execute("PRAGMA enable_object_cache")
+        return conn
 
-__all__ = ["AppDataStore", "DatasetMetadata"]
+    def _register_duckdb_table(self, table_name: str, frame: pd.DataFrame | None) -> None:
+        conn = self._duckdb_conn
+        if conn is None:
+            return
+        with self._duckdb_lock:
+            if frame is None or frame.empty:
+                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+                return
+            temp_name = f"__df_{table_name}"
+            conn.register(temp_name, frame)
+            conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM {temp_name}")
+            conn.unregister(temp_name)
+            self._create_duckdb_indexes(table_name, frame.columns)
+
+    def _create_duckdb_indexes(self, table_name: str, columns: pd.Index) -> None:
+        conn = self._duckdb_conn
+        if conn is None:
+            return
+        candidates = [col for col in ("month", "project_name", "gang_name") if col in columns]
+        for col in candidates:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_{col} ON {table_name}({col})")
+
+    def _augment_stringing_frame(self, frame: pd.DataFrame) -> None:
+        if frame.empty:
+            frame["line_kv"] = pd.Series(dtype="string")
+            frame["method_norm"] = pd.Series(dtype="string")
+            return
+        source = None
+        if "project_name" in frame.columns:
+            source = frame["project_name"].astype(str)
+        elif "project" in frame.columns:
+            source = frame["project"].astype(str)
+        else:
+            source = pd.Series("", index=frame.index)
+        norm = source.str.lower()
+        line_kv = np.where(
+            norm.str.contains("765", na=False),
+            "765",
+            np.where(norm.str.contains("400", na=False), "400", pd.NA),
+        )
+        frame["line_kv"] = pd.Series(line_kv, index=frame.index).astype("string")
+        if "method" in frame.columns:
+            method_norm = frame["method"].astype(str).str.strip().str.lower()
+            frame["method_norm"] = method_norm.mask(method_norm.isin({"", "nan", "none"})).astype("string")
+        else:
+            frame["method_norm"] = pd.Series(pd.NA, index=frame.index, dtype="string")
+
+
+__all__ = ["AppDataStore", "DatasetMetadata", "DUCKDB_TABLE_ERECTION", "DUCKDB_TABLE_STRINGING"]

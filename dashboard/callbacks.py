@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 import dash_bootstrap_components as dbc 
 import pandas as pd
 from io import BytesIO
 import traceback
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, TypeVar
 
 import dash
+import duckdb
 import re
 import numpy as np
 import plotly.graph_objects as go
@@ -19,6 +24,7 @@ from dash.dependencies import MATCH, ALL
 from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
+from uuid import uuid4
 
 try:
     from dash import ctx as dash_ctx
@@ -54,6 +60,34 @@ BENCHMARK_KM_PER_MONTH = 5.0
 
 # App-wide config instance for callback logic
 config = AppConfig()
+
+T = TypeVar("T")
+
+_SCOPE_CACHE_TTL_SECONDS = 180.0
+_SCOPE_CACHE_MAX_ITEMS = 8
+
+
+@dataclass(slots=True)
+class _ScopeCacheEntry:
+    frame: pd.DataFrame
+    stored_at: float
+    aggregates: dict[str, Any] = field(default_factory=dict)
+
+
+_SCOPE_CACHE: "OrderedDict[str, _ScopeCacheEntry]" = OrderedDict()
+
+
+@dataclass(slots=True)
+class _AggregateCacheEntry:
+    value: Any
+    stored_at: float
+
+
+_AGGREGATE_CACHE_TTL_SECONDS = 180.0
+_AGGREGATE_CACHE_MAX_ITEMS = 32
+_AGGREGATE_CACHE: "OrderedDict[str, _AggregateCacheEntry]" = OrderedDict()
+DATA_SELECTOR: DataSelector | None = None
+_PROJECT_INFO_PROVIDER: Callable[[], pd.DataFrame] | None = None
 
 
 def _normalize_month_value(raw: Any) -> tuple[str | None, str | None]:
@@ -544,6 +578,296 @@ def _ensure_list(value: Sequence[str] | str | None) -> list[str]:
     return list(value)
 
 
+def _normalize_mode(value: str | None) -> str:
+    return (value or "erection").strip().lower()
+
+
+def _normalize_str_list(values: Sequence[Any] | None, *, lower: bool = False) -> list[str]:
+    result: list[str] = []
+    if not values:
+        return result
+    for raw in values:
+        text = "" if raw is None else str(raw).strip()
+        if not text:
+            continue
+        result.append(text.lower() if lower else text)
+    return result
+
+
+def _set_scope_cache_entry(key: str, frame: pd.DataFrame) -> None:
+    if not key:
+        return
+    _SCOPE_CACHE[key] = _ScopeCacheEntry(frame.copy(deep=False), time.time())
+    _SCOPE_CACHE.move_to_end(key)
+    while len(_SCOPE_CACHE) > _SCOPE_CACHE_MAX_ITEMS:
+        _SCOPE_CACHE.popitem(last=False)
+
+
+def _remember_scope_frame(frame: pd.DataFrame) -> str:
+    key = uuid4().hex
+    _set_scope_cache_entry(key, frame)
+    return key
+
+
+def _get_scope_entry(key: str | None) -> _ScopeCacheEntry | None:
+    if not key:
+        return None
+    entry = _SCOPE_CACHE.get(key)
+    if not entry:
+        return None
+    if _SCOPE_CACHE_TTL_SECONDS > 0 and (time.time() - entry.stored_at) > _SCOPE_CACHE_TTL_SECONDS:
+        _SCOPE_CACHE.pop(key, None)
+        return None
+    return entry
+
+
+def _get_scope_cache_entry(key: str | None) -> pd.DataFrame | None:
+    entry = _get_scope_entry(key)
+    if entry is None:
+        return None
+    return entry.frame.copy(deep=False)
+
+
+def _cached_scope_result(
+    cache_key: str | None,
+    token: str,
+    producer: Callable[[], T],
+    *,
+    clone: Callable[[T], T] | None = None,
+) -> T:
+    entry = _get_scope_entry(cache_key)
+    if entry is not None:
+        existing = entry.aggregates.get(token)
+        if existing is not None:
+            return clone(existing) if clone else existing
+    result = producer()
+    if entry is not None:
+        entry.aggregates[token] = result
+    return clone(result) if clone else result
+
+
+def _cached_global_result(
+    token: str,
+    producer: Callable[[], T],
+    *,
+    clone: Callable[[T], T] | None = None,
+) -> T:
+    entry = _AGGREGATE_CACHE.get(token)
+    if entry is not None:
+        if _AGGREGATE_CACHE_TTL_SECONDS <= 0 or (time.time() - entry.stored_at) <= _AGGREGATE_CACHE_TTL_SECONDS:
+            return clone(entry.value) if clone else entry.value
+        _AGGREGATE_CACHE.pop(token, None)
+        entry = None
+    result = producer()
+    _AGGREGATE_CACHE[token] = _AggregateCacheEntry(result, time.time())
+    _AGGREGATE_CACHE.move_to_end(token)
+    while len(_AGGREGATE_CACHE) > _AGGREGATE_CACHE_MAX_ITEMS:
+        _AGGREGATE_CACHE.popitem(last=False)
+    return clone(result) if clone else result
+
+
+def _clone_baseline_result(
+    result: tuple[Mapping[str, float], Mapping[str, Mapping[pd.Timestamp, float]]],
+) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    overall, monthly = result
+    overall_map = dict(overall or {})
+    monthly_map = {gang: dict(month_map or {}) for gang, month_map in (monthly or {}).items()}
+    return overall_map, monthly_map
+
+
+def _clone_loss_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows]
+
+
+def _clone_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    return df.copy(deep=True)
+
+
+def _hash_cache_payload(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _attach_line_kv(work: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds __line_kv__ ('765'|'400'|NA) inferred from Project Details.
+    Tries BOTH mappings: project name and project code.
+    If mapping fails, falls back to the row's own project text.
+    """
+    try:
+        provider = _PROJECT_INFO_PROVIDER
+        if work is None or work.empty:
+            return work
+
+        proj_col = "project_name" if "project_name" in work.columns else ("project" if "project" in work.columns else None)
+        if not proj_col:
+            return work
+
+        out = work.copy()
+        out["__kv_source__"] = out[proj_col].astype(str).str.strip()
+
+        dfpi = provider() if callable(provider) else None
+        if dfpi is not None and not dfpi.empty:
+            dpi = dfpi.copy()
+
+            def _norm_key(x: object) -> str:
+                return re.sub(r"\s+", " ", ("" if x is None else str(x)).strip().lower())
+
+            # Build normalized keys on both name and code
+            if "project_name" in dpi.columns:
+                dpi["__name_key__"] = dpi["project_name"].astype(str).map(_norm_key)
+            else:
+                dpi["__name_key__"] = ""
+
+            if "project_code" in dpi.columns:
+                dpi["__code_key__"] = dpi["project_code"].astype(str).map(_norm_key)
+            else:
+                dpi["__code_key__"] = ""
+
+            # Which column is the descriptive text? Prefer "Project Name"
+            desc_col = "Project Name" if "Project Name" in dpi.columns else ("project_name" if "project_name" in dpi.columns else None)
+
+            if desc_col:
+                name_map = dict(zip(dpi["__name_key__"], dpi[desc_col].astype(str)))
+                code_map = dict(zip(dpi["__code_key__"], dpi[desc_col].astype(str)))
+
+                row_key = out[proj_col].astype(str).map(_norm_key)
+                mapped_name = row_key.map(name_map)
+                mapped_code = row_key.map(code_map)
+                # Prefer name-map, fall back to code-map, then original project text
+                desc_series = mapped_name.where(mapped_name.notna(), mapped_code)
+                out["__kv_source__"] = desc_series.where(desc_series.notna(), out[proj_col].astype(str))
+
+        src = out["__kv_source__"].astype(str).str.lower()
+        out["__line_kv__"] = np.where(
+            src.str.contains("765"),
+            "765",
+            np.where(src.str.contains("400"), "400", pd.NA),
+        )
+        return out
+    except Exception:
+        return work
+
+
+def _stringing_scope(work: pd.DataFrame, kv_values, method_values) -> pd.DataFrame:
+    work = work.copy()
+    work = _attach_line_kv(work)
+
+    kv_set = set(_normalize_str_list(kv_values))
+    if kv_set and kv_set != {"400", "765"}:
+        work = work[work["__line_kv__"].isin(kv_set)]
+
+    method_set = {m.lower() for m in _normalize_str_list(method_values)}
+    if method_set and method_set != {"manual", "tse"}:
+        if "method" in work.columns:
+            work = work[work["method"].astype(str).str.lower().isin(method_set)]
+        else:
+            work = work.iloc[0:0]
+    return work
+
+
+def _build_scope_frames(
+    mode_value: str,
+    *,
+    project_list: Sequence[str],
+    gang_list: Sequence[str],
+    months_value: Sequence[str],
+    quick_range: str | None,
+    kv_values: Sequence[str] | None,
+    method_values: Sequence[str] | None,
+) -> tuple[dict[str, pd.DataFrame], list[pd.Timestamp], float]:
+    selector = DATA_SELECTOR
+    if selector is None:
+        raise RuntimeError("Data selector not initialized.")
+    eff_mode = _normalize_mode(mode_value)
+    normalized_months = resolve_months(months_value, quick_range)
+    kv_set = {value.strip() for value in _normalize_str_list(kv_values) if value and str(value).strip()}
+    method_set = {value.strip().lower() for value in _normalize_str_list(method_values)}
+
+    scoped_frames = selector.scopes_for(
+        eff_mode,
+        months=normalized_months,
+        projects=project_list,
+        gangs=gang_list,
+        kv_filter=kv_set if eff_mode == "stringing" else None,
+        method_filter=method_set if eff_mode == "stringing" else None,
+    )
+
+    if scoped_frames is None:
+        df_day = selector.select(eff_mode)
+        if not isinstance(df_day, pd.DataFrame) or df_day.empty:
+            empty = pd.DataFrame()
+            return (
+                {"month": empty, "project": empty, "full": empty, "project_gang": empty},
+                [],
+                30.0,
+            )
+
+        work = df_day.copy()
+        if eff_mode == "stringing":
+            work = _stringing_scope(work, kv_values, method_values)
+
+        month_scope = apply_filters(work, [], normalized_months, [])
+        project_scope = apply_filters(work, project_list, normalized_months, [])
+        full_scope = apply_filters(work, project_list, normalized_months, gang_list)
+        project_gang_scope = apply_filters(work, project_list, [], gang_list)
+    else:
+        month_scope = scoped_frames.get("month", pd.DataFrame()).copy()
+        project_scope = scoped_frames.get("project", pd.DataFrame()).copy()
+        full_scope = scoped_frames.get("full", pd.DataFrame()).copy()
+        project_gang_scope = scoped_frames.get("project_gang", pd.DataFrame()).copy()
+
+    return (
+        {
+            "month": month_scope,
+            "project": project_scope,
+            "full": full_scope,
+            "project_gang": project_gang_scope,
+        },
+        normalized_months,
+        _avg_days_in_selected_months(normalized_months),
+    )
+
+
+def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame]:
+    selected = meta.get("selected") or {}
+    scopes, _, _ = _build_scope_frames(
+        _normalize_mode(meta.get("mode")),
+        project_list=selected.get("projects", []),
+        gang_list=selected.get("gangs", []),
+        months_value=selected.get("months", []),
+        quick_range=selected.get("quick_range"),
+        kv_values=selected.get("kv", []),
+        method_values=selected.get("methods", []),
+    )
+    for name, frame in scopes.items():
+        cache_key = (meta.get("scopes") or {}).get(name)
+        if cache_key:
+            _set_scope_cache_entry(cache_key, frame)
+    return scopes
+
+
+def _scope_frame_from_store(meta: dict[str, Any] | None, scope_name: str) -> pd.DataFrame:
+    if not isinstance(meta, dict):
+        return pd.DataFrame()
+    cache_key = (meta.get("scopes") or {}).get(scope_name)
+    frame = _get_scope_cache_entry(cache_key)
+    if frame is not None:
+        return frame
+    rebuilt = _repopulate_scopes_from_meta(meta)
+    return rebuilt.get(scope_name, pd.DataFrame())
+
+
+def _months_from_meta(meta: dict[str, Any] | None) -> list[pd.Timestamp]:
+    raw_months = (meta or {}).get("months_iso") or []
+    months: list[pd.Timestamp] = []
+    for raw in raw_months:
+        try:
+            months.append(pd.to_datetime(raw))
+        except Exception:
+            continue
+    return months
+
+
 def _format_period_label(months: Sequence[pd.Timestamp]) -> str:
     if not months:
         return "(All periods)"
@@ -563,6 +887,7 @@ def register_callbacks(
     data_provider: Callable[[], pd.DataFrame],
     config: AppConfig,
     *,
+    duckdb_connection: duckdb.DuckDBPyConnection | None = None,
     stringing_data_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
@@ -573,12 +898,19 @@ def register_callbacks(
 
     LOGGER.debug("Registering callbacks")
 
+    if config.enable_stringing and stringing_data_provider is None:
+        raise RuntimeError("Stringing data provider must be supplied when stringing support is enabled.")
+
     data_selector = DataSelector(
         config=config,
         data_provider=data_provider,
         stringing_provider=stringing_data_provider,
+        duckdb_connection=duckdb_connection,
         logger=LOGGER,
     )
+    global DATA_SELECTOR, _PROJECT_INFO_PROVIDER
+    DATA_SELECTOR = data_selector
+    _PROJECT_INFO_PROVIDER = project_info_provider
     responsibilities_accessor = ResponsibilitiesAccessor(
         data_provider=responsibilities_provider,
         completion_provider=responsibilities_completion_provider,
@@ -854,68 +1186,6 @@ def register_callbacks(
 
         return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
     
-        # --- helper: attach __line_kv__ by looking up Project Details "Project Name" ---
-    def _attach_line_kv(work: pd.DataFrame) -> pd.DataFrame:
-        """
-        Adds __line_kv__ ('765'|'400'|NA) inferred from Project Details.
-        Tries BOTH mappings: project name and project code.
-        If mapping fails, falls back to the row's own project text.
-        """
-        try:
-            if work is None or work.empty:
-                return work
-
-            proj_col = "project_name" if "project_name" in work.columns else ("project" if "project" in work.columns else None)
-            if not proj_col:
-                return work
-
-            out = work.copy()
-            out["__kv_source__"] = out[proj_col].astype(str).str.strip()
-
-            dfpi = project_info_provider() if project_info_provider is not None else None
-            if dfpi is not None and not dfpi.empty:
-                dpi = dfpi.copy()
-
-                def _norm_key(x: object) -> str:
-                    return re.sub(r"\s+", " ", ("" if x is None else str(x)).strip().lower())
-
-                # Build normalized keys on both name and code
-                if "project_name" in dpi.columns:
-                    dpi["__name_key__"] = dpi["project_name"].astype(str).map(_norm_key)
-                else:
-                    dpi["__name_key__"] = ""
-
-                if "project_code" in dpi.columns:
-                    dpi["__code_key__"] = dpi["project_code"].astype(str).map(_norm_key)
-                else:
-                    dpi["__code_key__"] = ""
-
-                # Which column is the descriptive text? Prefer "Project Name"
-                desc_col = "Project Name" if "Project Name" in dpi.columns else ("project_name" if "project_name" in dpi.columns else None)
-
-                if desc_col:
-                    name_map = dict(zip(dpi["__name_key__"], dpi[desc_col].astype(str)))
-                    code_map = dict(zip(dpi["__code_key__"], dpi[desc_col].astype(str)))
-
-                    row_key = out[proj_col].astype(str).map(_norm_key)
-                    mapped_name = row_key.map(name_map)
-                    mapped_code = row_key.map(code_map)
-                    # Prefer name-map, fall back to code-map, then original project text
-                    desc_series = mapped_name.where(mapped_name.notna(), mapped_code)
-                    out["__kv_source__"] = desc_series.where(desc_series.notna(), out[proj_col].astype(str))
-
-            src = out["__kv_source__"].astype(str).str.lower()
-            out["__line_kv__"] = np.where(
-                src.str.contains("765"),
-                "765",
-                np.where(src.str.contains("400"), "400", pd.NA),
-            )
-            return out
-        except Exception:
-            return work
-
-
-
     # --- Mode toggle -> store + banner text ---
     @app.callback(
         Output("store-mode", "data"),
@@ -949,7 +1219,7 @@ def register_callbacks(
         const prop   = ctx.triggered[0].prop_id || "";
         const idPart = prop.split(".")[0];
 
-        // --- AVP surfaces (row or overlay) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â only accept real, timestamped clicks
+        // --- AVP surfaces (row or overlay) only accept real, timestamped clicks
         try {
             const pid = JSON.parse(idPart);
             if (pid && (pid.type === "avp-row" || pid.type === "avp-tip")) {
@@ -1037,48 +1307,48 @@ def register_callbacks(
 
     @app.callback(
         Output("lbl-erections-title", "children"),
-        Input("mode-toggle", "value"),
         Input("store-mode", "data"),
+        State("mode-toggle", "value"),
     )
-    def _title_for_completed(toggle_value, mode_value):
-        eff_mode = (toggle_value or mode_value or "erection").strip().lower()
+    def _title_for_completed(mode_value, toggle_value):
+        eff_mode = (mode_value or toggle_value or "erection").strip().lower()
         return "Stringing Completed" if eff_mode == "stringing" else "Erections Completed"
 
     @app.callback(
         Output("stringing-filters-wrap", "style"),
         Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        State("mode-toggle", "value"),
     )
     def _toggle_stringing_filters(mode_value, toggle_value):
-        mode = (toggle_value or mode_value or "erection").strip().lower()
+        mode = (mode_value or toggle_value or "erection").strip().lower()
         return {"display": "block"} if mode == "stringing" else {"display": "none"}
 
     # Make KPI row span full width in Stringing (4 cards) vs 5 in Erection
     @app.callback(
         Output("kpi-row", "className"),
         Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        State("mode-toggle", "value"),
     )
     def _kpi_row_class(mode_value, toggle_value):
         base = "g-3 align-items-stretch row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 "
-        mode = (toggle_value or mode_value or "erection").strip().lower()
-        # Stringing shows 4 KPI tiles — use 4 cols on xl as well
+        mode = (mode_value or toggle_value or "erection").strip().lower()
+        # Stringing shows 4 KPI tiles - use 4 cols on xl as well
         return base + ("row-cols-xl-4" if mode == "stringing" else "row-cols-xl-5")
     
     @app.callback(
         Output("card-total-nos", "style"),
         Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        State("mode-toggle", "value"),
     )
     def _toggle_total_nos_card(mode_value, toggle_value):
-        mode = (toggle_value or mode_value or "erection").strip().lower()
+        mode = (mode_value or toggle_value or "erection").strip().lower()
         return {} if mode == "erection" else {"display": "none"}
     
     @app.callback(
         Output("f-kv", "value"),
         Output("f-method", "value"),
         Input("btn-reset-filters", "n_clicks"),
-        Input("mode-toggle", "value"),
+        Input("store-mode", "data"),
         prevent_initial_call=True,
     )
     def _reset_stringing_filters(_n, _mode_value):
@@ -1095,7 +1365,7 @@ def register_callbacks(
         Output("f-quick-range", "value"),
         Input("btn-reset-filters", "n_clicks"),
         Input("link-clear-quick-range", "n_clicks"),
-        Input("mode-toggle", "value"),
+        Input("store-mode", "data"),
         prevent_initial_call=True,
     )
     def handle_filter_reset(
@@ -1111,7 +1381,7 @@ def register_callbacks(
         if trigger_id == "link-clear-quick-range":
             return dash.no_update, dash.no_update, dash.no_update, None
         # On mode toggle or Reset click: reset all filters to defaults
-        if trigger_id in {"mode-toggle", "btn-reset-filters"}:
+        if trigger_id in {"store-mode", "btn-reset-filters"}:
             # Compute default month from the latest data date in the active mode's dataset
             try:
                 eff_mode = (mode_value or "erection").strip().lower()
@@ -1131,210 +1401,144 @@ def register_callbacks(
 
 
     @app.callback(
-        Output("f-project", "options"),
+        Output("store-filtered-scope", "data"),
+        Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),         # NEW
-        Input("f-method", "value"),     # NEW
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
         Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        State("mode-toggle", "value"),
+        prevent_initial_call=False,
     )
-    def update_project_options(
+    def _sync_filtered_scope_store(
+        projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
-        kv_values: Sequence[str] | None,       # NEW
-        method_values: Sequence[str] | None,   # NEW
+        kv_values: Sequence[str] | None,
+        method_values: Sequence[str] | None,
         mode_value: str | None,
         toggle_value: str | None,
-    ) -> list[dict[str, str]]:
+    ) -> dict[str, Any]:
+        eff_mode = _normalize_mode(toggle_value or mode_value)
+        project_list = _normalize_str_list(_ensure_list(projects))
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        months_list = _normalize_str_list(_ensure_list(months))
+        kv_list = _normalize_str_list(kv_values)
+        method_list = _normalize_str_list(method_values, lower=True)
+
+        frames, months_ts, days_factor = _build_scope_frames(
+            eff_mode,
+            project_list=project_list,
+            gang_list=gang_list,
+            months_value=months_list,
+            quick_range=quick_range,
+            kv_values=kv_values,
+            method_values=method_values,
+        )
+
+        scope_keys = {name: _remember_scope_frame(frame) for name, frame in frames.items()}
+        rows_meta = {name: int(len(frame.index)) for name, frame in frames.items()}
+        signature_payload = {
+            "mode": eff_mode,
+            "projects": project_list,
+            "gangs": gang_list,
+            "months": months_list,
+            "quick_range": quick_range,
+            "kv": kv_list,
+            "methods": method_list,
+        }
+        signature = hashlib.sha1(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+        return {
+            "mode": eff_mode,
+            "signature": signature,
+            "scopes": scope_keys,
+            "rows": rows_meta,
+            "days_factor": days_factor,
+            "months_iso": [ts.isoformat() for ts in months_ts],
+            "selected": {
+                "projects": project_list,
+                "gangs": gang_list,
+                "months": months_list,
+                "quick_range": quick_range,
+                "kv": kv_list,
+                "methods": method_list,
+            },
+        }
+
+
+    @app.callback(
+        Output("f-project", "options"),
+        Input("store-filtered-scope", "data"),
+    )
+    def update_project_options(scope_meta: dict[str, Any] | None) -> list[dict[str, str]]:
         try:
-            # Prefer the live toggle for immediate switching; fall back to stored mode
-            eff_mode = (toggle_value or mode_value or "erection")
-            df_day = data_selector.select(eff_mode)
-            if df_day is None or df_day.empty:
+            scope = _scope_frame_from_store(scope_meta, "month")
+            if scope.empty:
                 return []
-            # Derive month if missing (belt-and-braces)
-            if "month" not in df_day.columns and "date" in df_day.columns:
-                work = df_day.copy()
-                work["date"] = pd.to_datetime(work["date"], errors="coerce")
-                work = work.dropna(subset=["date"])  # keep valid only
-                work["month"] = work["date"].dt.to_period("M").dt.to_timestamp()
-            else:
-                work = df_day.copy()
-
-                        # --- Stringing-only filters: Line kV + Method ---
-            eff_mode = (toggle_value or mode_value or "erection").strip().lower()
-            if eff_mode == "stringing":
-                work = _attach_line_kv(work)
-
-                # --- kV chips: apply filter only if the selection is a proper subset ---
-                kv_set = set(kv_values or [])
-                if kv_set and kv_set != {"400", "765"}:
-                    work = work[work["__line_kv__"].isin(kv_set)]
-
-                # --- Method chips: same subset rule ---
-                mset = set((m or "").lower() for m in (method_values or []))
-                if mset and mset != {"manual", "tse"} and "method" in work.columns:
-                    work = work[work["method"].astype(str).str.lower().isin(mset)]
-
-
-
-            months_ts = resolve_months(_ensure_list(months), quick_range)
-            days_factor = _avg_days_in_selected_months(months_ts)
-
-            filtered = work
-            if months_ts and "month" in filtered.columns:
-                filtered = filtered[filtered["month"].isin(months_ts)]
-            gang_list = _ensure_list(gangs)
-            if gang_list and "gang_name" in filtered.columns:
-                filtered = filtered[filtered["gang_name"].isin(gang_list)]
-
-            # Project column may be aliased
-            proj_col = "project_name" if "project_name" in filtered.columns else ("project" if "project" in filtered.columns else None)
+            proj_col = "project_name" if "project_name" in scope.columns else ("project" if "project" in scope.columns else None)
             if not proj_col:
                 return []
-            projects = sorted(pd.Series(filtered[proj_col]).dropna().astype(str).str.strip().unique())
-            if not projects:
-                projects = sorted(pd.Series(work[proj_col]).dropna().astype(str).str.strip().unique())
-            return [{"label": p, "value": p} for p in projects]
+            projects = (
+                scope[proj_col]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .unique()
+                .tolist()
+            )
+            projects = sorted({p for p in projects if p})
+            return [{"label": project, "value": project} for project in projects]
         except Exception as exc:
             LOGGER.exception("Failed to build project options: %s", exc)
-            # Return an empty list instead of 500 to keep UI responsive
             return []
 
     @app.callback(
         Output("f-gang", "options"),
-        Input("f-project", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-        Input("f-kv", "value"),         # NEW
-        Input("f-method", "value"),     # NEW
-        Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        Input("store-filtered-scope", "data"),
     )
-    def update_gang_options(
-        projects: Sequence[str] | None,
-        months: Sequence[str] | None,
-        quick_range: str | None,
-        kv_values: Sequence[str] | None,       # NEW
-        method_values: Sequence[str] | None,   # NEW
-        mode_value: str | None,
-        toggle_value: str | None,
-    ) -> list[dict[str, str]]:
+    def update_gang_options(scope_meta: dict[str, Any] | None) -> list[dict[str, str]]:
         try:
-            # Prefer the live toggle for immediate switching; fall back to stored mode
-            eff_mode = (toggle_value or mode_value or "erection")
-            df_day = data_selector.select(eff_mode)
-            if df_day is None or df_day.empty:
+            scope = _scope_frame_from_store(scope_meta, "project")
+            if scope.empty or "gang_name" not in scope.columns:
                 return []
-            work = df_day.copy()
-            eff_mode = (toggle_value or mode_value or "erection").strip().lower()
-            if eff_mode == "stringing":
-                work = _attach_line_kv(work)
-
-                # --- kV chips: apply filter only if the selection is a proper subset ---
-                kv_set = set(kv_values or [])
-                if kv_set and kv_set != {"400", "765"}:
-                    work = work[work["__line_kv__"].isin(kv_set)]
-
-                # --- Method chips: same subset rule ---
-                mset = set((m or "").lower() for m in (method_values or []))
-                if mset and mset != {"manual", "tse"} and "method" in work.columns:
-                    work = work[work["method"].astype(str).str.lower().isin(mset)]
-
-
-
-            if "month" not in work.columns and "date" in work.columns:
-                work["date"] = pd.to_datetime(work["date"], errors="coerce")
-                work = work.dropna(subset=["date"])
-                work["month"] = work["date"].dt.to_period("M").dt.to_timestamp()
-
-            filtered = work
-            project_list = _ensure_list(projects)
-            proj_col = "project_name" if "project_name" in filtered.columns else ("project" if "project" in filtered.columns else None)
-            if project_list and proj_col:
-                filtered = filtered[filtered[proj_col].isin(project_list)]
-            months_ts = resolve_months(_ensure_list(months), quick_range)
-            if months_ts and "month" in filtered.columns:
-                filtered = filtered[filtered["month"].isin(months_ts)]
-
-            if "gang_name" not in filtered.columns:
-                return []
-            gangs = sorted(filtered["gang_name"].dropna().astype(str).str.strip().unique())
-            if not gangs:
-                gangs = sorted(work.get("gang_name", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique())
-            return [{"label": g, "value": g} for g in gangs]
+            gangs = (
+                scope["gang_name"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .unique()
+                .tolist()
+            )
+            gangs = sorted({g for g in gangs if g})
+            return [{"label": gang, "value": gang} for gang in gangs]
         except Exception as exc:
             LOGGER.exception("Failed to build gang options: %s", exc)
             return []
 
     @app.callback(
         Output("f-month", "options"),
-        Input("f-project", "value"),
-        Input("f-quick-range", "value"),
-        Input("f-gang", "value"),
-        Input("f-kv", "value"),         # NEW
-        Input("f-method", "value"),     # NEW
-        Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        Input("store-filtered-scope", "data"),
     )
-    def update_month_options(
-        projects: Sequence[str] | None,
-        quick_range: str | None,
-        gangs: Sequence[str] | None,
-        kv_values: Sequence[str] | None,       # NEW
-        method_values: Sequence[str] | None,   # NEW
-        mode_value: str | None,
-        toggle_value: str | None,
-    ) -> list[dict[str, str]]:
+    def update_month_options(scope_meta: dict[str, Any] | None) -> list[dict[str, str]]:
         try:
-            # Prefer the live toggle for immediate switching; fall back to stored mode
-            eff_mode = (toggle_value or mode_value or "erection")
-            df_day = data_selector.select(eff_mode)
-            if df_day is None or df_day.empty:
+            scope = _scope_frame_from_store(scope_meta, "project_gang")
+            if scope.empty or "month" not in scope.columns:
                 return []
-            work = df_day.copy()
-            eff_mode = (toggle_value or mode_value or "erection").strip().lower()
-            if eff_mode == "stringing":
-                work = _attach_line_kv(work)
-
-                # --- kV chips: apply filter only if the selection is a proper subset ---
-                kv_set = set(kv_values or [])
-                if kv_set and kv_set != {"400", "765"}:
-                    work = work[work["__line_kv__"].isin(kv_set)]
-
-                # --- Method chips: same subset rule ---
-                mset = set((m or "").lower() for m in (method_values or []))
-                if mset and mset != {"manual", "tse"} and "method" in work.columns:
-                    work = work[work["method"].astype(str).str.lower().isin(mset)]
-
-
-
-            # Ensure month exists from date
-            if "month" not in work.columns and "date" in work.columns:
-                work["date"] = pd.to_datetime(work["date"], errors="coerce")
-                work = work.dropna(subset=["date"]).copy()
-                work["month"] = work["date"].to_period("M").dt.to_timestamp()
-
-            filtered = work
-            project_list = _ensure_list(projects)
-            proj_col = "project_name" if "project_name" in filtered.columns else ("project" if "project" in filtered.columns else None)
-            if project_list and proj_col:
-                filtered = filtered[filtered[proj_col].isin(project_list)]
-            gang_list = _ensure_list(gangs)
-            if gang_list and "gang_name" in filtered.columns:
-                filtered = filtered[filtered["gang_name"].isin(gang_list)]
-
-            if "month" not in filtered.columns:
-                return []
-            months = sorted(pd.to_datetime(filtered["month"].dropna().unique()))
+            months = sorted(pd.to_datetime(scope["month"].dropna().unique()))
+            quick_range = ((scope_meta or {}).get("selected") or {}).get("quick_range")
             if quick_range:
-                months_range = resolve_months(None, quick_range)
-                months = [m for m in months if m in months_range]
-            if not months and "month" in work.columns:
-                months = sorted(pd.to_datetime(work["month"].dropna().unique()))
+                allowed = set(resolve_months(None, quick_range))
+                months = [m for m in months if m in allowed]
+            if not months:
+                months = sorted(pd.to_datetime(scope["month"].dropna().unique()))
             return [{"label": m.strftime("%b %Y"), "value": m.strftime("%Y-%m")} for m in months]
         except Exception as exc:
             LOGGER.exception("Failed to build month options: %s", exc)
@@ -1417,8 +1621,8 @@ def register_callbacks(
         Output("pd-title", "children"),
         Output("project-details", "children"),
         Input("f-project", "value"),
-        Input("store-mode", "data"),    # NEW: re-render when mode changes
-        Input("mode-toggle", "value"),  # NEW: also react to the visible toggle
+        Input("store-mode", "data"),    # re-render when mode changes
+        State("mode-toggle", "value"),  # keep toggle context without double triggering
         prevent_initial_call=False,
     )
     def show_project_details(selected_project, _mode_value, _toggle_value):
@@ -1432,7 +1636,7 @@ def register_callbacks(
             text = str(raw).strip()
             if not text:
                 return ""
-            if any(marker in text for marker in ("Ã", "Â")):
+            if any(marker in text for marker in ("Ãƒ", "Ã‚")):
                 try:
                     text = text.encode("latin-1").decode("utf-8").strip()
                 except (UnicodeEncodeError, UnicodeDecodeError):
@@ -1944,187 +2148,204 @@ def register_callbacks(
         Output("kpi-total-nos", "children"),
         Output("kpi-total-nos-planned", "children"),
         Output("kpi-loss", "children"),
-        Output("kpi-loss-delta", "children"),   # <--- add this line
-        Output("avp-list", "children"),            # <-- NEW (HTML children)
+        Output("kpi-loss-delta", "children"),
+        Output("avp-list", "children"),
         Output("g-actual-vs-bench", "figure"),
-        # Output("g-monthly", "figure"),
         Output("g-top5", "figure"),
         Output("g-bottom5", "figure"),
         Output("g-projects-over-months", "figure"),
-        Input("f-project", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-        Input("f-gang", "value"),
-        Input("f-kv", "value"),         # NEW
-        Input("f-method", "value"),     # NEW
+        Input("store-filtered-scope", "data"),
         Input("f-topbot-metric", "value"),
-        Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
     )
     def update_dashboard(
-        projects: Sequence[str] | None,
-        months: Sequence[str] | None,
-        quick_range: str | None,
-        gangs: Sequence[str] | None,
-        kv_values: Sequence[str] | None,       # NEW
-        method_values: Sequence[str] | None,   # NEW
-        topbot_metric: str | None,         
-        mode_value: str | None,
-        toggle_value: str | None,
+        scope_meta: dict[str, Any] | None,
+        topbot_metric: str | None,
     ) -> tuple:
-        if True:
-            project_list = _ensure_list(projects)
-            month_list = _ensure_list(months)
-            gang_list = _ensure_list(gangs)
-            # Prefer the live toggle for immediate switching; fall back to stored mode
-            eff_mode = (toggle_value or mode_value or "erection")
-            df_day = data_selector.select(eff_mode)
-                        # --- Stringing-only filters: Line kV + Method ---
-            if eff_mode == "stringing" and isinstance(df_day, pd.DataFrame) and not df_day.empty:
-                df_day = _attach_line_kv(df_day)
+        if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
+            raise PreventUpdate
 
-                kv_set = set(kv_values or [])
-                if kv_set and kv_set != {"400", "765"}:
-                    df_day = df_day[df_day["__line_kv__"].isin(kv_set)]
+        selected = scope_meta.get("selected") or {}
+        project_list = selected.get("projects", [])
+        gang_list = selected.get("gangs", [])
+        months_ts = _months_from_meta(scope_meta)
+        days_factor = float(scope_meta.get("days_factor") or 30.0)
+        eff_mode = _normalize_mode(scope_meta.get("mode"))
+        meta_signature = scope_meta.get("signature") or "nosig"
 
-                mset = set((m or "").lower() for m in (method_values or []))
-                if mset and mset != {"manual", "tse"} and "method" in df_day.columns:
-                    df_day = df_day[df_day["method"].astype(str).str.lower().isin(mset)]
+        scoped = _scope_frame_from_store(scope_meta, "full").copy()
+        scoped_top_bottom = _scope_frame_from_store(scope_meta, "project").copy()
+        scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
+        scope_keys = scope_meta.get("scopes") or {}
+        project_gang_key = scope_keys.get("project_gang")
+        empty_loss_columns = [
+            "gang_name",
+            "delivered",
+            "lost",
+            "potential",
+            "avg_prod",
+            "baseline",
+            "efficiency_pct",
+            "total_mt",
+        ]
+        loss_df = pd.DataFrame(columns=empty_loss_columns)
 
+        is_stringing = eff_mode == "stringing"
+        metric_col = "daily_km" if is_stringing else "daily_prod_mt"
+        unit_short = "KM" if is_stringing else "MT"
 
-
-            months_ts = resolve_months(month_list, quick_range)
-            days_factor = _avg_days_in_selected_months(months_ts)
-
-            scoped = apply_filters(df_day, project_list, months_ts, gang_list)
-            scoped_top_bottom = apply_filters(df_day, project_list, months_ts, [])
-
-            is_stringing = (str(eff_mode or "erection").strip().lower() == "stringing")
-            metric_col = "daily_km" if is_stringing else "daily_prod_mt"
-            unit_short = "KM" if is_stringing else "MT"
-
-            if is_stringing:
-                # Monthly KPI and benchmark for stringing mode
-                benchmark = BENCHMARK_KM_PER_MONTH
-                if not scoped.empty and metric_col in scoped.columns:
-                    monthly_totals = (
-                        scoped.groupby(["gang_name", "month"], dropna=True)[metric_col]
-                              .sum()
-                              .reset_index(name="monthly_value")
-                    )
-                    avg_prod = float(monthly_totals["monthly_value"].mean()) if not monthly_totals.empty else 0.0
-                else:
-                    avg_prod = 0.0
-                delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
-                kpi_avg = f"{avg_prod:.2f} KM/month"
-                kpi_delta = (
-                    "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} KM/month)"
+        if is_stringing:
+            benchmark = BENCHMARK_KM_PER_MONTH
+            if not scoped.empty and metric_col in scoped.columns:
+                monthly_totals = (
+                    scoped.groupby(["gang_name", "month"], dropna=True)[metric_col]
+                    .sum()
+                    .reset_index(name="monthly_value")
                 )
-                # Keep project chart lines in per-day units for readability
-                project_bench = BENCHMARK_KM_PER_MONTH
-                avg_line_for_project = (scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0)
+                avg_prod = float(monthly_totals["monthly_value"].mean()) if not monthly_totals.empty else 0.0
             else:
-                benchmark = BENCHMARK_MT_PER_DAY
-                avg_prod = scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
-                delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
-                kpi_avg = f"{avg_prod:.2f} {unit_short}"
-                kpi_delta = (
-                    "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} {unit_short})"
+                avg_prod = 0.0
+            delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
+            kpi_avg = f"{avg_prod:.2f} KM/month"
+            kpi_delta = "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} KM/month)"
+            project_bench = BENCHMARK_KM_PER_MONTH
+            avg_line_for_project = (
+                scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
+            )
+        else:
+            benchmark = BENCHMARK_MT_PER_DAY
+            avg_prod = scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
+            delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
+            kpi_avg = f"{avg_prod:.2f} {unit_short}"
+            kpi_delta = "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} {unit_short})"
+            project_bench = benchmark
+            avg_line_for_project = avg_prod
+
+        has_selected_months = bool(months_ts)
+        baseline_map: dict[str, float] = {}
+        baseline_monthly_map: dict[str, dict[pd.Timestamp, float]] = {}
+
+        if "gang_name" not in scoped_all.columns:
+            scoped_all["gang_name"] = pd.Series(dtype=str)
+        if "project_name" not in scoped_all.columns:
+            scoped_all["project_name"] = pd.Series(dtype=str)
+
+        earliest_month = None
+        if has_selected_months and not scoped_all.empty and "month" in scoped_all.columns:
+            month_values = sorted(set(months_ts))
+            period_mask = scoped_all["month"].isin(month_values)
+            loss_scope = scoped_all.loc[period_mask].copy()
+            earliest_month = month_values[0] if month_values else None
+            history_scope = scoped_all.loc[scoped_all["month"] < (earliest_month or pd.Timestamp.max)].copy()
+        else:
+            loss_scope = scoped_all.copy()
+            history_scope = scoped_all.copy()
+        loss_scope = loss_scope.copy()
+        if not loss_scope.empty:
+            if "gang_name" in loss_scope.columns:
+                loss_scope = loss_scope.dropna(subset=["gang_name"])
+                loss_scope["gang_name"] = loss_scope["gang_name"].astype(str).str.strip()
+            if "project_name" in loss_scope.columns:
+                loss_scope["project_name"] = loss_scope["project_name"].astype(str).str.strip()
+
+        # --- PROJECT-level baselines, then map them onto gangs ---
+        precomputed_overall, precomputed_monthly = _get_project_baselines()
+        use_precomputed = (not is_stringing) and bool(precomputed_overall)
+        proj_overall_all: dict[str, float] = {}
+        proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
+
+        if use_precomputed:
+            if "project_name" in scoped_all.columns:
+                available_projects = (
+                    scoped_all["project_name"].dropna().astype(str).str.strip().unique().tolist()
                 )
-                project_bench = benchmark
-                avg_line_for_project = avg_prod
-
-            has_selected_months = bool(months_ts)
-
-            scope_mask = pd.Series(True, index=df_day.index)
-            if project_list and ("project_name" in df_day.columns):
-                scope_mask &= df_day["project_name"].isin(project_list)
-            if gang_list and ("gang_name" in df_day.columns):
-                scope_mask &= df_day["gang_name"].isin(gang_list)
-            scoped_all = df_day.loc[scope_mask].copy()
-            # Ensure expected keys exist to avoid KeyError on selection
-            if "gang_name" not in scoped_all.columns:
-                scoped_all["gang_name"] = pd.Series(dtype=str)
-            if "project_name" not in scoped_all.columns:
-                scoped_all["project_name"] = pd.Series(dtype=str)
-
-            if has_selected_months and not scoped_all.empty and "month" in scoped_all:
-                month_values = sorted(set(months_ts))
-                period_mask = scoped_all["month"].isin(month_values)
-                loss_scope = scoped_all.loc[period_mask].copy()
-                earliest_month = month_values[0]
-                history_scope = scoped_all.loc[scoped_all["month"] < earliest_month].copy()
             else:
-                loss_scope = scoped_all.copy()
-                history_scope = scoped_all.copy()
-
-            # --- PROJECT-level baselines, then map them onto gangs ---
-            precomputed_overall, precomputed_monthly = _get_project_baselines()
-            use_precomputed = (not is_stringing) and bool(precomputed_overall)
-            proj_overall_all: dict[str, float] = {}
-            proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
-            if use_precomputed:
-                if "project_name" in scoped_all.columns:
-                    available_projects = (
-                        scoped_all["project_name"].dropna().astype(str).str.strip().unique().tolist()
-                    )
-                else:
-                    available_projects = []
-                if available_projects:
-                    proj_overall_all = {
-                        project: precomputed_overall.get(project)
-                        for project in available_projects
-                        if precomputed_overall.get(project) is not None
-                    }
-                    monthly_candidates = {
-                        project: precomputed_monthly.get(project, {})
-                        for project in available_projects
-                    }
-                else:
-                    proj_overall_all = dict(precomputed_overall)
-                    monthly_candidates = dict(precomputed_monthly)
-                if has_selected_months and earliest_month is not None:
-                    proj_monthly = {
-                        project: {
-                            month: value
-                            for month, value in month_map.items()
-                            if month < earliest_month
-                        }
-                        for project, month_map in monthly_candidates.items()
-                        if any(month < earliest_month for month in month_map)
-                    }
-                else:
-                    proj_monthly = monthly_candidates
+                available_projects = []
+            if available_projects:
+                proj_overall_all = {
+                    project: precomputed_overall.get(project)
+                    for project in available_projects
+                    if precomputed_overall.get(project) is not None
+                }
+                monthly_candidates = {
+                    project: precomputed_monthly.get(project, {})
+                    for project in available_projects
+                }
             else:
+                proj_overall_all = dict(precomputed_overall)
+                monthly_candidates = dict(precomputed_monthly)
+            if has_selected_months and earliest_month is not None:
+                proj_monthly = {
+                    project: {
+                        month: value
+                        for month, value in month_map.items()
+                        if month < earliest_month
+                    }
+                    for project, month_map in monthly_candidates.items()
+                    if any(month < earliest_month for month in month_map)
+                }
+            else:
+                proj_monthly = monthly_candidates
+        else:
+            baseline_token_all = f"project-baseline::{metric_col}::{meta_signature}"
+
+            def _compute_baseline_all() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                if scoped_all.empty:
+                    return {}, {}
                 if is_stringing:
-                    proj_overall_all, proj_monthly_all = compute_project_baseline_maps_for(scoped_all, metric_col)
-                    proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps_for(history_scope, metric_col)
-                else:
-                    proj_overall_all, proj_monthly_all = compute_project_baseline_maps(scoped_all)
-                    proj_overall_hist, proj_monthly_hist = compute_project_baseline_maps(history_scope)
-                if proj_overall_hist:
-                    proj_overall_all.update(proj_overall_hist)
-                proj_monthly = proj_monthly_hist
-        # Gang → Project bridge
-            gang_to_project = (
-                scoped_all[["gang_name", "project_name"]]
-                .dropna()
-                .drop_duplicates()
-                .set_index("gang_name")["project_name"]
-                .astype(str)
-                .to_dict()
+                    return compute_project_baseline_maps_for(scoped_all, metric_col)
+                return compute_project_baseline_maps(scoped_all)
+
+            proj_overall_all, proj_monthly_all = _cached_scope_result(
+                project_gang_key,
+                baseline_token_all,
+                _compute_baseline_all,
+                clone=_clone_baseline_result,
             )
 
-            # Build the same names your downstream code already expects:
-            baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
-            baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
+            history_key = (
+                f"{baseline_token_all}::history::{earliest_month.isoformat()}"
+                if earliest_month is not None
+                else f"{baseline_token_all}::history::all"
+            )
 
-            baseline_map = baseline_overall_map
+            def _compute_baseline_hist() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                if history_scope.empty:
+                    return {}, {}
+                if is_stringing:
+                    return compute_project_baseline_maps_for(history_scope, metric_col)
+                return compute_project_baseline_maps(history_scope)
 
+            proj_overall_hist, proj_monthly_hist = _cached_scope_result(
+                project_gang_key,
+                history_key,
+                _compute_baseline_hist,
+                clone=_clone_baseline_result,
+            )
+            if proj_overall_hist:
+                proj_overall_all.update(proj_overall_hist)
+            proj_monthly = proj_monthly_hist
 
-            baseline_map = baseline_overall_map
-            loss_rows: list[dict[str, float]] = []
+        # Gang <-> Project bridge
+        gang_to_project = (
+            scoped_all[["gang_name", "project_name"]]
+            .dropna()
+            .drop_duplicates()
+            .set_index("gang_name")["project_name"]
+            .astype(str)
+            .to_dict()
+        )
+
+        baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
+        baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
+        baseline_map = baseline_overall_map or {}
+
+        loss_token = f"loss::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}"
+
+        def _compute_loss_rows() -> list[dict[str, float]]:
+            rows: list[dict[str, float]] = []
             for gang_name, gang_df in loss_scope.groupby("gang_name"):
+                if gang_df.empty:
+                    continue
                 overall_baseline = baseline_overall_map.get(gang_name)
                 if is_stringing:
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss_for_column(
@@ -2141,7 +2362,7 @@ def register_callbacks(
                         baseline_mt_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
                     )
-                loss_rows.append(
+                rows.append(
                     {
                         "gang_name": gang_name,
                         "delivered": delivered,
@@ -2151,121 +2372,76 @@ def register_callbacks(
                         "baseline": baseline,
                     }
                 )
-            if loss_rows:
+            return rows
 
-                loss_df = pd.DataFrame(loss_rows)
-                # --- convert per-day metrics to per-month for stringing ---
-                if is_stringing and not loss_df.empty:
-                    loss_df["avg_prod"] = loss_df["avg_prod"].astype(float) * days_factor
-                    loss_df["baseline"] = loss_df["baseline"].astype(float) * days_factor
+        loss_rows = _cached_scope_result(
+            project_gang_key,
+            loss_token,
+            _compute_loss_rows,
+            clone=_clone_loss_rows,
+        )
 
+        if loss_rows:
+            loss_df = pd.DataFrame(loss_rows)
+            if is_stringing and not loss_df.empty:
+                loss_df["avg_prod"] = loss_df["avg_prod"].astype(float) * days_factor
+                loss_df["baseline"] = loss_df["baseline"].astype(float) * days_factor
 
-                deliv = loss_df["delivered"].astype(float)
-
-                lost = loss_df["lost"].astype(float)
-
-                potential = loss_df["potential"].astype(float)
-
-                sum_series = deliv.add(lost)
-
-                use_sum = deliv.notna() & lost.notna()
-
-                potential_fallback = potential.where(potential.notna(), sum_series)
-
-                total_series = pd.Series(
-
-                    np.where(use_sum, sum_series, potential_fallback),
-
-                    index=loss_df.index,
-
-                ).fillna(0.0)
-
-                efficiency_series = np.where(
-
-                    total_series > 0.0,
-
-                    (deliv.fillna(0.0) / total_series) * 100.0,
-
-                    0.0,
-
+            deliv = loss_df["delivered"].astype(float)
+            lost = loss_df["lost"].astype(float)
+            potential = loss_df["potential"].astype(float)
+            sum_series = deliv.add(lost)
+            use_sum = deliv.notna() & lost.notna()
+            potential_fallback = potential.where(potential.notna(), sum_series)
+            total_series = pd.Series(
+                np.where(use_sum, sum_series, potential_fallback),
+                index=loss_df.index,
+            ).fillna(0.0)
+            efficiency_series = np.where(
+                total_series > 0.0,
+                (deliv.fillna(0.0) / total_series) * 100.0,
+                0.0,
+            )
+            loss_df = (
+                loss_df.assign(
+                    efficiency_pct=efficiency_series,
+                    total_mt=total_series,
                 )
-
-                loss_df = (
-
-                    loss_df.assign(
-
-                        efficiency_pct=efficiency_series,
-
-                        total_mt=total_series,
-
-                    )
-
-                    .sort_values("efficiency_pct", ascending=True)
-
-                    .reset_index(drop=True)
-
-                )
-
-            else:
-
-                loss_df = pd.DataFrame(
-
-                    columns=[
-
-                        "gang_name",
-
-                        "delivered",
-
-                        "lost",
-
-                        "potential",
-
-                        "avg_prod",
-
-                        "baseline",
-
-                        "efficiency_pct",
-
-                        "total_mt",
-
-                    ]
-
-                )
-
-
-
-
-
-
-
-        
-
+                .sort_values("efficiency_pct", ascending=True)
+                .reset_index(drop=True)
+            )
+        else:
+            loss_df = loss_df.copy()
         # --- meta for hover: last project & last worked date per gang (within current filters)
         meta_ready = {"gang_name", "project_name", "date"}.issubset(scoped_all.columns) and not scoped_all.empty
 
         if meta_ready:
-                idx_last = scoped_all.sort_values("date").groupby("gang_name")["date"].idxmax()
-                base_cols = ["gang_name", "project_name", "date"]
-                meta = (
-                    scoped_all.loc[idx_last, base_cols]
-                    .rename(columns={"project_name": "last_project", "date": "last_date"})
-                )
-                # Attach stringing meta if present at the last row per gang
-                extra_cols = ["from_ap", "to_ap", "method", "po_id", "status"]
-                present_extras = [c for c in extra_cols if c in scoped_all.columns]
-                if present_extras:
-                    extras = scoped_all.loc[idx_last, ["gang_name", *present_extras]].copy()
-                    meta = meta.merge(extras, on="gang_name", how="left")
-                loss_df = loss_df.merge(meta, on="gang_name", how="left")
+            idx_last = (
+                scoped_all.sort_values("date")
+                .groupby("gang_name", observed=True)["date"]
+                .idxmax()
+            )
+            base_cols = ["gang_name", "project_name", "date"]
+            meta = (
+                scoped_all.loc[idx_last, base_cols]
+                .rename(columns={"project_name": "last_project", "date": "last_date"})
+            )
+            # Attach stringing meta if present at the last row per gang
+            extra_cols = ["from_ap", "to_ap", "method", "po_id", "status"]
+            present_extras = [c for c in extra_cols if c in scoped_all.columns]
+            if present_extras:
+                extras = scoped_all.loc[idx_last, ["gang_name", *present_extras]].copy()
+                meta = meta.merge(extras, on="gang_name", how="left")
+            loss_df = loss_df.merge(meta, on="gang_name", how="left")
         else:
-                # guarantee columns exist even when we couldn't compute meta
-                loss_df = loss_df.assign(last_project=np.nan, last_date=pd.NaT)
+            # guarantee columns exist even when we couldn't compute meta
+            loss_df = loss_df.assign(last_project=np.nan, last_date=pd.NaT)
         
 
         # pretty, null-safe strings for hover (NO KeyError even if meta missing)
         last_date_series = pd.to_datetime(loss_df.get("last_date"), errors="coerce")
-        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â")
-        loss_df["last_project"]  = loss_df.get("last_project").fillna("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â")
+        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("")
+        loss_df["last_project"]  = loss_df.get("last_project").fillna("")
 
         # Build left-card HTML list from loss_df (now that meta is attached)
 
@@ -2321,7 +2497,13 @@ def register_callbacks(
                     )
 
                 )
-
+        else:
+            avp_children.append(
+                html.Div(
+                    "No gang performance data for the current filters.",
+                    className="text-muted small px-2 py-3",
+                )
+            )
 
         row_px = 56
         topbot_margin = 120
@@ -2592,7 +2774,20 @@ def register_callbacks(
         
         # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
         charts_scope = scoped_top_bottom.copy()
-        projects_scope = df_day.copy()
+        if not charts_scope.empty and "gang_name" in charts_scope.columns:
+            charts_scope = charts_scope.dropna(subset=["gang_name"])
+            charts_scope["gang_name"] = charts_scope["gang_name"].astype(str).str.strip()
+        projects_scope = data_selector.select(eff_mode)
+        if isinstance(projects_scope, pd.DataFrame):
+            projects_scope = projects_scope.copy()
+            if is_stringing:
+                projects_scope = _stringing_scope(
+                    projects_scope,
+                    selected.get("kv"),
+                    selected.get("methods"),
+                )
+        else:
+            projects_scope = pd.DataFrame()
         if is_stringing:
             if "daily_km" in charts_scope.columns:
                 charts_scope["daily_prod_mt"] = charts_scope["daily_km"]
@@ -2612,14 +2807,6 @@ def register_callbacks(
 
             # Scale baseline map to KM/month using average days in selected months (fallback 30)
             if baseline_map:
-                days_factor = 30.0
-                try:
-                    if months_ts:
-                        month_days = [pd.to_datetime(m).to_period("M").days_in_month if not isinstance(m, pd.Period) else m.days_in_month for m in months_ts]
-                        if month_days:
-                            days_factor = float(sum(month_days) / len(month_days))
-                except Exception:
-                    days_factor = 30.0
                 baseline_map = {g: (float(v) * days_factor if v is not None and not pd.isna(v) else 0.0) for g, v in baseline_map.items()}
 
         fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(
@@ -2726,22 +2913,14 @@ def register_callbacks(
         Input("store-click-meta", "data"),
         Input("trace-gang", "value"),
         Input("modal-trace-gang", "value"),
-        State("f-project", "value"),
-        State("f-month", "value"),
-        State("f-quick-range", "value"),
-        State("f-gang", "value"),
-        State("store-mode", "data"),
+        Input("store-filtered-scope", "data"),
         prevent_initial_call=True,
     )
     def update_trace_tables(
         meta,
         trace_gang_value,
         modal_trace_gang_value,
-        projects,
-        months,
-        quick_range,
-        gangs,
-        mode_value: str | None,
+        scope_meta: dict[str, Any] | None,
     ):
         ctx = dash.callback_context
         if not ctx.triggered:
@@ -2754,28 +2933,26 @@ def register_callbacks(
         meta_is_chart = meta_source in CHART_SOURCES and bool(meta_gang)
 
         if triggered_id == "store-click-meta":
-            if meta_is_chart:
-                gang_focus = meta_gang
-            else:
-                gang_focus = dropdown_selection
+            gang_focus = meta_gang if meta_is_chart else dropdown_selection
         else:
             gang_focus = dropdown_selection or (meta_gang if meta_is_chart else None)
 
-        if not gang_focus:
+        if not gang_focus or not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
             raise PreventUpdate
 
+        selected = scope_meta.get("selected") or {}
+        project_list = selected.get("projects", [])
+        gang_list = selected.get("gangs", [])
+        months_ts = _months_from_meta(scope_meta)
+        meta_signature = scope_meta.get("signature") or "nosig"
+        scope_keys = scope_meta.get("scopes") or {}
+        project_gang_key = scope_keys.get("project_gang")
 
-        project_list = _ensure_list(projects)
-        month_list   = _ensure_list(months)
-        gang_list    = _ensure_list(gangs)
+        base_scope = _scope_frame_from_store(scope_meta, "project").copy()
+        scoped = _scope_frame_from_store(scope_meta, "full").copy()
+        scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
 
-        df_day = data_selector.select(mode_value)
-        months_ts = resolve_months(month_list, quick_range)
-
-        base_scope = apply_filters(df_day, project_list, months_ts, []).copy()
-        scoped     = apply_filters(df_day, project_list, months_ts, gang_list).copy()
-
-        is_stringing = (str(mode_value or "erection").strip().lower() == "stringing")
+        is_stringing = _normalize_mode(scope_meta.get("mode")) == "stringing"
         metric_col = "daily_km" if is_stringing else "daily_prod_mt"
 
         def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
@@ -2784,18 +2961,12 @@ def register_callbacks(
             subset = base_scope[base_scope["gang_name"] == target_gang]
             if not subset.empty:
                 return subset
-            fb = df_day[df_day["gang_name"] == target_gang].copy()
-            if project_list:
-                fb = fb[fb["project_name"].isin(project_list)]
-            if months_ts:
+            fb = scoped_all[scoped_all["gang_name"] == target_gang].copy()
+            if months_ts and "month" in fb.columns:
                 fb = fb[fb["month"].isin(months_ts)]
             return fb
 
-        baseline_source = df_day.copy()
-        if project_list:
-            baseline_source = baseline_source[baseline_source["project_name"].isin(project_list)]
-        if gang_list:
-            baseline_source = baseline_source[baseline_source["gang_name"].isin(gang_list)]
+        baseline_source = scoped_all.copy()
         # PROJECT-level baselines for trace/idle view, then map to gang keys
         precomputed_overall, precomputed_monthly = _get_project_baselines()
         use_precomputed = (not is_stringing) and bool(precomputed_overall)
@@ -2833,10 +3004,21 @@ def register_callbacks(
             else:
                 proj_monthly = monthly_candidates
         else:
-            if is_stringing:
-                proj_overall, proj_monthly = compute_project_baseline_maps_for(baseline_source, metric_col)
-            else:
-                proj_overall, proj_monthly = compute_project_baseline_maps(baseline_source)
+            baseline_token = f"trace-project-baseline::{metric_col}::{is_stringing}::{meta_signature}"
+
+            def _compute_trace_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                if baseline_source.empty:
+                    return {}, {}
+                if is_stringing:
+                    return compute_project_baseline_maps_for(baseline_source, metric_col)
+                return compute_project_baseline_maps(baseline_source)
+
+            proj_overall, proj_monthly = _cached_scope_result(
+                project_gang_key,
+                baseline_token,
+                _compute_trace_baselines,
+                clone=_clone_baseline_result,
+            )
         if {"gang_name", "project_name"}.issubset(baseline_source.columns):
             g2p = (
                 baseline_source[["gang_name", "project_name"]]
@@ -2858,11 +3040,23 @@ def register_callbacks(
         if idle_source.empty:
             idle_source = scoped if not scoped.empty else base_scope
 
-        idle_df = compute_idle_intervals_per_gang(
-            idle_source,
-            loss_max_gap_days=config.loss_max_gap_days,
-            baseline_month_lookup=monthly_baseline_map,
-            baseline_fallback_map=overall_baseline_map,
+        idle_token = f"idle::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}::{gang_focus or '*'}"
+
+        def _compute_idle_df() -> pd.DataFrame:
+            if idle_source.empty:
+                return pd.DataFrame()
+            return compute_idle_intervals_per_gang(
+                idle_source,
+                loss_max_gap_days=config.loss_max_gap_days,
+                baseline_month_lookup=monthly_baseline_map,
+                baseline_fallback_map=overall_baseline_map,
+            )
+
+        idle_df = _cached_scope_result(
+            project_gang_key,
+            idle_token,
+            _compute_idle_df,
+            clone=_clone_dataframe,
         )
         if not idle_df.empty:
             idle_df["interval_loss_mt"] = (
@@ -2916,85 +3110,72 @@ def register_callbacks(
         # mirror into modal tables
         return idle_data, daily_data, idle_data, daily_data
 
+
     @app.callback(
         Output("tbl-erections-completed", "columns"),
         Output("tbl-erections-completed", "data"),
         Input("erections-completion-range", "start_date"),
         Input("erections-completion-range", "end_date"),
-        Input("f-project", "value"),
-        Input("f-gang", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
         Input("erections-search", "value"),
-        Input("store-mode", "data"),
-        Input("mode-toggle", "value"),
+        Input("store-filtered-scope", "data"),
     )
     def update_erections_completed(
         start_date,
         end_date,
-        projects,
-        gangs,
-        months,
-        quick_range,
         search_text,
-        mode_value: str | None,
-        toggle_value: str | None,
+        scope_meta: dict[str, Any] | None,
     ) -> list[dict[str, object]]:
         range_start = _parse_completion_date(start_date) or _default_completion_date()
         range_end = _parse_completion_date(end_date) or range_start
         if range_start > range_end:
             range_start, range_end = range_end, range_start
 
-        project_list = _ensure_list(projects)
-        gang_list = _ensure_list(gangs)
-        _unused_months = _ensure_list(months)
-        _unused_quick_range = quick_range
+        if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
+            raise PreventUpdate
 
-        eff_mode = (toggle_value or mode_value or "erection")
-        df_day = data_selector.select(eff_mode)
-        scoped = apply_filters(df_day, project_list, [], gang_list).copy()
+        eff_mode = _normalize_mode(scope_meta.get("mode"))
+        scoped = _scope_frame_from_store(scope_meta, "project_gang").copy()
 
-        if str(eff_mode).strip().lower() == "stringing":
-                export_df, display_df = _prepare_stringing_completed(
-                    scoped,
-                    range_start=range_start,
-                    range_end=range_end,
-                    search_text=search_text,
-                )
-                columns = [
-                    {"name": "Completion Date",           "id": "completion_date"},
-                    {"name": "Project",                   "id": "project_name"},
-                    {"name": "Span (From→To)",            "id": "location_no"},   # we render From→To here
-                    {"name": "Length (KM)",               "id": "tower_weight"},  # was Tower Weight (MT)
-                    {"name": "Productivity (KM/day)",     "id": "daily_prod_mt"}, # was MT/day
-                    {"name": "Gang",                      "id": "gang_name"},
-                    {"name": "F/S Start Date",            "id": "start_date"},
-                    {"name": "Supervisor",                "id": "supervisor_name"},
-                    {"name": "Section Incharge",          "id": "section_incharge_name"},
-                    {"name": "Revenue",                   "id": "revenue"},
-                ]
+        if eff_mode == "stringing":
+            export_df, display_df = _prepare_stringing_completed(
+                scoped,
+                range_start=range_start,
+                range_end=range_end,
+                search_text=search_text,
+            )
+            columns = [
+                {"name": "Completion Date", "id": "completion_date"},
+                {"name": "Project", "id": "project_name"},
+                {"name": "Span (From-To)", "id": "location_no"},
+                {"name": "Length (KM)", "id": "tower_weight"},
+                {"name": "Productivity (KM/day)", "id": "daily_prod_mt"},
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "F/S Start Date", "id": "start_date"},
+                {"name": "Supervisor", "id": "supervisor_name"},
+                {"name": "Section Incharge", "id": "section_incharge_name"},
+                {"name": "Revenue", "id": "revenue"},
+            ]
         else:
-                export_df, display_df = _prepare_erections_completed(
-                    scoped,
-                    range_start=range_start,
-                    range_end=range_end,
-                    responsibilities_provider=responsibilities_provider,
-                    search_text=search_text,
-                )
-                columns = [
-                    {"name": "Completion Date",           "id": "completion_date"},
-                    {"name": "Project",                   "id": "project_name"},
-                    {"name": "Location",                  "id": "location_no"},
-                    {"name": "Tower Weight (MT)",         "id": "tower_weight"},
-                    {"name": "Productivity (MT/day)",     "id": "daily_prod_mt"},
-                    {"name": "Gang",                      "id": "gang_name"},
-                    {"name": "Start Date",                "id": "start_date"},
-                    {"name": "Supervisor",                "id": "supervisor_name"},
-                    {"name": "Section Incharge",          "id": "section_incharge_name"},
-                    {"name": "Revenue",                   "id": "revenue"},
-                ]
+            export_df, display_df = _prepare_erections_completed(
+                scoped,
+                range_start=range_start,
+                range_end=range_end,
+                responsibilities_provider=responsibilities_provider,
+                search_text=search_text,
+            )
+            columns = [
+                {"name": "Completion Date", "id": "completion_date"},
+                {"name": "Project", "id": "project_name"},
+                {"name": "Location", "id": "location_no"},
+                {"name": "Tower Weight (MT)", "id": "tower_weight"},
+                {"name": "Productivity (MT/day)", "id": "daily_prod_mt"},
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Start Date", "id": "start_date"},
+                {"name": "Supervisor", "id": "supervisor_name"},
+                {"name": "Section Incharge", "id": "section_incharge_name"},
+                {"name": "Revenue", "id": "revenue"},
+            ]
 
-            # return columns + rows (empty list if nothing)
         if display_df.empty:
             return columns, []
         return columns, display_df.to_dict("records")
@@ -3098,36 +3279,34 @@ def register_callbacks(
         Output("trace-gang", "value"),
         Output("modal-trace-gang", "options"),
         Output("modal-trace-gang", "value"),
-        Input("f-project", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
+        Input("store-filtered-scope", "data"),
         Input("store-selected-gang", "data"),
-        Input("store-mode", "data"),
         State("trace-gang", "value"),
     )
     def update_trace_gang_options(
-        projects: Sequence[str] | None,
-        months: Sequence[str] | None,
-        quick_range: str | None,
+        scope_meta: dict[str, Any] | None,
         clicked_gang: str | None,
-        mode_value: str | None,
         current_value: str | None,
     ) -> tuple[list[dict[str, str]], str | None, list[dict[str, str]], str | None]:
-        project_list = _ensure_list(projects)
-        month_list = _ensure_list(months)
+        if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
+            raise PreventUpdate
 
-        df_day = data_selector.select(mode_value)
-        months_ts = resolve_months(month_list, quick_range)
-        base = apply_filters(df_day, project_list, months_ts, [])
-        # Be defensive when switching to Stringing with no data configured
-        if not isinstance(base, pd.DataFrame) or base.empty or "gang_name" not in base.columns:
+        base = _scope_frame_from_store(scope_meta, "project")
+        if base.empty or "gang_name" not in base.columns:
             options: list[dict[str, str]] = []
-            value = None
-            return options, value, options, value
+            return options, None, options, None
+
         gangs = (
-            base["gang_name"].dropna().astype(str).str.strip().unique().tolist()
+            base["gang_name"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .unique()
+            .tolist()
         )
-        gangs = sorted([g for g in gangs if g])
+        gangs = sorted({g for g in gangs if g})
         options = [{"label": gang, "value": gang} for gang in gangs]
 
         if clicked_gang and clicked_gang in gangs:
@@ -3447,11 +3626,46 @@ def register_callbacks(
                 elif "month" in day_filtered.columns:
                     day_filtered["month"] = pd.to_datetime(day_filtered["month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
                 day_filtered = day_filtered.dropna(subset=["project_name", "daily_km"])
-                overall_map, _ = compute_project_baseline_maps_for(day_filtered, "daily_km")
+                baseline_payload = {
+                    "kind": "stringing-day-baseline",
+                    "projects": sorted(project_list),
+                    "months": [ts.isoformat() for ts in months_ts],
+                    "rows": int(len(day_filtered.index)),
+                    "version": int(df_day.attrs.get("_appdata_version", 0)),
+                }
+                baseline_token = f"stringing-baseline::{_hash_cache_payload(baseline_payload)}"
+
+                def _compute_day_baseline() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                    if day_filtered.empty:
+                        return {}, {}
+                    return compute_project_baseline_maps_for(day_filtered, "daily_km")
+
+                overall_map, _ = _cached_global_result(
+                    baseline_token,
+                    _compute_day_baseline,
+                    clone=_clone_baseline_result,
+                )
                 prod_overall_norm_map, prod_overall_compact_map = _build_lookup_maps(overall_map)
                 current_scope = day_filtered[day_filtered["month"] == current_month_ts] if "month" in day_filtered.columns else pd.DataFrame()
                 if not current_scope.empty:
-                    current_map, _ = compute_project_baseline_maps_for(current_scope, "daily_km")
+                    current_payload = dict(baseline_payload)
+                    current_payload.update(
+                        {
+                            "window": "current",
+                            "month": current_month_ts.isoformat(),
+                            "rows": int(len(current_scope.index)),
+                        }
+                    )
+                    current_token = f"stringing-baseline::{_hash_cache_payload(current_payload)}"
+
+                    def _compute_current_baseline() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                        return compute_project_baseline_maps_for(current_scope, "daily_km")
+
+                    current_map, _ = _cached_global_result(
+                        current_token,
+                        _compute_current_baseline,
+                        clone=_clone_baseline_result,
+                    )
                     prod_current_norm_map, prod_current_compact_map = _build_lookup_maps(current_map)
                 if not prod_current_norm_map:
                     prod_current_norm_map, prod_current_compact_map = prod_overall_norm_map.copy(), prod_overall_compact_map.copy()
@@ -4035,12 +4249,46 @@ def register_callbacks(
 
                 current_scope = day_filtered[day_filtered["month"] == current_month_ts]
                 if not current_scope.empty:
-                    prod_current_raw, _ = compute_project_baseline_maps_for(current_scope, "daily_prod_mt")
+                    current_payload = {
+                        "kind": "erection-current-baseline",
+                        "projects": sorted(project_list),
+                        "months": [ts.isoformat() for ts in months_ts],
+                        "month": current_month_ts.isoformat(),
+                        "rows": int(len(current_scope.index)),
+                        "version": int(df_day.attrs.get("_appdata_version", 0)),
+                    }
+                    current_token = f"erection-baseline::{_hash_cache_payload(current_payload)}"
+
+                    def _compute_current_prod() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                        return compute_project_baseline_maps_for(current_scope, "daily_prod_mt")
+
+                    prod_current_raw, _ = _cached_global_result(
+                        current_token,
+                        _compute_current_prod,
+                        clone=_clone_baseline_result,
+                    )
                     prod_current_norm_map, prod_current_compact_map = _build_metric_lookup(prod_current_raw)
 
                 history_scope = day_filtered[day_filtered["month"] < current_month_ts]
                 if not history_scope.empty:
-                    prod_history_raw, _ = compute_project_baseline_maps_for(history_scope, "daily_prod_mt")
+                    history_payload = {
+                        "kind": "erection-history-baseline",
+                        "projects": sorted(project_list),
+                        "months": [ts.isoformat() for ts in months_ts],
+                        "month": current_month_ts.isoformat(),
+                        "rows": int(len(history_scope.index)),
+                        "version": int(df_day.attrs.get("_appdata_version", 0)),
+                    }
+                    history_token = f"erection-baseline::{_hash_cache_payload(history_payload)}"
+
+                    def _compute_history_prod() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                        return compute_project_baseline_maps_for(history_scope, "daily_prod_mt")
+
+                    prod_history_raw, _ = _cached_global_result(
+                        history_token,
+                        _compute_history_prod,
+                        clone=_clone_baseline_result,
+                    )
                     prod_history_norm_map, prod_history_compact_map = _build_metric_lookup(prod_history_raw)
 
         if isinstance(ed, pd.DataFrame) and not ed.empty and "completion_date" in ed.columns:
