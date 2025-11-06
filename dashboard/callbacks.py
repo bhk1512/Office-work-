@@ -556,7 +556,7 @@ def register_callbacks(
 
     # --- shared: responsibilities figure + KPIs for a single project selection ---
     def _build_responsibilities_for_project(
-        project_value: str | None,
+        project_value: str | Sequence[str] | None,
         entity_value: str | None,
         metric_value: str | None,
         months_value: Sequence[str] | None,
@@ -566,10 +566,33 @@ def register_callbacks(
             empty_fig = build_empty_responsibilities_figure(message)
             return empty_fig, "\u2014", "\u2014", "\u2014"
 
-        if not project_value:
+        candidates_raw: list[Any] = []
+        if isinstance(project_value, dict):
+            candidates_raw.extend([
+                project_value.get("name"),
+                project_value.get("code"),
+            ])
+            candidates_raw.extend(project_value.values())
+        elif isinstance(project_value, Sequence) and not isinstance(project_value, (str, bytes)):
+            candidates_raw.extend(project_value)
+        elif project_value is not None:
+            candidates_raw.append(project_value)
+
+        project_candidates: list[str] = []
+        seen_candidates: set[str] = set()
+        for candidate in candidates_raw:
+            text = "" if candidate is None else str(candidate).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            project_candidates.append(text)
+
+        if not project_candidates:
             return _empty_response("Select a single project to view its details.")
 
-        project_value = str(project_value).strip()
         entity = (entity_value or "Supervisor").strip()
         metric = (metric_value or "tower_weight").strip()
         metric = metric if metric in {"revenue", "tower_weight"} else "tower_weight"
@@ -667,19 +690,26 @@ def register_callbacks(
             df_atomic = df_atomic[df_atomic["completion_month"].isin(active_months)].copy()
 
         # Filter by project (supports name or code; robust compact match)
-        sel = _norm_lc(project_value)
-        mask_name_or_key = (
-            (df_atomic["project_name_lc"] == sel) | (df_atomic["project_key_lc"] == sel)
-        )
-        if not mask_name_or_key.any():
-            import re as _re
-            sel_compact = _re.sub(r"[^a-z0-9]", "", sel)
-            project_name_compact = df_atomic["project_name_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
-            project_key_compact = df_atomic["project_key_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+        df_entity = pd.DataFrame()
+        for candidate in project_candidates:
+            sel = _norm_lc(candidate)
             mask_name_or_key = (
-                (project_name_compact == sel_compact) | (project_key_compact == sel_compact)
+                (df_atomic["project_name_lc"] == sel) | (df_atomic["project_key_lc"] == sel)
             )
-        df_entity = df_atomic[mask_name_or_key].copy()
+            if not mask_name_or_key.any():
+                import re as _re
+                sel_compact = _re.sub(r"[^a-z0-9]", "", sel)
+                project_name_compact = df_atomic["project_name_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+                project_key_compact = df_atomic["project_key_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+                mask_name_or_key = (
+                    (project_name_compact == sel_compact) | (project_key_compact == sel_compact)
+                )
+            if mask_name_or_key.any():
+                df_entity = df_atomic[mask_name_or_key].copy()
+                break
+
+        if df_entity.empty:
+            return _empty_response("No responsibilities found for the selected project.")
 
         # Entity filter (Supervisor / Section Incharge / Gang)
         ent_map = {
@@ -3129,52 +3159,32 @@ def register_callbacks(
             return f"mode={mode}; error={type(exc).__name__}"
 
 
-    # --- KPI Details Modal: open/close and populate tables ---
-    @app.callback(
-        Output("kpi-modal", "is_open"),
-        Output("kpi-modal-title", "children"),
-        Output("store-kpi-modal-source", "data"),
-        Input("kpi-card-total-nos", "n_clicks"),
-        Input("kpi-card-total-mt", "n_clicks"),
-        Input("kpi-modal-close", "n_clicks"),
-        State("kpi-modal", "is_open"),
-        State("store-mode", "data"),
-        prevent_initial_call=True,
-    )
-    def _toggle_kpi_modal(n_nos: int | None, n_mt: int | None, n_close: int | None, is_open: bool, mode_value: str | None):
-        ctx = dash.callback_context
-        if not ctx.triggered:
-            raise PreventUpdate
-        trig = ctx.triggered[0]["prop_id"].split(".")[0]
-        mode = (mode_value or "erection").strip().lower()
-        if trig == "kpi-modal-close":
-            return False, dash.no_update, dash.no_update
-        # Erection: open for both Nos and MT
-        if mode == "erection":
-            if trig == "kpi-card-total-nos":
-                return True, "Towers Erected - PCH Wise Planned vs Delivered", {"source": "nos"}
-            if trig == "kpi-card-total-mt":
-                return True, "Volume Erected - PCH Wise Planned vs Delivered", {"source": "mt"}
-        # Stringing: open for KM (reuse MT card click)
-        if mode == "stringing":
-            if trig == "kpi-card-total-mt":
-                return True, "Length Stringed - PCH Wise Planned vs Delivered", {"source": "km"}
-        raise PreventUpdate
-
+    # --- KPI Details drilldown: populate inline accordion ---
     @app.callback(
         Output("kpi-pch-accordion", "children"),
-        Input("kpi-modal", "is_open"),
-        State("store-kpi-modal-source", "data"),
-        State("f-project", "value"),
-        State("f-month", "value"),
-        State("f-quick-range", "value"),
-        State("store-mode", "data"),
-        prevent_initial_call=True,
+        Output("kpi-pch-accordion", "active_item"),
+        Input("f-project", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("store-mode", "data"),
     )
-    def _populate_kpi_pch(is_open: bool, source_meta, projects, months, quick_range, mode_value: str | None):
-        if not is_open:
-            raise PreventUpdate
+    def _populate_kpi_pch(projects, months, quick_range, mode_value: str | None):
         mode = (mode_value or "erection").strip().lower()
+        try:
+            import re as _re_slug
+        except Exception:  # pragma: no cover - regex should be available, but keep fallback
+            _re_slug = None
+
+        def _slugify_pch(value: Any) -> str:
+            text = str(value or "").strip().lower()
+            if not text:
+                return "unknown"
+            if _re_slug is not None:
+                text = _re_slug.sub(r"[^a-z0-9]+", "-", text)
+            else:
+                text = text.replace(" ", "-")
+            text = text.strip("-")
+            return text or "unknown"
         # Erection mode (existing flow)
         if mode != "stringing":
             # fall through to original erection implementation below
@@ -3200,7 +3210,7 @@ def register_callbacks(
             if isinstance(scoped, pd.DataFrame) and not scoped.empty:
                 proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
                 if proj_col is None:
-                    return []
+                    return [], None
                 delivered_km_by_project = (
                     scoped.groupby(scoped[proj_col].astype(str))
                           .agg({"daily_km": "sum"})
@@ -3332,15 +3342,31 @@ def register_callbacks(
                 p_planned_km = sum(r["planned_mt"] for r in rows)
                 p_delivered_km = sum(r["delivered_mt"] for r in rows)
 
-                header = dbc.Row([
-                    dbc.Col(html.H6(str(pch), className="mb-0"), md=3),
-                    dbc.Col(html.Div([dbc.Badge(f"KM {p_delivered_km:.1f}/{p_planned_km:.1f}", color="dark", className="me-2")]), md=9),
-                ], className="pch-header align-items-center py-2")
+                title_component = html.Div(
+                    [
+                        html.Span(str(pch or "Unassigned"), className="fw-semibold"),
+                        dbc.Badge(
+                            f"KM {p_delivered_km:.1f}/{p_planned_km:.1f}",
+                            color="dark",
+                            className="ms-auto",
+                        ),
+                    ],
+                    className="d-flex align-items-center w-100 gap-2",
+                )
 
                 tile_cols = []
                 for r in sorted(rows, key=lambda x: str(x["project_name"])):
                     proj_name = str(r["project_name"]).strip()
-                    proj_code = r.get("project_code") or proj_name
+                    # Build robust compact code for modal open
+                    try:
+                        import re as _re
+                        def _compact_code_text(s: str) -> str:
+                            return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                    except Exception:
+                        def _compact_code_text(s: str) -> str:
+                            return (s or "").strip().lower().replace(" ", "")
+                    raw_code = r.get("project_code") or r.get("project_key") or proj_name
+                    proj_code = _compact_code_text(str(raw_code))
                     tile_body = html.Div([
                         html.Div(html.Strong(proj_name), className="mb-2"),
                         html.Div([
@@ -3355,12 +3381,16 @@ def register_callbacks(
                             html.Span("Length Stringed : ", className="me-2"),
                             dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} KM", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                         ], className="mb-2"),
-                        dbc.Button(
-                            "View Responsibilities",
-                            id={"type": "proj-resp-open", "code": proj_code},
-                            color="link",
-                            className="p-0",
-                        ),
+                        html.Div([
+                            html.Span("View Responsibilities : ", className="me-2"),
+                            # For stringing, responsibilities still open the erection responsibilities modal filtered by project
+                            dbc.Button(
+                                (pd.Timestamp.today().strftime("%b %Y")),
+                                id={"type": "proj-resp-open", "code": proj_code, "name": proj_name, "month": pd.Timestamp.today().strftime("%Y-%m")},
+                                color="link",
+                                className="p-0 me-1",
+                            ),
+                        ], className="mb-2"),
                     ])
                     tile_cols.append(
                         dbc.Col(
@@ -3368,10 +3398,29 @@ def register_callbacks(
                             xs=12, sm=12, md=6, lg=4, className="mb-3"
                         )
                     )
+                body_children = (
+                    [dbc.Row(tile_cols, className="g-3")]
+                    if tile_cols
+                    else [html.Div("No projects available.", className="text-muted")]
+                )
+                pch_sections.append(
+                    dbc.AccordionItem(
+                        title=title_component,
+                        children=dbc.AccordionBody(body_children),
+                        item_id=f"pch-{_slugify_pch(pch)}",
+                        className="pch-section mb-2",
+                    )
+                )
+            if not pch_sections:
+                placeholder = dbc.AccordionItem(
+                    title=html.Span("No PCH data", className="fw-semibold"),
+                    children=dbc.AccordionBody(html.Div("No projects match the current filters.", className="text-muted")),
+                    item_id="pch-empty",
+                    className="pch-section mb-2",
+                )
+                pch_sections = [placeholder]
 
-                pch_sections.append(html.Div([header, dbc.Row(tile_cols, className="g-3")], className="pch-section mb-4"))
-
-            return pch_sections
+            return pch_sections, None
 
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
@@ -3408,15 +3457,29 @@ def register_callbacks(
         if "completion_month" in mp.columns and months_ts:
             mp = mp[mp["completion_month"].isin(months_ts)].copy()
         if project_list:
-            proj_names = set(str(p).strip().lower() for p in project_list)
+            import re as _re
+            proj_names_lc = set(str(p).strip().lower() for p in project_list)
+            proj_names_compact = set(_re.sub(r"[^a-z0-9]", "", s) for s in proj_names_lc)
             name_lc = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
             key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
-            mp = mp[(name_lc.isin(proj_names)) | (key_lc.isin(proj_names))].copy()
+            name_compact = name_lc.str.replace(r"[^a-z0-9]", "", regex=True)
+            key_compact = key_lc.str.replace(r"[^a-z0-9]", "", regex=True)
+            mask_mp = (
+                name_lc.isin(proj_names_lc) | key_lc.isin(proj_names_lc) |
+                name_compact.isin(proj_names_compact) | key_compact.isin(proj_names_compact)
+            )
+            mp = mp[mask_mp].copy()
             # Apply same project filter to unfiltered copy used for availability checks
             if isinstance(mp_all, pd.DataFrame) and not mp_all.empty:
                 name_lc_all = (mp_all.get("project_name", pd.Series([""] * len(mp_all), index=mp_all.index)).astype(str).str.strip().str.lower())
                 key_lc_all = (mp_all.get("project_key", pd.Series([""] * len(mp_all), index=mp_all.index)).astype(str).str.strip().str.lower())
-                mp_all = mp_all[(name_lc_all.isin(proj_names)) | (key_lc_all.isin(proj_names))].copy()
+                name_compact_all = name_lc_all.str.replace(r"[^a-z0-9]", "", regex=True)
+                key_compact_all = key_lc_all.str.replace(r"[^a-z0-9]", "", regex=True)
+                mask_all = (
+                    name_lc_all.isin(proj_names_lc) | key_lc_all.isin(proj_names_lc) |
+                    name_compact_all.isin(proj_names_compact) | key_compact_all.isin(proj_names_compact)
+                )
+                mp_all = mp_all[mask_all].copy()
 
         # Normalized helper columns
         mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
@@ -3747,7 +3810,14 @@ def register_callbacks(
                 # (legacy header removed)
                 # Detect if Micro Plan rows exist for this project using robust name/code matching
                 import re as _re
-                sel_name = str(proj_name).strip().lower()
+                # proj_name may be in format "CODE : NAME"; split for robust matching
+                full_name = str(proj_name).strip()
+                if " : " in full_name:
+                    code_part, name_part = full_name.split(" : ", 1)
+                else:
+                    code_part, name_part = "", full_name
+                sel_name = name_part.strip().lower()
+                sel_code = _re.sub(r"[^a-z0-9]", "", code_part.strip().lower()) if code_part else ""
                 sel_compact = _re.sub(r"[^a-z0-9]", "", sel_name)
 
                 def _has_project(frame: pd.DataFrame | None) -> bool:
@@ -3762,7 +3832,8 @@ def register_callbacks(
                         key_compact = key_lc.str.replace(r"[^a-z0-9]", "", regex=True)
                         mask = (
                             (name_lc == sel_name) | (key_lc == sel_name) |
-                            (name_compact == sel_compact) | (key_compact == sel_compact)
+                            (name_compact == sel_compact) | (key_compact == sel_compact) |
+                            ((sel_code != "") & (key_compact == sel_code))
                         )
                         return bool(mask.any())
                     except Exception:
@@ -3888,7 +3959,16 @@ def register_callbacks(
 
                 # Build the grid tile representation used for the new layout
                 key = f"{pch}::{proj_name}"
-                proj_code = r.get("project_code") or r.get("project_key") or proj_name
+                # Build compact code for modal IDs (match against project_key)
+                try:
+                    import re as _re
+                    def _compact_code_text(s: str) -> str:
+                        return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                except Exception:
+                    def _compact_code_text(s: str) -> str:
+                        return (s or "").strip().lower().replace(" ", "")
+                raw_code = r.get("project_code") or r.get("project_key") or proj_name
+                proj_code = _compact_code_text(str(raw_code))
                 tile_body_children = [
                     html.Div(html.Strong(proj_name), className="mb-2"),
                     html.Div([
@@ -3900,44 +3980,70 @@ def register_callbacks(
                         dbc.Badge(r.get("project_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
                     ], className="mb-2"),
                 ]
-                if has_mp:
-                    tile_body_children.extend([
-                        html.Div([
-                            html.Span("Towers Erected : ", className="me-2"),
-                            dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}),
-                        ], className="mb-2"),
-                        html.Div([
-                            html.Span("Volume Erected : ", className="me-2"),
-                            dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
-                        ], className="mb-2"),
-                        dbc.Button(
-                            "View Responsibilities",
-                            id={"type": "proj-resp-open", "code": proj_code},
-                            color="link",
-                            className="p-0",
-                        ),
-                    ])
-                else:
-                    # For projects with Micro Plan outside the selected month, still show the button
-                    tile_body_children.extend([
-                        html.Div([
-                            html.Span("Towers Erected : ", className="me-2"),
-                        ], className="mb-2"),
-                        html.Div([
-                            html.Span("Volume Erected : ", className="me-2"),
-                        ], className="mb-2"),
-                    ])
-                    if has_mp_any:
-                        tile_body_children.append(
-                            dbc.Button(
-                                "View Responsibilities",
-                                id={"type": "proj-resp-open", "code": proj_code},
-                                color="link",
-                                className="p-0",
+                # Build month-aware responsibilities openers
+                def _month_buttons_for_project() -> list:
+                    # derive available months from mp_all for this project
+                    months_vals: list = []
+                    try:
+                        if isinstance(mp_all, pd.DataFrame) and not mp_all.empty:
+                            # Filter mp_all to this project using same robust matcher
+                            name_lc_all = (mp_all.get("project_name", pd.Series([""] * len(mp_all), index=mp_all.index)).astype(str).str.strip().str.lower())
+                            key_lc_all = (mp_all.get("project_key", pd.Series([""] * len(mp_all), index=mp_all.index)).astype(str).str.strip().str.lower())
+                            name_compact_all = name_lc_all.str.replace(r"[^a-z0-9]", "", regex=True)
+                            key_compact_all = key_lc_all.str.replace(r"[^a-z0-9]", "", regex=True)
+                            mask_all = (
+                                (name_lc_all == sel_name) | (key_lc_all == sel_name) |
+                                (name_compact_all == sel_compact) | (key_compact_all == sel_compact) |
+                                ((sel_code != "") & (key_compact_all == sel_code))
                             )
-                        )
-                    else:
-                        tile_body_children.append(html.Div("Micro Plan not available.", className="text-muted"))
+                            sub = mp_all.loc[mask_all].copy()
+                            if "completion_month" not in sub.columns:
+                                if "completion_date" in sub.columns:
+                                    try:
+                                        sub["completion_month"] = pd.to_datetime(sub["completion_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                                    except Exception:
+                                        sub["completion_month"] = pd.NaT
+                                else:
+                                    sub["completion_month"] = pd.NaT
+                            months_vals = sorted({pd.Timestamp(v) for v in sub["completion_month"] if pd.notna(v)})
+                    except Exception:
+                        months_vals = []
+                    # render buttons
+                    out: list = []
+                    if months_vals:
+                        out.append(html.Span("View Responsibilities : ", className="me-2"))
+                        # cap to last 2 months only
+                        months_vals = sorted(months_vals)
+                        months_vals = months_vals[-2:]
+                        for ts in months_vals:
+                            label = ts.strftime("%b %Y")
+                            value = ts.strftime("%Y-%m")
+                            out.append(
+                                dbc.Button(
+                                    label,
+                                    id={"type": "proj-resp-open", "code": proj_code, "name": name_part.strip(), "month": value},
+                                    color="link",
+                                    className="p-0 me-1",
+                                )
+                            )
+                    return out
+
+                # Common stats section
+                tile_body_children.extend([
+                    html.Div([
+                        html.Span("Towers Erected : ", className="me-2"),
+                        (dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}) if has_mp else None),
+                    ], className="mb-2"),
+                    html.Div([
+                        html.Span("Volume Erected : ", className="me-2"),
+                        (dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}) if has_mp else None),
+                    ], className="mb-2"),
+                ])
+                month_buttons = _month_buttons_for_project()
+                if month_buttons:
+                    tile_body_children.append(html.Div(month_buttons, className="mb-1"))
+                else:
+                    tile_body_children.append(html.Div("Micro Plan not available.", className="text-muted"))
 
                 tile_body = html.Div(tile_body_children)
 
@@ -3948,23 +4054,41 @@ def register_callbacks(
                     )
                 )
 
+            body_children = (
+                [dbc.Row(tile_cols, className="g-3")]
+                if tile_cols
+                else [html.Div("No projects available.", className="text-muted")]
+            )
+            title_component = html.Div(
+                [
+                    html.Span(str(pch or "Unassigned"), className="fw-semibold"),
+                    dbc.Badge(
+                        f"Nos {p_delivered_nos}/{p_planned_nos} · MT {p_delivered_mt:.1f}/{p_planned_mt:.1f}",
+                        color="dark",
+                        className="ms-auto",
+                    ),
+                ],
+                className="d-flex align-items-center w-100 gap-2",
+            )
             pch_sections.append(
-                html.Div([
-                    header,
-                    dbc.Row(tile_cols, className="g-3"),
-                ], className="pch-section mb-4")
+                dbc.AccordionItem(
+                    title=title_component,
+                    children=dbc.AccordionBody(body_children),
+                    item_id=f"pch-{_slugify_pch(pch)}",
+                    className="pch-section mb-2",
+                )
             )
 
-        return pch_sections
+        if not pch_sections:
+            placeholder = dbc.AccordionItem(
+                title=html.Span("No PCH data", className="fw-semibold"),
+                children=dbc.AccordionBody(html.Div("No projects match the current filters.", className="text-muted")),
+                item_id="pch-empty",
+                className="pch-section mb-2",
+            )
+            pch_sections = [placeholder]
 
-    @app.callback(
-        Output("kpi-location-box", "style"),
-        Input("kpi-modal", "is_open"),
-        prevent_initial_call=True,
-    )
-    def _hide_legacy_location_box(is_open: bool):
-        # Locations now render inside each project accordion item; keep legacy box hidden.
-        return {"display": "none"}
+        return pch_sections, None
 
     # Toggle responsibilities visibility inside each project tile (pattern-matching IDs)
     @app.callback(
@@ -3983,34 +4107,34 @@ def register_callbacks(
         Output("proj-resp-modal", "is_open"),
         Output("proj-resp-modal-title", "children"),
         Output("store-proj-resp-code", "data"),
-        Input({"type": "proj-resp-open", "code": ALL}, "n_clicks_timestamp"),
+        Output("store-proj-resp-month", "data"),
+        Input({"type": "proj-resp-open", "code": ALL}, "n_clicks"),
         Input("proj-resp-modal-close", "n_clicks"),
         State("proj-resp-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _toggle_proj_resp_modal(open_clicks_ts, close_clicks, is_open):
+    def _toggle_proj_resp_modal(open_clicks, close_clicks, is_open):
         ctx = dash.callback_context
         if not ctx.triggered:
             raise PreventUpdate
         trig = ctx.triggered[0]["prop_id"].split(".")[0]
         if trig == "proj-resp-modal-close":
-            return False, dash.no_update, dash.no_update
-        # Only react to real user clicks (timestamp > 0)
-        try:
-            ts_value = int(ctx.triggered[0].get("value") or 0)
-        except Exception:
-            ts_value = 0
-        if ts_value <= 0:
-            raise PreventUpdate
+            return False, dash.no_update, dash.no_update, None
         # Parse dict ID to get project code
         try:
             import json as _json
             id_obj = _json.loads(trig)
             code = id_obj.get("code")
+            name = id_obj.get("name")
+            month = id_obj.get("month")
         except Exception:
             code = None
-        title = f"Responsibilities \u2014 {code}" if code else "Responsibilities"
-        return True, title, code
+            name = None
+            month = None
+        display_title = name or code
+        title = f"Responsibilities \u2014 {display_title}" if display_title else "Responsibilities"
+        payload = {"code": code, "name": name}
+        return True, title, payload, month
 
     # --- Render responsibilities inside the project mini-modal ---
     @app.callback(
@@ -4019,17 +4143,43 @@ def register_callbacks(
         Output("proj-resp-kpi-delivered", "children"),
         Output("proj-resp-kpi-ach", "children"),
         Input("store-proj-resp-code", "data"),
+        Input("store-proj-resp-month", "data"),
         Input("proj-resp-entity", "value"),
         Input("proj-resp-metric", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
+        Input("proj-resp-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _render_proj_resp(code_value, entity_value, metric_value, months_value, quick_value):
+    def _render_proj_resp(code_value, month_value, entity_value, metric_value, months_value, quick_value, is_open):
         if not code_value:
             raise PreventUpdate
+        project_identifiers: list[str] = []
+        seen: set[str] = set()
+
+        def _append_identifier(candidate: Any) -> None:
+            text = "" if candidate is None else str(candidate).strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                project_identifiers.append(text)
+
+        if isinstance(code_value, dict):
+            for candidate in (code_value.get("name"), code_value.get("code")):
+                _append_identifier(candidate)
+        elif isinstance(code_value, Sequence) and not isinstance(code_value, (str, bytes)):
+            for candidate in code_value:
+                _append_identifier(candidate)
+        else:
+            _append_identifier(code_value)
+        if not project_identifiers:
+            raise PreventUpdate
+        # If a dedicated month is chosen from the tile, override the global filters
+        if month_value:
+            months_value = [month_value]
+            quick_value = None
         return _build_responsibilities_for_project(
-            project_value=code_value,
+            project_value=project_identifiers,
             entity_value=entity_value,
             metric_value=metric_value,
             months_value=months_value,
