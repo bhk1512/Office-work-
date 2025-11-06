@@ -58,8 +58,13 @@ def _resolve_default_data_path() -> Path:
 
 
 _DEFAULT_DATA_PATH = _resolve_default_data_path()
-_DEFAULT_CSP_SCRIPT_SRC = ("https://unpkg.com", "https://cdn.plot.ly")
-_DEFAULT_CSP_STYLE_SRC = ("https://fonts.googleapis.com", "https://cdn.jsdelivr.net")
+_DEFAULT_CSP_SCRIPT_SRC = ("https://unpkg.com", "https://cdn.plot.ly", "https://cdn.jsdelivr.net")
+_DEFAULT_CSP_STYLE_SRC = (
+    "https://fonts.googleapis.com",
+    "https://cdn.jsdelivr.net",
+    "https://unpkg.com",
+    "https://cdn.plot.ly",
+)
 _DEFAULT_CSP_FONT_SRC = ("https://fonts.gstatic.com",)
 
 
