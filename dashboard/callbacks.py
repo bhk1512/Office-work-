@@ -33,10 +33,7 @@ from .charts import (
     build_empty_responsibilities_figure,
 )
 from .config import AppConfig
-from .data_loader import (
-    load_stringing_daily as _load_stringing_daily,
-    load_stringing_compiled_raw as _load_stringing_compiled_raw,
-)
+from .data_loader import load_stringing_compiled_raw as _load_stringing_compiled_raw
 from .filters import apply_filters, resolve_months
 from .metrics import (
     calc_idle_and_loss,
@@ -47,6 +44,7 @@ from .metrics import (
     compute_project_baseline_maps_for,
 )
 from .workbook import make_trace_workbook_bytes
+from .callback_utils import DataSelector, ResponsibilitiesAccessor, ResponsibilitiesPayload
 
 
 LOGGER = logging.getLogger(__name__)
@@ -575,35 +573,51 @@ def register_callbacks(
 
     LOGGER.debug("Registering callbacks")
 
-    # Tiny selector to swap daily dataset based on mode
-    def _select_daily(mode_value: str | None) -> pd.DataFrame:
-        mode = (mode_value or "erection").strip().lower()
-        if mode == "stringing":
-            if callable(stringing_data_provider):
-                df = stringing_data_provider()
-            else:
-                df = _load_stringing_daily(config)
-        else:
-            df = data_provider()
-        # Normalize required columns and provide consistent aliases across modes
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return pd.DataFrame()
-        df = df.copy()
-        # Ensure date and month fields exist and are typed
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df = df.dropna(subset=["date"]).copy()
-            if "month" not in df.columns:
-                df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
-        # Provide a unified project column for filters/options
-        if "project_name" not in df.columns:
-            if "project" in df.columns:
-                df["project_name"] = df["project"].astype(str).str.strip()
-        # Provide a unified daily metric alias when using stringing data
-        if mode == "stringing" and "daily_km" in df.columns and "daily_prod_mt" not in df.columns:
-            # For downstream components that expect daily_prod_mt (charts/helpers)
-            df["daily_prod_mt"] = df["daily_km"]
-        return df
+    data_selector = DataSelector(
+        config=config,
+        data_provider=data_provider,
+        stringing_provider=stringing_data_provider,
+        logger=LOGGER,
+    )
+    responsibilities_accessor = ResponsibilitiesAccessor(
+        data_provider=responsibilities_provider,
+        completion_provider=responsibilities_completion_provider,
+        error_provider=responsibilities_error_provider,
+        logger=LOGGER,
+    )
+    has_responsibilities_provider = callable(responsibilities_provider)
+
+    def _fetch_responsibilities(
+        allow_workbook_fallback: bool = False,
+    ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], str | None, pd.ExcelFile | None]:
+        payload: ResponsibilitiesPayload = responsibilities_accessor.load()
+        if payload.has_frame:
+            frame = payload.frame.copy() if payload.frame is not None else None
+            completion_keys = set(payload.completion_keys or set())
+            return frame, completion_keys, payload.error, None
+
+        completion_keys = set(payload.completion_keys or set())
+        load_error = payload.error
+        if allow_workbook_fallback and not has_responsibilities_provider:
+            cfg = config
+            try:
+                workbook = pd.ExcelFile(cfg.data_path)
+            except FileNotFoundError:
+                LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
+                return None, completion_keys, "Compiled workbook not found.", None
+            except Exception as exc:
+                LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
+                return None, completion_keys, "Unable to load Micro Plan data.", None
+
+            atomic_sheet = "MicroPlanResponsibilities"
+            if atomic_sheet not in workbook.sheet_names:
+                LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
+                return None, completion_keys, "No Micro Plan data found in the compiled workbook.", workbook
+
+            df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
+            return df_atomic, completion_keys, load_error, workbook
+
+        return None, completion_keys, load_error, None
 
     # --- shared: responsibilities figure + KPIs for a single project selection ---
     def _build_responsibilities_for_project(
@@ -648,51 +662,9 @@ def register_callbacks(
         metric = (metric_value or "tower_weight").strip()
         metric = metric if metric in {"revenue", "tower_weight"} else "tower_weight"
 
-        load_error_msg: str | None = None
-        completed_keys: set[tuple[str, str]] = set()
-        df_atomic: pd.DataFrame | None = None
-        workbook: pd.ExcelFile | None = None
-
-        if responsibilities_provider is not None:
-            try:
-                df_atomic = responsibilities_provider()
-            except RuntimeError as exc:
-                LOGGER.warning("Responsibilities data unavailable: %s", exc)
-                return _empty_response(str(exc))
-            except Exception as exc:
-                LOGGER.exception("Failed to access responsibilities data: %s", exc)
-                return _empty_response("Unable to load Micro Plan data.")
-            else:
-                df_atomic = df_atomic.copy()
-                if responsibilities_completion_provider is not None:
-                    try:
-                        completed_keys = set(responsibilities_completion_provider())
-                    except Exception as exc:
-                        LOGGER.warning("Failed to resolve responsibilities completion keys: %s", exc)
-                        completed_keys = set()
-                if responsibilities_error_provider is not None:
-                    try:
-                        load_error_msg = responsibilities_error_provider()
-                    except Exception:
-                        load_error_msg = None
-        else:
-            cfg = config
-            try:
-                workbook = pd.ExcelFile(cfg.data_path)
-            except FileNotFoundError:
-                LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
-                return _empty_response("Compiled workbook not found.")
-            except Exception as exc:
-                LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
-                return _empty_response("Unable to load Micro Plan data.")
-
-            atomic_sheet = "MicroPlanResponsibilities"
-            if atomic_sheet not in workbook.sheet_names:
-                LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
-                return _empty_response("No Micro Plan data found in the compiled workbook.")
-
-            df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
-
+        df_atomic, completed_keys, load_error_msg, _ = _fetch_responsibilities(
+            allow_workbook_fallback=True
+        )
         if df_atomic is None or df_atomic.empty:
             message = load_error_msg or "No Micro Plan data found in the compiled workbook."
             return _empty_response(message)
@@ -1143,7 +1115,7 @@ def register_callbacks(
             # Compute default month from the latest data date in the active mode's dataset
             try:
                 eff_mode = (mode_value or "erection").strip().lower()
-                df = _select_daily(eff_mode)
+                df = data_selector.select(eff_mode)
                 latest_date = None
                 if isinstance(df, pd.DataFrame) and not df.empty and "date" in df.columns:
                     dates = pd.to_datetime(df["date"], errors="coerce").dropna()
@@ -1180,7 +1152,7 @@ def register_callbacks(
         try:
             # Prefer the live toggle for immediate switching; fall back to stored mode
             eff_mode = (toggle_value or mode_value or "erection")
-            df_day = _select_daily(eff_mode)
+            df_day = data_selector.select(eff_mode)
             if df_day is None or df_day.empty:
                 return []
             # Derive month if missing (belt-and-braces)
@@ -1254,7 +1226,7 @@ def register_callbacks(
         try:
             # Prefer the live toggle for immediate switching; fall back to stored mode
             eff_mode = (toggle_value or mode_value or "erection")
-            df_day = _select_daily(eff_mode)
+            df_day = data_selector.select(eff_mode)
             if df_day is None or df_day.empty:
                 return []
             work = df_day.copy()
@@ -1320,7 +1292,7 @@ def register_callbacks(
         try:
             # Prefer the live toggle for immediate switching; fall back to stored mode
             eff_mode = (toggle_value or mode_value or "erection")
-            df_day = _select_daily(eff_mode)
+            df_day = data_selector.select(eff_mode)
             if df_day is None or df_day.empty:
                 return []
             work = df_day.copy()
@@ -1676,51 +1648,9 @@ def register_callbacks(
         metric_value = (metric_value or "tower_weight").strip()
         metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
 
-        load_error_msg: str | None = None
-        completed_keys: set[tuple[str, str]] = set()
-        df_atomic: pd.DataFrame | None = None
-        workbook: pd.ExcelFile | None = None
-
-        if responsibilities_provider is not None:
-            try:
-                df_atomic = responsibilities_provider()
-            except RuntimeError as exc:
-                LOGGER.warning("Responsibilities data unavailable: %s", exc)
-                return _empty_response(str(exc))
-            except Exception as exc:
-                LOGGER.exception("Failed to access responsibilities data: %s", exc)
-                return _empty_response("Unable to load Micro Plan data.")
-            else:
-                df_atomic = df_atomic.copy()
-                if responsibilities_completion_provider is not None:
-                    try:
-                        completed_keys = set(responsibilities_completion_provider())
-                    except Exception as exc:
-                        LOGGER.warning("Failed to resolve responsibilities completion keys: %s", exc)
-                        completed_keys = set()
-                if responsibilities_error_provider is not None:
-                    try:
-                        load_error_msg = responsibilities_error_provider()
-                    except Exception:
-                        load_error_msg = None
-        else:
-            cfg = config
-            try:
-                workbook = pd.ExcelFile(cfg.data_path)
-            except FileNotFoundError:
-                LOGGER.warning("Responsibilities workbook not found: %s", cfg.data_path)
-                return _empty_response("Compiled workbook not found.")
-            except Exception as exc:
-                LOGGER.exception("Failed to open responsibilities workbook: %s", exc)
-                return _empty_response("Unable to load Micro Plan data.")
-
-            atomic_sheet = "MicroPlanResponsibilities"
-            if atomic_sheet not in workbook.sheet_names:
-                LOGGER.warning("Sheet '%s' missing in workbook", atomic_sheet)
-                return _empty_response("No Micro Plan data found in the compiled workbook.")
-
-            df_atomic = pd.read_excel(workbook, sheet_name=atomic_sheet)
-
+        df_atomic, completed_keys, load_error_msg, workbook = _fetch_responsibilities(
+            allow_workbook_fallback=True
+        )
         if df_atomic is None or df_atomic.empty:
             message = load_error_msg or "No Micro Plan data found in the compiled workbook."
             return _empty_response(message)
@@ -1795,7 +1725,7 @@ def register_callbacks(
         df_atomic["entity_type_lc"] = df_atomic["entity_type"].str.lower()
         df_atomic["location_no_norm"] = df_atomic["location_no"].map(_normalize_location)
 
-        if responsibilities_provider is None and workbook is not None:
+        if (not has_responsibilities_provider) and workbook is not None:
             daily_sheet = None
             for candidate in ("ProdDailyExpandedSingles"):
                 if candidate in workbook.sheet_names:
@@ -2048,7 +1978,7 @@ def register_callbacks(
             gang_list = _ensure_list(gangs)
             # Prefer the live toggle for immediate switching; fall back to stored mode
             eff_mode = (toggle_value or mode_value or "erection")
-            df_day = _select_daily(eff_mode)
+            df_day = data_selector.select(eff_mode)
                         # --- Stringing-only filters: Line kV + Method ---
             if eff_mode == "stringing" and isinstance(df_day, pd.DataFrame) and not df_day.empty:
                 df_day = _attach_line_kv(df_day)
@@ -2413,10 +2343,10 @@ def register_callbacks(
         if not is_stringing:
             try:
                 active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
-                if active_months and callable(responsibilities_provider):
-                    resp = responsibilities_provider()
-                    if isinstance(resp, pd.DataFrame) and not resp.empty:
-                        df_mp = resp.copy()
+                if active_months and has_responsibilities_provider:
+                    resp_df, _, _, _ = _fetch_responsibilities()
+                    if isinstance(resp_df, pd.DataFrame) and not resp_df.empty:
+                        df_mp = resp_df.copy()
                         # completion month (use folder-derived plan_month when available)
                         if "plan_month" in df_mp.columns:
                             df_mp["plan_month"] = pd.to_datetime(
@@ -2839,7 +2769,7 @@ def register_callbacks(
         month_list   = _ensure_list(months)
         gang_list    = _ensure_list(gangs)
 
-        df_day = _select_daily(mode_value)
+        df_day = data_selector.select(mode_value)
         months_ts = resolve_months(month_list, quick_range)
 
         base_scope = apply_filters(df_day, project_list, months_ts, []).copy()
@@ -3021,7 +2951,7 @@ def register_callbacks(
         _unused_quick_range = quick_range
 
         eff_mode = (toggle_value or mode_value or "erection")
-        df_day = _select_daily(eff_mode)
+        df_day = data_selector.select(eff_mode)
         scoped = apply_filters(df_day, project_list, [], gang_list).copy()
 
         if str(eff_mode).strip().lower() == "stringing":
@@ -3120,7 +3050,7 @@ def register_callbacks(
         month_list = _ensure_list(months)
         gang_list = _ensure_list(gangs)
 
-        df_day = _select_daily(mode_value)
+        df_day = data_selector.select(mode_value)
         months_ts = resolve_months(month_list, quick_range)
         scoped = apply_filters(df_day, project_list, months_ts, gang_list)
         gang_for_sheet = trace_gang_value or selected_gang
@@ -3186,7 +3116,7 @@ def register_callbacks(
         project_list = _ensure_list(projects)
         month_list = _ensure_list(months)
 
-        df_day = _select_daily(mode_value)
+        df_day = data_selector.select(mode_value)
         months_ts = resolve_months(month_list, quick_range)
         base = apply_filters(df_day, project_list, months_ts, [])
         # Be defensive when switching to Stringing with no data configured
@@ -3216,7 +3146,7 @@ def register_callbacks(
     )
     def _debug_mode_data(mode_value: str | None) -> str:
         try:
-            df = _select_daily(mode_value)
+            df = data_selector.select(mode_value)
             rows = int(len(df.index)) if hasattr(df, "index") else 0
             mode = (mode_value or "erection").strip().lower()
             return f"mode={mode}; rows={rows}"
@@ -3282,7 +3212,7 @@ def register_callbacks(
             current_month_ts = range_end.to_period("M").to_timestamp()
 
             # Delivered KM from per-day stringing dataset
-            df_day = _select_daily("stringing")
+            df_day = data_selector.select("stringing")
             scoped = apply_filters(df_day, project_list, months_ts, [])
             delivered_km_current_series = pd.Series(dtype=float)
             if isinstance(scoped, pd.DataFrame) and not scoped.empty:
@@ -3694,7 +3624,7 @@ def register_callbacks(
             range_start = today.to_period("M").start_time.normalize()
             range_end = (today + pd.offsets.MonthEnd(0)).normalize()
 
-        df_day = _select_daily("erection")
+        df_day = data_selector.select("erection")
         scoped = apply_filters(df_day, project_list, months_ts, [])
         export_df, _ = _prepare_erections_completed(
             scoped,
@@ -3706,7 +3636,11 @@ def register_callbacks(
         if not isinstance(export_df, pd.DataFrame):
             export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
 
-        df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
+        df_mp = None
+        if has_responsibilities_provider:
+            df_mp_frame, _, _, _ = _fetch_responsibilities()
+            if isinstance(df_mp_frame, pd.DataFrame):
+                df_mp = df_mp_frame
         # Keep an unfiltered copy to test project-level availability (any month)
         mp_all = df_mp.copy() if isinstance(df_mp, pd.DataFrame) else None
         if isinstance(mp_all, pd.DataFrame):
@@ -4614,26 +4548,6 @@ def register_callbacks(
             raise PreventUpdate
         return not bool(is_open)
 
-    @app.callback(
-        Output("proj-resp-debug", "children"),
-        Input({"type": "proj-resp-open", "key": ALL}, "n_clicks"),
-        Input("proj-resp-modal-close", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def _debug_proj_resp_button(open_clicks, close_clicks):
-        ctx = dash.callback_context
-        payload = {
-            "triggered_id": _resolve_triggered_id(),
-            "triggered": getattr(ctx, "triggered", None),
-            "open_clicks": open_clicks,
-            "close_clicks": close_clicks,
-        }
-        LOGGER.info("proj-resp debug: %s", payload)
-        try:
-            return json.dumps(payload, default=str, indent=2)
-        except Exception:
-            return str(payload)
-
     # --- Project Responsibilities mini-modal: open/close and set project code ---
     @app.callback(
         Output("proj-resp-modal", "is_open"),
@@ -4808,3 +4722,4 @@ def register_callbacks(
             {"name": f"{unit_short}/day", "id": "daily_prod_mt"},
         ]
         return avg_label, total_label, lost_label, idle_cols, idle_cols, daily_cols, daily_cols
+

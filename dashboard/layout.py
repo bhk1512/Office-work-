@@ -1170,7 +1170,6 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-kpi-selected-project", data=None),
             dcc.Store(id="store-proj-resp-code", data=None),
             dcc.Store(id="store-proj-resp-month", data=None),
-            html.Div(id="proj-resp-debug", style={"display": "none"}),
         ],
         fluid=True,
     )
