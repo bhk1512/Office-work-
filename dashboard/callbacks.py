@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import dash_bootstrap_components as dbc 
 import pandas as pd
 from io import BytesIO
@@ -18,6 +19,11 @@ from dash.dependencies import MATCH, ALL
 from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
+
+try:
+    from dash import ctx as dash_ctx
+except ImportError:  # Dash < 2.6
+    dash_ctx = None
 
 from .charts import (
     # create_monthly_line_chart,
@@ -50,6 +56,51 @@ BENCHMARK_KM_PER_MONTH = 5.0
 
 # App-wide config instance for callback logic
 config = AppConfig()
+
+
+def _normalize_month_value(raw: Any) -> tuple[str | None, str | None]:
+    """
+    Normalize a month selector value (e.g., '2025-10', '2025-10-01') into a
+    canonical YYYY-MM string plus a display label 'Oct 2025'.
+    """
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None, None
+    if isinstance(raw, (list, tuple)) and raw:
+        # take the first element if a sequence sneaks in
+        raw = raw[0]
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    try:
+        ts = pd.to_datetime(text, errors="coerce")
+        if pd.isna(ts):
+            ts = pd.to_datetime(f"{text}-01", errors="coerce")
+        if pd.isna(ts):
+            return None, None
+        ts = ts.to_period("M").to_timestamp()
+        return ts.strftime("%Y-%m"), ts.strftime("%b %Y")
+    except Exception:
+        return None, None
+
+
+def _resolve_triggered_id() -> Any:
+    """
+    Return the ID (string or dict) of the triggering input for the current callback,
+    compatible with both legacy dash.callback_context and newer dash.ctx APIs.
+    """
+    if dash_ctx is not None:
+        trig = getattr(dash_ctx, "triggered_id", None)
+        if trig is not None:
+            return trig
+    ctx = dash.callback_context
+    triggered = getattr(ctx, "triggered", None)
+    if not triggered:
+        return None
+    raw = triggered[0]["prop_id"].split(".")[0]
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw
 
 
 _ERECTIONS_EXPORT_COLUMNS = [
@@ -652,12 +703,17 @@ def register_callbacks(
         months_ts = resolve_months(month_list, quick_range_value)
         active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
 
-        if 'completion_date' in df_atomic.columns:
-            df_atomic['completion_month'] = pd.to_datetime(
-                df_atomic['completion_date'], errors='coerce'
-            ).dt.to_period('M').dt.to_timestamp()
+        if "plan_month" in df_atomic.columns:
+            df_atomic["plan_month"] = pd.to_datetime(
+                df_atomic["plan_month"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
+            df_atomic["completion_month"] = df_atomic["plan_month"]
+        elif "completion_date" in df_atomic.columns:
+            df_atomic["completion_month"] = pd.to_datetime(
+                df_atomic["completion_date"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
         else:
-            df_atomic['completion_month'] = pd.NaT
+            df_atomic["completion_month"] = pd.NaT
 
         # text normalizers (copy from local scope to avoid shadowing)
         def _norm_text(v: object) -> str:
@@ -1675,12 +1731,17 @@ def register_callbacks(
         months_ts = resolve_months(month_list, quick_range_value)
         active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
 
-        if 'completion_date' in df_atomic.columns:
-            df_atomic['completion_month'] = pd.to_datetime(
-                df_atomic['completion_date'], errors='coerce'
-            ).dt.to_period('M').dt.to_timestamp()
+        if "plan_month" in df_atomic.columns:
+            df_atomic["plan_month"] = pd.to_datetime(
+                df_atomic["plan_month"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
+            df_atomic["completion_month"] = df_atomic["plan_month"]
+        elif "completion_date" in df_atomic.columns:
+            df_atomic["completion_month"] = pd.to_datetime(
+                df_atomic["completion_date"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
         else:
-            df_atomic['completion_month'] = pd.NaT
+            df_atomic["completion_month"] = pd.NaT
 
         def _normalize_text(value: object) -> str:
             text = str(value).replace("\u00a0", " ").strip()
@@ -2356,8 +2417,13 @@ def register_callbacks(
                     resp = responsibilities_provider()
                     if isinstance(resp, pd.DataFrame) and not resp.empty:
                         df_mp = resp.copy()
-                        # completion month
-                        if 'completion_date' in df_mp.columns:
+                        # completion month (use folder-derived plan_month when available)
+                        if "plan_month" in df_mp.columns:
+                            df_mp["plan_month"] = pd.to_datetime(
+                                df_mp["plan_month"], errors="coerce"
+                            ).dt.to_period("M").dt.to_timestamp()
+                            df_mp["completion_month"] = df_mp["plan_month"]
+                        elif 'completion_date' in df_mp.columns:
                             df_mp['completion_month'] = pd.to_datetime(df_mp['completion_date'], errors='coerce').dt.to_period('M').dt.to_timestamp()
                         else:
                             df_mp['completion_month'] = pd.NaT
@@ -3185,6 +3251,16 @@ def register_callbacks(
                 text = text.replace(" ", "-")
             text = text.strip("-")
             return text or "unknown"
+
+        def _empty_pch_items(message: str) -> list[dbc.AccordionItem]:
+            return [
+                dbc.AccordionItem(
+                    title="No PCH data",
+                    children=html.Div(message, className="text-muted"),
+                    item_id="pch-empty",
+                    className="pch-section mb-2",
+                )
+            ]
         # Erection mode (existing flow)
         if mode != "stringing":
             # fall through to original erection implementation below
@@ -3210,7 +3286,7 @@ def register_callbacks(
             if isinstance(scoped, pd.DataFrame) and not scoped.empty:
                 proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
                 if proj_col is None:
-                    return [], None
+                    return _empty_pch_items("Missing project information in the dataset."), None
                 delivered_km_by_project = (
                     scoped.groupby(scoped[proj_col].astype(str))
                           .agg({"daily_km": "sum"})
@@ -3351,7 +3427,7 @@ def register_callbacks(
                             className="ms-auto",
                         ),
                     ],
-                    className="d-flex align-items-center w-100 gap-2",
+                    className="d-flex align-items-center justify-content-between w-100",
                 )
 
                 tile_cols = []
@@ -3367,6 +3443,13 @@ def register_callbacks(
                             return (s or "").strip().lower().replace(" ", "")
                     raw_code = r.get("project_code") or r.get("project_key") or proj_name
                     proj_code = _compact_code_text(str(raw_code))
+                    current_month_value = pd.Timestamp.today().strftime("%Y-%m")
+                    current_month_label = pd.Timestamp.today().strftime("%b %Y")
+                    current_key_payload = "||".join([
+                        proj_code or "",
+                        current_month_value,
+                        proj_name,
+                    ])
                     tile_body = html.Div([
                         html.Div(html.Strong(proj_name), className="mb-2"),
                         html.Div([
@@ -3385,8 +3468,8 @@ def register_callbacks(
                             html.Span("View Responsibilities : ", className="me-2"),
                             # For stringing, responsibilities still open the erection responsibilities modal filtered by project
                             dbc.Button(
-                                (pd.Timestamp.today().strftime("%b %Y")),
-                                id={"type": "proj-resp-open", "code": proj_code, "name": proj_name, "month": pd.Timestamp.today().strftime("%Y-%m")},
+                                current_month_label,
+                                id={"type": "proj-resp-open", "key": current_key_payload},
                                 color="link",
                                 className="p-0 me-1",
                             ),
@@ -3406,19 +3489,13 @@ def register_callbacks(
                 pch_sections.append(
                     dbc.AccordionItem(
                         title=title_component,
-                        children=dbc.AccordionBody(body_children),
+                        children=body_children,
                         item_id=f"pch-{_slugify_pch(pch)}",
                         className="pch-section mb-2",
                     )
                 )
             if not pch_sections:
-                placeholder = dbc.AccordionItem(
-                    title=html.Span("No PCH data", className="fw-semibold"),
-                    children=dbc.AccordionBody(html.Div("No projects match the current filters.", className="text-muted")),
-                    item_id="pch-empty",
-                    className="pch-section mb-2",
-                )
-                pch_sections = [placeholder]
+                pch_sections = _empty_pch_items("No projects match the current filters.")
 
             return pch_sections, None
 
@@ -3449,12 +3526,48 @@ def register_callbacks(
         df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
         # Keep an unfiltered copy to test project-level availability (any month)
         mp_all = df_mp.copy() if isinstance(df_mp, pd.DataFrame) else None
+        if isinstance(mp_all, pd.DataFrame):
+            if "plan_month" in mp_all.columns:
+                mp_all["plan_month"] = pd.to_datetime(
+                    mp_all["plan_month"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+                mp_all["completion_month"] = mp_all["plan_month"]
+            elif "completion_month" in mp_all.columns:
+                mp_all["completion_month"] = pd.to_datetime(
+                    mp_all["completion_month"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+            elif "completion_date" in mp_all.columns:
+                mp_all["completion_month"] = pd.to_datetime(
+                    mp_all["completion_date"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+            else:
+                mp_all["completion_month"] = pd.NaT
         # Do not block the modal if Micro Plan is unavailable; proceed with empty frame
         if df_mp is None:
-            mp = pd.DataFrame(columns=["project_name", "project_key", "location_no", "entity_type", "entity_name", "tower_weight", "pch", "completion_month"])
+            mp = pd.DataFrame(columns=[
+                "project_name", "project_key", "location_no", "entity_type", "entity_name",
+                "tower_weight", "pch", "plan_month", "completion_month"
+            ])
         else:
             mp = df_mp.copy()
-        if "completion_month" in mp.columns and months_ts:
+
+        if "plan_month" in mp.columns:
+            mp["plan_month"] = pd.to_datetime(
+                mp["plan_month"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
+            mp["completion_month"] = mp["plan_month"]
+        elif "completion_month" in mp.columns:
+            mp["completion_month"] = pd.to_datetime(
+                mp["completion_month"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
+        elif "completion_date" in mp.columns:
+            mp["completion_month"] = pd.to_datetime(
+                mp["completion_date"], errors="coerce"
+            ).dt.to_period("M").dt.to_timestamp()
+        else:
+            mp["completion_month"] = pd.NaT
+
+        if months_ts:
             mp = mp[mp["completion_month"].isin(months_ts)].copy()
         if project_list:
             import re as _re
@@ -3749,6 +3862,146 @@ def register_callbacks(
             rec["delivered_mt"] = round(float(rec["delivered_mt"]), 1)
             projects_rows.setdefault(_pch_label, []).append(rec)
 
+        current_month_ts = range_end.to_period("M").to_timestamp()
+
+        def _compact_key(value: str) -> str:
+            text = str(value or "").strip().lower()
+            if not text:
+                return ""
+            return re.sub(r"[^a-z0-9]", "", text)
+
+        def _build_metric_lookup(source: dict[str, float] | None) -> tuple[dict[str, float], dict[str, float]]:
+            norm_map: dict[str, float] = {}
+            compact_map: dict[str, float] = {}
+            if not source:
+                return norm_map, compact_map
+            for proj_name, raw_value in source.items():
+                text = str(proj_name or "").strip()
+                if not text:
+                    continue
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if pd.isna(value):
+                    continue
+                norm_key = _normalize_lower(text)
+                if norm_key and norm_key not in norm_map:
+                    norm_map[norm_key] = value
+                compact_key = _compact_key(text)
+                if compact_key and compact_key not in compact_map:
+                    compact_map[compact_key] = value
+            return norm_map, compact_map
+
+        prod_current_norm_map: dict[str, float] = {}
+        prod_current_compact_map: dict[str, float] = {}
+        prod_history_norm_map: dict[str, float] = {}
+        prod_history_compact_map: dict[str, float] = {}
+        towers_current_norm_map: dict[str, int] = {}
+        towers_current_compact_map: dict[str, int] = {}
+        towers_planned_norm_map: dict[str, int] = {}
+        towers_planned_compact_map: dict[str, int] = {}
+
+        if isinstance(df_day, pd.DataFrame) and not df_day.empty:
+            day_filtered = df_day.copy()
+            if project_list and "project_name" in day_filtered.columns:
+                project_filter_values = [str(p).strip() for p in project_list if str(p).strip()]
+                if project_filter_values:
+                    day_filtered = day_filtered[
+                        day_filtered["project_name"].astype(str).str.strip().isin(project_filter_values)
+                    ]
+            if not day_filtered.empty and {"month", "daily_prod_mt", "project_name"}.issubset(day_filtered.columns):
+                day_filtered = day_filtered.copy()
+                day_filtered["month"] = pd.to_datetime(day_filtered["month"], errors="coerce")
+                day_filtered["project_name"] = day_filtered["project_name"].astype(str).str.strip()
+                day_filtered = day_filtered.dropna(subset=["month", "daily_prod_mt", "project_name"])
+
+                current_scope = day_filtered[day_filtered["month"] == current_month_ts]
+                if not current_scope.empty:
+                    prod_current_raw, _ = compute_project_baseline_maps_for(current_scope, "daily_prod_mt")
+                    prod_current_norm_map, prod_current_compact_map = _build_metric_lookup(prod_current_raw)
+
+                history_scope = day_filtered[day_filtered["month"] < current_month_ts]
+                if not history_scope.empty:
+                    prod_history_raw, _ = compute_project_baseline_maps_for(history_scope, "daily_prod_mt")
+                    prod_history_norm_map, prod_history_compact_map = _build_metric_lookup(prod_history_raw)
+
+        if isinstance(ed, pd.DataFrame) and not ed.empty and "completion_date" in ed.columns:
+            ed_for_towers = ed.copy()
+            ed_for_towers["completion_month"] = pd.to_datetime(ed_for_towers["completion_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+            ed_for_towers = ed_for_towers.dropna(subset=["completion_month"])
+            ed_for_towers["project_name_display"] = ed_for_towers["project_name_display"].astype(str).str.strip()
+            ed_current = ed_for_towers[ed_for_towers["completion_month"] == current_month_ts]
+            if not ed_current.empty and "location_no_norm" in ed_current.columns:
+                towers_series = (
+                    ed_current.dropna(subset=["location_no_norm"])
+                              .drop_duplicates(["project_name_display", "location_no_norm"])
+                              .groupby("project_name_display")
+                              .size()
+                )
+                for proj_name, count in towers_series.items():
+                    text = str(proj_name or "").strip()
+                    if not text:
+                        continue
+                    norm_key = _normalize_lower(text)
+                    if norm_key and norm_key not in towers_current_norm_map:
+                        towers_current_norm_map[norm_key] = int(count)
+                    compact_key = _compact_key(text)
+                    if compact_key and compact_key not in towers_current_compact_map:
+                        towers_current_compact_map[compact_key] = int(count)
+
+        if isinstance(mp, pd.DataFrame) and not mp.empty and "completion_month" in mp.columns:
+            mp_current = mp[mp["completion_month"] == current_month_ts].copy()
+            if not mp_current.empty and "location_no_norm" in mp_current.columns:
+                planned_series = (
+                    mp_current.dropna(subset=["location_no_norm"])
+                              .drop_duplicates(["project_name_display", "location_no_norm"])
+                              .groupby("project_name_display")
+                              .size()
+                )
+                for proj_name, count in planned_series.items():
+                    text = str(proj_name or "").strip()
+                    if not text:
+                        continue
+                    norm_key = _normalize_lower(text)
+                    if norm_key and norm_key not in towers_planned_norm_map:
+                        towers_planned_norm_map[norm_key] = int(count)
+                    compact_key = _compact_key(text)
+                    if compact_key and compact_key not in towers_planned_compact_map:
+                        towers_planned_compact_map[compact_key] = int(count)
+
+        def _project_lookup_keys(row: dict[str, Any]) -> tuple[list[str], list[str]]:
+            display = str(row.get("project_name", "")).strip()
+            base = display.split(" : ", 1)[1] if " : " in display else display
+            code = str(row.get("project_code", "")).strip()
+            texts = [display, base, code]
+            norm_keys: list[str] = []
+            compact_keys: list[str] = []
+            for text in texts:
+                if not text:
+                    continue
+                norm_key = _normalize_lower(text)
+                if norm_key and norm_key not in norm_keys:
+                    norm_keys.append(norm_key)
+                compact_key = _compact_key(text)
+                if compact_key and compact_key not in compact_keys:
+                    compact_keys.append(compact_key)
+            return norm_keys, compact_keys
+
+        def _lookup_with_key(
+            norm_keys: list[str],
+            compact_keys: list[str],
+            norm_map: dict[str, float],
+            compact_map: dict[str, float],
+        ) -> tuple[float | None, str | None]:
+            for key in norm_keys:
+                if key in norm_map:
+                    return norm_map[key], key
+            for key in compact_keys:
+                if key in compact_map:
+                    return compact_map[key], key
+            return None, None
+
         def _project_locations(project_name: str) -> list[dict]:
             # Planned per location (tower weight) for the project
             # project_name in the aggregated rows may be "CODE : NAME"; match using NAME part
@@ -3786,21 +4039,86 @@ def register_callbacks(
         pch_sections = []
         for pch in sorted(projects_rows.keys(), key=_pch_sort_key):
             rows = projects_rows[pch]
-            # Totals per PCH
-            p_planned_mt = sum(r["planned_mt"] for r in rows)
-            p_delivered_mt = sum(r["delivered_mt"] for r in rows)
-            p_planned_nos = sum(r["planned_nos"] for r in rows)
-            p_delivered_nos = sum(r["delivered_nos"] for r in rows)
 
-            header = dbc.Row([
-                dbc.Col(html.H6(str(pch), className="mb-0"), md=3),
-                dbc.Col(
-                    html.Div([
-                        dbc.Badge(f"Nos {p_delivered_nos}/{p_planned_nos}", color="primary", className="me-2"),
-                        dbc.Badge(f"MT {p_delivered_mt:.1f}/{p_planned_mt:.1f}", color="dark", className="me-2"),
-                    ]), md=9
+            project_count = len(rows)
+            project_codes: list[str] = []
+            prod_current_values: list[float] = []
+            prod_history_values: list[float] = []
+            towers_delivered_total = 0
+            towers_planned_total = 0
+            towers_delivered_keys: set[str] = set()
+            towers_planned_keys: set[str] = set()
+
+            for r in sorted(rows, key=lambda x: str(x["project_name"])):
+                norm_keys, compact_keys = _project_lookup_keys(r)
+                code_value = str(r.get("project_code", "")).strip()
+                if not code_value:
+                    project_label = str(r.get("project_name", "")).strip()
+                    if " : " in project_label:
+                        code_value = project_label.split(" : ", 1)[0].strip()
+                if code_value and code_value.lower() != "nan" and code_value not in project_codes:
+                    project_codes.append(code_value)
+
+                prod_current_value, _ = _lookup_with_key(
+                    norm_keys, compact_keys, prod_current_norm_map, prod_current_compact_map
+                )
+                if prod_current_value is not None:
+                    prod_current_values.append(prod_current_value)
+
+                prod_history_value, _ = _lookup_with_key(
+                    norm_keys, compact_keys, prod_history_norm_map, prod_history_compact_map
+                )
+                if prod_history_value is not None:
+                    prod_history_values.append(prod_history_value)
+
+                tower_value, tower_key = _lookup_with_key(
+                    norm_keys, compact_keys, towers_current_norm_map, towers_current_compact_map
+                )
+                if tower_value is not None and tower_key and tower_key not in towers_delivered_keys:
+                    towers_delivered_keys.add(tower_key)
+                    towers_delivered_total += int(tower_value)
+
+                tower_plan_value, tower_plan_key = _lookup_with_key(
+                    norm_keys, compact_keys, towers_planned_norm_map, towers_planned_compact_map
+                )
+                if tower_plan_value is not None and tower_plan_key and tower_plan_key not in towers_planned_keys:
+                    towers_planned_keys.add(tower_plan_key)
+                    towers_planned_total += int(tower_plan_value)
+
+            prod_current_avg = (
+                float(sum(prod_current_values) / len(prod_current_values)) if prod_current_values else None
+            )
+            prod_history_avg = (
+                float(sum(prod_history_values) / len(prod_history_values)) if prod_history_values else None
+            )
+            fmt_prod_current = f"{prod_current_avg:.2f}" if prod_current_avg is not None else "\u2014"
+            fmt_prod_history = f"{prod_history_avg:.2f}" if prod_history_avg is not None else "\u2014"
+            projects_label = (
+                f"Projects: {', '.join(project_codes)}" if project_codes else f"Projects: {project_count}"
+            )
+            towers_delivered_label = int(towers_delivered_total)
+            towers_planned_label = int(towers_planned_total)
+
+            header_pills = [
+                html.Span(projects_label, className="pch-pill pch-pill-projects me-2 mb-1"),
+                html.Span(f"Prod This Month: {fmt_prod_current} MT/day", className="pch-pill pch-pill-prod-month me-2 mb-1"),
+                html.Span(f"Prod Overall: {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-overall me-2 mb-1"),
+                html.Span(
+                    f"Towers This Month: {towers_delivered_label} delivered / {towers_planned_label} planned",
+                    className="pch-pill pch-pill-towers me-2 mb-1",
                 ),
-            ], className="pch-header align-items-center py-2")
+            ]
+
+            header = dbc.Row(
+                [
+                    dbc.Col(html.H6(str(pch), className="mb-0"), md=3),
+                    dbc.Col(
+                        html.Div(header_pills, className="pch-pill-group justify-content-md-end"),
+                        md=9,
+                    ),
+                ],
+                className="pch-header align-items-center py-2",
+            )
 
             # Nested tiles for projects within this PCH
             project_items = []  # legacy; no longer used
@@ -3998,7 +4316,12 @@ def register_callbacks(
                             )
                             sub = mp_all.loc[mask_all].copy()
                             if "completion_month" not in sub.columns:
-                                if "completion_date" in sub.columns:
+                                if "plan_month" in sub.columns:
+                                    try:
+                                        sub["completion_month"] = pd.to_datetime(sub["plan_month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                                    except Exception:
+                                        sub["completion_month"] = pd.NaT
+                                elif "completion_date" in sub.columns:
                                     try:
                                         sub["completion_month"] = pd.to_datetime(sub["completion_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
                                     except Exception:
@@ -4018,10 +4341,15 @@ def register_callbacks(
                         for ts in months_vals:
                             label = ts.strftime("%b %Y")
                             value = ts.strftime("%Y-%m")
+                            key_payload = "||".join([
+                                proj_code or "",
+                                value or "",
+                                name_part.strip(),
+                            ])
                             out.append(
                                 dbc.Button(
                                     label,
-                                    id={"type": "proj-resp-open", "code": proj_code, "name": name_part.strip(), "month": value},
+                                    id={"type": "proj-resp-open", "key": key_payload},
                                     color="link",
                                     className="p-0 me-1",
                                 )
@@ -4062,31 +4390,32 @@ def register_callbacks(
             title_component = html.Div(
                 [
                     html.Span(str(pch or "Unassigned"), className="fw-semibold"),
-                    dbc.Badge(
-                        f"Nos {p_delivered_nos}/{p_planned_nos} · MT {p_delivered_mt:.1f}/{p_planned_mt:.1f}",
-                        color="dark",
-                        className="ms-auto",
+                    html.Div(
+                        [
+                            html.Span(projects_label, className="pch-pill pch-pill-projects mb-1"),
+                            html.Span(f"Prod This Month: {fmt_prod_current} MT/day", className="pch-pill pch-pill-prod-month mb-1"),
+                            html.Span(f"Prod Overall: {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-overall mb-1"),
+                            html.Span(
+                                f"Towers This Month: {towers_delivered_label} delivered / {towers_planned_label} planned",
+                                className="pch-pill pch-pill-towers mb-1",
+                            ),
+                        ],
+                        className="pch-pill-group ms-auto d-none d-md-flex",
                     ),
                 ],
-                className="d-flex align-items-center w-100 gap-2",
+                className="d-flex align-items-center justify-content-between w-100",
             )
             pch_sections.append(
                 dbc.AccordionItem(
                     title=title_component,
-                    children=dbc.AccordionBody(body_children),
+                    children=body_children,
                     item_id=f"pch-{_slugify_pch(pch)}",
                     className="pch-section mb-2",
                 )
             )
 
         if not pch_sections:
-            placeholder = dbc.AccordionItem(
-                title=html.Span("No PCH data", className="fw-semibold"),
-                children=dbc.AccordionBody(html.Div("No projects match the current filters.", className="text-muted")),
-                item_id="pch-empty",
-                className="pch-section mb-2",
-            )
-            pch_sections = [placeholder]
+            pch_sections = _empty_pch_items("No projects match the current filters.")
 
         return pch_sections, None
 
@@ -4102,39 +4431,81 @@ def register_callbacks(
             raise PreventUpdate
         return not bool(is_open)
 
+    @app.callback(
+        Output("proj-resp-debug", "children"),
+        Input({"type": "proj-resp-open", "key": ALL}, "n_clicks"),
+        Input("proj-resp-modal-close", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _debug_proj_resp_button(open_clicks, close_clicks):
+        ctx = dash.callback_context
+        payload = {
+            "triggered_id": _resolve_triggered_id(),
+            "triggered": getattr(ctx, "triggered", None),
+            "open_clicks": open_clicks,
+            "close_clicks": close_clicks,
+        }
+        LOGGER.info("proj-resp debug: %s", payload)
+        try:
+            return json.dumps(payload, default=str, indent=2)
+        except Exception:
+            return str(payload)
+
     # --- Project Responsibilities mini-modal: open/close and set project code ---
     @app.callback(
         Output("proj-resp-modal", "is_open"),
         Output("proj-resp-modal-title", "children"),
         Output("store-proj-resp-code", "data"),
         Output("store-proj-resp-month", "data"),
-        Input({"type": "proj-resp-open", "code": ALL}, "n_clicks"),
+        Input({"type": "proj-resp-open", "key": ALL}, "n_clicks"),
         Input("proj-resp-modal-close", "n_clicks"),
         State("proj-resp-modal", "is_open"),
         prevent_initial_call=True,
     )
     def _toggle_proj_resp_modal(open_clicks, close_clicks, is_open):
-        ctx = dash.callback_context
-        if not ctx.triggered:
+        trigger_id = _resolve_triggered_id()
+        if trigger_id is None:
             raise PreventUpdate
-        trig = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trig == "proj-resp-modal-close":
+        if trigger_id == "proj-resp-modal-close":
             return False, dash.no_update, dash.no_update, None
-        # Parse dict ID to get project code
-        try:
-            import json as _json
-            id_obj = _json.loads(trig)
-            code = id_obj.get("code")
-            name = id_obj.get("name")
-            month = id_obj.get("month")
-        except Exception:
-            code = None
-            name = None
-            month = None
+        ctx = dash.callback_context
+        triggered_entries = getattr(ctx, "triggered", None)
+        if not triggered_entries:
+            raise PreventUpdate
+        trigger_value = triggered_entries[0].get("value")
+        if not trigger_value:
+            # Ignore initial invocation where n_clicks is zero/None
+            raise PreventUpdate
+        key_str = None
+        if isinstance(trigger_id, dict):
+            id_obj = trigger_id
+            key_str = id_obj.get("key")
+        else:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+        if id_obj.get("type") != "proj-resp-open":
+            raise PreventUpdate
+
+        code = name = month_raw = None
+        if isinstance(key_str, str):
+            parts = key_str.split("||")
+            if parts:
+                code = parts[0] or None
+            if len(parts) > 1:
+                month_raw = parts[1] or None
+            if len(parts) > 2:
+                name = parts[2] or None
+
+        month_value, month_label = _normalize_month_value(month_raw)
         display_title = name or code
-        title = f"Responsibilities \u2014 {display_title}" if display_title else "Responsibilities"
+        if display_title:
+            title = f"Responsibilities \u2014 {display_title}"
+        else:
+            title = "Responsibilities"
+        if month_label:
+            title = f"{title} ({month_label})"
         payload = {"code": code, "name": name}
-        return True, title, payload, month
+        return True, title, payload, month_value
 
     # --- Render responsibilities inside the project mini-modal ---
     @app.callback(
@@ -4175,8 +4546,9 @@ def register_callbacks(
         if not project_identifiers:
             raise PreventUpdate
         # If a dedicated month is chosen from the tile, override the global filters
-        if month_value:
-            months_value = [month_value]
+        normalized_month, _month_label = _normalize_month_value(month_value)
+        if normalized_month:
+            months_value = [normalized_month]
             quick_value = None
         return _build_responsibilities_for_project(
             project_value=project_identifiers,

@@ -369,54 +369,44 @@ def build_kpi_cards() -> dbc.Row:
                 ),
            ),
 
-            # 3) Towers Erected - visible only in erection mode (clickable)
+            # 3) Towers Erected - visible only in erection mode
             dbc.Col(
-                html.Div(
-                    id="kpi-card-total-nos",
-                    n_clicks=0,
-                    children=
-                        dbc.Card(
-                            dbc.CardBody(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div(id="label-total-nos", children="Towers Erected", className="kpi-label"),
+                            html.Div(
                                 [
-                                    html.Div(id="label-total-nos", children="Towers Erected", className="kpi-label"),
-                                    html.Div(
-                                        [
-                                            html.Span(id="kpi-total-nos", className="kpi-value"),
-                                            html.Span(id="kpi-total-nos-planned", className="kpi-delta"),
-                                        ],
-                                        className="kpi-row",
-                                    ),
-                                ]
+                                    html.Span(id="kpi-total-nos", className="kpi-value"),
+                                    html.Span(id="kpi-total-nos-planned", className="kpi-delta"),
+                                ],
+                                className="kpi-row",
                             ),
-                            className="kpi kpi--green",
-                        ),
-                    style={"cursor": "pointer"},
+                        ]
+                    ),
+                    id="kpi-card-total-nos",
+                    className="kpi kpi--green",
                 ),
                 id="card-total-nos",
             ),
 
-            # 3b) Total Erection (MT) – visible only in erection mode (clickable)
+            # 3b) Total Erection (MT) – visible only in erection mode
             dbc.Col(
-                html.Div(
-                    id="kpi-card-total-mt",
-                    n_clicks=0,
-                    children=
-                        dbc.Card(
-                            dbc.CardBody(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div(id="label-total", children="Volume Erected", className="kpi-label"),
+                            html.Div(
                                 [
-                                    html.Div(id="label-total", children="Volume Erected", className="kpi-label"),
-                                    html.Div(
-                                        [
-                                            html.Span(id="kpi-total", className="kpi-value"),
-                                            html.Span(id="kpi-total-planned", className="kpi-delta"),
-                                        ],
-                                        className="kpi-row",
-                                    ),
-                                ]
+                                    html.Span(id="kpi-total", className="kpi-value"),
+                                    html.Span(id="kpi-total-planned", className="kpi-delta"),
+                                ],
+                                className="kpi-row",
                             ),
-                            className="kpi kpi--green",
-                        ),
-                    style={"cursor": "pointer"},
+                        ]
+                    ),
+                    id="kpi-card-total-mt",
+                    className="kpi kpi--green",
                 ),
             ),
 
@@ -624,40 +614,40 @@ def build_trace_modal() -> dbc.Modal:
     )
 
 
-def build_kpi_details_modal() -> dbc.Modal:
-    """Modal showing PCH-wise drilldown using nested accordions."""
+def build_kpi_details_section() -> dbc.Card:
+    """Inline card showing the PCH-wise drilldown that previously lived inside a modal."""
 
-    # Container populated by a callback with an Accordion hierarchy
-    modal_body = dbc.Card(
+    drilldown = dbc.Card(
         dbc.CardBody(
             [
-                html.Div(id="kpi-pch-accordion"),
-                # Hidden legacy elements (to avoid missing-callback errors during hot reloads)
+                dbc.Accordion(
+                    id="kpi-pch-accordion",
+                    start_collapsed=True,
+                    always_open=False,
+                    flush=True,
+                    active_item=None,
+                    className="pch-accordion",
+                ),
+                # Hidden legacy element retained for callbacks that expect the node
                 html.Div(id="kpi-location-box", style={"display": "none"}),
             ]
         ),
         className="shadow-sm",
     )
 
-    return dbc.Modal(
+    return dbc.Card(
         [
-            dbc.ModalHeader(dbc.ModalTitle(id="kpi-modal-title"), close_button=True),
-            dbc.ModalBody(modal_body),
-            dbc.ModalFooter(
-                dbc.Button(
-                    "Close",
-                    id="kpi-modal-close",
-                    className="ms-auto",
-                    n_clicks=0,
-                )
+            dbc.CardHeader(
+                [
+                    html.Div("PCH-wise Planned vs Delivered", className="section-title"),
+                    html.Div("Details synced with the active filters", className="section-sub"),
+                ],
+                className="d-flex flex-column",
             ),
+            dbc.CardBody(drilldown),
         ],
-        id="kpi-modal",
-        is_open=False,
-        size="xl",
-        scrollable=True,
-        backdrop=True,
-        keyboard=True,
+        id="kpi-details-card",
+        className="viz-card shadow-soft section-gap-top",
     )
 
 def build_project_responsibilities_modal() -> dbc.Modal:
@@ -874,7 +864,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     controls = build_controls()
     
     trace_modal = build_trace_modal()
-    kpi_modal = build_kpi_details_modal()
+    kpi_details = build_kpi_details_section()
     layout = dbc.Container(
         [
             build_header("Productivity Dashboard", last_updated_text),
@@ -882,6 +872,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             controls,
             build_project_details_card(),     # <-- INSERT HERE
             build_kpi_cards(),
+            kpi_details,
             dbc.Row(
                 [
                     # LEFT: Projects over Months (only)
@@ -1182,11 +1173,11 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             html.Div(id="mode-data-debug", style={"display": "none"}),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
-            kpi_modal,
             build_project_responsibilities_modal(),
-            dcc.Store(id="store-kpi-modal-source", data=None),
             dcc.Store(id="store-kpi-selected-project", data=None),
             dcc.Store(id="store-proj-resp-code", data=None),
+            dcc.Store(id="store-proj-resp-month", data=None),
+            html.Div(id="proj-resp-debug", style={"display": "none"}),
         ],
         fluid=True,
     )

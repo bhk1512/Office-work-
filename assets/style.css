@@ -248,15 +248,44 @@ html {
   padding: 10px 12px;
   margin: 6px 0 12px;
 }
-.pch-section .accordion-item{
+.pch-accordion .accordion-item{
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
 }
-.pch-section .accordion-button{
+.pch-accordion .accordion-button{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   font-weight: 700;
 }
-.pch-section .badge{ font-weight: 700; }
+.pch-accordion .badge{ font-weight: 700; }
+.pch-pill-group{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+}
+.pch-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-size:.85rem;
+  font-weight:600;
+  letter-spacing:.01em;
+  border-radius:999px;
+  padding:6px 14px;
+  background:#eef2ff;
+  color:#1f2937;
+  box-shadow:inset 0 0 0 1px rgba(15,23,42,.08);
+  white-space:normal;
+  text-align:left;
+}
+.pch-pill-projects{ background:#e0f2fe; color:#0f172a; }
+.pch-pill-prod-month{ background:#dcfce7; color:#166534; }
+.pch-pill-prod-overall{ background:#ede9fe; color:#4338ca; }
+.pch-pill-towers{ background:#fef9c3; color:#92400e; }
 
 /* Bigger numbers on project tiles for readability */
 .proj-badges .badge{
