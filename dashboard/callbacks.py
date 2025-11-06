@@ -8,7 +8,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 from io import BytesIO
 import traceback
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import dash
 import re
@@ -3279,10 +3279,12 @@ def register_callbacks(
                 today = pd.Timestamp.today().normalize()
                 range_start = today.to_period("M").start_time.normalize()
                 range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+            current_month_ts = range_end.to_period("M").to_timestamp()
 
             # Delivered KM from per-day stringing dataset
             df_day = _select_daily("stringing")
             scoped = apply_filters(df_day, project_list, months_ts, [])
+            delivered_km_current_series = pd.Series(dtype=float)
             if isinstance(scoped, pd.DataFrame) and not scoped.empty:
                 proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
                 if proj_col is None:
@@ -3292,8 +3294,21 @@ def register_callbacks(
                           .agg({"daily_km": "sum"})
                           .rename(columns={"daily_km": "delivered_km"})
                 ) if "daily_km" in scoped.columns else pd.DataFrame(columns=["delivered_km"])
+                if "daily_km" in scoped.columns:
+                    scoped_month = scoped.copy()
+                    if "month" not in scoped_month.columns and "date" in scoped_month.columns:
+                        scoped_month["date"] = pd.to_datetime(scoped_month["date"], errors="coerce")
+                        scoped_month = scoped_month.dropna(subset=["date"])
+                        scoped_month["month"] = scoped_month["date"].dt.to_period("M").dt.to_timestamp()
+                    elif "month" in scoped_month.columns:
+                        scoped_month["month"] = pd.to_datetime(scoped_month["month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                    if "month" in scoped_month.columns:
+                        scoped_current = scoped_month[scoped_month["month"] == current_month_ts]
+                        if not scoped_current.empty:
+                            delivered_km_current_series = scoped_current.groupby(scoped_current[proj_col].astype(str))["daily_km"].sum()
             else:
                 delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
+                delivered_km_current_series = pd.Series(dtype=float)
 
             # Planned KM from compiled stringing dataset (section-level total length)
             try:
@@ -3301,6 +3316,7 @@ def register_callbacks(
             except Exception:
                 df_compiled = pd.DataFrame()
             planned_km_by_project = pd.DataFrame(columns=["planned_km"])
+            planned_km_current_series = pd.Series(dtype=float)
             if isinstance(df_compiled, pd.DataFrame) and not df_compiled.empty:
                 comp = df_compiled.copy()
                 # Detect project/name column robustly
@@ -3326,6 +3342,10 @@ def register_callbacks(
                     planned_km_by_project = (
                         comp.groupby(comp[comp_proj_col].astype(str))["length_km"].sum().to_frame("planned_km")
                     )
+                    if date_col is not None and date_col in comp.columns:
+                        comp_current = comp[comp[date_col] == current_month_ts].copy()
+                        if not comp_current.empty:
+                            planned_km_current_series = comp_current.groupby(comp_current[comp_proj_col].astype(str))["length_km"].sum()
 
             # Merge planned and delivered into a projects table
             projects_df = (
@@ -3348,6 +3368,8 @@ def register_callbacks(
                 info_df = project_info_provider() if callable(project_info_provider) else None
             except Exception:
                 info_df = None
+            pch_col = "pch"
+            info_key_map: dict[str, int] = {}
             if isinstance(info_df, pd.DataFrame) and not info_df.empty:
                 info = info_df.copy()
                 info["project_name_display"] = info.get("Project Name", info.get("project_name", "")).astype(str)
@@ -3360,12 +3382,36 @@ def register_callbacks(
                 if pch_col is None:
                     info["pch"] = ""
                     pch_col = "pch"
+                try:
+                    import re as _re_key
+
+                    def _compact_code(value: str) -> str:
+                        return _re_key.sub(r"[^a-z0-9]", "", (value or "").lower())
+                except Exception:
+
+                    def _compact_code(value: str) -> str:
+                        return str(value or "").strip().lower().replace(" ", "")
+
+                name_keys = info["project_name_display"].astype(str).map(_compact_code)
+                for idx, key in zip(info.index, name_keys):
+                    if key and key not in info_key_map:
+                        info_key_map[key] = idx
+                for code_col in ("project_code", "Project Code"):
+                    if code_col in info.columns:
+                        code_keys = info[code_col].astype(str).map(_compact_code)
+                        for idx, key in zip(info.index, code_keys):
+                            if key and key not in info_key_map:
+                                info_key_map[key] = idx
             else:
                 info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])
+                def _compact_code(value: str) -> str:
+                    return str(value or "").strip().lower().replace(" ", "")
 
             proj_info_pch = {}
+            proj_info_pch_norm = {}
             if not info.empty and "pch" in info.columns:
                 proj_info_pch = dict(zip(info["project_name_display"], info["pch"].astype(str)))
+                proj_info_pch_norm = { _normalize_lower(k): str(v) for k, v in proj_info_pch.items() if str(k).strip() }
 
             try:
                 from .pch_normalizer import normalize_pch as _normalize_pch, CANONICAL_PCH_PRIMARY as _PCH_ORDER
@@ -3384,7 +3430,13 @@ def register_callbacks(
                 delivered_km = float(row.get("delivered_km", 0.0) or 0.0)
                 # Meta join
                 meta = info[info.get("project_name_norm", "").astype(str) == _normalize_lower(proj)].iloc[:1] if not info.empty else pd.DataFrame()
+                if (not isinstance(meta, pd.DataFrame)) or meta.empty:
+                    target_key = _compact_code(proj)
+                    if target_key and target_key in info_key_map:
+                        meta = info.loc[[info_key_map[target_key]]]
                 raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
+                if (not raw_pch) and proj:
+                    raw_pch = proj_info_pch.get(proj, "") or proj_info_pch_norm.get(_normalize_lower(proj), "")
                 # Use normalized PCH if known; otherwise keep the original as-is (no 'Unassigned')
                 pch_label = _normalize_pch(raw_pch) or str(raw_pch or "").strip()
                 rec = {
@@ -3412,19 +3464,150 @@ def register_callbacks(
                 except ValueError:
                     return (1, str(name))
 
+            delivered_current_norm_map: dict[str, float] = {}
+            delivered_current_compact_map: dict[str, float] = {}
+            planned_current_norm_map: dict[str, float] = {}
+            planned_current_compact_map: dict[str, float] = {}
+            prod_current_norm_map: dict[str, float] = {}
+            prod_current_compact_map: dict[str, float] = {}
+            prod_overall_norm_map: dict[str, float] = {}
+            prod_overall_compact_map: dict[str, float] = {}
+
+            def _build_lookup_maps(source: Mapping[str, float]) -> tuple[dict[str, float], dict[str, float]]:
+                norm_map: dict[str, float] = {}
+                compact_map: dict[str, float] = {}
+                if not source:
+                    return norm_map, compact_map
+                for key, raw_val in source.items():
+                    text = str(key or "").strip()
+                    if not text:
+                        continue
+                    try:
+                        value = float(raw_val)
+                    except (TypeError, ValueError):
+                        continue
+                    if pd.isna(value):
+                        continue
+                    norm_key = _normalize_lower(text)
+                    if norm_key and norm_key not in norm_map:
+                        norm_map[norm_key] = value
+                    compact_key = _compact_code(text)
+                    if compact_key and compact_key not in compact_map:
+                        compact_map[compact_key] = value
+                return norm_map, compact_map
+
+            if isinstance(delivered_km_current_series, pd.Series) and not delivered_km_current_series.empty:
+                delivered_current_norm_map, delivered_current_compact_map = _build_lookup_maps(delivered_km_current_series.to_dict())
+            if isinstance(planned_km_current_series, pd.Series) and not planned_km_current_series.empty:
+                planned_current_norm_map, planned_current_compact_map = _build_lookup_maps(planned_km_current_series.to_dict())
+
+            if isinstance(df_day, pd.DataFrame) and not df_day.empty and "daily_km" in df_day.columns:
+                day_filtered = df_day.copy()
+                if project_list and "project_name" in day_filtered.columns:
+                    project_filter_values = [str(p).strip() for p in project_list if str(p).strip()]
+                    if project_filter_values:
+                        day_filtered = day_filtered[day_filtered["project_name"].astype(str).str.strip().isin(project_filter_values)]
+                project_name_col = "project_name" if "project_name" in day_filtered.columns else ("project" if "project" in day_filtered.columns else None)
+                if project_name_col:
+                    day_filtered[project_name_col] = day_filtered[project_name_col].astype(str).str.strip()
+                    day_filtered = day_filtered.rename(columns={project_name_col: "project_name"})
+                if "month" not in day_filtered.columns and "date" in day_filtered.columns:
+                    day_filtered["date"] = pd.to_datetime(day_filtered["date"], errors="coerce")
+                    day_filtered["month"] = day_filtered["date"].dt.to_period("M").dt.to_timestamp()
+                elif "month" in day_filtered.columns:
+                    day_filtered["month"] = pd.to_datetime(day_filtered["month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                day_filtered = day_filtered.dropna(subset=["project_name", "daily_km"])
+                overall_map, _ = compute_project_baseline_maps_for(day_filtered, "daily_km")
+                prod_overall_norm_map, prod_overall_compact_map = _build_lookup_maps(overall_map)
+                current_scope = day_filtered[day_filtered["month"] == current_month_ts] if "month" in day_filtered.columns else pd.DataFrame()
+                if not current_scope.empty:
+                    current_map, _ = compute_project_baseline_maps_for(current_scope, "daily_km")
+                    prod_current_norm_map, prod_current_compact_map = _build_lookup_maps(current_map)
+                if not prod_current_norm_map:
+                    prod_current_norm_map, prod_current_compact_map = prod_overall_norm_map.copy(), prod_overall_compact_map.copy()
+
             pch_sections = []
             for pch in sorted(projects_rows.keys(), key=_pch_sort_key):
                 rows = projects_rows[pch]
-                p_planned_km = sum(r["planned_mt"] for r in rows)
-                p_delivered_km = sum(r["delivered_mt"] for r in rows)
+                project_count = len(rows)
+                project_codes: list[str] = []
+                prod_current_values: list[float] = []
+                prod_overall_values: list[float] = []
+                delivered_month_total = 0.0
+                planned_month_total = 0.0
+
+                def _project_lookup_keys(row: dict[str, Any]) -> tuple[list[str], list[str]]:
+                    display = str(row.get("project_name", "")).strip()
+                    base = display.split(" : ", 1)[1] if " : " in display else display
+                    code = str(row.get("project_code", "")).strip()
+                    texts = [display, base, code]
+                    norm_keys: list[str] = []
+                    compact_keys: list[str] = []
+                    for text in texts:
+                        if not text or text.lower() == "nan":
+                            continue
+                        norm_key = _normalize_lower(text)
+                        if norm_key and norm_key not in norm_keys:
+                            norm_keys.append(norm_key)
+                        compact_key = _compact_code(text)
+                        if compact_key and compact_key not in compact_keys:
+                            compact_keys.append(compact_key)
+                    return norm_keys, compact_keys
+
+                def _lookup_with_keys(norm_keys: list[str], compact_keys: list[str], norm_map: Mapping[str, float], compact_map: Mapping[str, float]) -> float | None:
+                    for key in norm_keys:
+                        if key in norm_map:
+                            return norm_map[key]
+                    for key in compact_keys:
+                        if key in compact_map:
+                            return compact_map[key]
+                    return None
+
+                for r in sorted(rows, key=lambda x: str(x["project_name"])):
+                    norm_keys, compact_keys = _project_lookup_keys(r)
+                    code_value = str(r.get("project_code", "")).strip()
+                    if code_value and code_value.lower() not in ("", "nan") and code_value not in project_codes:
+                        project_codes.append(code_value)
+
+                    prod_current_val = _lookup_with_keys(norm_keys, compact_keys, prod_current_norm_map, prod_current_compact_map)
+                    if prod_current_val is not None:
+                        prod_current_values.append(prod_current_val)
+
+                    prod_overall_val = _lookup_with_keys(norm_keys, compact_keys, prod_overall_norm_map, prod_overall_compact_map)
+                    if prod_overall_val is not None:
+                        prod_overall_values.append(prod_overall_val)
+
+                    delivered_month_val = _lookup_with_keys(norm_keys, compact_keys, delivered_current_norm_map, delivered_current_compact_map)
+                    if delivered_month_val is not None:
+                        delivered_month_total += float(delivered_month_val)
+
+                    planned_month_val = _lookup_with_keys(norm_keys, compact_keys, planned_current_norm_map, planned_current_compact_map)
+                    if planned_month_val is not None:
+                        planned_month_total += float(planned_month_val)
+
+                prod_current_avg = float(sum(prod_current_values) / len(prod_current_values)) if prod_current_values else None
+                prod_overall_avg = float(sum(prod_overall_values) / len(prod_overall_values)) if prod_overall_values else None
+
+                fmt_prod_current = f"{prod_current_avg:.2f}" if prod_current_avg is not None else "\u2014"
+                fmt_prod_overall = f"{prod_overall_avg:.2f}" if prod_overall_avg is not None else "\u2014"
+                projects_label = f"Projects: {', '.join(project_codes)}" if project_codes else f"Projects: {project_count}"
+                km_delivered_label = round(delivered_month_total, 1)
+                km_planned_label = round(planned_month_total, 1)
 
                 title_component = html.Div(
                     [
                         html.Span(str(pch or "Unassigned"), className="fw-semibold"),
-                        dbc.Badge(
-                            f"KM {p_delivered_km:.1f}/{p_planned_km:.1f}",
-                            color="dark",
-                            className="ms-auto",
+                        html.Div(
+                            [
+                                html.Span(projects_label, className="pch-pill pch-pill-projects mb-1"),
+                                html.Span(f"Prod This Month: {fmt_prod_current} KM/day", className="pch-pill pch-pill-prod-month mb-1"),
+                                html.Span(f"Prod Overall: {fmt_prod_overall} KM/day", className="pch-pill pch-pill-prod-overall mb-1"),
+                                html.Span(
+                                    f"KM This Month: {km_delivered_label:.1f} delivered / {km_planned_label:.1f} planned",
+                                    className="pch-pill pch-pill-towers mb-1",
+                                ),
+                            ],
+                            className="pch-pill-group ms-auto d-none d-md-flex",
                         ),
                     ],
                     className="d-flex align-items-center justify-content-between w-100",

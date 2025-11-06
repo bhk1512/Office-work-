@@ -242,8 +242,9 @@ html {
 
 /* --- KPI Modal (PCH → Projects → Locations) --- */
 .pch-header{
-  background: var(--surface-header);
-  border: 1px solid var(--border);
+  /* match the tinted header chrome used on viz cards */
+  background: #f0f6ff;
+  border: 1px solid #d8e4ff;
   border-radius: 12px;
   padding: 10px 12px;
   margin: 6px 0 12px;

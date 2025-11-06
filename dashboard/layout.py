@@ -870,9 +870,9 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_header("Productivity Dashboard", last_updated_text),
             
             controls,
-            build_project_details_card(),     # <-- INSERT HERE
-            build_kpi_cards(),
             kpi_details,
+            build_kpi_cards(),
+            build_project_details_card(),
             dbc.Row(
                 [
                     # LEFT: Projects over Months (only)
