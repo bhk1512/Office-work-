@@ -4721,15 +4721,63 @@ def register_callbacks(
                             )
                     return out
 
-                # Common stats section
+                # Project-level KPI highlights aligned with the PCH header metrics
+                norm_keys, compact_keys = _project_lookup_keys(r)
+                prod_current_value, _ = _lookup_with_key(
+                    norm_keys, compact_keys, prod_current_norm_map, prod_current_compact_map
+                )
+                prod_overall_value, _ = _lookup_with_key(
+                    norm_keys, compact_keys, prod_history_norm_map, prod_history_compact_map
+                )
+                towers_current_value, _ = _lookup_with_key(
+                    norm_keys, compact_keys, towers_current_norm_map, towers_current_compact_map
+                )
+                towers_planned_value, _ = _lookup_with_key(
+                    norm_keys, compact_keys, towers_planned_norm_map, towers_planned_compact_map
+                )
+
+                prod_current_display = (
+                    f"{float(prod_current_value):.2f} MT/day"
+                    if prod_current_value is not None and pd.notna(prod_current_value)
+                    else "\u2014"
+                )
+                prod_overall_display = (
+                    f"{float(prod_overall_value):.2f} MT/day"
+                    if prod_overall_value is not None and pd.notna(prod_overall_value)
+                    else "\u2014"
+                )
+                has_tower_data = (
+                    (towers_current_value is not None and pd.notna(towers_current_value))
+                    or (towers_planned_value is not None and pd.notna(towers_planned_value))
+                )
+                towers_current_display = (
+                    int(towers_current_value)
+                    if towers_current_value is not None and pd.notna(towers_current_value)
+                    else 0
+                )
+                towers_planned_display = (
+                    int(towers_planned_value)
+                    if towers_planned_value is not None and pd.notna(towers_planned_value)
+                    else 0
+                )
+                towers_summary_display = (
+                    f"{towers_current_display} delivered / {towers_planned_display} planned"
+                    if has_tower_data
+                    else "\u2014"
+                )
+
                 tile_body_children.extend([
                     html.Div([
-                        html.Span("Towers Erected : ", className="me-2"),
-                        (dbc.Badge(f"{r['delivered_nos']} / {r['planned_nos']}", color="primary", className="me-2", style={"fontSize": "1.05rem"}) if has_mp else None),
+                        html.Span("Prod This Month : ", className="me-2"),
+                        dbc.Badge(prod_current_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
                     html.Div([
-                        html.Span("Volume Erected : ", className="me-2"),
-                        (dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} MT", color="dark", className="me-2", style={"fontSize": "1.05rem"}) if has_mp else None),
+                        html.Span("Prod Overall : ", className="me-2"),
+                        dbc.Badge(prod_overall_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
+                    ], className="mb-2"),
+                    html.Div([
+                        html.Span("Towers This Month : ", className="me-2"),
+                        dbc.Badge(towers_summary_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
                 ])
                 month_buttons = _month_buttons_for_project()
