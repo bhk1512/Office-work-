@@ -658,7 +658,8 @@ def build_project_responsibilities_modal() -> dbc.Modal:
                 dcc.Graph(
                     id="proj-resp-graph",
                     config={"displayModeBar": False},
-                    style={"height": "360px"},
+                    responsive=True,
+                    style={"height": "360px", "minHeight": "280px", "width": "100%"},
                 ),
                 dbc.Row(
                     [
@@ -703,7 +704,7 @@ def build_project_responsibilities_modal() -> dbc.Modal:
                 ),
             ]
         ),
-        className="shadow-sm",
+        className="shadow-sm responsibilities-modal-card",
     )
     # Header with title on left and local filter pills on right (mirrors main card)
     header = dbc.ModalHeader(
@@ -716,36 +717,32 @@ def build_project_responsibilities_modal() -> dbc.Modal:
                 dbc.Col(
                     html.Div(
                         [
-                            html.Div(
-                                className="segment segment-xxs",
-                                children=[
-                                    dcc.RadioItems(
-                                        id="proj-resp-entity",
-                                        options=[
-                                            {"label": "Gangs", "value": "Gang"},
-                                            {"label": "Section Incharges", "value": "Section Incharge"},
-                                            {"label": "Supervisors", "value": "Supervisor"},
-                                        ],
-                                        value="Supervisor",
-                                        labelStyle={"display": "inline-flex", "gap": "0"},
-                                        inputStyle={"marginRight": "6px"},
-                                    )
+                            dbc.RadioItems(
+                                id="proj-resp-entity",
+                                options=[
+                                    {"label": "Gangs", "value": "Gang"},
+                                    {"label": "Section Incharges", "value": "Section Incharge"},
+                                    {"label": "Supervisors", "value": "Supervisor"},
                                 ],
+                                value="Supervisor",
+                                inline=True,
+                                class_name="segment segment-xxs",
+                                label_class_name="segment-label",
+                                label_checked_class_name="segment-label--active",
+                                input_class_name="segment-input",
                             ),
-                            html.Div(
-                                className="segment segment-xxs",
-                                children=[
-                                    dcc.RadioItems(
-                                        id="proj-resp-metric",
-                                        options=[
-                                            {"label": "Tower Weight", "value": "tower_weight"},
-                                            {"label": "Revenue", "value": "revenue"},
-                                        ],
-                                        value="tower_weight",
-                                        labelStyle={"display": "inline-flex", "gap": "0"},
-                                        inputStyle={"marginRight": "6px"},
-                                    )
+                            dbc.RadioItems(
+                                id="proj-resp-metric",
+                                options=[
+                                    {"label": "Tower Weight", "value": "tower_weight"},
+                                    {"label": "Revenue", "value": "revenue"},
                                 ],
+                                value="tower_weight",
+                                inline=True,
+                                class_name="segment segment-xxs",
+                                label_class_name="segment-label",
+                                label_checked_class_name="segment-label--active",
+                                input_class_name="segment-input",
                             ),
                         ],
                         className="header-pills d-flex flex-row align-items-center justify-content-end",
@@ -772,6 +769,7 @@ def build_project_responsibilities_modal() -> dbc.Modal:
         scrollable=True,
         backdrop=True,
         keyboard=True,
+        content_class_name="responsibilities-modal",
     )
 
 def build_header(title: str, last_updated_text: str) -> html.Div:
@@ -933,36 +931,32 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                             dbc.Col(
                                                 html.Div(
                                                     [
-                                                        html.Div(
-                                                            className="segment segment-xxs",
-                                                            children=[
-                                                                dcc.RadioItems(
-                                                                    id="f-resp-entity",
-                                                                    options=[
-                                                                        {"label": "Gangs", "value": "Gang"},
-                                                                        {"label": "Section Incharges", "value": "Section Incharge"},
-                                                                        {"label": "Supervisors", "value": "Supervisor"},
-                                                                    ],
-                                                                    value="Supervisor",
-                                                                    labelStyle={"display": "inline-flex", "gap": "0"},
-                                                                    inputStyle={"marginRight": "6px"},
-                                                                )
+                                                        dbc.RadioItems(
+                                                            id="f-resp-entity",
+                                                            options=[
+                                                                {"label": "Gangs", "value": "Gang"},
+                                                                {"label": "Section Incharges", "value": "Section Incharge"},
+                                                                {"label": "Supervisors", "value": "Supervisor"},
                                                             ],
+                                                            value="Supervisor",
+                                                            inline=True,
+                                                            class_name="segment segment-xxs",
+                                                            label_class_name="segment-label",
+                                                            label_checked_class_name="segment-label--active",
+                                                            input_class_name="segment-input",
                                                         ),
-                                                        html.Div(
-                                                            className="segment segment-xxs",
-                                                            children=[
-                                                                dcc.RadioItems(
-                                                                    id="f-resp-metric",
-                                                                    options=[
-                                                                        {"label": "Tower Weight", "value": "tower_weight"},
-                                                                        {"label": "Revenue", "value": "revenue"},
-                                                                    ],
-                                                                    value="tower_weight",
-                                                                    labelStyle={"display": "inline-flex", "gap": "0"},
-                                                                    inputStyle={"marginRight": "6px"},
-                                                                )
+                                                        dbc.RadioItems(
+                                                            id="f-resp-metric",
+                                                            options=[
+                                                                {"label": "Tower Weight", "value": "tower_weight"},
+                                                                {"label": "Revenue", "value": "revenue"},
                                                             ],
+                                                            value="tower_weight",
+                                                            inline=True,
+                                                            class_name="segment segment-xxs",
+                                                            label_class_name="segment-label",
+                                                            label_checked_class_name="segment-label--active",
+                                                            input_class_name="segment-input",
                                                         ),
                                                     ],
                                                     className="header-pills d-flex flex-row align-items-center justify-content-end"
@@ -979,7 +973,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                         dcc.Graph(
                                             id="g-responsibilities",
                                             config={"displayModeBar": False},
-                                            style={"height": "360px"},
+                                            responsive=True,
+                                            style={"height": "360px", "minHeight": "300px", "width": "100%"},
                                         ),
 
                                         # KPI row
@@ -1028,7 +1023,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     className="d-flex flex-column",
                                 ),
                             ],
-                            className="viz-card shadow-soft section-gap-top flex-fill w-100",  # matches other cards
+                            className="viz-card shadow-soft section-gap-top flex-fill w-100 responsibilities-card",  # matches other cards
                         ),
                         md=6,
                         className="d-flex",
@@ -1123,20 +1118,18 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                 align="center",
                                             ),
                                             dbc.Col(
-                                                html.Div(
-                                                    className="segment",
-                                                    children=[
-                                                        dcc.RadioItems(
-                                                            id="f-topbot-metric",              # keep same id
-                                                            options=[
-                                                                {"label": "Productivity", "value": "prod"},
-                                                                {"label": "Erection", "value": "erection"},
-                                                            ],
-                                                            value="prod",
-                                                            labelStyle={"display": "inline-flex", "gap": "0"},
-                                                            inputStyle={"marginRight": "8px"},
-                                                        )
+                                                dbc.RadioItems(
+                                                    id="f-topbot-metric",              # keep same id
+                                                    options=[
+                                                        {"label": "Productivity", "value": "prod"},
+                                                        {"label": "Erection", "value": "erection"},
                                                     ],
+                                                    value="prod",
+                                                    inline=True,
+                                                    class_name="segment",
+                                                    label_class_name="segment-label",
+                                                    label_checked_class_name="segment-label--active",
+                                                    input_class_name="segment-input",
                                                 ),
                                                 width="auto",
                                                 align="center",
