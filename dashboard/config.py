@@ -12,6 +12,20 @@ from pathlib import Path
 DEFAULT_WORKBOOK = Path("Parquets") / "Erection" / "ErectionCompiled_Output.xlsx"
 
 
+def _parse_csv_env(name: str) -> tuple[str, ...]:
+    """Parse a comma-separated environment variable into a tuple of values."""
+
+    raw = os.getenv(name, "")
+    if not raw:
+        return ()
+    parts: list[str] = []
+    for chunk in raw.split(","):
+        value = chunk.strip()
+        if value:
+            parts.append(value)
+    return tuple(parts)
+
+
 def _resolve_default_data_path() -> Path:
     """Resolve the default dataset root.
 
@@ -44,6 +58,9 @@ def _resolve_default_data_path() -> Path:
 
 
 _DEFAULT_DATA_PATH = _resolve_default_data_path()
+_DEFAULT_CSP_SCRIPT_SRC = ("https://unpkg.com", "https://cdn.plot.ly")
+_DEFAULT_CSP_STYLE_SRC = ("https://fonts.googleapis.com", "https://cdn.jsdelivr.net")
+_DEFAULT_CSP_FONT_SRC = ("https://fonts.gstatic.com",)
 
 
 @dataclass(frozen=True)
@@ -91,6 +108,14 @@ class AppConfig:
     # A directory with this name is created under the dataset root, with parquet files inside.
     # Default to a sibling under Parquets/Stringing so reads/writes land there
     stringing_daily_table: str = os.getenv("STRINGING_DAILY_TABLE", "../Stringing/StringingDaily")
+
+    # Display + CSP customisation
+    display_timezone: str | None = os.getenv("DISPLAY_TIMEZONE", "Asia/Kolkata") or None
+    csp_script_src: tuple[str, ...] = _DEFAULT_CSP_SCRIPT_SRC + _parse_csv_env("CSP_SCRIPT_SRC")
+    csp_style_src: tuple[str, ...] = _DEFAULT_CSP_STYLE_SRC + _parse_csv_env("CSP_STYLE_SRC")
+    csp_font_src: tuple[str, ...] = _DEFAULT_CSP_FONT_SRC + _parse_csv_env("CSP_FONT_SRC")
+    csp_connect_src: tuple[str, ...] = _parse_csv_env("CSP_CONNECT_SRC")
+    csp_img_src: tuple[str, ...] = _parse_csv_env("CSP_IMG_SRC")
 
     def validate(self) -> None:
         """Ensure configured paths stay within the permitted root."""

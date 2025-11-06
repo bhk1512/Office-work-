@@ -149,19 +149,39 @@ def create_app(config: AppConfig | None = None) -> Dash:
             server.wsgi_app = ProxyFix(server.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
         # Strict CSP for prod; leave it OFF in dev to avoid blocking Dash inline JS.
+        def _merge_csp_values(*groups: tuple[str, ...] | list[str]) -> list[str]:
+            merged: list[str] = []
+            seen: set[str] = set()
+            for group in groups:
+                for value in group:
+                    if value not in seen:
+                        seen.add(value)
+                        merged.append(value)
+            return merged
+
+        csp = {
+            "default-src": ["'self'"],
+            "img-src": ["'self'", "data:"],
+            "style-src": ["'self'", "'unsafe-inline'"],
+            "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+            "connect-src": ["'self'"],
+            "font-src": ["'self'", "data:"],
+        }
+
+        csp["script-src"] = _merge_csp_values(csp["script-src"], active_config.csp_script_src)
+        csp["style-src"] = _merge_csp_values(csp["style-src"], active_config.csp_style_src)
+        csp["font-src"] = _merge_csp_values(csp["font-src"], active_config.csp_font_src)
+        csp["connect-src"] = _merge_csp_values(csp["connect-src"], active_config.csp_connect_src)
+        csp["img-src"] = _merge_csp_values(csp["img-src"], active_config.csp_img_src)
+
+        csp_directives = {key: " ".join(values) for key, values in csp.items()}
+
         Talisman(
             server,
             force_https=True,
             strict_transport_security=True,
             frame_options="DENY",
-            content_security_policy={
-                "default-src": "'self'",
-                "img-src": "'self' data:",
-                "style-src": "'self' 'unsafe-inline'",
-                "script-src": "'self' 'unsafe-inline' 'unsafe-eval'",
-                "connect-src": "'self'",
-                "font-src": "'self'",
-            },
+            content_security_policy=csp_directives,
         )
 
         Limiter(get_remote_address, app=server, default_limits=["120/minute"])

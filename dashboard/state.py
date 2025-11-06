@@ -11,6 +11,11 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - fallback for Py<3.9 (not expected)
+    ZoneInfo = None  # type: ignore[misc,assignment]
+
 from .config import AppConfig
 from .data_loader import (
     load_daily as _load_daily,
@@ -32,6 +37,7 @@ DUCKDB_TABLE_STRINGING = "appdata_stringing_daily"
 class DatasetMetadata:
     """Human-readable metadata for the currently loaded dataset."""
 
+    display_timezone: str | None = None
     last_data_date: pd.Timestamp | None = None
     last_data_date_text: str = "N/A"
     last_loaded_text: str = "N/A"
@@ -43,8 +49,28 @@ class DatasetMetadata:
         self.last_data_date_text = (
             self.last_data_date.strftime("%d-%m-%Y") if self.last_data_date is not None else "N/A"
         )
+
+        tzinfo = None
+        if self.display_timezone:
+            if ZoneInfo is None:
+                LOGGER.warning(
+                    "zoneinfo unavailable; cannot apply display timezone '%s'.", self.display_timezone
+                )
+            else:
+                try:
+                    tzinfo = ZoneInfo(self.display_timezone)
+                except Exception:  # pragma: no cover - invalid timezone string
+                    LOGGER.warning(
+                        "Invalid DISPLAY_TIMEZONE '%s'; using server local time.",
+                        self.display_timezone,
+                    )
+                    tzinfo = None
+
         try:
-            self.last_loaded_text = pd.Timestamp.now().strftime("%d-%m-%Y")
+            now_display = pd.Timestamp.now(tz=tzinfo) if tzinfo is not None else pd.Timestamp.now()
+            if tzinfo is not None:
+                now_display = now_display.tz_localize(None)
+            self.last_loaded_text = now_display.strftime("%d-%m-%Y")
         except Exception:
             self.last_loaded_text = "N/A"
 
@@ -59,7 +85,7 @@ class AppDataStore:
         self._stringing_daily: pd.DataFrame | None = None
         self._project_info: pd.DataFrame | None = None
         self._responsibilities: ResponsibilitiesSnapshot = ResponsibilitiesSnapshot(None, set(), None)
-        self.metadata = DatasetMetadata()
+        self.metadata = DatasetMetadata(display_timezone=config.display_timezone)
         self._daily_version = 0
         self._stringing_version = 0
         self._duckdb_conn = self._create_duckdb_connection()
