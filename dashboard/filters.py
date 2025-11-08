@@ -21,11 +21,33 @@ def apply_filters(
     """Filter *data* by the provided selections."""
 
     filtered = data.copy()
-    if projects:
+
+    # Project filter (only if column is present)
+    if projects and "project_name" in filtered.columns:
         filtered = filtered[filtered["project_name"].isin(projects)]
+
+    # Month filter with resilience: compute month from date if missing
     if months:
-        filtered = filtered[filtered["month"].isin(months)]
-    if gangs:
+        if "month" not in filtered.columns:
+            if "date" in filtered.columns:
+                # Coerce date then derive month as normalized month start timestamp
+                work = filtered.copy()
+                work["date"] = pd.to_datetime(work["date"], errors="coerce")
+                work = work.dropna(subset=["date"])  # only keep valid dates
+                work["month"] = work["date"].dt.to_period("M").dt.to_timestamp()
+                filtered = work
+            else:
+                # No compatible date fields; skip month filtering
+                LOGGER.warning(
+                    "Skipping month filter: neither 'month' nor 'date' columns are present (rows=%d)",
+                    len(filtered),
+                )
+                months = []  # neutralize month filtering
+        if months:
+            filtered = filtered[filtered["month"].isin(months)]
+
+    # Gang filter (only if column is present)
+    if gangs and "gang_name" in filtered.columns:
         filtered = filtered[filtered["gang_name"].isin(gangs)]
     LOGGER.debug(
         "Filtered data down to %d rows (projects=%s, months=%s, gangs=%s)",

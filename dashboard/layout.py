@@ -122,7 +122,9 @@ def _build_trace_contents(
                             ],
                             data=[],
                             page_size=10,
-                            style_table={"overflowX": "auto"},
+                            virtualization=True,
+                            fixed_rows={"headers": True},
+                            style_table={"overflowX": "auto", "maxHeight": "380px"},
                             style_cell={
                                 "fontFamily": "Inter, system-ui",
                                 "fontSize": 13,
@@ -147,7 +149,9 @@ def _build_trace_contents(
                             ],
                             data=[],
                             page_size=10,
-                            style_table={"overflowX": "auto"},
+                            virtualization=True,
+                            fixed_rows={"headers": True},
+                            style_table={"overflowX": "auto", "maxHeight": "380px"},
                             style_cell={
                                 "fontFamily": "Inter, system-ui",
                                 "fontSize": 13,
@@ -271,6 +275,54 @@ def build_controls() -> dbc.Card:
                     ],
                     className="g-2 mt-1",
                 ),
+                                # Row 3: Stringing-only filters (Line kV + Method)
+                html.Div(
+                    [
+                        dbc.Row(
+                            [
+                                # Left: Line kV chips
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Div("Line (kV)", className="filter-label mb-1"),
+                                            dbc.Checklist(
+                                                id="f-kv",
+                                                options=[
+                                                    {"label": "400 kV", "value": "400"},
+                                                    {"label": "765 kV", "value": "765"},
+                                                ],
+                                                value=["400", "765"],  # default: overall (both)
+                                                inline=True,
+                                            ),
+                                        ]
+                                    ),
+                                    md=6,
+                                ),
+                                # Right: Method chips
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Div("Method", className="filter-label mb-1"),
+                                            dbc.Checklist(
+                                                id="f-method",
+                                                options=[
+                                                    {"label": "Manual", "value": "manual"},
+                                                    {"label": "TSE", "value": "tse"},
+                                                ],
+                                                value=["manual", "tse"],  # default: overall (both)
+                                                inline=True,
+                                            ),
+                                        ]
+                                    ),
+                                    md=6,
+                                ),
+                            ],
+                            className="g-2",
+                        )
+                    ],
+                    id="stringing-filters-wrap",
+                    style={"display": "none"},  # shown only in stringing mode by callback
+                ),
             ]
         ),
         className="mb-3 shadow-sm filter-card",
@@ -291,8 +343,7 @@ def build_kpi_cards() -> dbc.Row:
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("trend_down"), className="kpi__icon"),
-                            html.Div("Avg Output / Gang / Day", className="kpi-label"),
+                            html.Div(id="label-avg", children="Avg Output / Gang / Day", className="kpi-label"),
                             html.Div(
                                 [
                                     html.Span(id="kpi-avg", className="kpi-value"),
@@ -303,8 +354,7 @@ def build_kpi_cards() -> dbc.Row:
                         ]
                     ),
                     className="kpi kpi--blue",
-                ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
+                ),           
             ),
 
             # 2) Active Projects (purple)
@@ -312,7 +362,6 @@ def build_kpi_cards() -> dbc.Row:
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("users"), className="kpi__icon"),
                             html.Div("Active Gangs", className="kpi-label"),
                             html.Div(
                                 [ html.Span(id="kpi-active", className="kpi-value") ],
@@ -322,25 +371,47 @@ def build_kpi_cards() -> dbc.Row:
                     ),
                     className="kpi kpi--purple",
                 ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
-            ),
+           ),
 
-            # 3) Total Erection (orange for Figma look)
+            # 3) Towers Erected - visible only in erection mode
             dbc.Col(
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("trend_up"), className="kpi__icon"),
-                            html.Div("Total Erection", className="kpi-label"),
+                            html.Div(id="label-total-nos", children="Towers Erected", className="kpi-label"),
                             html.Div(
-                                [ html.Span(id="kpi-total", className="kpi-value") ],
+                                [
+                                    html.Span(id="kpi-total-nos", className="kpi-value"),
+                                    html.Span(id="kpi-total-nos-planned", className="kpi-delta"),
+                                ],
                                 className="kpi-row",
                             ),
                         ]
                     ),
+                    id="kpi-card-total-nos",
                     className="kpi kpi--green",
                 ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
+                id="card-total-nos",
+            ),
+
+            # 3b) Total Erection (MT) – visible only in erection mode
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div(id="label-total", children="Volume Erected", className="kpi-label"),
+                            html.Div(
+                                [
+                                    html.Span(id="kpi-total", className="kpi-value"),
+                                    html.Span(id="kpi-total-planned", className="kpi-delta"),
+                                ],
+                                className="kpi-row",
+                            ),
+                        ]
+                    ),
+                    id="kpi-card-total-mt",
+                    className="kpi kpi--green",
+                ),
             ),
 
             # 4) Lost Units (red)
@@ -348,8 +419,7 @@ def build_kpi_cards() -> dbc.Row:
                 dbc.Card(
                     dbc.CardBody(
                         [
-                            html.Div(_icon("trend_down"), className="kpi__icon"),
-                            html.Div("Lost Units", className="kpi-label"),
+                            html.Div(id="label-lost", children="Lost Units", className="kpi-label"),
                             html.Div(
                                 [
                                     html.Span(id="kpi-loss", className="kpi-value"),
@@ -361,10 +431,10 @@ def build_kpi_cards() -> dbc.Row:
                     ),
                     className="kpi kpi--red",
                 ),
-                xs=12, sm=6, md=6, lg=3, xl=3,
             ),
         ],
-        className="g-3 align-items-stretch",
+        id="kpi-row",
+        className="g-3 align-items-stretch row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-5",
     )
 
 
@@ -428,7 +498,7 @@ def build_erections_card() -> dbc.Card:
             dbc.Col(
                 html.Div(
                     [
-                        html.Div("Erections Completed", className="section-title mb-2"),
+                        html.Div("Erections Completed", className="section-title mb-2", id="lbl-erections-title"),
                         html.Div(
                             "Completion date (defaults to yesterday)",
                             className="fw-semibold mb-1",
@@ -495,10 +565,12 @@ def build_erections_card() -> dbc.Card:
             {"name": "Revenue", "id": "revenue"},
         ],
         data=[],
-        page_size=10,
+        page_size=15,
         sort_action="native",
         filter_action="native",
-        style_table={"overflowX": "auto"},
+        virtualization=True,
+        fixed_rows={"headers": True},
+        style_table={"overflowX": "auto", "maxHeight": "500px"},
         style_cell={
             "fontFamily": "Inter, system-ui",
             "fontSize": 13,
@@ -548,6 +620,164 @@ def build_trace_modal() -> dbc.Modal:
     )
 
 
+def build_kpi_details_section() -> dbc.Card:
+    """Inline card showing the PCH-wise drilldown that previously lived inside a modal."""
+
+    drilldown = dbc.Card(
+        dbc.CardBody(
+            [
+                dbc.Accordion(
+                    id="kpi-pch-accordion",
+                    start_collapsed=True,
+                    always_open=False,
+                    flush=True,
+                    active_item=None,
+                    className="pch-accordion",
+                ),
+                # Hidden legacy element retained for callbacks that expect the node
+                html.Div(id="kpi-location-box", style={"display": "none"}),
+            ]
+        ),
+        className="shadow-sm",
+    )
+
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.Div("PCH-wise Planned vs Delivered", className="section-title"),
+                    html.Div("Details synced with the active filters", className="section-sub"),
+                ],
+                className="d-flex flex-column",
+            ),
+            dbc.CardBody(drilldown),
+        ],
+        id="kpi-details-card",
+        className="viz-card shadow-soft section-gap-top",
+    )
+
+def build_project_responsibilities_modal() -> dbc.Modal:
+    """Nested mini-modal to show Responsibilities chart for a selected project."""
+    body = dbc.Card(
+        dbc.CardBody(
+            [
+                dcc.Graph(
+                    id="proj-resp-graph",
+                    config={"displayModeBar": False},
+                    responsive=True,
+                    style={"height": "360px", "minHeight": "280px", "width": "100%"},
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-resp-kpi-target", className="kpi-value"),
+                                        html.Div("Total Target", className="kpi-sub"),
+                                    ]
+                                ),
+                                className="kpi kpi-blue",
+                            ),
+                            md=4,
+                        ),
+                        dbc.Col(
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-resp-kpi-delivered", className="kpi-value"),
+                                        html.Div("Delivered", className="kpi-sub"),
+                                    ]
+                                ),
+                                className="kpi kpi-green",
+                            ),
+                            md=4,
+                        ),
+                        dbc.Col(
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-resp-kpi-ach", className="kpi-value"),
+                                        html.Div("Achievement", className="kpi-sub"),
+                                    ]
+                                ),
+                                className="kpi kpi-red",
+                            ),
+                            md=4,
+                        ),
+                    ],
+                    className="kpi-row-compact",
+                ),
+            ]
+        ),
+        className="shadow-sm responsibilities-modal-card",
+    )
+    # Header with title on left and local filter pills on right (mirrors main card)
+    header = dbc.ModalHeader(
+        dbc.Row(
+            [
+                dbc.Col(
+                    dbc.ModalTitle(id="proj-resp-modal-title"),
+                    className="d-flex align-items-center",
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            dbc.RadioItems(
+                                id="proj-resp-entity",
+                                options=[
+                                    {"label": "Gangs", "value": "Gang"},
+                                    {"label": "Section Incharges", "value": "Section Incharge"},
+                                    {"label": "Supervisors", "value": "Supervisor"},
+                                ],
+                                value="Supervisor",
+                                inline=True,
+                                class_name="segment segment-xxs",
+                                label_class_name="segment-label",
+                                label_checked_class_name="segment-label--active",
+                                input_class_name="segment-input",
+                            ),
+                            dbc.RadioItems(
+                                id="proj-resp-metric",
+                                options=[
+                                    {"label": "Tower Weight", "value": "tower_weight"},
+                                    {"label": "Revenue", "value": "revenue"},
+                                ],
+                                value="tower_weight",
+                                inline=True,
+                                class_name="segment segment-xxs",
+                                label_class_name="segment-label",
+                                label_checked_class_name="segment-label--active",
+                                input_class_name="segment-input",
+                            ),
+                        ],
+                        className="header-pills d-flex flex-row align-items-center justify-content-end",
+                    ),
+                    width="auto",
+                ),
+            ],
+            className="align-items-center  justify-content-between g-2",
+        ),
+        close_button=True,
+    )
+
+    return dbc.Modal(
+        [
+            header,
+            dbc.ModalBody(body),
+            dbc.ModalFooter(
+                dbc.Button("Close", id="proj-resp-modal-close", className="ms-auto")
+            ),
+        ],
+        id="proj-resp-modal",
+        is_open=False,
+        size="xl",
+        scrollable=True,
+        backdrop=True,
+        keyboard=True,
+        content_class_name="responsibilities-modal",
+    )
+
 def build_header(title: str, last_updated_text: str) -> html.Div:
     """Top section: icon + big title, and 'Last Updated On' line under it."""
 
@@ -578,6 +808,37 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
         style={"width": "16px", "height": "16px", "marginRight": "8px"},
     )
 
+    # Mode banner + toggle (top-right)
+    mode_controls = html.Div(
+        [
+            html.Span(
+                "Erection mode",
+                id="mode-banner",
+                style={
+                    "fontSize": "12px",
+                    "color": "#64748B",
+                    "background": "#F1F5F9",
+                    "padding": "4px 8px",
+                    "borderRadius": "8px",
+                },
+            ),
+            dcc.RadioItems(
+                id="mode-toggle",
+                options=[
+                    {"label": "Erection", "value": "erection"},
+                    {"label": "Stringing", "value": "stringing"},
+                ],
+                value="erection",
+                inline=True,
+                style={"fontSize": "12px"},
+                inputStyle={"marginRight": "6px"},
+                labelStyle={"display": "inline-flex", "gap": "0", "marginRight": "10px"},
+            ),
+        ],
+        className="topbar__mode",
+        style={"marginLeft": "auto", "display": "flex", "gap": "10px", "alignItems": "center"},
+    )
+
     return html.Div(
         [
             html.Div(  # left icon badge
@@ -594,6 +855,7 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
                 ],
                 className="topbar__text",
             ),
+            mode_controls,
         ],
         className="topbar",
     )
@@ -606,13 +868,15 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     controls = build_controls()
     
     trace_modal = build_trace_modal()
+    kpi_details = build_kpi_details_section()
     layout = dbc.Container(
         [
             build_header("Productivity Dashboard", last_updated_text),
             
             controls,
-            build_project_details_card(),     # <-- INSERT HERE
+            kpi_details,
             build_kpi_cards(),
+            build_project_details_card(),
             dbc.Row(
                 [
                     # LEFT: Projects over Months (only)
@@ -673,36 +937,32 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                             dbc.Col(
                                                 html.Div(
                                                     [
-                                                        html.Div(
-                                                            className="segment segment-xxs",
-                                                            children=[
-                                                                dcc.RadioItems(
-                                                                    id="f-resp-entity",
-                                                                    options=[
-                                                                        {"label": "Gangs", "value": "Gang"},
-                                                                        {"label": "Section Incharges", "value": "Section Incharge"},
-                                                                        {"label": "Supervisors", "value": "Supervisor"},
-                                                                    ],
-                                                                    value="Supervisor",
-                                                                    labelStyle={"display": "inline-flex", "gap": "0"},
-                                                                    inputStyle={"marginRight": "6px"},
-                                                                )
+                                                        dbc.RadioItems(
+                                                            id="f-resp-entity",
+                                                            options=[
+                                                                {"label": "Gangs", "value": "Gang"},
+                                                                {"label": "Section Incharges", "value": "Section Incharge"},
+                                                                {"label": "Supervisors", "value": "Supervisor"},
                                                             ],
+                                                            value="Supervisor",
+                                                            inline=True,
+                                                            class_name="segment segment-xxs",
+                                                            label_class_name="segment-label",
+                                                            label_checked_class_name="segment-label--active",
+                                                            input_class_name="segment-input",
                                                         ),
-                                                        html.Div(
-                                                            className="segment segment-xxs",
-                                                            children=[
-                                                                dcc.RadioItems(
-                                                                    id="f-resp-metric",
-                                                                    options=[
-                                                                        {"label": "Tower Weight", "value": "tower_weight"},
-                                                                        {"label": "Revenue", "value": "revenue"},
-                                                                    ],
-                                                                    value="tower_weight",
-                                                                    labelStyle={"display": "inline-flex", "gap": "0"},
-                                                                    inputStyle={"marginRight": "6px"},
-                                                                )
+                                                        dbc.RadioItems(
+                                                            id="f-resp-metric",
+                                                            options=[
+                                                                {"label": "Tower Weight", "value": "tower_weight"},
+                                                                {"label": "Revenue", "value": "revenue"},
                                                             ],
+                                                            value="tower_weight",
+                                                            inline=True,
+                                                            class_name="segment segment-xxs",
+                                                            label_class_name="segment-label",
+                                                            label_checked_class_name="segment-label--active",
+                                                            input_class_name="segment-input",
                                                         ),
                                                     ],
                                                     className="header-pills d-flex flex-row align-items-center justify-content-end"
@@ -719,7 +979,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                         dcc.Graph(
                                             id="g-responsibilities",
                                             config={"displayModeBar": False},
-                                            style={"height": "360px"},
+                                            responsive=True,
+                                            style={"height": "360px", "minHeight": "300px", "width": "100%"},
                                         ),
 
                                         # KPI row
@@ -768,7 +1029,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     className="d-flex flex-column",
                                 ),
                             ],
-                            className="viz-card shadow-soft section-gap-top flex-fill w-100",  # matches other cards
+                            className="viz-card shadow-soft section-gap-top flex-fill w-100 responsibilities-card",  # matches other cards
                         ),
                         md=6,
                         className="d-flex",
@@ -863,20 +1124,18 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                                 align="center",
                                             ),
                                             dbc.Col(
-                                                html.Div(
-                                                    className="segment",
-                                                    children=[
-                                                        dcc.RadioItems(
-                                                            id="f-topbot-metric",              # keep same id
-                                                            options=[
-                                                                {"label": "Productivity", "value": "prod"},
-                                                                {"label": "Erection", "value": "erection"},
-                                                            ],
-                                                            value="prod",
-                                                            labelStyle={"display": "inline-flex", "gap": "0"},
-                                                            inputStyle={"marginRight": "8px"},
-                                                        )
+                                                dbc.RadioItems(
+                                                    id="f-topbot-metric",              # keep same id
+                                                    options=[
+                                                        {"label": "Productivity", "value": "prod"},
+                                                        {"label": "Erection", "value": "erection"},
                                                     ],
+                                                    value="prod",
+                                                    inline=True,
+                                                    class_name="segment",
+                                                    label_class_name="segment-label",
+                                                    label_checked_class_name="segment-label--active",
+                                                    input_class_name="segment-input",
                                                 ),
                                                 width="auto",
                                                 align="center",
@@ -909,14 +1168,19 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
             dcc.Store(id="store-selected-gang", data=None),   
+            dcc.Store(id="store-mode", data="erection"),
+            dcc.Store(id="store-filtered-scope", data=None),
+            html.Div(id="mode-data-debug", style={"display": "none"}),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
+            build_project_responsibilities_modal(),
+            dcc.Store(id="store-kpi-selected-project", data=None),
+            dcc.Store(id="store-proj-resp-code", data=None),
+            dcc.Store(id="store-proj-resp-month", data=None),
         ],
         fluid=True,
     )
     return layout
-
-
 
 
 

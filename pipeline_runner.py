@@ -10,13 +10,22 @@ import duckdb
 import pandas as pd
 
 from erection_compiled_to_daily_new import run_pipeline
+from dashboard.config import AppConfig
+from dashboard.stringing import (
+    expand_stringing_to_daily,
+    normalize_stringing_columns,
+    summarize_date_parsing,
+    add_length_units,
+    read_stringing_sheet_robust,
+    parse_project_code_from_filename,
+)
 from microplan_compile import compile_microplans_to_workbook
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
     "input_directory": "Raw Data/DPRs",
     "microplan_directory": "Raw Data/Micro Plans",
-    "output_file": "ErectionCompiled_Output.xlsx",
+    "output_file": "Parquets/Erection/ErectionCompiled_Output.xlsx",
     "pipeline_extra_args": [],
     "dash_host": "0.0.0.0",
     "dash_port": 8050,
@@ -85,19 +94,17 @@ def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
 
 
 def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None = None) -> Path:
-    """Export selected workbook sheets to parquet files alongside the workbook."""
+    """Export selected workbook sheets to parquet files under the dataset folder.
+
+    New behavior: writes directly into the workbook's parent directory (e.g.,
+    Parquets/Erection) instead of creating a sibling "*_parquet" directory.
+    """
 
     workbook_path = Path(workbook_path)
     if not workbook_path.exists():
         raise FileNotFoundError(f"Workbook '{workbook_path}' does not exist.")
 
-    target_dir = workbook_path.parent / f"{workbook_path.stem}_parquet"
-    # Recreate the parquet directory to ensure a fresh dataset (no stale files)
-    if target_dir.exists():
-        try:
-            shutil.rmtree(target_dir)
-        except Exception as exc:
-            print(f"[pipeline] Warning: failed to clear parquet dir {target_dir}: {exc}")
+    target_dir = workbook_path.parent
     target_dir.mkdir(parents=True, exist_ok=True)
 
     sheet_list = list(sheets) if sheets is not None else list(PARQUET_SHEETS)
@@ -120,6 +127,199 @@ def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None
         print(f"[pipeline] Exported sheets to parquet: {', '.join(exported)}")
 
     return target_dir
+
+
+def _stringing_candidates(input_dir: Optional[Path], files: Optional[List[Path]]) -> List[Path]:
+    if files:
+        return [p for p in files if p.suffix.lower() in (".xlsx", ".xlsm", ".xls") and p.exists()]
+    if input_dir and input_dir.exists():
+        return sorted([p for p in input_dir.rglob("*.xls*") if p.is_file()])
+    return []
+
+
+def _find_stringing_sheet_name(xl: pd.ExcelFile, preferred: Optional[str]) -> Optional[str]:
+    names = list(xl.sheet_names)
+    if not names:
+        return None
+    if preferred:
+        target = preferred.strip().lower()
+        for n in names:
+            if n.strip().lower() == target:
+                return n
+    # tolerant fallback: case-insensitive contains "stringing" and "compiled"
+    lowered = [(n, n.strip().lower()) for n in names]
+    for original, low in lowered:
+        if "stringing" in low and "compiled" in low:
+            return original
+    return None
+
+
+def _write_stringing_artifacts(output_path: Path, raw_df: pd.DataFrame, sheet_name: str, source_files: Optional[List[Path]] = None) -> Path:
+    # Output workbook + parquet dirs
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Write parquet files directly under Parquets/Stringing (no legacy *_parquet dir)
+    parquet_dir = output_path.parent
+
+    # Diagnostics and issues
+    try:
+        normalized, norm_report = normalize_stringing_columns(raw_df)
+    except Exception:
+        normalized, norm_report = raw_df.copy(), {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
+    try:
+        date_metrics = summarize_date_parsing(raw_df)
+    except Exception:
+        date_metrics = {"po_start_date_parsed_count": 0, "fs_complete_date_parsed_count": 0, "invalid_date_rows": 0}
+    try:
+        _, length_metrics = add_length_units(normalized)
+    except Exception:
+        length_metrics = {"total_length_km": 0.0, "min_length_km": 0.0, "max_length_km": 0.0}
+
+    issues_df = pd.DataFrame()
+    try:
+        work = normalized.copy()
+        po_col = "po_start_date"; end_col = "fs_complete_date"
+        if po_col in work.columns and end_col in work.columns:
+            po_val = work[po_col]; end_val = work[end_col]
+            po_parsed = pd.to_datetime(po_val, errors="coerce").dt.normalize()
+            end_parsed = pd.to_datetime(end_val, errors="coerce").dt.normalize()
+            po_filled = po_val.astype(str).str.strip().ne("") & po_val.notna()
+            end_filled = end_val.astype(str).str.strip().ne("") & end_val.notna()
+            po_invalid = po_filled & po_parsed.isna(); end_invalid = end_filled & end_parsed.isna()
+            missing_po = ~po_filled; missing_end = ~end_filled
+            any_issue = po_invalid | end_invalid | missing_po | missing_end
+            if any_issue.any():
+                tmp = work.loc[any_issue].copy()
+                def _mk_issue(row):
+                    msgs = []
+                    if pd.isna(pd.to_datetime(row.get(po_col), errors="coerce")) and str(row.get(po_col, "")).strip():
+                        msgs.append("Invalid PO Start Date")
+                    if pd.isna(pd.to_datetime(row.get(end_col), errors="coerce")) and str(row.get(end_col, "")).strip():
+                        msgs.append("Invalid F/S Complete Date")
+                    if not str(row.get(po_col, "")).strip():
+                        msgs.append("Missing PO Start Date")
+                    if not str(row.get(end_col, "")).strip():
+                        msgs.append("Missing F/S Complete Date")
+                    return "; ".join(msgs)
+                tmp["Issues"] = tmp.apply(_mk_issue, axis=1)
+                issues_df = tmp
+    except Exception:
+        issues_df = pd.DataFrame()
+
+    # Project codes from source file names (best-effort)
+    projects: List[str] = []
+    if source_files:
+        seen = set()
+        for p in source_files:
+            code = parse_project_code_from_filename(p.name)
+            if code and code not in seen:
+                seen.add(code)
+                projects.append(code)
+
+    diagnostics_df = pd.DataFrame([
+        {
+            "sheet": sheet_name,
+            "rows": int(len(raw_df.index)),
+            "source_file_count": int(len(source_files) if source_files else 0),
+            "projects_detected": ", ".join(projects) if projects else "",
+            "normalized_columns_ok": bool(norm_report.get("normalized_columns_ok", False)),
+            "present_columns": ", ".join(norm_report.get("present", [])),
+            "missing_columns": ", ".join(norm_report.get("missing", [])),
+            "po_start_date_parsed_count": int(date_metrics.get("po_start_date_parsed_count", 0)),
+            "fs_complete_date_parsed_count": int(date_metrics.get("fs_complete_date_parsed_count", 0)),
+            "invalid_date_rows": int(date_metrics.get("invalid_date_rows", 0)),
+            "total_length_km": float(length_metrics.get("total_length_km", 0.0)),
+            "min_length_km": float(length_metrics.get("min_length_km", 0.0)),
+            "max_length_km": float(length_metrics.get("max_length_km", 0.0)),
+        }
+    ])
+
+    readme_df = pd.DataFrame([
+        {
+            "Note": "Compiled from DPR files: stringing sheet consolidation.",
+            "Rules": "Preserve raw columns; diagnostics include column presence and date parsing; PO start to F/S complete inclusive for daily expansion.",
+        }
+    ])
+
+    # Write workbook
+    try:
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            raw_df.to_excel(writer, sheet_name=sheet_name[:31] or "Stringing", index=False)
+            diagnostics_df.to_excel(writer, sheet_name="Diagnostics", index=False)
+            if not issues_df.empty:
+                issues_df.to_excel(writer, sheet_name="Issues", index=False)
+            readme_df.to_excel(writer, sheet_name="README_Assumptions", index=False)
+        print(f"[pipeline] Stringing: wrote workbook {output_path}")
+    except Exception as exc:
+        print(f"[pipeline] Warning: failed to write stringing workbook {output_path}: {exc}")
+
+    # Parquet directory for compiled raw
+    try:
+        if parquet_dir.exists():
+            shutil.rmtree(parquet_dir)
+    except Exception as exc:
+        print(f"[pipeline] Warning: failed to clear stringing parquet dir {parquet_dir}: {exc}")
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    compiled_parquet = parquet_dir / "StringingCompiled.parquet"
+    _write_parquet(raw_df, compiled_parquet)
+    print(f"[pipeline] Stringing: wrote compiled parquet {compiled_parquet}")
+
+    # Precompute daily parquet to mirror erection flow (optional speed-up)
+    try:
+        daily = expand_stringing_to_daily(raw_df)
+        if daily is not None and not daily.empty:
+            daily_dir = output_path.parent / "StringingDaily"
+            daily_dir.mkdir(parents=True, exist_ok=True)
+            _write_parquet(daily, daily_dir / "stringing_daily.parquet")
+            print(f"[pipeline] Stringing: wrote daily parquet {daily_dir}")
+    except Exception as exc:
+        print(f"[pipeline] Warning: failed to write stringing daily parquet: {exc}")
+
+    return parquet_dir
+
+
+def compile_stringing_to_workbook(input_dir: Optional[Path], files: Optional[List[Path]], output_path: Path, sheet_name: Optional[str] = None) -> Optional[Path]:
+    candidates = _stringing_candidates(input_dir, files)
+    if not candidates:
+        print("[pipeline] Stringing: no candidate files found; skipping.")
+        return None
+
+    compiled: List[pd.DataFrame] = []
+    missing: List[str] = []
+    used_name: Optional[str] = None
+    preferred = (sheet_name or AppConfig().stringing_sheet_name or "").strip()
+
+    for f in candidates:
+        try:
+            with pd.ExcelFile(f) as xl:
+                found = _find_stringing_sheet_name(xl, preferred)
+                if not found:
+                    missing.append(f.name)
+                    continue
+                used_name = used_name or found
+                # Robust header detection and parse
+                df = read_stringing_sheet_robust(str(f), found)
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df["_source_file"] = f.name
+                    compiled.append(df)
+        except Exception as exc:
+            print(f"[pipeline] Stringing: failed reading {f}: {exc}")
+
+    if not compiled and missing:
+        # Write an empty workbook with diagnostics for visibility
+        empty_df = pd.DataFrame()
+        _ = _write_stringing_artifacts(output_path, empty_df, used_name or preferred or "Stringing Compiled")
+        print("[pipeline] Stringing: no sheets found; wrote empty diagnostics workbook.")
+        return None
+
+    if not compiled:
+        print("[pipeline] Stringing: nothing to compile.")
+        return None
+
+    all_df = pd.concat(compiled, ignore_index=True, copy=False)
+    parquet_dir = _write_stringing_artifacts(output_path, all_df, used_name or preferred or "Stringing Compiled", source_files=candidates)
+    return parquet_dir
 
 
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
@@ -267,6 +467,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 parquet_dir = None
         else:
             parquet_dir = None
+
+        # --- NEW: Compile Stringing from the same DPR sources ---
+        try:
+            # Prefer writing stringing outputs to a sibling Parquets/Stringing folder
+            base_dir = resolved_output.parent if resolved_output else BASE_DIR
+            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+                stringing_base = base_dir.parent / "Stringing"
+            else:
+                # Fallback: put stringing next to the current base
+                stringing_base = base_dir / "Stringing" if base_dir.name != "Stringing" else base_dir
+            stringing_base.mkdir(parents=True, exist_ok=True)
+            stringing_out = stringing_base / "StringingCompiled_Output.xlsx"
+            print(f"[pipeline] Stringing: compiling to {stringing_out}")
+            stringing_parquet_dir = compile_stringing_to_workbook(
+                resolved_input,
+                resolved_files,
+                stringing_out,
+                sheet_name=AppConfig().stringing_sheet_name,
+            )
+            if stringing_parquet_dir:
+                print(f"[pipeline] Stringing: compiled parquet at {stringing_parquet_dir}")
+        except Exception as exc:
+            print(f"[pipeline] Stringing: failed to compile from DPRs: {exc}")
     else:
         print("[pipeline] Skipping compilation step as requested.")
         parquet_dir = None
@@ -314,9 +537,5 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
 

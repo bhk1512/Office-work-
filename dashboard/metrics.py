@@ -217,6 +217,115 @@ def calc_idle_and_loss(
     return idle_days, baseline, loss_mt, delivered_mt, potential_mt
 
 
+def calc_idle_and_loss_for_column(
+    group_df: pd.DataFrame,
+    *,
+    metric_column: str,
+    loss_max_gap_days: int = DEFAULT_LOSS_MAX_GAP_DAYS,
+    baseline_per_day: float | None = None,
+    baseline_by_month: Mapping[pd.Timestamp, float] | None = None,
+) -> Tuple[int, float, float, float, float]:
+    """Generic variant of idle/loss computation for an arbitrary metric column.
+
+    Returns (idle_days_capped, baseline_per_day, loss_value, delivered_value, potential_value).
+
+    The idle day detection logic mirrors `calc_idle_and_loss`; only the metric
+    aggregation (delivered, baseline units) is parameterized via ``metric_column``.
+    """
+    if group_df is None or group_df.empty or metric_column not in group_df.columns:
+        return 0, float(baseline_per_day or 0.0), 0.0, 0.0, 0.0
+
+    gang_name = ""
+    if "gang_name" in group_df.columns:
+        non_null = group_df["gang_name"].dropna()
+        if not non_null.empty:
+            gang_name = str(non_null.iloc[0])
+
+    segments = _iter_idle_segments(gang_name, group_df, loss_max_gap_days)
+    idle_days = int(sum(seg["idle_days_capped"] for seg in segments))
+
+    metric_series = pd.to_numeric(group_df[metric_column], errors="coerce")
+
+    # Fallback baseline from provided arg -> mean of metric -> small positive default
+    fallback_baseline: float | None = None
+    if baseline_per_day is not None and not pd.isna(baseline_per_day):
+        fallback_baseline = float(baseline_per_day)
+    else:
+        mean_val = metric_series.mean()
+        if not pd.isna(mean_val):
+            fallback_baseline = float(mean_val)
+    if fallback_baseline is None or fallback_baseline <= 0.0:
+        fallback_baseline = 1.0
+
+    loss_value = 0.0
+    weighted_total = 0.0
+    weighted_days = 0
+
+    for seg in segments:
+        month_key = seg["interval_month"]
+        baseline_value = None
+        if baseline_by_month:
+            baseline_value = baseline_by_month.get(month_key)
+        if baseline_value is None:
+            baseline_value = fallback_baseline
+
+        idle_capped = int(seg["idle_days_capped"])
+        if idle_capped > 0:
+            weighted_total += baseline_value * idle_capped
+            weighted_days += idle_capped
+        loss_value += baseline_value * idle_capped
+
+    if not segments:
+        loss_value = fallback_baseline * idle_days
+
+    baseline_value = (weighted_total / weighted_days) if weighted_days > 0 else fallback_baseline
+
+    delivered_value = float(metric_series.sum())
+    potential_value = delivered_value + loss_value
+    return idle_days, baseline_value, loss_value, delivered_value, potential_value
+
+
+def compute_project_baseline_maps_for(
+    data: pd.DataFrame,
+    metric_column: str,
+) -> tuple[dict[str, float], dict[pd.Timestamp, dict[pd.Timestamp, float]]]:
+    """Generic project baseline maps for an arbitrary metric column.
+
+    Baseline is the mean of ``metric_column`` over gang-day rows.
+    Returns (overall_project_map, monthly_project_map).
+    """
+    if data is None or data.empty or metric_column not in data.columns or "project_name" not in data.columns:
+        return {}, {}
+
+    working = data.copy()
+    working["project_name"] = working["project_name"].astype(str).str.strip()
+    working[metric_column] = pd.to_numeric(working[metric_column], errors="coerce")
+    working = working.dropna(subset=["project_name", metric_column])
+    if working.empty:
+        return {}, {}
+
+    month_series = _resolve_month_series(working)
+    working["__baseline_month"] = month_series
+
+    overall_series = working.groupby("project_name")[metric_column].mean().dropna()
+    overall = {str(project): float(value) for project, value in overall_series.items() if not pd.isna(value)}
+
+    monthly: dict[str, dict[pd.Timestamp, float]] = {}
+    monthly_series = (
+        working.dropna(subset=["__baseline_month"])
+        .groupby(["project_name", "__baseline_month"])[metric_column]
+        .mean()
+        .dropna()
+    )
+    for (project, month), value in monthly_series.items():
+        month_ts = pd.to_datetime(month)
+        if pd.isna(month_ts):
+            continue
+        monthly.setdefault(str(project), {})[pd.Timestamp(month_ts)] = float(value)
+
+    return overall, monthly
+
+
 
 def compute_idle_intervals_per_gang(
     data: pd.DataFrame,
@@ -259,3 +368,59 @@ def compute_idle_intervals_per_gang(
 
 
 
+
+def compute_stringing_metrics(
+    data: pd.DataFrame,
+    *,
+    loss_max_gap_days: int = DEFAULT_LOSS_MAX_GAP_DAYS,
+    baseline_overall_map: Mapping[str, float] | None = None,
+    baseline_monthly_map: Mapping[str, Mapping[pd.Timestamp, float]] | None = None,
+) -> pd.DataFrame:
+    """Compute delivered/lost/potential for stringing in KM.
+
+    Mirrors the erection compute but uses ``daily_km`` as the delivered metric
+    and baseline units in KM/day. If overall/monthly baselines are not provided,
+    falls back to per-gang mean of ``daily_km`` over the given rows.
+    """
+    if data is None or data.empty:
+        return pd.DataFrame(
+            columns=[
+                "gang_name",
+                "delivered_km",
+                "lost_km",
+                "potential_km",
+                "baseline_km_per_day",
+                "idle_days_capped",
+                "first_date",
+                "last_date",
+                "active_days",
+            ]
+        )
+
+    overall = dict(baseline_overall_map or {})
+    monthly = {k: dict(v) for k, v in (baseline_monthly_map or {}).items()}
+
+    rows: list[dict[str, object]] = []
+    for gang_name, gang_df in data.groupby("gang_name"):
+        idle, baseline, loss, delivered, potential = calc_idle_and_loss_for_column(
+            gang_df,
+            metric_column="daily_km",
+            loss_max_gap_days=loss_max_gap_days,
+            baseline_per_day=overall.get(gang_name),
+            baseline_by_month=monthly.get(gang_name),
+        )
+        rows.append(
+            {
+                "gang_name": gang_name,
+                "delivered_km": delivered,
+                "lost_km": loss,
+                "potential_km": potential,
+                "baseline_km_per_day": baseline,
+                "idle_days_capped": idle,
+                "first_date": gang_df["date"].min(),
+                "last_date": gang_df["date"].max(),
+                "active_days": gang_df["date"].nunique(),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("potential_km", ascending=False)

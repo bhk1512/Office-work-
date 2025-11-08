@@ -48,7 +48,6 @@ html {
 .kpi{
   position: relative;
   padding:18px 22px;
-  padding-right: 58px;
   border-radius:16px;
   border: none;
   color:#fff;                  /* White text on vibrant cards */
@@ -80,6 +79,7 @@ html {
   align-items:baseline;
   justify-content:space-between;
   gap:8px;
+  flex-wrap: wrap;             /* allow secondary line */
 }
 
 .kpi-value{
@@ -135,12 +135,11 @@ html {
   max-width: 100%;
 }
 
-/* Ensure the row never wraps and the pill doesn't squeeze the value */
-.kpi-row{
-  flex-wrap: nowrap;       /* <-- no wrapping inside the row */
-}
+/* Secondary metric on its own line */
 .kpi-delta{
-  flex-shrink: 0;          /* <-- pill keeps its width, doesn't crush value */
+  flex: 0 0 100%;          /* take full width on next line */
+  text-align: right;       /* align to the right edge */
+  margin-top: 4px;
 }
 
 
@@ -162,18 +161,56 @@ html {
 
 /* === Segmented control (style radio as pills) === */
 .segment{
-  display:flex; gap:8px; background:#fff; border:1px solid var(--border);
-  padding:4px; border-radius:12px; box-shadow:var(--shadow-1);
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  background:#fff;
+  border:1px solid var(--border);
+  padding:4px;
+  border-radius:12px;
+  box-shadow:var(--shadow-1);
 }
-.segment input[type="radio"]{ display:none; }
-.segment label{
-  padding:8px 12px; border-radius:8px; cursor:pointer; user-select:none;
-  font-weight:700; font-size:.92rem; color:#111827;
+.segment .form-check{
+  margin:0;
+  padding-left:0;
+  display:flex;
+  align-items:center;
 }
-/* highlight the selected radio (label that HAS a checked input) */
-.segment label:has(input[type="radio"]:checked){
-  background:#0B1020; color:#fff;
+.segment .form-check + .form-check{
+  margin-left:6px;
+}
+.segment .segment-input{
+  display:none;
+}
+.segment .segment-label{
+  padding:8px 12px;
+  border-radius:8px;
+  cursor:pointer;
+  user-select:none;
+  font-weight:700;
+  font-size:.92rem;
+  color:#111827;
+  display:inline-flex;
+  align-items:center;
+  margin:0;
+}
+.segment .segment-label--active{
+  background:#0B1020;
+  color:#fff;
   box-shadow:0 1px 2px rgba(0,0,0,.1), 0 6px 18px rgba(0,0,0,.12);
+}
+
+.segment.segment-xxs .segment-label{
+  padding:4px 10px;
+  font-size:13px;
+  border-radius:10px;
+  margin:0;
+}
+.segment.segment-xxs .form-check + .form-check{
+  margin-left:4px;
+}
+.segment.segment-xxs .segment-input{
+  transform:scale(0.82);
 }
 
 /* === AVP list (left card) === */
@@ -239,6 +276,60 @@ html {
 .js-plotly-plot .bars rect,
 .js-plotly-plot .scatterlayer .points path {
   cursor: pointer !important;
+}
+
+/* --- KPI Modal (PCH → Projects → Locations) --- */
+.pch-header{
+  /* match the tinted header chrome used on viz cards */
+  background: #f0f6ff;
+  border: 1px solid #d8e4ff;
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin: 6px 0 12px;
+}
+.pch-accordion .accordion-item{
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.pch-accordion .accordion-button{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 700;
+}
+.pch-accordion .badge{ font-weight: 700; }
+.pch-pill-group{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+}
+.pch-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-size:.85rem;
+  font-weight:600;
+  letter-spacing:.01em;
+  border-radius:999px;
+  padding:6px 14px;
+  background:#eef2ff;
+  color:#1f2937;
+  box-shadow:inset 0 0 0 1px rgba(15,23,42,.08);
+  white-space:normal;
+  text-align:left;
+}
+.pch-pill-projects{ background:#e0f2fe; color:#0f172a; }
+.pch-pill-prod-month{ background:#dcfce7; color:#166534; }
+.pch-pill-prod-overall{ background:#ede9fe; color:#4338ca; }
+.pch-pill-towers{ background:#fef9c3; color:#92400e; }
+
+/* Bigger numbers on project tiles for readability */
+.proj-badges .badge{
+  font-size: 1rem;    /* increase number size */
+  padding: 6px 10px;
 }
 
 
@@ -462,44 +553,34 @@ html {
 
 
 /* ===== Responsibilities card — compact pills + KPI chips (scoped) ===== */
-/* Scope to the card that contains #g-responsibilities so we don't affect anything else */
-.card:has(#g-responsibilities) .header-pills {
+.responsibilities-card .header-pills {
   display: flex;
   flex-wrap: nowrap;
-  gap: 8px;
   align-items: center;
-  justify-content: end;
+  justify-content: flex-end;
+}
+.responsibilities-card .header-pills > * {
+  margin-left: 8px;
+}
+.responsibilities-card .header-pills > *:first-child {
+  margin-left: 0;
 }
 
-.card:has(#g-responsibilities) .header-pills .segment {
-  display: inline-flex;
-  align-items: center;
-  margin: 0;
-  box-shadow: var(--shadow-1);
-}
-
-/* smallest pills so both groups fit on one line next to the title */
-.card:has(#g-responsibilities) .segment.segment-xxs .dash-radio-items label {
-  padding: 4px 10px;
-  font-size: 13px;
-  border-radius: 10px;
-  margin-right: 4px;
-}
-.card:has(#g-responsibilities) .segment.segment-xxs .dash-radio-items input {
-  transform: scale(0.82);
-}
-
-/* Allow wrap on narrow screens only */
+/* Allow wrap on narrow screens */
 @media (max-width: 991.98px) {
-  .card:has(#g-responsibilities) .header-pills {
+  .responsibilities-card .header-pills {
     flex-wrap: wrap;
-    row-gap: 6px;
     justify-content: flex-start;
+  }
+  .responsibilities-card .header-pills > * {
+    margin-left: 0;
+    margin-right: 8px;
+    margin-bottom: 6px;
   }
 }
 
 /* KPI chips under the chart — compact boxes, same text sizes */
-.card:has(#g-responsibilities) .kpi {
+.responsibilities-card .kpi {
   padding: 6px 10px;
   min-height: 56px;
   border-radius: 12px;
@@ -507,35 +588,57 @@ html {
   box-shadow: var(--shadow-1);
   background: #fff;
 }
-.card:has(#g-responsibilities) .kpi .card-body {
+.responsibilities-card .kpi .card-body {
   padding: 8px 10px;
   row-gap: 2px;
 }
-.card:has(#g-responsibilities) .kpi .kpi-value {
+.responsibilities-card .kpi .kpi-value {
   font-size: 22px;
   font-weight: 800;
   line-height: 1.1;
 }
-.card:has(#g-responsibilities) .kpi .kpi-sub {
+.responsibilities-card .kpi .kpi-sub {
   font-size: 13px;
   margin-top: 1px;
   color: #6b7280;
 }
 
 /* light color variants matching your screenshot */
-.card:has(#g-responsibilities) .kpi.kpi-blue  { background-color: #F1F5FF; color: #0f172a; }
-.card:has(#g-responsibilities) .kpi.kpi-red   { background-color: #FFF4F4; color: #0f172a; }
-.card:has(#g-responsibilities) .kpi.kpi-green { background-color: #F0FFF6; color: #0f172a; }
-.card:has(#g-responsibilities) .kpi.kpi-blue  .kpi-value  { color: #2563EB; }
-.card:has(#g-responsibilities) .kpi.kpi-red   .kpi-value  { color: #DC2626; }
-.card:has(#g-responsibilities) .kpi.kpi-green .kpi-value  { color: #16A34A; }
-/* hide the “hero KPI” corner chip inside these light chips (if present) */
-.card:has(#g-responsibilities) .kpi .kpi__icon { display: none; }
+.responsibilities-card .kpi.kpi-blue  { background-color: #F1F5FF; color: #0f172a; }
+.responsibilities-card .kpi.kpi-red   { background-color: #FFF4F4; color: #0f172a; }
+.responsibilities-card .kpi.kpi-green { background-color: #F0FFF6; color: #0f172a; }
+.responsibilities-card .kpi.kpi-blue  .kpi-value  { color: #2563EB; }
+.responsibilities-card .kpi.kpi-red   .kpi-value  { color: #DC2626; }
+.responsibilities-card .kpi.kpi-green .kpi-value  { color: #16A34A; }
+.responsibilities-card .kpi .kpi__icon { display: none; }
+.responsibilities-card .kpi-row-compact { margin-top: 0.35rem; row-gap: 0.5rem; }
+.responsibilities-card #g-responsibilities { margin-bottom: 0.25rem; }
 
-/* tighten space between chart and KPI row */
-.card:has(#g-responsibilities) .kpi-row-compact { margin-top: 0.35rem; row-gap: 0.5rem; }
-/* small bottom margin on the graph */
-.card:has(#g-responsibilities) #g-responsibilities { margin-bottom: 0.25rem; }
+/* === Responsibilities mini-modal (project) KPI chips === */
+.responsibilities-modal .kpi {
+  padding: 6px 10px;
+  min-height: 56px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-1);
+  background: #fff;
+  color: #0f172a;
+}
+.responsibilities-modal .kpi .card-body { padding: 8px 10px; row-gap: 2px; }
+.responsibilities-modal .kpi .kpi-value { font-size: 22px; font-weight: 800; line-height: 1.1; color: inherit; }
+.responsibilities-modal .kpi .kpi-sub   { font-size: 13px; margin-top: 1px; color: #6b7280; }
+.responsibilities-modal .kpi.kpi-blue  { background-color: #F1F5FF; }
+.responsibilities-modal .kpi.kpi-red   { background-color: #FFF4F4; }
+.responsibilities-modal .kpi.kpi-green { background-color: #F0FFF6; }
+.responsibilities-modal .kpi.kpi-blue  .kpi-value  { color: #2563EB; }
+.responsibilities-modal .kpi.kpi-red   .kpi-value  { color: #DC2626; }
+.responsibilities-modal .kpi.kpi-green .kpi-value  { color: #16A34A; }
+.responsibilities-modal .modal-body{
+  padding-bottom: 0.5rem;
+}
+.responsibilities-modal #proj-resp-graph{
+  margin-bottom: 0.5rem;
+}
 
 
 
@@ -689,4 +792,28 @@ html {
 }
 
 
+/* === KPI tidy overrides (consistency across modes) === */
+/* keep cards the same height regardless of label length */
+.kpi { min-height: 138px; }
 
+/* center everything inside KPI tiles */
+.kpi .card-body { align-items: center; text-align: center; }
+.kpi .kpi-label { text-align: center; width: 100%; white-space: normal; overflow: visible; text-overflow: clip; }
+.kpi .kpi-row { justify-content: center; gap: 6px; flex-direction: column; align-items: center; }
+
+/* make secondary metric a neat pill, content-sized and centered */
+.kpi .kpi-delta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.24);
+  color: #fff;
+  white-space: nowrap;
+  margin-top: 4px;
+  margin-left: 0;             /* center under value */
+  flex: 0 0 auto !important;  /* override earlier full-width rule */
+}

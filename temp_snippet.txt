@@ -1,9 +1,99 @@
-        if not project_value:`r`n            return _empty_response("Select a single project to view its details.")`r`n`r`n        if isinstance(project_value, (list, tuple)):`r`n            cleaned_projects = [str(p).strip() for p in project_value if p]`r`n            if len(cleaned_projects) != 1:`r`n                return _empty_response("Select a single project to view its details.")`r`n            project_value = cleaned_projects[0]`r`n`r`n        entity_value = (entity_value or "Supervisor").strip()
-        metric_value = (metric_value or "tower_weight").strip()
-        metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
+                html.Div([
+                    header,
+                    dbc.Accordion(project_items, start_collapsed=True, always_open=False, className="mb-3"),
+                ], className="pch-section mb-4")
+            )
 
-        load_error_msg: str | None = None
-        completed_keys: set[tuple[str, str]] = set()
-        df_atomic: pd.DataFrame | None = None
-        workbook: pd.ExcelFile | None = None
+        return pch_sections
 
+    @app.callback(
+        Output("kpi-location-box", "style"),
+        Output("tbl-kpi-project-locations", "data"),
+        Input("tbl-kpi-pch", "active_cell"),
+        State("tbl-kpi-pch", "data"),
+        State("f-month", "value"),
+        State("f-quick-range", "value"),
+        prevent_initial_call=True,
+    )
+    def _populate_location_box(active_cell, table_data, months, quick_range):
+        if not active_cell or not table_data:
+            return {"display": "none"}, []
+        row_idx = active_cell.get("row") if isinstance(active_cell, dict) else None
+        if row_idx is None or row_idx < 0 or row_idx >= len(table_data):
+            return {"display": "none"}, []
+        sel = table_data[row_idx]
+        project_value = sel.get("project_name")
+        if not project_value:
+            return {"display": "none"}, []
+
+        months_ts = resolve_months(_ensure_list(months), quick_range)
+        if months_ts:
+            range_start = pd.Timestamp(min(months_ts)).normalize()
+            range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
+        else:
+            today = pd.Timestamp.today().normalize()
+            range_start = today.to_period("M").start_time.normalize()
+            range_end = (today + pd.offsets.MonthEnd(0)).normalize()
+
+        df_day = _select_daily("erection")
+        scoped = apply_filters(df_day, [project_value], months_ts, [])
+        export_df, _ = _prepare_erections_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            responsibilities_provider=None,
+            search_text=None,
+        )
+        if not isinstance(export_df, pd.DataFrame):
+            export_df = pd.DataFrame(columns=["project_name", "location_no", "tower_weight_mt", "daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"])
+
+        df_mp = responsibilities_provider() if callable(responsibilities_provider) else None
+        if isinstance(df_mp, pd.DataFrame) and not df_mp.empty:
+            mp = df_mp.copy()
+            if months_ts and "completion_month" in mp.columns:
+                mp = mp[mp["completion_month"].isin(months_ts)].copy()
+            target = str(project_value).strip().lower()
+            name_lc = (mp.get("project_name", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
+            key_lc = (mp.get("project_key", pd.Series([""] * len(mp), index=mp.index)).astype(str).str.strip().str.lower())
+            mp = mp[(name_lc == target) | (key_lc == target)].copy()
+            mp["location_no_norm"] = (mp.get("location_no", pd.Series([""] * len(mp), index=mp.index)).map(_normalize_location))
+            planned_loc = (
+                mp.groupby("location_no_norm")["tower_weight"].sum().rename("planned_mt") if "tower_weight" in mp.columns else pd.Series(dtype=float)
+            )
+        else:
+            planned_loc = pd.Series(dtype=float)
+
+        ed = export_df.copy()
+        ed["location_no_norm"] = (ed.get("location_no", pd.Series([""] * len(ed), index=ed.index)).map(_normalize_location))
+        delivered_loc = ed.groupby("location_no_norm")["tower_weight_mt"].sum().rename("delivered_mt")
+        meta_cols = ["daily_prod_mt", "gang_name", "supervisor_name", "section_incharge_name"]
+        meta_map = (
+            ed.sort_values("completion_date").drop_duplicates("location_no_norm", keep="last")[["location_no_norm", *[c for c in meta_cols if c in ed.columns]]]
+            if not ed.empty else pd.DataFrame(columns=["location_no_norm", *meta_cols])
+        )
+        meta_map = meta_map.set_index("location_no_norm") if not meta_map.empty else meta_map
+
+        keys = set(planned_loc.index.tolist()) | set(delivered_loc.index.tolist())
+        out = []
+        for loc in sorted(k for k in keys if k):
+            planned = float(planned_loc.get(loc, 0.0)) if hasattr(planned_loc, 'get') else 0.0
+            delivered = float(delivered_loc.get(loc, 0.0)) if hasattr(delivered_loc, 'get') else 0.0
+            meta = meta_map.loc[loc] if (isinstance(meta_map, pd.DataFrame) and (loc in getattr(meta_map, 'index', []))) else None
+            out.append({
+                "location_no": loc,
+                "planned_mt": round(planned, 1),
+                "delivered_mt": round(delivered, 1),
+                "daily_prod_mt": (float(meta["daily_prod_mt"]) if (isinstance(meta, pd.Series) and "daily_prod_mt" in meta) else None),
+                "gang_name": (str(meta["gang_name"]) if (isinstance(meta, pd.Series) and "gang_name" in meta) else ""),
+                "supervisor_name": (str(meta["supervisor_name"]) if (isinstance(meta, pd.Series) and "supervisor_name" in meta) else ""),
+                "section_incharge_name": (str(meta["section_incharge_name"]) if (isinstance(meta, pd.Series) and "section_incharge_name" in meta) else ""),
+            })
+
+        style = {"display": "none"} if not out else {"display": "block"}
+        return style, out
+
+    @app.callback(
+        Output("trace-modal", "is_open"),
+        Output("trace-modal-title", "children"),
+        # Output("store-selected-gang", "data"),
+        Input("store-dblclick", "data"),
