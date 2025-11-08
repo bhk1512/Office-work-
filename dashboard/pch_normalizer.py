@@ -56,18 +56,21 @@ _add_alias(
     "S. K. Gupta",
     "S K Gupta",
     "SK Gupta",
+    "Sanjay Kr Gupta"
 )
 
 # Mr. Arun Felbin (no known variants beyond honorific/casing)
 _add_alias(
     "Mr. Arun Felbin",
     "Arun Felbin",
+    "A Felbin"
 )
 
 # Mr. Dhiraj Vashisth (no known variants beyond honorific/casing)
 _add_alias(
     "Mr. Dhiraj Vashisth",
     "Dhiraj Vashisth",
+    "D Vashisth"
 )
 
 # Mr. Nikhilesh Kumar Gupta and common variants
@@ -79,6 +82,7 @@ _add_alias(
     "N. K. Gupta",
     "N K Gupta",
     "NK Gupta",
+    "Nikhilesh Kr Gupta"
 )
 
 
