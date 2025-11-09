@@ -106,6 +106,14 @@ def get_df_stringing_day() -> pd.DataFrame:
     return DATA_STORE.get_stringing()
 
 
+def set_df_stringing_compiled(df: pd.DataFrame) -> None:
+    DATA_STORE.set_stringing_compiled(df)
+
+
+def get_df_stringing_compiled() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_compiled()
+
+
 def load_daily(config_or_path) -> pd.DataFrame:  # type: ignore[override]
     """Compatibility wrapper around the refactored data loader."""
 
@@ -222,10 +230,17 @@ def create_app(config: AppConfig | None = None) -> Dash:
         # Probe stringing dataset safely (non-expanding, cached)
         stringing_df = pd.DataFrame()
         try:
-            stringing_df = _load_stringing_compiled_raw(CONFIG)
+            stringing_df = get_df_stringing_compiled()
         except Exception:
-            # Keep health lightweight and resilient; treat as not found on errors
             stringing_df = pd.DataFrame()
+        if stringing_df.empty:
+            try:
+                stringing_df = _load_stringing_compiled_raw(CONFIG)
+                if not stringing_df.empty:
+                    set_df_stringing_compiled(stringing_df)
+            except Exception:
+                # Keep health lightweight and resilient; treat as not found on errors
+                stringing_df = pd.DataFrame()
         stringing_found = not stringing_df.empty
         stringing_rows = int(len(stringing_df.index)) if stringing_found else 0
 
@@ -365,6 +380,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
         # Provide a preloaded stringing data provider for instant switching
         duckdb_connection=DATA_STORE.get_duckdb_connection(),
         stringing_data_provider=get_df_stringing_day,
+        stringing_compiled_provider=get_df_stringing_compiled,
         project_info_provider=get_df_projinfo,
         project_baseline_provider=get_project_baselines,
         responsibilities_provider=get_responsibilities_df,

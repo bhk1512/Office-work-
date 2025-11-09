@@ -812,7 +812,7 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
     mode_controls = html.Div(
         [
             html.Span(
-                "Erection mode",
+                "Mode",
                 id="mode-banner",
                 style={
                     "fontSize": "12px",

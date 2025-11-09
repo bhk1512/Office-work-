@@ -889,6 +889,7 @@ def register_callbacks(
     *,
     duckdb_connection: duckdb.DuckDBPyConnection | None = None,
     stringing_data_provider: Callable[[], pd.DataFrame] | None = None,
+    stringing_compiled_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
@@ -1195,7 +1196,7 @@ def register_callbacks(
     )
     def _sync_mode_store_and_banner(mode_value: str | None):
         mode = (mode_value or "erection").strip().lower()
-        banner = "Erection mode" if mode == "erection" else "Stringing mode"
+        banner = "Mode" if mode == "erection" else "Stringing mode"
         return mode, banner
     def _get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
         if project_baseline_provider is None:
@@ -1549,10 +1550,17 @@ def register_callbacks(
         Input("f-month", "options"),
         Input("store-mode", "data"),
         State("f-month", "value"),
+        State("f-quick-range", "value"),
         prevent_initial_call='initial_duplicate',
     )
-    def ensure_default_month(options, mode_value, current_value):
+    def ensure_default_month(options, mode_value, current_value, quick_range):
         try:
+            # If user cleared all months (empty list) keep it blank instead of forcing latest.
+            if isinstance(current_value, list) and len(current_value) == 0:
+                return dash.no_update
+            # When quick-range is active its callback sets months=None; do not override it here.
+            if quick_range:
+                return dash.no_update
             # If a month already selected and appears in options, keep it
             if current_value:
                 selected = set(current_value if isinstance(current_value, (list, tuple)) else [current_value])
@@ -3420,10 +3428,17 @@ def register_callbacks(
                 delivered_km_current_series = pd.Series(dtype=float)
 
             # Planned KM from compiled stringing dataset (section-level total length)
-            try:
-                df_compiled = _load_stringing_compiled_raw(config)
-            except Exception:
-                df_compiled = pd.DataFrame()
+            df_compiled = pd.DataFrame()
+            if callable(stringing_compiled_provider):
+                try:
+                    df_compiled = stringing_compiled_provider()
+                except Exception:
+                    df_compiled = pd.DataFrame()
+            if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
+                try:
+                    df_compiled = _load_stringing_compiled_raw(config)
+                except Exception:
+                    df_compiled = pd.DataFrame()
             planned_km_by_project = pd.DataFrame(columns=["planned_km"])
             planned_km_current_series = pd.Series(dtype=float)
             if isinstance(df_compiled, pd.DataFrame) and not df_compiled.empty:

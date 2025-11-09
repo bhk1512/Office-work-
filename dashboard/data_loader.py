@@ -756,15 +756,21 @@ def _export_stringing_compiled_artifacts(base: Path, sheet_name: str, df_raw: pd
         LOGGER.warning("Failed to write stringing compiled parquet near '%s': %s", parquet_dir, exc)
 
 @_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
-def _load_stringing_compiled_raw_cached(data_path: str, sheet_name: str, probe_dirs: tuple[str, ...]) -> pd.DataFrame:
-    """
-    New behavior: scan RAW DPRs each run and rebuild the master compiled parquet.
-    """
-    raw_root = _resolve_stringing_raw_root(Path(data_path))
-    _, daily_all, _ = build_stringing_artifacts_every_run(raw_root, sheet_name)
-    compiled_all, _, _ = build_stringing_artifacts_every_run(raw_root, sheet_name)
-    return compiled_all
+def _load_stringing_artifacts_cached(
+    data_path: str,
+    sheet_name: str,
+    probe_dirs: tuple[str, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
+    """Shared cached builder so compiled + daily reads reuse the same scan."""
 
+    raw_root = _resolve_stringing_raw_root(Path(data_path))
+    compiled_all, daily_all, out_root = build_stringing_artifacts_every_run(raw_root, sheet_name)
+    return compiled_all, daily_all, out_root
+
+
+def _load_stringing_compiled_raw_cached(data_path: str, sheet_name: str, probe_dirs: tuple[str, ...]) -> pd.DataFrame:
+    compiled_all, _, _ = _load_stringing_artifacts_cached(data_path, sheet_name, probe_dirs)
+    return compiled_all
 
 
 def load_stringing_compiled_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
@@ -813,13 +819,8 @@ def _guarded_write_stringing_daily(root: Path, table: str, df: pd.DataFrame) -> 
         LOGGER.warning("Failed to write stringing daily parquet to '%s': %s", target_file, exc)
 
 
-@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
 def _load_stringing_daily_cached(data_path: str, sheet_name: str, probe_dirs: tuple[str, ...], daily_table: str = "StringingDaily") -> pd.DataFrame:
-    """
-    New behavior: scan RAW DPRs each run and rebuild the master daily parquet.
-    """
-    raw_root = _resolve_stringing_raw_root(Path(data_path))
-    _, daily_all, _ = build_stringing_artifacts_every_run(raw_root, sheet_name)
+    _, daily_all, _ = _load_stringing_artifacts_cached(data_path, sheet_name, probe_dirs)
     return daily_all
 
 

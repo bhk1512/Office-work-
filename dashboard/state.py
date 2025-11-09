@@ -21,6 +21,7 @@ from .data_loader import (
     load_daily as _load_daily,
     load_project_details,
     load_stringing_daily as _load_stringing_daily,
+    load_stringing_compiled_raw as _load_stringing_compiled_raw,
 )
 from .services.responsibilities import (
     ResponsibilitiesSnapshot,
@@ -83,6 +84,7 @@ class AppDataStore:
         self._lock = RLock()
         self._daily: pd.DataFrame | None = None
         self._stringing_daily: pd.DataFrame | None = None
+        self._stringing_compiled: pd.DataFrame | None = None
         self._project_info: pd.DataFrame | None = None
         self._responsibilities: ResponsibilitiesSnapshot = ResponsibilitiesSnapshot(None, set(), None)
         self.metadata = DatasetMetadata(display_timezone=config.display_timezone)
@@ -143,6 +145,7 @@ class AppDataStore:
             working.attrs["_appdata_version"] = self._stringing_version
             self._augment_stringing_frame(working)
             self._stringing_daily = working
+            self._stringing_compiled = None
             self._register_duckdb_table(DUCKDB_TABLE_STRINGING, self._stringing_daily)
 
     def get_stringing(self) -> pd.DataFrame:
@@ -150,6 +153,18 @@ class AppDataStore:
             return (
                 self._stringing_daily.copy()
                 if isinstance(self._stringing_daily, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stringing_compiled(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._stringing_compiled = df.copy()
+
+    def get_stringing_compiled(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._stringing_compiled.copy()
+                if isinstance(self._stringing_compiled, pd.DataFrame)
                 else pd.DataFrame()
             )
 
@@ -193,6 +208,15 @@ class AppDataStore:
                 stringing_df["month"] = stringing_df["date"].dt.to_period("M").dt.to_timestamp()
         self.set_stringing(stringing_df)
         LOGGER.info("Preloaded stringing daily rows: %d", len(stringing_df))
+
+        try:
+            compiled_df = _load_stringing_compiled_raw(config)
+        except Exception as exc:
+            LOGGER.warning("Stringing compiled preload failed: %s", exc)
+            return
+        if isinstance(compiled_df, pd.DataFrame):
+            self.set_stringing_compiled(compiled_df)
+            LOGGER.info("Preloaded stringing compiled rows: %d", len(compiled_df))
 
     def _attach_project_codes(self, df: pd.DataFrame, project_info: pd.DataFrame) -> pd.DataFrame:
         if project_info is None or project_info.empty or "project_name" not in df.columns:
