@@ -2578,13 +2578,21 @@ def register_callbacks(
                         # filter by selected months
                         df_mp = df_mp[df_mp['completion_month'].isin(active_months)].copy()
                         if not df_mp.empty:
-                            # planned MT is sum of tower_weight
-                            if 'tower_weight' in df_mp.columns:
-                                planned_mt = pd.to_numeric(df_mp['tower_weight'], errors='coerce').fillna(0.0).sum()
+                            dedup_cols = ["project_name_lc", "location_no_norm"]
+                            valid_locations = df_mp.dropna(subset=dedup_cols).copy()
+                            if "tower_weight" in valid_locations.columns:
+                                valid_locations["tower_weight"] = (
+                                    pd.to_numeric(valid_locations["tower_weight"], errors="coerce").fillna(0.0)
+                                )
+                            dedup_locations = (
+                                valid_locations.sort_values(dedup_cols)
+                                .drop_duplicates(subset=dedup_cols, keep="first")
+                            )
+                            if "tower_weight" in df_mp.columns:
+                                planned_mt = float(dedup_locations.get("tower_weight", 0.0).sum())
                             else:
                                 planned_mt = 0.0
-                            # planned towers = unique locations per project
-                            planned_tower_count = int(df_mp[['project_name_lc', 'location_no_norm']].dropna().drop_duplicates().shape[0])
+                            planned_tower_count = int(dedup_locations.shape[0])
                             kpi_total_planned = f"Planned: {planned_mt:.1f} MT"
                             kpi_total_nos_planned = f"Planned: {planned_tower_count}"
             except Exception:
