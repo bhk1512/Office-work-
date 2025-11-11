@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 from importlib import import_module
 from pathlib import Path
@@ -131,10 +132,27 @@ def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None
 
 def _stringing_candidates(input_dir: Optional[Path], files: Optional[List[Path]]) -> List[Path]:
     if files:
-        return [p for p in files if p.suffix.lower() in (".xlsx", ".xlsm", ".xls") and p.exists()]
+        return [
+            p
+            for p in files
+            if p.suffix.lower() in (".xlsx", ".xlsm", ".xls") and p.exists() and not p.name.startswith("~$")
+        ]
     if input_dir and input_dir.exists():
-        return sorted([p for p in input_dir.rglob("*.xls*") if p.is_file()])
+        return sorted(
+            [
+                p
+                for p in input_dir.rglob("*.xls*")
+                if p.is_file() and not p.name.startswith("~$")
+            ]
+        )
     return []
+
+
+def _normalize_sheet_label(label: Optional[str]) -> str:
+    if label is None:
+        return ""
+    lowered = str(label).lower().strip()
+    return re.sub(r"[^a-z0-9]+", "", lowered)
 
 
 def _find_stringing_sheet_name(xl: pd.ExcelFile, preferred: Optional[str]) -> Optional[str]:
@@ -143,9 +161,14 @@ def _find_stringing_sheet_name(xl: pd.ExcelFile, preferred: Optional[str]) -> Op
         return None
     if preferred:
         target = preferred.strip().lower()
+        target_normalized = _normalize_sheet_label(preferred)
         for n in names:
             if n.strip().lower() == target:
                 return n
+        if target_normalized:
+            for n in names:
+                if _normalize_sheet_label(n) == target_normalized:
+                    return n
     # tolerant fallback: case-insensitive contains "stringing" and "compiled"
     lowered = [(n, n.strip().lower()) for n in names]
     for original, low in lowered:

@@ -3768,7 +3768,7 @@ def register_callbacks(
                             [
                                 html.Span(projects_label, className="pch-pill pch-pill-projects mb-1"),
                                 html.Span(f"Prod This Month: {fmt_prod_current} KM/day", className="pch-pill pch-pill-prod-month mb-1"),
-                                html.Span(f"Prod Overall: {fmt_prod_overall} KM/day", className="pch-pill pch-pill-prod-overall mb-1"),
+                                html.Span(f"Historical Avg: {fmt_prod_overall} KM/day", className="pch-pill pch-pill-prod-overall mb-1"),
                                 html.Span(
                                     f"KM This Month: {km_delivered_label:.1f} delivered / {km_planned_label:.1f} planned",
                                     className="pch-pill pch-pill-towers mb-1",
@@ -4490,7 +4490,7 @@ def register_callbacks(
             header_pills = [
                 html.Span(projects_label, className="pch-pill pch-pill-projects me-2 mb-1"),
                 html.Span(f"Prod This Month: {fmt_prod_current} MT/day", className="pch-pill pch-pill-prod-month me-2 mb-1"),
-                html.Span(f"Prod Overall: {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-overall me-2 mb-1"),
+                html.Span(f"Historical Avg: {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-overall me-2 mb-1"),
                 html.Span(
                     f"Towers This Month: {towers_delivered_label} delivered / {towers_planned_label} planned",
                     className="pch-pill pch-pill-towers me-2 mb-1",
@@ -4795,7 +4795,7 @@ def register_callbacks(
                         dbc.Badge(prod_current_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
                     html.Div([
-                        html.Span("Prod Overall : ", className="me-2"),
+                        html.Span("Historical Avg : ", className="me-2"),
                         dbc.Badge(prod_overall_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
                     ], className="mb-2"),
                     html.Div([
@@ -4830,7 +4830,7 @@ def register_callbacks(
                         [
                             html.Span(projects_label, className="pch-pill pch-pill-projects mb-1"),
                             html.Span(f"Prod This Month: {fmt_prod_current} MT/day", className="pch-pill pch-pill-prod-month mb-1"),
-                            html.Span(f"Prod Overall: {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-overall mb-1"),
+                            html.Span(f"Historical Avg: {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-overall mb-1"),
                             html.Span(
                                 f"Towers This Month: {towers_delivered_label} delivered / {towers_planned_label} planned",
                                 className="pch-pill pch-pill-towers mb-1",

@@ -33,6 +33,47 @@ CACHE_MAXSIZE = CONFIG.cache_maxsize
 
 LOGGER = logging.getLogger(__name__)
 
+
+_OPENPYXL_PRINT_TITLES_PATCHED = False
+
+
+def _patch_openpyxl_invalid_print_titles() -> None:
+    """Work around workbooks whose Print Titles defined names evaluate to #N/A.
+
+    Such files cause openpyxl to raise ValueError during load. We intercept
+    the parser once and fall back to an empty PrintTitles instance instead
+    of failing the entire read.
+    """
+    global _OPENPYXL_PRINT_TITLES_PATCHED
+    if _OPENPYXL_PRINT_TITLES_PATCHED:
+        return
+    try:
+        from openpyxl.worksheet import print_settings as _ps
+    except Exception:
+        return
+    descriptor = _ps.PrintTitles.__dict__.get("from_string")
+    if descriptor is None:
+        return
+    original = descriptor.__func__ if hasattr(descriptor, "__func__") else descriptor
+    if not callable(original):
+        return
+
+    def _safe_from_string(cls, value):
+        try:
+            return original(cls, value)
+        except ValueError:
+            LOGGER.warning(
+                "Openpyxl: ignoring invalid Print Titles definition: %s",
+                value,
+            )
+            return cls()
+
+    _ps.PrintTitles.from_string = classmethod(_safe_from_string)
+    _OPENPYXL_PRINT_TITLES_PATCHED = True
+
+
+_patch_openpyxl_invalid_print_titles()
+
 PROJECT_BASELINES_SHEET = "ProjectBaselines"
 PROJECT_BASELINES_MONTHLY_SHEET = "ProjectBaselinesMonthly"
 
@@ -163,25 +204,44 @@ def _iter_excel_candidates(raw_root: Path) -> list[Path]:
     raw_root = raw_root.resolve()
     return sorted([p for p in raw_root.rglob("*.xls*") if p.is_file()])
 
-def _excel_has_sheet(xlsx_path: Path, desired_sheet: str) -> bool:
+def _resolve_excel_sheet_name(xlsx_path: Path, desired_sheet: str) -> str | None:
+    """Return the actual sheet name matching *desired_sheet* (case/spacing agnostic)."""
     try:
         with pd.ExcelFile(xlsx_path) as xl:
-            return desired_sheet in xl.sheet_names
+            actual = _match_sheet_name(xl, desired_sheet)
+            if actual:
+                return actual
+            if desired_sheet in xl.sheet_names:
+                return desired_sheet
+            return None
     except Exception:
-        return False
+        return None
 
 
 
 def _concat_union(dfs: list[pd.DataFrame]) -> pd.DataFrame:
-    """Concatenate with union of columns, preserving the first DF's order."""
+    """Concatenate with union of columns, preserving the first DF's order.
+
+    Some workbooks duplicate headers (e.g., unnamed blank columns). Pandas
+    refuses to reindex when duplicate column labels are present, so we drop
+    subsequent duplicates before aligning the frames.
+    """
+
     if not dfs:
         return pd.DataFrame()
-    cols = list(dfs[0].columns)
-    for df in dfs[1:]:
+
+    def _dedup_columns(df: pd.DataFrame) -> pd.DataFrame:
+        if df.columns.is_unique:
+            return df
+        return df.loc[:, ~df.columns.duplicated()].copy()
+
+    normalized = [_dedup_columns(df) for df in dfs]
+    cols = list(normalized[0].columns)
+    for df in normalized[1:]:
         for c in df.columns:
             if c not in cols:
                 cols.append(c)
-    aligned = [df.reindex(columns=cols) for df in dfs]
+    aligned = [df.reindex(columns=cols) for df in normalized]
     return pd.concat(aligned, ignore_index=True)
 
 def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
@@ -210,7 +270,8 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         proj = _project_from_filename(wb.name) or "UNKNOWN"
 
         # If the sheet does not exist, log and continue (so Diagnostics shows it)
-        if not _excel_has_sheet(wb, sheet_name):
+        actual_sheet = _resolve_excel_sheet_name(wb, sheet_name)
+        if not actual_sheet:
             diag_rows.append({
                 "Workbook": wb.name,
                 "Project": proj,
@@ -222,9 +283,15 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
         # Try robust parse of the desired sheet
         try:
-            df_raw = read_stringing_sheet_robust(str(wb), sheet_name)
+            df_raw = read_stringing_sheet_robust(str(wb), actual_sheet)
         except Exception as exc:
-            LOGGER.warning("Stringing: failed reading '%s' [%s]: %s", wb, sheet_name, exc)
+            LOGGER.warning(
+                "Stringing: failed reading '%s' [desired='%s', actual='%s']: %s",
+                wb,
+                sheet_name,
+                actual_sheet,
+                exc,
+            )
             diag_rows.append({
                 "Workbook": wb.name,
                 "Project": proj,
@@ -246,9 +313,27 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
         # Normalize columns
         try:
-            compiled_norm, _ = normalize_stringing_columns(df_raw)
+            compiled_norm, norm_report = normalize_stringing_columns(df_raw)
         except Exception:
             compiled_norm = df_raw.copy()
+            norm_report = {"missing": []}
+
+        missing_headers = list(norm_report.get("missing", []))
+        if missing_headers:
+            LOGGER.warning(
+                "Stringing: workbook '%s' missing required headers: %s",
+                wb.name,
+                ", ".join(missing_headers),
+            )
+
+        duplicate_headers = df_raw.columns[df_raw.columns.duplicated()].tolist()
+        if duplicate_headers:
+            deduped = list(dict.fromkeys(duplicate_headers))
+            LOGGER.warning(
+                "Stringing: workbook '%s' has duplicate headers that will be dropped: %s",
+                wb.name,
+                ", ".join(deduped),
+            )
 
         # Inject project/source for traceability (fill blank project_name)
         if "project_name" not in compiled_norm.columns:
