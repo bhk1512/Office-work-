@@ -329,6 +329,62 @@ def build_controls() -> dbc.Card:
     )
 
 
+def build_mode_summary_cards() -> dbc.Row:
+    """Twin overview cards for Erection and Stringing metrics."""
+
+    def _card(title: str, rows: list[tuple[str, str, str]], mode_key: str) -> dbc.Col:
+        return dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.Div(title, className="fw-semibold mb-3"),
+                    ]
+                    + [
+                        html.Div(
+                            [
+                                html.Span(label, className="summary-pill__label"),
+                                html.Span(id=value_id, children="-", className="summary-pill__value"),
+                            ],
+                            className="summary-pill",
+                            role="button",
+                            tabIndex=0,
+                            id={"type": "summary-pill-trigger", "mode": mode_key, "metric": metric_key},
+                            n_clicks=0,
+                        )
+                        for label, value_id, metric_key in rows
+                    ],
+                    className="d-flex flex-column gap-2",
+                ),
+                className="shadow-sm h-100",
+            ),
+            md=6,
+        )
+
+    erection_rows = [
+        ("Projects Covered", "erection-card-projects", "projects"),
+        ("Total / Done / Balance", "erection-card-totals", "totals"),
+        ("Gangs", "erection-card-gangs", "gangs"),
+        ("Productivity / Historical Avg", "erection-card-productivity", "productivity"),
+        ("Lost Units", "erection-card-loss", "loss"),
+    ]
+    stringing_rows = [
+        ("Projects Covered", "stringing-card-projects", "projects"),
+        ("Total / Done / Balance", "stringing-card-totals", "totals"),
+        ("Gangs", "stringing-card-gangs", "gangs"),
+        ("Productivity / Historical Avg", "stringing-card-productivity", "productivity"),
+        ("Lost Units", "stringing-card-loss", "loss"),
+        ("No. of TSE", "stringing-card-tse", "tse"),
+    ]
+
+    return dbc.Row(
+        [
+            _card("Erection", erection_rows, "erection"),
+            _card("Stringing", stringing_rows, "stringing"),
+        ],
+        className="g-3 mb-3",
+    )
+
+
 # Lucide paths (top-right icons)
 _LUCIDE_TREND_DOWN = "7 7 17 17M17 7h0v10H7"
 _LUCIDE_USERS      = "17 21v-2a4 4 0 0 0-4-4H11a4 4 0 0 0-4 4v2M7 7a4 4 0 1 0 8 0 4 4 0 0 0-8 0"
@@ -656,6 +712,42 @@ def build_kpi_details_section() -> dbc.Card:
         className="viz-card shadow-soft section-gap-top",
     )
 
+
+def build_kpi_pch_modal() -> dbc.Modal:
+    """Modal variant of the PCH-wise drilldown used when summary pills are clicked."""
+
+    body = dbc.Card(
+        dbc.CardBody(
+            [
+                dbc.Accordion(
+                    id="kpi-pch-modal-accordion",
+                    start_collapsed=True,
+                    always_open=False,
+                    flush=True,
+                    active_item=None,
+                    className="pch-accordion",
+                )
+            ]
+        ),
+        className="shadow-sm",
+    )
+
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(
+                dbc.ModalTitle(id="kpi-pch-modal-title", children="PCH-wise Planned vs Delivered")
+            ),
+            dbc.ModalBody(body),
+            dbc.ModalFooter(
+                dbc.Button("Close", id="kpi-pch-modal-close", className="ms-auto", n_clicks=0)
+            ),
+        ],
+        id="kpi-pch-modal",
+        is_open=False,
+        size="xl",
+        scrollable=True,
+    )
+
 def build_project_responsibilities_modal() -> dbc.Modal:
     """Nested mini-modal to show Responsibilities chart for a selected project."""
     body = dbc.Card(
@@ -868,12 +960,14 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     controls = build_controls()
     
     trace_modal = build_trace_modal()
+    pch_modal = build_kpi_pch_modal()
     kpi_details = build_kpi_details_section()
     layout = dbc.Container(
         [
             build_header("Productivity Dashboard", last_updated_text),
             
             controls,
+            build_mode_summary_cards(),
             kpi_details,
             build_kpi_cards(),
             build_project_details_card(),
@@ -1170,10 +1264,12 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-selected-gang", data=None),   
             dcc.Store(id="store-mode", data="erection"),
             dcc.Store(id="store-filtered-scope", data=None),
+            dcc.Store(id="store-pch-modal-focus", data=None),
             html.Div(id="mode-data-debug", style={"display": "none"}),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
             build_project_responsibilities_modal(),
+            pch_modal,
             dcc.Store(id="store-kpi-selected-project", data=None),
             dcc.Store(id="store-proj-resp-code", data=None),
             dcc.Store(id="store-proj-resp-month", data=None),

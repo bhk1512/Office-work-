@@ -200,6 +200,37 @@ html {
   box-shadow:0 1px 2px rgba(0,0,0,.1), 0 6px 18px rgba(0,0,0,.12);
 }
 
+/* --- Summary pills --- */
+.summary-pill{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 16px;
+  border:1px solid var(--border);
+  border-radius:999px;
+  background:var(--surface-2);
+  box-shadow:0 1px 2px rgba(15,23,42,0.08);
+  cursor:pointer;
+  transition:background 0.2s ease, box-shadow 0.2s ease;
+}
+.summary-pill:focus,
+.summary-pill:hover{
+  background:#eef2ff;
+  box-shadow:0 4px 12px rgba(15,23,42,0.12);
+}
+.summary-pill__label{
+  font-size:.85rem;
+  font-weight:600;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.summary-pill__value{
+  font-weight:700;
+  color:var(--text);
+}
+
 .segment.segment-xxs .segment-label{
   padding:4px 10px;
   font-size:13px;
