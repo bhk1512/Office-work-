@@ -848,7 +848,7 @@ def build_project_tile_modal() -> dbc.Modal:
                             dcc.Graph(
                                 id="project-modal-actual-vs-bench",
                                 config=CLICK_GRAPH_CONFIG,
-                                style={"minHeight": "320px"},
+                                style={"display": "none"},
                             ),
                         ]
                     ),
@@ -911,12 +911,15 @@ def build_project_tile_modal() -> dbc.Modal:
         className="mb-4",
     )
 
-    trace_contents = _build_trace_contents(
-        "project-modal-trace-gang",
-        "project-modal-btn-export-trace",
-        "project-modal-tbl-idle-intervals",
-        "project-modal-tbl-daily-prod",
-    )
+    trace_contents = [
+        html.Div(id="project-modal-trace-anchor"),
+        *_build_trace_contents(
+            "project-modal-trace-gang",
+            "project-modal-btn-export-trace",
+            "project-modal-tbl-idle-intervals",
+            "project-modal-tbl-daily-prod",
+        ),
+    ]
     trace_block = dbc.Card(
         dbc.CardBody(trace_contents + [Download(id="project-modal-download-trace")]),
         className="shadow-sm",
@@ -967,7 +970,7 @@ def build_project_tile_modal() -> dbc.Modal:
     return dbc.Modal(
         [
             dbc.ModalHeader(dbc.ModalTitle(id="project-modal-title", children="Project Deep Dive"), close_button=False),
-            dbc.ModalBody([summary_card, button_row, *sections]),
+            dbc.ModalBody([summary_card, button_row, *sections, html.Div(id="project-modal-scroll-wire", style={"display": "none"})]),
             dbc.ModalFooter(
                 dbc.Button("Close", id="project-modal-close", className="ms-auto")
             ),

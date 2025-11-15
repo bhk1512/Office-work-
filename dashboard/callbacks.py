@@ -1935,6 +1935,28 @@ def register_callbacks(
         prevent_initial_call=True,
     )
 
+    app.clientside_callback(
+        """
+        function(meta){
+        if(!meta || !meta.source || !meta.gang) return "";
+        const CHART_SOURCES = new Set(["project-modal-actual-vs-bench","project-modal-top5","project-modal-bottom5"]);
+        if (!CHART_SOURCES.has(meta.source)) return "";
+
+        let tries = 0;
+        function go(){
+            const anchor = document.getElementById("project-modal-trace-anchor");
+            if (!anchor) { if (tries++ < 25) setTimeout(go, 60); return; }
+            anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        setTimeout(go, 0);
+        return String(Date.now());
+        }
+        """,
+        Output("project-modal-scroll-wire", "children"),
+        Input("store-project-modal-click-meta", "data"),
+        prevent_initial_call=True,
+    )
+
 
     @app.callback(
         Output("lbl-erections-title", "children"),
@@ -3661,34 +3683,55 @@ def register_callbacks(
                 )
             else:
                 candidate_projects = []
-            project_baseline_map = {
-                proj: precomputed_overall.get(proj)
-                for proj in candidate_projects
-                if proj in precomputed_overall
-            }
-            project_month_baseline_map = {
-                proj: precomputed_monthly.get(proj, {})
-                for proj in candidate_projects
-            }
+            if candidate_projects:
+                proj_overall = {
+                    project: precomputed_overall.get(project)
+                    for project in candidate_projects
+                    if precomputed_overall.get(project) is not None
+                }
+                monthly_candidates = {
+                    project: precomputed_monthly.get(project, {})
+                    for project in candidate_projects
+                }
+            else:
+                proj_overall = dict(precomputed_overall)
+                monthly_candidates = dict(precomputed_monthly)
+            if months_ts:
+                cutoff_month = min(months_ts)
+                proj_monthly = {
+                    project: {
+                        month: value
+                        for month, value in month_map.items()
+                        if month < cutoff_month
+                    }
+                    for project, month_map in monthly_candidates.items()
+                    if any(month < cutoff_month for month in month_map)
+                }
+            else:
+                proj_monthly = monthly_candidates
         else:
-            project_baseline_map = {}
-            project_month_baseline_map = {}
+            baseline_token = f"trace-project-baseline::{metric_col}::{is_stringing}::{meta_signature}"
 
-        def _compute_trace_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
-            if baseline_source.empty:
-                return {}, {}
-            if use_precomputed:
-                return project_baseline_map, project_month_baseline_map
-            if is_stringing:
-                return compute_project_baseline_maps_for(baseline_source, metric_col)
-            return compute_project_baseline_maps(baseline_source)
+            def _compute_trace_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+                if baseline_source.empty:
+                    return {}, {}
+                if is_stringing:
+                    return compute_project_baseline_maps_for(baseline_source, metric_col)
+                return compute_project_baseline_maps(baseline_source)
 
-        project_overall, project_monthly = _cached_scope_result(
-            project_gang_key,
-            f"trace-baseline::{metric_col}::{use_precomputed}::{meta_signature}",
-            _compute_trace_baselines,
-            clone=_clone_baseline_result,
-        )
+            proj_overall, proj_monthly = _cached_scope_result(
+                project_gang_key,
+                baseline_token,
+                _compute_trace_baselines,
+                clone=_clone_baseline_result,
+            )
+
+        if use_precomputed:
+            project_overall = proj_overall
+            project_monthly = proj_monthly
+        else:
+            project_overall = proj_overall
+            project_monthly = proj_monthly
 
         if {"gang_name", "project_name"}.issubset(baseline_source.columns):
             g2p = (
@@ -3771,7 +3814,8 @@ def register_callbacks(
                     )
                 ),
             )
-            daily_source = daily_source.drop(columns=[metric_col])
+            if metric_col != "daily_prod_mt":
+                daily_source = daily_source.drop(columns=[metric_col])
         daily_data = daily_source.to_dict("records")
         return idle_data, daily_data
 
@@ -3810,174 +3854,7 @@ def register_callbacks(
         if not gang_focus or not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
             raise PreventUpdate
 
-        selected = scope_meta.get("selected") or {}
-        project_list = selected.get("projects", [])
-        gang_list = selected.get("gangs", [])
-        months_ts = _months_from_meta(scope_meta)
-        meta_signature = scope_meta.get("signature") or "nosig"
-        scope_keys = scope_meta.get("scopes") or {}
-        project_gang_key = scope_keys.get("project_gang")
-
-        base_scope = _scope_frame_from_store(scope_meta, "project").copy()
-        scoped = _scope_frame_from_store(scope_meta, "full").copy()
-        scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
-
-        is_stringing = _normalize_mode(scope_meta.get("mode")) == "stringing"
-        metric_col = "daily_km" if is_stringing else "daily_prod_mt"
-
-        def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
-            if not target_gang:
-                return pd.DataFrame()
-            subset = base_scope[base_scope["gang_name"] == target_gang]
-            if not subset.empty:
-                return subset
-            fb = scoped_all[scoped_all["gang_name"] == target_gang].copy()
-            if months_ts and "month" in fb.columns:
-                fb = fb[fb["month"].isin(months_ts)]
-            return fb
-
-        baseline_source = scoped_all.copy()
-        # PROJECT-level baselines for trace/idle view, then map to gang keys
-        precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = (not is_stringing) and bool(precomputed_overall)
-        if use_precomputed:
-            if "project_name" in baseline_source.columns:
-                candidate_projects = (
-                    baseline_source["project_name"].dropna().astype(str).str.strip().unique().tolist()
-                )
-            else:
-                candidate_projects = []
-            if candidate_projects:
-                proj_overall = {
-                    project: precomputed_overall.get(project)
-                    for project in candidate_projects
-                    if precomputed_overall.get(project) is not None
-                }
-                monthly_candidates = {
-                    project: precomputed_monthly.get(project, {})
-                    for project in candidate_projects
-                }
-            else:
-                proj_overall = dict(precomputed_overall)
-                monthly_candidates = dict(precomputed_monthly)
-            if months_ts:
-                cutoff_month = min(months_ts)
-                proj_monthly = {
-                    project: {
-                        month: value
-                        for month, value in month_map.items()
-                        if month < cutoff_month
-                    }
-                    for project, month_map in monthly_candidates.items()
-                    if any(month < cutoff_month for month in month_map)
-                }
-            else:
-                proj_monthly = monthly_candidates
-        else:
-            baseline_token = f"trace-project-baseline::{metric_col}::{is_stringing}::{meta_signature}"
-
-            def _compute_trace_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
-                if baseline_source.empty:
-                    return {}, {}
-                if is_stringing:
-                    return compute_project_baseline_maps_for(baseline_source, metric_col)
-                return compute_project_baseline_maps(baseline_source)
-
-            proj_overall, proj_monthly = _cached_scope_result(
-                project_gang_key,
-                baseline_token,
-                _compute_trace_baselines,
-                clone=_clone_baseline_result,
-            )
-        if {"gang_name", "project_name"}.issubset(baseline_source.columns):
-            g2p = (
-                baseline_source[["gang_name", "project_name"]]
-                .dropna()
-                .drop_duplicates()
-                .set_index("gang_name")["project_name"]
-                .astype(str)
-                .to_dict()
-            )
-        else:
-            g2p = {}
-
-        overall_baseline_map = {g: proj_overall.get(p) for g, p in g2p.items()}
-        monthly_baseline_map = {g: proj_monthly.get(p, {}) for g, p in g2p.items()}
-
-
-        # Idle intervals
-        idle_source = pick_gang_scope(gang_focus)
-        if idle_source.empty:
-            idle_source = scoped if not scoped.empty else base_scope
-
-        idle_token = f"idle::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}::{gang_focus or '*'}"
-
-        def _compute_idle_df() -> pd.DataFrame:
-            if idle_source.empty:
-                return pd.DataFrame()
-            return compute_idle_intervals_per_gang(
-                idle_source,
-                loss_max_gap_days=config.loss_max_gap_days,
-                baseline_month_lookup=monthly_baseline_map,
-                baseline_fallback_map=overall_baseline_map,
-            )
-
-        idle_df = _cached_scope_result(
-            project_gang_key,
-            idle_token,
-            _compute_idle_df,
-            clone=_clone_dataframe,
-        )
-        if not idle_df.empty:
-            idle_df["interval_loss_mt"] = (
-                idle_df["baseline"].astype(float)
-                * idle_df["idle_days_capped"].astype(float)
-            )
-            idle_df["cumulative_loss"] = idle_df.groupby("gang_name")[
-                "interval_loss_mt"
-            ].cumsum()
-
-            def _fmt_metric(value):
-                if pd.isna(value):
-                    return ""
-                formatted = f"{value:.2f}"
-                return formatted.rstrip("0").rstrip(".")
-
-            idle_df = (
-                idle_df.assign(
-                    interval_start=idle_df["interval_start"].dt.strftime("%d-%m-%Y"),
-                    interval_end=idle_df["interval_end"].dt.strftime("%d-%m-%Y"),
-                    baseline=idle_df["baseline"].apply(_fmt_metric),
-                    cumulative_loss=idle_df["cumulative_loss"].apply(_fmt_metric),
-                )
-                .drop(columns=["interval_loss_mt"])
-            )
-        idle_data = idle_df.to_dict("records")
-
-        # Daily prod
-        daily_source = pick_gang_scope(gang_focus)
-        if daily_source.empty:
-            daily_source = scoped if not scoped.empty else base_scope
-        sort_cols = ["gang_name", "date"]
-        daily_source = daily_source.sort_values(sort_cols)
-        _cols = ["date", "gang_name", metric_col]
-        if "project_name" in daily_source.columns:
-            _cols.insert(2, "project_name")
-        daily_source = daily_source[_cols]
-        if not daily_source.empty:
-            daily_source = daily_source.assign(
-                date=daily_source["date"].dt.strftime("%d-%m-%Y"),
-                daily_prod_mt=(
-                    pd.to_numeric(daily_source[metric_col], errors="coerce").round(2).map(
-                        lambda v: "" if pd.isna(v) else f"{v:.2f}".rstrip("0").rstrip(".")
-                    )
-                ),
-            )
-            # align to expected column id for the table
-            daily_source = daily_source.drop(columns=[metric_col])
-        daily_data = daily_source.to_dict("records")
-
-        # mirror into modal tables
+        idle_data, daily_data = _compute_trace_table_payload(scope_meta, gang_focus)
         return idle_data, daily_data, idle_data, daily_data
 
     @app.callback(
@@ -4043,6 +3920,7 @@ def register_callbacks(
         Output("project-modal-tbl-daily-prod", "data"),
         Input("store-project-modal-click-meta", "data"),
         Input("project-modal-trace-gang", "value"),
+        Input("project-modal-selected-gang", "data"),
         Input("store-project-tile-focus", "data"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
@@ -4056,6 +3934,7 @@ def register_callbacks(
     def _project_modal_trace_tables(
         modal_meta,
         dropdown_value,
+        selected_store_gang,
         focus_data: dict[str, Any] | None,
         months,
         quick_range,
@@ -4072,18 +3951,25 @@ def register_callbacks(
         eff_mode = _modal_mode_from_store(performance_mode, (focus_data or {}).get("mode") or global_mode)
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
-        meta_source = modal_meta.get("source") if isinstance(modal_meta, dict) else None
-        meta_gang = modal_meta.get("gang") if isinstance(modal_meta, dict) else None
+        ctx = dash.callback_context
+        triggered_id = None
+        if ctx.triggered:
+            triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        dropdown_selection = dropdown_value or selected_store_gang
+        if not isinstance(modal_meta, dict):
+            modal_meta = {}
+        meta_source = modal_meta.get("source")
+        meta_gang = modal_meta.get("gang")
         modal_sources = {
             "project-modal-actual-vs-bench",
             "project-modal-top5",
             "project-modal-bottom5",
         }
-        gang_focus = None
-        if meta_source in modal_sources and meta_gang:
-            gang_focus = meta_gang
-        if not gang_focus:
-            gang_focus = dropdown_value
+        meta_is_chart = meta_source in modal_sources and bool(meta_gang)
+        if triggered_id == "store-project-modal-click-meta":
+            gang_focus = meta_gang if meta_is_chart else dropdown_selection
+        else:
+            gang_focus = dropdown_selection or (meta_gang if meta_is_chart else None)
         if not gang_focus:
             raise PreventUpdate
         scope_meta = _build_project_scope_meta(
@@ -4287,13 +4173,20 @@ def register_callbacks(
         project_name = (focus_data or {}).get("project")
         if not project_name:
             return []
+        project_code = (focus_data or {}).get("code")
 
         range_start = _parse_completion_date(start_date) or _default_completion_date()
         range_end = _parse_completion_date(end_date) or range_start
         if range_start > range_end:
             range_start, range_end = range_end, range_start
 
-        project_list = [project_name]
+        candidate_ids = _project_filter_candidates(project_name, project_code)
+        if not candidate_ids:
+            if project_name:
+                candidate_ids = [str(project_name)]
+            elif project_code:
+                candidate_ids = [str(project_code)]
+        project_list = _normalize_str_list(candidate_ids)
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
 
@@ -4344,13 +4237,20 @@ def register_callbacks(
         project_name = (focus_data or {}).get("project")
         if not project_name:
             return []
+        project_code = (focus_data or {}).get("code")
 
         range_start = _parse_completion_date(start_date) or _default_completion_date()
         range_end = _parse_completion_date(end_date) or range_start
         if range_start > range_end:
             range_start, range_end = range_end, range_start
 
-        project_list = [project_name]
+        candidate_ids = _project_filter_candidates(project_name, project_code)
+        if not candidate_ids:
+            if project_name:
+                candidate_ids = [str(project_name)]
+            elif project_code:
+                candidate_ids = [str(project_code)]
+        project_list = _normalize_str_list(candidate_ids)
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
         kv_list = _ensure_list(kv_values)
