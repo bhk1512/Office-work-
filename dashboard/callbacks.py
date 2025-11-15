@@ -191,6 +191,44 @@ def _normalize_location(value: object) -> str:
     return txt
 
 
+def _project_filter_candidates(
+    project_label: str | None,
+    project_code: str | None = None,
+) -> list[str]:
+    """
+    Build a resilient set of candidate project identifiers by combining the
+    displayed label (which may include "CODE : Name" formatting) and the canonical
+    project code. This helps modal scope filters match the underlying dataset
+    regardless of how the project tile renders its title.
+    """
+    candidates: list[str] = []
+
+    def _add(text: str | None) -> None:
+        if not text:
+            return
+        normalized = text.strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    _add(project_label)
+    if project_label and ":" in project_label:
+        left, right = project_label.split(":", 1)
+        _add(left)
+        _add(right)
+    if project_label:
+        _add(project_label.replace(":", " "))
+
+    code_value = project_code or ""
+    if code_value:
+        compact = code_value.replace(" ", "")
+        _add(code_value)
+        _add(compact)
+        _add(compact.upper())
+        _add(compact.lower())
+
+    return candidates
+
+
 def _format_decimal(value: float | int | None) -> str:
     if pd.isna(value):
         return ""
@@ -3495,8 +3533,45 @@ def register_callbacks(
             fig_project,
         )
 
+    def _resolve_focus_mode(
+        focus_payload: dict[str, Any] | None,
+        fallback_mode: str | None,
+    ) -> str:
+        """
+        Prefer the project tile's mode (erection/stringing) when building modal scopes,
+        but gracefully fall back to the global mode store when the tile payload lacks it.
+        """
+        if isinstance(focus_payload, dict):
+            focus_mode = focus_payload.get("mode")
+            if isinstance(focus_mode, str) and focus_mode.strip():
+                return _normalize_mode(focus_mode)
+        return _normalize_mode(fallback_mode)
+
+    def _modal_mode_from_store(payload: Any, fallback: str | None = None) -> str:
+        raw: str | None
+        if isinstance(payload, dict):
+            raw = payload.get("mode")
+        else:
+            raw = payload
+        text = ""
+        if isinstance(raw, str):
+            text = raw.strip()
+        elif raw is not None:
+            text = str(raw).strip()
+        if "|" in text:
+            text = text.split("|", 1)[0]
+        if text:
+            return _normalize_mode(text)
+        return _normalize_mode(fallback)
+
+    def _compose_modal_mode_payload(mode_value: str) -> str:
+        mode_text = _normalize_mode(mode_value)
+        millis = int(time.time() * 1000)
+        return f"{mode_text}|{millis}"
+
     def _build_project_scope_meta(
         project_name: str,
+        project_code: str | None,
         mode_value: str,
         months,
         quick_range,
@@ -3504,7 +3579,8 @@ def register_callbacks(
         kv_values,
         method_values,
     ) -> dict[str, Any]:
-        project_list = _normalize_str_list([project_name])
+        project_candidates = _project_filter_candidates(project_name, project_code)
+        project_list = _normalize_str_list(project_candidates)
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
         kv_list = _ensure_list(kv_values)
@@ -3914,7 +3990,8 @@ def register_callbacks(
         Input("f-gang", "value"),
         Input("f-kv", "value"),
         Input("f-method", "value"),
-        Input("store-mode", "data"),
+        Input("store-project-modal-performance-mode", "data"),
+        State("store-mode", "data"),
         prevent_initial_call=True,
     )
     def _project_modal_trace_dropdown(
@@ -3925,14 +4002,20 @@ def register_callbacks(
         gangs,
         kv_values,
         method_values,
-        mode_value,
+        performance_mode,
+        global_mode,
     ):
         project_name = (focus_data or {}).get("project")
         if not project_name:
             return [], None
+        project_code = (focus_data or {}).get("code")
+        eff_mode = _modal_mode_from_store(performance_mode, (focus_data or {}).get("mode") or global_mode)
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
         scope_meta = _build_project_scope_meta(
             project_name,
-            mode_value or focus_data.get("mode"),
+            project_code,
+            eff_mode,
             months,
             quick_range,
             gangs,
@@ -3966,7 +4049,8 @@ def register_callbacks(
         Input("f-gang", "value"),
         Input("f-kv", "value"),
         Input("f-method", "value"),
-        Input("store-mode", "data"),
+        Input("store-project-modal-performance-mode", "data"),
+        State("store-mode", "data"),
         prevent_initial_call=True,
     )
     def _project_modal_trace_tables(
@@ -3978,11 +4062,16 @@ def register_callbacks(
         gangs,
         kv_values,
         method_values,
-        mode_value,
+        performance_mode,
+        global_mode,
     ):
         project_name = (focus_data or {}).get("project")
         if not project_name:
             raise PreventUpdate
+        project_code = (focus_data or {}).get("code")
+        eff_mode = _modal_mode_from_store(performance_mode, (focus_data or {}).get("mode") or global_mode)
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
         meta_source = modal_meta.get("source") if isinstance(modal_meta, dict) else None
         meta_gang = modal_meta.get("gang") if isinstance(modal_meta, dict) else None
         modal_sources = {
@@ -3999,7 +4088,8 @@ def register_callbacks(
             raise PreventUpdate
         scope_meta = _build_project_scope_meta(
             project_name,
-            mode_value or focus_data.get("mode"),
+            project_code,
+            eff_mode,
             months,
             quick_range,
             gangs,
@@ -4021,7 +4111,8 @@ def register_callbacks(
         Input("f-gang", "value"),
         Input("f-kv", "value"),
         Input("f-method", "value"),
-        Input("store-mode", "data"),
+        Input("store-project-modal-performance-mode", "data"),
+        State("store-mode", "data"),
     )
     def _update_project_modal_performance(
         focus_data: dict[str, Any] | None,
@@ -4031,7 +4122,8 @@ def register_callbacks(
         gangs,
         kv_values,
         method_values,
-        mode_value,
+        performance_mode,
+        global_mode,
     ):
         empty_fig = go.Figure()
         if not focus_data or not focus_data.get("project"):
@@ -4043,12 +4135,14 @@ def register_callbacks(
             )
 
         project_name = focus_data.get("project")
-        eff_mode = _normalize_mode(mode_value or focus_data.get("mode"))
+        project_code = focus_data.get("code")
+        eff_mode = _modal_mode_from_store(performance_mode, (focus_data or {}).get("mode") or global_mode)
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
 
         scope_meta = _build_project_scope_meta(
             project_name,
+            project_code,
             eff_mode,
             months,
             quick_range,
@@ -6846,24 +6940,48 @@ def register_callbacks(
 
     @app.callback(
         Output("store-project-modal-section", "data"),
+        Output("store-project-modal-performance-mode", "data"),
         Input("project-modal-btn-erections", "n_clicks"),
         Input("project-modal-btn-stringing", "n_clicks"),
-        Input("project-modal-btn-performance", "n_clicks"),
+        Input("project-modal-btn-performance-erection", "n_clicks"),
+        Input("project-modal-btn-performance-stringing", "n_clicks"),
         Input("store-project-tile-focus", "data"),
         State("store-project-modal-section", "data"),
+        State("store-project-modal-performance-mode", "data"),
+        State("store-mode", "data"),
         prevent_initial_call=True,
     )
-    def _set_modal_section(btn_e, btn_s, btn_p, focus_data, current):
+    def _set_modal_section(
+        btn_e,
+        btn_s,
+        btn_perf_e,
+        btn_perf_s,
+        focus_data,
+        current_section,
+        current_mode,
+        global_mode,
+    ):
         trigger = _resolve_triggered_id()
+        perf_mode = _modal_mode_from_store(current_mode, global_mode)
+
+        def _payload(mode_value: str) -> str:
+            return _compose_modal_mode_payload(mode_value)
+
         if trigger == "store-project-tile-focus":
-            return "erections"
+            perf_mode = _resolve_focus_mode(focus_data, perf_mode)
+            if perf_mode == "stringing" and not config.enable_stringing:
+                perf_mode = "erection"
+            return "erections", _payload(perf_mode)
         if trigger == "project-modal-btn-erections":
-            return "erections"
+            return "erections", _payload(perf_mode)
         if trigger == "project-modal-btn-stringing":
-            return "stringing"
-        if trigger == "project-modal-btn-performance":
-            return "performance"
-        return current or "erections"
+            return "stringing", _payload(perf_mode)
+        if trigger == "project-modal-btn-performance-erection":
+            return "performance", _payload("erection")
+        if trigger == "project-modal-btn-performance-stringing":
+            target_mode = "stringing" if config.enable_stringing else "erection"
+            return "performance", _payload(target_mode)
+        return (current_section or "erections"), _payload(perf_mode)
 
     @app.callback(
         Output("project-modal-section-erections", "is_open"),
@@ -6871,11 +6989,14 @@ def register_callbacks(
         Output("project-modal-section-performance", "is_open"),
         Output("project-modal-btn-erections", "className"),
         Output("project-modal-btn-stringing", "className"),
-        Output("project-modal-btn-performance", "className"),
+        Output("project-modal-btn-performance-erection", "className"),
+        Output("project-modal-btn-performance-stringing", "className"),
         Input("store-project-modal-section", "data"),
+        Input("store-project-modal-performance-mode", "data"),
     )
-    def _sync_modal_sections(active_section: str | None):
+    def _sync_modal_sections(active_section: str | None, performance_mode: Any):
         active = (active_section or "erections").strip().lower()
+        perf_mode = _modal_mode_from_store(performance_mode, "erection")
 
         def _is_open(key: str) -> bool:
             return active == key
@@ -6884,13 +7005,19 @@ def register_callbacks(
             base = "modal-section-btn"
             return f"{base} active" if active == key else base
 
+        def _perf_class(target: str) -> str:
+            base = "modal-section-btn"
+            is_active = active == "performance" and perf_mode == target
+            return f"{base} active" if is_active else base
+
         return (
             _is_open("erections"),
             _is_open("stringing"),
             _is_open("performance"),
             _class("erections"),
             _class("stringing"),
-            _class("performance"),
+            _perf_class("erection"),
+            _perf_class("stringing"),
         )
 
     # Toggle responsibilities visibility inside each project tile (pattern-matching IDs)

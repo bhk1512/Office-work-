@@ -183,6 +183,7 @@ class DataSelector:
         except Exception as exc:  # pragma: no cover - defensive logging
             self._logger.warning("DuckDB scope query failed for mode '%s': %s", mode, exc)
             scopes = None
+            self._duckdb_connection = None
 
         if scopes is None:
             return self._scopes_via_pandas(

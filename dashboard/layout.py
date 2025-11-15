@@ -941,8 +941,15 @@ def build_project_tile_modal() -> dbc.Modal:
                 className="modal-section-btn",
             ),
             dbc.Button(
-                "Show Gang Performance",
-                id="project-modal-btn-performance",
+                "Show Gang Performance (Erection)",
+                id="project-modal-btn-performance-erection",
+                color="primary",
+                size="lg",
+                className="modal-section-btn",
+            ),
+            dbc.Button(
+                "Show Gang Performance (Stringing)",
+                id="project-modal-btn-performance-stringing",
                 color="primary",
                 size="lg",
                 className="modal-section-btn",
@@ -1536,6 +1543,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-project-modal-section", data="erections"),
             dcc.Store(id="store-project-modal-click-meta", data=None),
             dcc.Store(id="project-modal-selected-gang", data=None),
+            dcc.Store(id="store-project-modal-performance-mode", data="erection|0"),
             dcc.Store(id="store-project-tile-meta", data={}),
             html.Button(
                 id={
