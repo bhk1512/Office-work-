@@ -676,6 +676,304 @@ def build_trace_modal() -> dbc.Modal:
     )
 
 
+def build_project_tile_modal() -> dbc.Modal:
+    """Large modal that mirrors key home-screen sections for a single project."""
+
+    summary_card = dbc.Card(
+        dbc.CardBody(
+            html.Div(
+                "Select a project tile to view its detailed view.",
+                id="project-modal-summary",
+                className="project-empty",
+            )
+        ),
+        className="shadow-sm mb-4",
+    )
+
+    def _completed_controls(range_id: str, search_id: str, title: str, subtitle: str) -> dbc.Row:
+        return dbc.Row(
+            [
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.Div(title, className="section-title mb-1"),
+                            html.Div(subtitle, className="section-sub mb-2"),
+                            dcc.DatePickerRange(
+                                id=range_id,
+                                min_date_allowed=datetime(2021, 1, 1),
+                                max_date_allowed=TODAY_DATE,
+                                start_date=DEFAULT_COMPLETION_DATE,
+                                end_date=DEFAULT_COMPLETION_DATE,
+                                display_format="DD-MM-YYYY",
+                                minimum_nights=0,
+                                persistence=True,
+                                persistence_type="session",
+                                className="filter-date",
+                            ),
+                        ],
+                        className="filter-field",
+                    ),
+                    md=6,
+                    lg=4,
+                ),
+                dbc.Col(
+                    html.Div(
+                        dbc.Input(
+                            id=search_id,
+                            placeholder="Filter by project, gang, or location",
+                            type="text",
+                            value="",
+                            className="filter-input",
+                        ),
+                        className="filter-field",
+                    ),
+                    md=4,
+                    lg=4,
+                ),
+                dbc.Col(
+                    dbc.Button(
+                        "Clear",
+                        id=f"{search_id}-reset",
+                        color="secondary",
+                        outline=True,
+                        className="w-100",
+                    ),
+                    md=2,
+                    lg=2,
+                ),
+            ],
+            className="g-3 align-items-end mb-3",
+        )
+
+    def _completed_table(table_id: str, columns: list[dict[str, str]]) -> dash_table.DataTable:
+        return dash_table.DataTable(
+            id=table_id,
+            columns=columns,
+            data=[],
+            page_size=15,
+            sort_action="native",
+            filter_action="native",
+            virtualization=True,
+            fixed_rows={"headers": True},
+            style_table={"overflowX": "auto", "maxHeight": "480px"},
+            style_cell={
+                "fontFamily": "Inter, system-ui",
+                "fontSize": 13,
+                "border": "1px solid var(--border, #e6e9f0)",
+            },
+            style_header={"border": "1px solid var(--border, #e6e9f0)"},
+        )
+
+    erections_section = dbc.Card(
+        [
+            _completed_controls(
+                "project-modal-erections-range",
+                "project-modal-erections-search",
+                "Erections Completed",
+                "Completion date (defaults to yesterday)",
+            ),
+            _completed_table(
+                "project-modal-erections-table",
+                [
+                    {"name": "Completion Date", "id": "completion_date"},
+                    {"name": "Project", "id": "project_name"},
+                    {"name": "Location", "id": "location_no"},
+                    {"name": "Tower Weight (MT)", "id": "tower_weight"},
+                    {"name": "Productivity (MT/day)", "id": "daily_prod_mt"},
+                    {"name": "Gang", "id": "gang_name"},
+                    {"name": "Start Date", "id": "start_date"},
+                    {"name": "Supervisor", "id": "supervisor_name"},
+                    {"name": "Section Incharge", "id": "section_incharge_name"},
+                    {"name": "Revenue", "id": "revenue"},
+                ],
+            ),
+        ],
+        className="shadow-sm mb-4",
+    )
+
+    stringing_section = dbc.Card(
+        [
+            _completed_controls(
+                "project-modal-stringing-range",
+                "project-modal-stringing-search",
+                "Stringing Completed",
+                "Filter by completion span",
+            ),
+            _completed_table(
+                "project-modal-stringing-table",
+                [
+                    {"name": "Completion Date", "id": "completion_date"},
+                    {"name": "Project", "id": "project_name"},
+                    {"name": "Span (From-To)", "id": "location_no"},
+                    {"name": "Length (KM)", "id": "tower_weight"},
+                    {"name": "Productivity (KM/day)", "id": "daily_prod_mt"},
+                    {"name": "Gang", "id": "gang_name"},
+                    {"name": "F/S Start Date", "id": "start_date"},
+                    {"name": "Supervisor", "id": "supervisor_name"},
+                    {"name": "Section Incharge", "id": "section_incharge_name"},
+                    {"name": "Revenue", "id": "revenue"},
+                ],
+            ),
+        ],
+        className="shadow-sm mb-4",
+    )
+
+    performance_cards = dbc.Row(
+        [
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div(
+                                className="section-header",
+                                children=[
+                                    html.Div(
+                                        [
+                                            html.Div("Gang Performance", className="section-title"),
+                                            html.Div("Delivered vs Lost (selected scope)", className="section-sub"),
+                                        ],
+                                        className="d-flex flex-column gap-1",
+                                    ),
+                                    html.Div(
+                                        className="legend",
+                                        children=[
+                                            html.Div([html.Span(className="legend__dot dot--delivered"), "Delivered Output"], className="legend__item"),
+                                            html.Div([html.Span(className="legend__dot dot--lost"), "Lost Potential"], className="legend__item"),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            html.Hr(style={"borderColor": "var(--border)", "margin": "8px 0 10px"}),
+                            html.Div(id="project-modal-avp-list", className="avp-wrap"),
+                            dcc.Graph(
+                                id="project-modal-actual-vs-bench",
+                                config=CLICK_GRAPH_CONFIG,
+                                style={"minHeight": "320px"},
+                            ),
+                        ]
+                    ),
+                    className="viz-card shadow-sm",
+                ),
+                md=6,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    [
+                        dbc.CardHeader(
+                            dbc.Row(
+                                [
+                                    dbc.Col(
+                                        html.Div(
+                                            [
+                                                html.Div("Performance Rankings", className="section-title"),
+                                                html.Div("Top and bottom gangs", className="section-sub"),
+                                            ]
+                                        ),
+                                        align="center",
+                                    ),
+                                    dbc.Col(
+                                        dbc.RadioItems(
+                                            id="project-modal-topbot-metric",
+                                            options=[
+                                                {"label": "Productivity", "value": "prod"},
+                                                {"label": "Erection", "value": "erection"},
+                                            ],
+                                            value="prod",
+                                            inline=True,
+                                            class_name="segment",
+                                            label_class_name="segment-label",
+                                            label_checked_class_name="segment-label--active",
+                                            input_class_name="segment-input",
+                                        ),
+                                        width="auto",
+                                        align="center",
+                                    ),
+                                ],
+                                justify="between",
+                                align="center",
+                            )
+                        ),
+                        dbc.CardBody(
+                            [
+                                html.Div("Top 5 Performers", className="text-success fw-semibold mb-2"),
+                                dcc.Graph(id="project-modal-top5", config=CLICK_GRAPH_CONFIG, style={"cursor": "pointer"}),
+                                html.Hr(className="my-3"),
+                                html.Div("Bottom 5 Performers", className="text-danger fw-semibold mb-2"),
+                                dcc.Graph(id="project-modal-bottom5", config=CLICK_GRAPH_CONFIG, style={"cursor": "pointer"}),
+                            ]
+                        ),
+                    ],
+                    className="viz-card shadow-sm",
+                ),
+                md=6,
+            ),
+        ],
+        className="mb-4",
+    )
+
+    trace_contents = _build_trace_contents(
+        "project-modal-trace-gang",
+        "project-modal-btn-export-trace",
+        "project-modal-tbl-idle-intervals",
+        "project-modal-tbl-daily-prod",
+    )
+    trace_block = dbc.Card(
+        dbc.CardBody(trace_contents + [Download(id="project-modal-download-trace")]),
+        className="shadow-sm",
+    )
+
+    performance_section = html.Div([performance_cards, trace_block])
+
+    button_row = html.Div(
+        [
+            dbc.Button(
+                "Show Completed Erections",
+                id="project-modal-btn-erections",
+                color="primary",
+                size="lg",
+                className="modal-section-btn",
+            ),
+            dbc.Button(
+                "Show Completed Stringing",
+                id="project-modal-btn-stringing",
+                color="primary",
+                size="lg",
+                className="modal-section-btn",
+            ),
+            dbc.Button(
+                "Show Gang Performance",
+                id="project-modal-btn-performance",
+                color="primary",
+                size="lg",
+                className="modal-section-btn",
+            ),
+        ],
+        className="modal-section-button-row",
+    )
+
+    sections = [
+        dbc.Collapse(erections_section, id="project-modal-section-erections", is_open=False),
+        dbc.Collapse(stringing_section, id="project-modal-section-stringing", is_open=False),
+        dbc.Collapse(performance_section, id="project-modal-section-performance", is_open=False),
+    ]
+
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle(id="project-modal-title", children="Project Deep Dive"), close_button=False),
+            dbc.ModalBody([summary_card, button_row, *sections]),
+            dbc.ModalFooter(
+                dbc.Button("Close", id="project-modal-close", className="ms-auto")
+            ),
+        ],
+        id="project-detail-modal",
+        is_open=False,
+        size="xl",
+        fullscreen=True,
+        scrollable=True,
+        backdrop="static",
+    )
+
+
 def build_kpi_details_section() -> dbc.Card:
     """Inline card showing the PCH-wise drilldown that previously lived inside a modal."""
 
@@ -961,6 +1259,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     
     trace_modal = build_trace_modal()
     pch_modal = build_kpi_pch_modal()
+    project_modal = build_project_tile_modal()
     kpi_details = build_kpi_details_section()
     layout = dbc.Container(
         [
@@ -1270,9 +1569,14 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             trace_modal,
             build_project_responsibilities_modal(),
             pch_modal,
+            project_modal,
             dcc.Store(id="store-kpi-selected-project", data=None),
             dcc.Store(id="store-proj-resp-code", data=None),
             dcc.Store(id="store-proj-resp-month", data=None),
+            dcc.Store(id="store-project-tile-focus", data=None),
+            dcc.Store(id="store-project-modal-section", data="erections"),
+            dcc.Store(id="store-project-modal-click-meta", data=None),
+            dcc.Store(id="store-project-modal-selected-gang", data=None),
         ],
         fluid=True,
     )

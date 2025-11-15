@@ -200,6 +200,44 @@ html {
   box-shadow:0 1px 2px rgba(0,0,0,.1), 0 6px 18px rgba(0,0,0,.12);
 }
 
+/* --- Project tiles ----------------------------------------------------- */
+.project-tile-summary{
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:14px;
+  background:var(--surface-2);
+  cursor:pointer;
+  transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+}
+.project-tile-summary:focus,
+.project-tile-summary:hover{
+  outline:none;
+  transform:translateY(-1px);
+  box-shadow:var(--shadow-1);
+  border-color:#bfc8e6;
+}
+
+/* --- Project modal buttons --------------------------------------------- */
+.modal-section-button-row{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:1rem;
+  margin-bottom:1.25rem;
+}
+.modal-section-btn{
+  min-width:230px;
+  font-weight:700;
+  text-transform:none;
+  border-radius:999px;
+  padding:.85rem 1.5rem;
+  box-shadow:0 8px 24px rgba(15,23,42,.18);
+}
+.modal-section-btn.active{
+  background:#0f172a;
+  border-color:#0f172a;
+}
+
 /* --- Summary pills --- */
 .summary-pill{
   display:flex;

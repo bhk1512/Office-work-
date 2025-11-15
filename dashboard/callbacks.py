@@ -516,15 +516,31 @@ def _prepare_stringing_completed(
 
 _slug = lambda s: re.sub(r"[^a-z0-9_-]+", "-", str(s).lower()).strip("-")
 
-def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.0, last_project=" ", last_date=" ", rate_label="MT/day", unit_total="MT"):
+def _render_avp_row(
+    gang,
+    delivered,
+    lost,
+    total,
+    pct,
+    avg_prod=0.0,
+    baseline=0.0,
+    last_project=" ",
+    last_date=" ",
+    rate_label="MT/day",
+    unit_total="MT",
+    namespace: str = "avp",
+):
     badge_cls = "good" if pct >= 80 else ("mid" if pct >= 65 else "low")
     delivered_pct = 0 if total == 0 else max(0, min(100, (delivered/total)*100))
     lost_pct = 0 if total == 0 else max(0, min(100, (lost/total)*100))
 
-    row_tip_id = f"avp-tip-{gang}"  # STRING id for tooltip target
+    safe_gang = _slug(gang)
+    row_tip_id = f"{namespace}-tip-{safe_gang}"  # STRING id for tooltip target
+    row_type = f"{namespace}-row"
+    tip_type = f"{namespace}-tip"
 
     return html.Div(
-        id={"type": "avp-row", "index": gang},   # <-- move pattern id to the row itself
+        id={"type": row_type, "index": gang},   # <-- move pattern id to the row itself
         n_clicks=0,
         style={"cursor": "pointer"},             # (nice to have)
         className="avp-item",
@@ -543,10 +559,10 @@ def _render_avp_row(gang, delivered, lost, total, pct, avg_prod=0.0, baseline=0.
                 html.Span(f"{delivered:,.0f} {unit_total} vs {lost:,.0f} {unit_total} lost"),
                 html.Div(f"{total:,.0f} {unit_total}", className="text-muted ..."),
             ]),
-            
+
 
             html.Div(
-                id={"type": "avp-tip", "index": gang},     # pattern id to allow row-wide click capture
+                id={"type": tip_type, "index": gang},     # pattern id to allow row-wide click capture
                 n_clicks=0,
                 className="avp-tip-overlay",
                 children=[
@@ -1790,6 +1806,68 @@ def register_callbacks(
 
     app.clientside_callback(
         """
+        function(lossClick, topClick, bottomClick, rowTs, tipTs){
+        const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+        if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+        const prop   = ctx.triggered[0].prop_id || "";
+        const idPart = prop.split(".")[0];
+        try {
+            const pid = JSON.parse(idPart);
+            if (pid && (pid.type === "project-modal-avp-row" || pid.type === "project-modal-avp-tip")) {
+                if (!prop.endsWith(".n_clicks_timestamp")) return NO;
+                const ts = ctx.triggered[0].value;
+                if (!ts || ts <= 0) return NO;
+                const gang = pid.index;
+                if (!gang) return NO;
+                return { source: "project-modal-actual-vs-bench", gang: String(gang), ts: Date.now() };
+            }
+        } catch(e) { /* ignore */ }
+
+        let cd = null;
+        if (idPart === "project-modal-actual-vs-bench") cd = lossClick;
+        else if (idPart === "project-modal-top5")       cd = topClick;
+        else if (idPart === "project-modal-bottom5")    cd = bottomClick;
+        else return NO;
+
+        if (!cd || !cd.points || !cd.points.length) return NO;
+        const pt = cd.points[0];
+        let gang = null;
+        if (typeof pt.y === "string")      gang = pt.y;
+        else if (typeof pt.x === "string") gang = pt.x;
+        else if (pt.customdata){
+            if (typeof pt.customdata === "string")      gang = pt.customdata;
+            else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
+            else if (typeof pt.customdata === "object") gang = pt.customdata.gang || pt.customdata.name || null;
+        }
+        if (!gang) return NO;
+        return { source: idPart, gang: String(gang), ts: Date.now() };
+        }
+        """,
+        Output("store-project-modal-click-meta", "data"),
+        [
+            Input("project-modal-actual-vs-bench", "clickData"),
+            Input("project-modal-top5", "clickData"),
+            Input("project-modal-bottom5", "clickData"),
+            Input({"type":"project-modal-avp-row","index": dash.dependencies.ALL}, "n_clicks_timestamp"),
+            Input({"type":"project-modal-avp-tip","index": dash.dependencies.ALL}, "n_clicks_timestamp"),
+        ],
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(meta){
+        if (!meta || !meta.gang) return window.dash_clientside.no_update;
+        return meta.gang;
+        }
+        """,
+        Output("project-modal-selected-gang", "data"),
+        Input("store-project-modal-click-meta", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
         function(meta){
         if(!meta || !meta.source || !meta.gang) return "";
         const CHART_SOURCES = new Set(["g-actual-vs-bench","g-top5","g-bottom5"]);
@@ -2653,27 +2731,11 @@ def register_callbacks(
         return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
 
 
-    @app.callback(
-        Output("kpi-avg", "children"),
-        Output("kpi-delta", "children"),
-        Output("kpi-active", "children"),
-        Output("kpi-total", "children"),
-        Output("kpi-total-planned", "children"),
-        Output("kpi-total-nos", "children"),
-        Output("kpi-total-nos-planned", "children"),
-        Output("kpi-loss", "children"),
-        Output("kpi-loss-delta", "children"),
-        Output("avp-list", "children"),
-        Output("g-actual-vs-bench", "figure"),
-        Output("g-top5", "figure"),
-        Output("g-bottom5", "figure"),
-        Output("g-projects-over-months", "figure"),
-        Input("store-filtered-scope", "data"),
-        Input("f-topbot-metric", "value"),
-    )
-    def update_dashboard(
+    def _compute_dashboard_outputs(
         scope_meta: dict[str, Any] | None,
         topbot_metric: str | None,
+        *,
+        avp_namespace: str = "avp",
     ) -> tuple:
         if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
             raise PreventUpdate
@@ -3007,7 +3069,7 @@ def register_callbacks(
                         last_date=str(r.get("last_date_str", "\uFFFD")),
                         rate_label=rate_label,
                         unit_total=unit_total,
-
+                        namespace=avp_namespace,
                     )
 
                 )
@@ -3424,8 +3486,210 @@ def register_callbacks(
             fig_bottom5,
             fig_project,
         )
+
+    def _build_project_scope_meta(
+        project_name: str,
+        mode_value: str,
+        months,
+        quick_range,
+        gangs,
+        kv_values,
+        method_values,
+    ) -> dict[str, Any]:
+        project_list = _normalize_str_list([project_name])
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        months_list = _normalize_str_list(_ensure_list(months))
+        kv_list = _ensure_list(kv_values)
+        method_list = _ensure_list(method_values)
+        eff_mode = _normalize_mode(mode_value)
+        return _build_scope_meta_payload(
+            eff_mode=eff_mode,
+            project_list=project_list,
+            gang_list=gang_list,
+            months_list=months_list,
+            quick_range=quick_range,
+            kv_values=kv_list,
+            method_values=method_list,
+            kv_list=_normalize_str_list(kv_list),
+            method_list=_normalize_str_list(method_list, lower=True),
+        )
+
+    @app.callback(
+        Output("kpi-avg", "children"),
+        Output("kpi-delta", "children"),
+        Output("kpi-active", "children"),
+        Output("kpi-total", "children"),
+        Output("kpi-total-planned", "children"),
+        Output("kpi-total-nos", "children"),
+        Output("kpi-total-nos-planned", "children"),
+        Output("kpi-loss", "children"),
+        Output("kpi-loss-delta", "children"),
+        Output("avp-list", "children"),
+        Output("g-actual-vs-bench", "figure"),
+        Output("g-top5", "figure"),
+        Output("g-bottom5", "figure"),
+        Output("g-projects-over-months", "figure"),
+        Input("store-filtered-scope", "data"),
+        Input("f-topbot-metric", "value"),
+    )
+    def update_dashboard(
+        scope_meta: dict[str, Any] | None,
+        topbot_metric: str | None,
+    ) -> tuple:
+        return _compute_dashboard_outputs(scope_meta, topbot_metric)
         
     CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
+
+    def _compute_trace_table_payload(
+        scope_meta: dict[str, Any], gang_focus: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        selected = scope_meta.get("selected") or {}
+        months_ts = _months_from_meta(scope_meta)
+        meta_signature = scope_meta.get("signature") or "nosig"
+        scope_keys = scope_meta.get("scopes") or {}
+        project_gang_key = scope_keys.get("project_gang")
+
+        base_scope = _scope_frame_from_store(scope_meta, "project").copy()
+        scoped = _scope_frame_from_store(scope_meta, "full").copy()
+        scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
+
+        is_stringing = _normalize_mode(scope_meta.get("mode")) == "stringing"
+        metric_col = "daily_km" if is_stringing else "daily_prod_mt"
+
+        def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
+            if not target_gang:
+                return pd.DataFrame()
+            subset = base_scope[base_scope["gang_name"] == target_gang]
+            if not subset.empty:
+                return subset
+            fb = scoped_all[scoped_all["gang_name"] == target_gang].copy()
+            if months_ts and "month" in fb.columns:
+                fb = fb[fb["month"].isin(months_ts)]
+            return fb
+
+        baseline_source = scoped_all.copy()
+        precomputed_overall, precomputed_monthly = _get_project_baselines()
+        use_precomputed = (not is_stringing) and bool(precomputed_overall)
+        if use_precomputed:
+            if "project_name" in baseline_source.columns:
+                candidate_projects = (
+                    baseline_source["project_name"].dropna().astype(str).str.strip().unique().tolist()
+                )
+            else:
+                candidate_projects = []
+            project_baseline_map = {
+                proj: precomputed_overall.get(proj)
+                for proj in candidate_projects
+                if proj in precomputed_overall
+            }
+            project_month_baseline_map = {
+                proj: precomputed_monthly.get(proj, {})
+                for proj in candidate_projects
+            }
+        else:
+            project_baseline_map = {}
+            project_month_baseline_map = {}
+
+        def _compute_trace_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+            if baseline_source.empty:
+                return {}, {}
+            if use_precomputed:
+                return project_baseline_map, project_month_baseline_map
+            if is_stringing:
+                return compute_project_baseline_maps_for(baseline_source, metric_col)
+            return compute_project_baseline_maps(baseline_source)
+
+        project_overall, project_monthly = _cached_scope_result(
+            project_gang_key,
+            f"trace-baseline::{metric_col}::{use_precomputed}::{meta_signature}",
+            _compute_trace_baselines,
+            clone=_clone_baseline_result,
+        )
+
+        if {"gang_name", "project_name"}.issubset(baseline_source.columns):
+            g2p = (
+                baseline_source[["gang_name", "project_name"]]
+                .dropna()
+                .drop_duplicates()
+                .set_index("gang_name")["project_name"]
+                .astype(str)
+                .to_dict()
+            )
+        else:
+            g2p = {}
+
+        overall_baseline_map = {g: project_overall.get(p) for g, p in g2p.items()}
+        monthly_baseline_map = {g: project_monthly.get(p, {}) for g, p in g2p.items()}
+
+        idle_source = pick_gang_scope(gang_focus)
+        if idle_source.empty:
+            idle_source = scoped if not scoped.empty else base_scope
+
+        idle_token = f"idle::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}::{gang_focus or '*'}"
+
+        def _compute_idle_df() -> pd.DataFrame:
+            if idle_source.empty:
+                return pd.DataFrame()
+            return compute_idle_intervals_per_gang(
+                idle_source,
+                loss_max_gap_days=config.loss_max_gap_days,
+                baseline_month_lookup=monthly_baseline_map,
+                baseline_fallback_map=overall_baseline_map,
+            )
+
+        idle_df = _cached_scope_result(
+            project_gang_key,
+            idle_token,
+            _compute_idle_df,
+            clone=_clone_dataframe,
+        )
+        if not idle_df.empty:
+            idle_df["interval_loss_mt"] = (
+                idle_df["baseline"].astype(float)
+                * idle_df["idle_days_capped"].astype(float)
+            )
+            idle_df["cumulative_loss"] = idle_df.groupby("gang_name")[
+                "interval_loss_mt"
+            ].cumsum()
+
+            def _fmt_metric(value):
+                if pd.isna(value):
+                    return ""
+                formatted = f"{value:.2f}"
+                return formatted.rstrip("0").rstrip(".")
+
+            idle_df = (
+                idle_df.assign(
+                    interval_start=idle_df["interval_start"].dt.strftime("%d-%m-%Y"),
+                    interval_end=idle_df["interval_end"].dt.strftime("%d-%m-%Y"),
+                    baseline=idle_df["baseline"].apply(_fmt_metric),
+                    cumulative_loss=idle_df["cumulative_loss"].apply(_fmt_metric),
+                )
+                .drop(columns=["interval_loss_mt"])
+            )
+        idle_data = idle_df.to_dict("records")
+
+        daily_source = pick_gang_scope(gang_focus)
+        if daily_source.empty:
+            daily_source = scoped if not scoped.empty else base_scope
+        sort_cols = ["gang_name", "date"]
+        daily_source = daily_source.sort_values(sort_cols)
+        _cols = ["date", "gang_name", metric_col]
+        if "project_name" in daily_source.columns:
+            _cols.insert(2, "project_name")
+        daily_source = daily_source[_cols]
+        if not daily_source.empty:
+            daily_source = daily_source.assign(
+                date=daily_source["date"].dt.strftime("%d-%m-%Y"),
+                daily_prod_mt=(
+                    pd.to_numeric(daily_source[metric_col], errors="coerce").round(2).map(
+                        lambda v: "" if pd.isna(v) else f"{v:.2f}".rstrip("0").rstrip(".")
+                    )
+                ),
+            )
+            daily_source = daily_source.drop(columns=[metric_col])
+        daily_data = daily_source.to_dict("records")
+        return idle_data, daily_data
 
     @app.callback(
         Output("tbl-idle-intervals", "data"),
@@ -3632,6 +3896,183 @@ def register_callbacks(
         # mirror into modal tables
         return idle_data, daily_data, idle_data, daily_data
 
+    @app.callback(
+        Output("project-modal-trace-gang", "options"),
+        Output("project-modal-trace-gang", "value"),
+        Input("store-project-tile-focus", "data"),
+        Input("project-modal-selected-gang", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
+        Input("store-mode", "data"),
+        prevent_initial_call=True,
+    )
+    def _project_modal_trace_dropdown(
+        focus_data: dict[str, Any] | None,
+        selected_gang: str | None,
+        months,
+        quick_range,
+        gangs,
+        kv_values,
+        method_values,
+        mode_value,
+    ):
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return [], None
+        scope_meta = _build_project_scope_meta(
+            project_name,
+            mode_value or focus_data.get("mode"),
+            months,
+            quick_range,
+            gangs,
+            kv_values,
+            method_values,
+        )
+        base_scope = _scope_frame_from_store(scope_meta, "project")
+        if base_scope.empty or "gang_name" not in base_scope.columns:
+            return [], None
+        gangs_series = (
+            base_scope["gang_name"].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
+        )
+        gangs_series = sorted({g for g in gangs_series if g})
+        options = [{"label": g, "value": g} for g in gangs_series]
+        if not options:
+            return [], None
+        if selected_gang and selected_gang in gangs_series:
+            value = selected_gang
+        else:
+            value = gangs_series[0]
+        return options, value
+
+    @app.callback(
+        Output("project-modal-tbl-idle-intervals", "data"),
+        Output("project-modal-tbl-daily-prod", "data"),
+        Input("store-project-modal-click-meta", "data"),
+        Input("project-modal-trace-gang", "value"),
+        Input("store-project-tile-focus", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
+        Input("store-mode", "data"),
+        prevent_initial_call=True,
+    )
+    def _project_modal_trace_tables(
+        modal_meta,
+        dropdown_value,
+        focus_data: dict[str, Any] | None,
+        months,
+        quick_range,
+        gangs,
+        kv_values,
+        method_values,
+        mode_value,
+    ):
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            raise PreventUpdate
+        meta_source = modal_meta.get("source") if isinstance(modal_meta, dict) else None
+        meta_gang = modal_meta.get("gang") if isinstance(modal_meta, dict) else None
+        modal_sources = {
+            "project-modal-actual-vs-bench",
+            "project-modal-top5",
+            "project-modal-bottom5",
+        }
+        gang_focus = None
+        if meta_source in modal_sources and meta_gang:
+            gang_focus = meta_gang
+        if not gang_focus:
+            gang_focus = dropdown_value
+        if not gang_focus:
+            raise PreventUpdate
+        scope_meta = _build_project_scope_meta(
+            project_name,
+            mode_value or focus_data.get("mode"),
+            months,
+            quick_range,
+            gangs,
+            kv_values,
+            method_values,
+        )
+        idle_data, daily_data = _compute_trace_table_payload(scope_meta, gang_focus)
+        return idle_data, daily_data
+
+    @app.callback(
+        Output("project-modal-avp-list", "children"),
+        Output("project-modal-actual-vs-bench", "figure"),
+        Output("project-modal-top5", "figure"),
+        Output("project-modal-bottom5", "figure"),
+        Input("store-project-tile-focus", "data"),
+        Input("project-modal-topbot-metric", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
+        Input("store-mode", "data"),
+    )
+    def _update_project_modal_performance(
+        focus_data: dict[str, Any] | None,
+        topbot_metric: str | None,
+        months,
+        quick_range,
+        gangs,
+        kv_values,
+        method_values,
+        mode_value,
+    ):
+        empty_fig = go.Figure()
+        if not focus_data or not focus_data.get("project"):
+            return (
+                html.Div("Select a project tile to view gang performance.", className="text-muted"),
+                empty_fig,
+                empty_fig,
+                empty_fig,
+            )
+
+        project_name = focus_data.get("project")
+        eff_mode = _normalize_mode(mode_value or focus_data.get("mode"))
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+
+        scope_meta = _build_project_scope_meta(
+            project_name,
+            eff_mode,
+            months,
+            quick_range,
+            gangs,
+            kv_values,
+            method_values,
+        )
+
+        try:
+            (
+                *_kpi,
+                avp_children,
+                fig_loss,
+                fig_top5,
+                fig_bottom5,
+                _fig_project,
+            ) = _compute_dashboard_outputs(
+                scope_meta,
+                topbot_metric,
+                avp_namespace="project-modal-avp",
+            )
+        except PreventUpdate:
+            return (
+                html.Div("No data available for the selected project.", className="text-muted"),
+                empty_fig,
+                empty_fig,
+                empty_fig,
+            )
+
+        avp_children = avp_children or html.Div("No gangs available for this selection.", className="text-muted")
+        return avp_children, fig_loss, fig_top5, fig_bottom5
+
 
     @app.callback(
         Output("tbl-erections-completed", "columns"),
@@ -3703,6 +4144,135 @@ def register_callbacks(
         return columns, display_df.to_dict("records")
 
     @app.callback(
+        Output("project-modal-erections-search", "value"),
+        Input("project-modal-erections-search-reset", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _reset_modal_erections_search(n):
+        if not n:
+            raise PreventUpdate
+        return ""
+
+    @app.callback(
+        Output("project-modal-stringing-search", "value"),
+        Input("project-modal-stringing-search-reset", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _reset_modal_stringing_search(n):
+        if not n:
+            raise PreventUpdate
+        return ""
+
+    @app.callback(
+        Output("project-modal-erections-table", "data"),
+        Input("project-modal-erections-range", "start_date"),
+        Input("project-modal-erections-range", "end_date"),
+        Input("project-modal-erections-search", "value"),
+        Input("store-project-tile-focus", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+    )
+    def _update_modal_erections_table(
+        start_date,
+        end_date,
+        search_text,
+        focus_data: dict[str, Any] | None,
+        months,
+        quick_range,
+        gangs,
+    ):
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return []
+
+        range_start = _parse_completion_date(start_date) or _default_completion_date()
+        range_end = _parse_completion_date(end_date) or range_start
+        if range_start > range_end:
+            range_start, range_end = range_end, range_start
+
+        project_list = [project_name]
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        months_list = _normalize_str_list(_ensure_list(months))
+
+        frames, _, _ = _build_scope_frames(
+            "erection",
+            project_list=project_list,
+            gang_list=gang_list,
+            months_value=months_list,
+            quick_range=quick_range,
+            kv_values=[],
+            method_values=[],
+        )
+        scoped = frames.get("project_gang", pd.DataFrame()).copy()
+        export_df, display_df = _prepare_erections_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            responsibilities_provider=responsibilities_provider,
+            search_text=search_text,
+        )
+        return display_df.to_dict("records") if not display_df.empty else []
+
+    @app.callback(
+        Output("project-modal-stringing-table", "data"),
+        Input("project-modal-stringing-range", "start_date"),
+        Input("project-modal-stringing-range", "end_date"),
+        Input("project-modal-stringing-search", "value"),
+        Input("store-project-tile-focus", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
+    )
+    def _update_modal_stringing_table(
+        start_date,
+        end_date,
+        search_text,
+        focus_data: dict[str, Any] | None,
+        months,
+        quick_range,
+        gangs,
+        kv_values,
+        method_values,
+    ):
+        if not config.enable_stringing:
+            return []
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return []
+
+        range_start = _parse_completion_date(start_date) or _default_completion_date()
+        range_end = _parse_completion_date(end_date) or range_start
+        if range_start > range_end:
+            range_start, range_end = range_end, range_start
+
+        project_list = [project_name]
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        months_list = _normalize_str_list(_ensure_list(months))
+        kv_list = _ensure_list(kv_values)
+        method_list = _ensure_list(method_values)
+
+        frames, _, _ = _build_scope_frames(
+            "stringing",
+            project_list=project_list,
+            gang_list=gang_list,
+            months_value=months_list,
+            quick_range=quick_range,
+            kv_values=kv_list,
+            method_values=method_list,
+        )
+        scoped = frames.get("project_gang", pd.DataFrame()).copy()
+        export_df, display_df = _prepare_stringing_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            search_text=search_text,
+        )
+        return display_df.to_dict("records") if not display_df.empty else []
+
+    @app.callback(
         Output("erections-completion-range", "start_date"),
         Output("erections-completion-range", "end_date"),
         Output("erections-search", "value"),
@@ -3718,8 +4288,10 @@ def register_callbacks(
 
     @app.callback(
         Output("download-trace-xlsx", "data"),
+        Output("project-modal-download-trace", "data"),
         Input("btn-export-trace", "n_clicks"),
         Input("modal-btn-export-trace", "n_clicks"),
+        Input("project-modal-btn-export-trace", "n_clicks"),
         State("f-project", "value"),
         State("f-month", "value"),
         State("f-quick-range", "value"),
@@ -3730,11 +4302,17 @@ def register_callbacks(
         State("erections-completion-range", "end_date"),
         State("erections-search", "value"),
         State("store-mode", "data"),
+        State("store-project-tile-focus", "data"),
+        State("project-modal-trace-gang", "value"),
+        State("project-modal-erections-range", "start_date"),
+        State("project-modal-erections-range", "end_date"),
+        State("project-modal-erections-search", "value"),
         prevent_initial_call=True,
     )
     def export_trace(
         main_clicks: int | None,
         modal_clicks: int | None,
+        project_modal_clicks: int | None,
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
         quick_range: str | None,
@@ -3745,7 +4323,69 @@ def register_callbacks(
         erections_end: str | None,
         erections_search: str | None,
         mode_value: str | None,
+        focus_data: dict[str, Any] | None,
+        project_modal_trace_gang: str | None,
+        modal_start: str | None,
+        modal_end: str | None,
+        modal_search: str | None,
     ):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "project-modal-btn-export-trace":
+            project_name = (focus_data or {}).get("project")
+            if not project_name:
+                raise PreventUpdate
+            project_list = [project_name]
+            month_list = _ensure_list(months)
+            gang_list = _ensure_list(gangs)
+            df_day = data_selector.select(mode_value)
+            months_ts = resolve_months(month_list, quick_range)
+            scoped = apply_filters(df_day, project_list, months_ts, gang_list)
+            gang_for_sheet = project_modal_trace_gang or selected_gang
+            benchmark_value = (
+                BENCHMARK_KM_PER_MONTH
+                if _normalize_mode(mode_value) == "stringing"
+                else BENCHMARK_MT_PER_DAY
+            )
+            project_info_df = project_info_provider() if project_info_provider else None
+
+            range_start = _parse_completion_date(modal_start) or _default_completion_date()
+            range_end = _parse_completion_date(modal_end) or range_start
+            if range_start > range_end:
+                range_start, range_end = range_end, range_start
+            erections_export_df, _ = _prepare_erections_completed(
+                scoped,
+                range_start=range_start,
+                range_end=range_end,
+                responsibilities_provider=responsibilities_provider,
+                search_text=modal_search,
+            )
+            erections_context = {
+                "range_start": range_start,
+                "range_end": range_end,
+                "search_text": (modal_search or ""),
+            }
+
+            def _writer(buffer: BytesIO) -> None:
+                buffer.write(
+                    make_trace_workbook_bytes(
+                        scoped,
+                        months_ts,
+                        project_list,
+                        gang_list,
+                        benchmark_value,
+                        gang_for_sheet=gang_for_sheet,
+                        config=config,
+                        project_info=project_info_df,
+                        erections_completed=erections_export_df,
+                        erections_context=erections_context,
+                    )
+                )
+
+            return dash.no_update, send_bytes(_writer, "Trace_Calcs.xlsx")
+
         if not (main_clicks or modal_clicks):
             raise PreventUpdate
 
@@ -3795,7 +4435,7 @@ def register_callbacks(
                 )
             )
 
-        return send_bytes(_writer, "Trace_Calcs.xlsx")
+        return send_bytes(_writer, "Trace_Calcs.xlsx"), dash.no_update
     @app.callback(
         Output("trace-gang", "options"),
         Output("trace-gang", "value"),
@@ -3868,6 +4508,103 @@ def register_callbacks(
         filtered = [component for key, component in pill_components if key == focus]
         return filtered or [component for _, component in pill_components]
 
+
+    def _build_tile_metric_rows(
+        *,
+        mode: str,
+        focus_metric: str | None,
+        prod_current_value: float | None,
+        prod_overall_value: float | None,
+        total_current_value: float | None,
+        total_planned_value: float | None,
+        gangs_value: int | None = None,
+        loss_value: float | None = None,
+        tse_value: int | None = None,
+    ) -> list[html.Div]:
+        """
+        Build the dynamic KPI rows rendered inside each project tile.
+
+        When *focus_metric* is provided (i.e., a summary pill opened the modal),
+        the tile shows only the requested metric. Otherwise the default trio of
+        production + totals rows is displayed.
+        """
+
+        is_stringing = mode == "stringing"
+        prod_unit = "KM/day" if is_stringing else "MT/day"
+        total_unit = "KM" if is_stringing else "Towers"
+        loss_unit = "KM" if is_stringing else "MT"
+
+        def _fmt_prod(value: float | None) -> str:
+            if value is None or pd.isna(value):
+                return "\u2014"
+            return f"{float(value):.2f} {prod_unit}"
+
+        def _fmt_prod_compact(value: float | None) -> str:
+            if value is None or pd.isna(value):
+                return "\u2014"
+            return f"{float(value):.2f}"
+
+        def _ensure_number(value: float | int | None, *, default: float = 0.0) -> float:
+            if value is None or pd.isna(value):
+                return default
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        focus = (focus_metric or "").strip().lower()
+        if focus not in _PCH_PILL_LABELS or focus == "projects":
+            focus = None
+
+        total_current = _ensure_number(total_current_value)
+        total_planned = _ensure_number(total_planned_value)
+        balance_value = max(total_planned - total_current, 0.0)
+
+        if is_stringing:
+            delivered_label = f"{total_current:.1f} {total_unit}"
+            planned_label = f"{total_planned:.1f} {total_unit}"
+            balance_label = f"{balance_value:.1f} {total_unit}"
+        else:
+            delivered_label = f"{int(round(total_current))} {total_unit}"
+            planned_label = f"{int(round(total_planned))} {total_unit}"
+            balance_label = f"{int(round(balance_value))} {total_unit}"
+
+        totals_display = f"{delivered_label} delivered / {planned_label} planned ({balance_label} balance)"
+        totals_focus_display = f"{planned_label} / {delivered_label} / {balance_label}"
+
+        def _row(label: str, value: str) -> html.Div:
+            return html.Div(
+                [
+                    html.Span(f"{label} : ", className="me-2"),
+                    dbc.Badge(value, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
+                ],
+                className="mb-2",
+            )
+
+        if focus == "totals":
+            return [_row("Total / Done / Balance", totals_focus_display)]
+        if focus == "gangs":
+            value = "\u2014" if gangs_value is None else f"{int(gangs_value):,}"
+            return [_row("Gangs", value)]
+        if focus == "productivity":
+            prod_pair = f"{_fmt_prod_compact(prod_current_value)} / {_fmt_prod_compact(prod_overall_value)} {prod_unit}"
+            return [_row("Productivity / Historical Avg", prod_pair)]
+        if focus == "loss":
+            if loss_value is None:
+                value = "\u2014"
+            else:
+                value = f"{float(loss_value):.1f} {loss_unit}"
+            return [_row("Lost Units", value)]
+        if focus == "tse" and is_stringing:
+            value = "\u2014" if tse_value is None else f"{int(tse_value):,}"
+            return [_row("No. of TSE", value)]
+
+        return [
+            _row("Prod This Month", _fmt_prod(prod_current_value)),
+            _row("Historical Avg", _fmt_prod(prod_overall_value)),
+            _row(f"{total_unit} This Month", totals_display),
+        ]
+
     @app.callback(
         Output("kpi-pch-accordion", "children"),
         Output("kpi-pch-accordion", "active_item"),
@@ -3875,12 +4612,16 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("store-mode", "data"),
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
     )
     def _populate_kpi_pch(
         projects,
         months,
         quick_range,
         mode_value: str | None,
+        kv_filter,
+        method_filter,
         *,
         use_modal_ids: bool = False,
         pill_focus: str | None = None,
@@ -3890,6 +4631,12 @@ def register_callbacks(
             import re as _re_slug
         except Exception:  # pragma: no cover - regex should be available, but keep fallback
             _re_slug = None
+
+        focus_metric = None
+        if pill_focus:
+            focus_raw = str(pill_focus).strip().lower()
+            if focus_raw in _PCH_PILL_LABELS and focus_raw != "projects":
+                focus_metric = focus_raw
 
         def _slugify_pch(value: Any) -> str:
             text = str(value or "").strip().lower()
@@ -3911,6 +4658,194 @@ def register_callbacks(
                     className="pch-section mb-2",
                 )
             ]
+
+        def _detect_project_column(frame: pd.DataFrame | None) -> str | None:
+            """
+            Return the first available project column in *frame* that can be used
+            to associate gang rows back to a project label.
+            """
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return None
+            for candidate in ("project_name", "project", "Project Name", "project_name_display"):
+                if candidate in frame.columns:
+                    return candidate
+            return None
+
+        def _compact_project_token(value: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (value or "").strip().lower())
+
+        def _filter_scope_by_projects(
+            scope: pd.DataFrame | None, rows: list[dict[str, Any]]
+        ) -> pd.DataFrame:
+            if not isinstance(scope, pd.DataFrame) or scope.empty or not rows:
+                return pd.DataFrame()
+            match_norm: set[str] = set()
+            match_compact: set[str] = set()
+            match_codes: set[str] = set()
+            for entry in rows:
+                title = str(entry.get("project_name", "")).strip()
+                base = title.split(" : ", 1)[1] if " : " in title else title
+                norm = _normalize_lower(base)
+                if norm:
+                    match_norm.add(norm)
+                compact = _compact_project_token(base)
+                if compact:
+                    match_compact.add(compact)
+                code = str(entry.get("project_code", "")).strip()
+                if code and code.lower() != "nan":
+                    compact_code = _compact_project_token(code)
+                    if compact_code:
+                        match_codes.add(compact_code)
+            if not (match_norm or match_compact or match_codes):
+                return pd.DataFrame()
+
+            mask = pd.Series(False, index=scope.index)
+
+            def _apply_norm(column: str) -> None:
+                nonlocal mask
+                if column in scope.columns and match_norm:
+                    mask |= scope[column].astype(str).map(_normalize_lower).isin(match_norm)
+
+            def _apply_compact(column: str) -> None:
+                nonlocal mask
+                if column in scope.columns and match_compact:
+                    mask |= scope[column].astype(str).map(_compact_project_token).isin(match_compact)
+
+            for column in ("project_name", "project", "project_name_display"):
+                _apply_norm(column)
+            for column in ("project_name", "project", "project_name_display"):
+                _apply_compact(column)
+            if match_codes and "project_code" in scope.columns:
+                mask |= scope["project_code"].astype(str).map(_compact_project_token).isin(match_codes)
+
+            if not mask.any():
+                return scope.iloc[0:0].copy()
+            return scope.loc[mask].copy()
+
+        def _project_scope_for_row(
+            row: dict[str, Any],
+            *,
+            primary_scope: pd.DataFrame | None,
+            fallback_scope: pd.DataFrame | None,
+        ) -> pd.DataFrame:
+            subset = _filter_scope_by_projects(primary_scope, [row])
+            if subset.empty:
+                subset = _filter_scope_by_projects(fallback_scope, [row])
+            return subset
+
+        def _count_gangs(frame: pd.DataFrame | None) -> int | None:
+            if not isinstance(frame, pd.DataFrame) or frame.empty or "gang_name" not in frame.columns:
+                return None
+            series = (
+                frame["gang_name"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            series = series[series != ""]
+            if series.empty:
+                return 0
+            return int(series.nunique())
+
+        def _count_tse(frame: pd.DataFrame | None) -> int | None:
+            if not isinstance(frame, pd.DataFrame) or frame.empty or "method" not in frame.columns:
+                return None
+            mask = frame["method"].astype(str).str.strip().str.lower() == "tse"
+            if not mask.any():
+                return 0
+            if "gang_name" in frame.columns:
+                gangs = (
+                    frame.loc[mask, "gang_name"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                )
+                gangs = gangs[gangs != ""]
+                if not gangs.empty:
+                    return int(gangs.nunique())
+            return int(mask.sum())
+
+        def _prepare_scope_for_loss(frame: pd.DataFrame | None) -> pd.DataFrame:
+            if not isinstance(frame, pd.DataFrame):
+                return pd.DataFrame()
+            if frame.empty:
+                return frame
+            if "project_name" not in frame.columns:
+                for alt in ("project", "project_name_display"):
+                    if alt in frame.columns:
+                        work = frame.copy()
+                        work["project_name"] = work[alt].astype(str)
+                        return work
+            return frame
+
+        def _compute_project_loss_value(frame: pd.DataFrame | None, *, mode: str) -> float | None:
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return None
+            metric_col = "daily_km" if mode == "stringing" else "daily_prod_mt"
+            if metric_col not in frame.columns:
+                return None
+            work = _prepare_scope_for_loss(frame)
+            if work.empty or "project_name" not in work.columns or "gang_name" not in work.columns:
+                return None
+            work = work.dropna(subset=["gang_name"]).copy()
+            work["gang_name"] = work["gang_name"].astype(str).str.strip()
+            work = work[work["gang_name"] != ""]
+            if work.empty:
+                return None
+            try:
+                if mode == "stringing":
+                    overall_map, monthly_map = compute_project_baseline_maps_for(work, metric_col)
+                else:
+                    overall_map, monthly_map = compute_project_baseline_maps(work)
+            except Exception:
+                overall_map, monthly_map = {}, {}
+            proj_col = _detect_project_column(work) or ("project_name" if "project_name" in work.columns else None)
+            if proj_col and proj_col not in work.columns:
+                proj_col = "project_name"
+            if proj_col:
+                gang_project_map = (
+                    work[["gang_name", proj_col]]
+                    .dropna(subset=["gang_name"])
+                    .astype(str)
+                    .rename(columns={proj_col: "project_name"})
+                    .drop_duplicates(subset=["gang_name"], keep="last")
+                    .set_index("gang_name")["project_name"]
+                    .to_dict()
+                )
+            else:
+                gang_project_map = {}
+            default_project = str(work["project_name"].iloc[0]) if "project_name" in work.columns and not work.empty else None
+            total_loss = 0.0
+            for gang, gdf in work.groupby("gang_name"):
+                if gdf.empty:
+                    continue
+                project_label = gang_project_map.get(str(gang), default_project)
+                baseline_value = overall_map.get(project_label)
+                monthly_lookup = monthly_map.get(project_label, {})
+                try:
+                    if mode == "stringing":
+                        _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss_for_column(
+                            gdf,
+                            metric_column=metric_col,
+                            loss_max_gap_days=config.loss_max_gap_days,
+                            baseline_per_day=baseline_value,
+                            baseline_by_month=monthly_lookup,
+                        )
+                    else:
+                        _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss(
+                            gdf,
+                            loss_max_gap_days=config.loss_max_gap_days,
+                            baseline_mt_per_day=baseline_value,
+                            baseline_by_month=monthly_lookup,
+                        )
+                except Exception:
+                    continue
+                if pd.notna(loss_val):
+                    total_loss += float(loss_val)
+            return total_loss
+
+        kv_list = _ensure_list(kv_filter)
+        method_list = _normalize_str_list(method_filter, lower=True)
         pch_sections: list[dbc.AccordionItem] = []
         # Erection mode (existing flow)
         if mode == "stringing":
@@ -3932,6 +4867,19 @@ def register_callbacks(
             # Delivered KM from per-day stringing dataset
             df_day = data_selector.select("stringing")
             scoped = apply_filters(df_day, project_list, months_ts, [])
+            try:
+                scope_frames, _, _ = _build_scope_frames(
+                    "stringing",
+                    project_list=project_list,
+                    gang_list=[],
+                    months_value=month_list,
+                    quick_range=quick_range,
+                    kv_values=kv_list,
+                    method_values=method_list,
+                )
+                scope_full = scope_frames.get("full", pd.DataFrame()).copy()
+            except Exception:
+                scope_full = pd.DataFrame()
             delivered_km_current_series = pd.Series(dtype=float)
             if isinstance(scoped, pd.DataFrame) and not scoped.empty:
                 proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
@@ -4094,9 +5042,21 @@ def register_callbacks(
                     raw_pch = proj_info_pch.get(proj, "") or proj_info_pch_norm.get(_normalize_lower(proj), "")
                 # Use normalized PCH if known; otherwise keep the original as-is (no 'Unassigned')
                 pch_label = _normalize_pch(raw_pch) or str(raw_pch or "").strip()
+                try:
+                    proj_code = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
+                        meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
+                    )) if isinstance(meta, pd.DataFrame) else ""
+                except Exception:
+                    proj_code = ""
+                if isinstance(meta, pd.DataFrame) and not meta.empty:
+                    proj_display_series = meta.get("project_name_display", meta.get("project_name", pd.Series([proj], index=meta.index)))
+                    proj_display_name = str(proj_display_series.iloc[0]) if not proj_display_series.empty else str(proj)
+                else:
+                    proj_display_name = str(proj)
+                proj_display = f"{proj_code} : {proj_display_name}".strip(" :") if proj_code else proj_display_name
                 rec = {
-                    "project_name": proj,
-                    "project_code": (meta.get("project_code", pd.Series([proj])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else proj),
+                    "project_name": proj_display,
+                    "project_code": proj_code or proj,
                     "regional_mgr": (meta.get("regional_mgr", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "regional_mgr" in meta.columns) else ""),
                     "project_mgr": (meta.get("project_mgr", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_mgr" in meta.columns) else ""),
                     "planning_eng": (meta.get("planning_eng", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "planning_eng" in meta.columns) else ""),
@@ -4225,6 +5185,8 @@ def register_callbacks(
                 prod_overall_values: list[float] = []
                 delivered_month_total = 0.0
                 planned_month_total = 0.0
+                gangs_total = 0
+                lost_units_total = 0.0
 
                 def _project_lookup_keys(row: dict[str, Any]) -> tuple[list[str], list[str]]:
                     display = str(row.get("project_name", "")).strip()
@@ -4275,21 +5237,96 @@ def register_callbacks(
                     if planned_month_val is not None:
                         planned_month_total += float(planned_month_val)
 
+                # Derive Gangs and Lost Units per PCH (stringing)
+                try:
+                    unit_short = "KM"
+                    metric_col = "daily_km"
+                    sub = _filter_scope_by_projects(scope_full, rows)
+                    if sub.empty:
+                        sub = _filter_scope_by_projects(scoped, rows)
+                    if not sub.empty:
+                        if "gang_name" in sub.columns:
+                            gangs_total = (
+                                sub["gang_name"].dropna().astype(str).str.strip().replace("", pd.NA).dropna().nunique()
+                            )
+                        try:
+                            overall_map, monthly_map = compute_project_baseline_maps_for(sub, metric_col)
+                        except Exception:
+                            overall_map, monthly_map = {}, {}
+                        proj_col_for_gang = _detect_project_column(sub)
+                        if proj_col_for_gang:
+                            gang_project_map = (
+                                sub[["gang_name", proj_col_for_gang]]
+                                .dropna()
+                                .astype(str)
+                                .rename(columns={proj_col_for_gang: "project_name"})
+                                .drop_duplicates(subset=["gang_name", "project_name"], keep="last")
+                                .set_index("gang_name")["project_name"]
+                                .to_dict()
+                            )
+                        else:
+                            gang_project_map = {}
+                        for gang, gdf in sub.groupby("gang_name"):
+                            if gdf.empty:
+                                continue
+                            proj_for_gang = gang_project_map.get(str(gang))
+                            ov = overall_map.get(proj_for_gang)
+                            mm = monthly_map.get(proj_for_gang, {})
+                            try:
+                                _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss_for_column(
+                                    gdf,
+                                    metric_column=metric_col,
+                                    loss_max_gap_days=config.loss_max_gap_days,
+                                    baseline_per_day=ov,
+                                    baseline_by_month=mm,
+                                )
+                                if pd.notna(loss_val):
+                                    lost_units_total += float(loss_val)
+                            except Exception:
+                                pass
+                except Exception:
+                    gangs_total = gangs_total or 0
+                    lost_units_total = lost_units_total or 0.0
+
                 prod_current_avg = float(sum(prod_current_values) / len(prod_current_values)) if prod_current_values else None
                 prod_overall_avg = float(sum(prod_overall_values) / len(prod_overall_values)) if prod_overall_values else None
 
                 fmt_prod_current = f"{prod_current_avg:.2f}" if prod_current_avg is not None else "\u2014"
                 fmt_prod_overall = f"{prod_overall_avg:.2f}" if prod_overall_avg is not None else "\u2014"
+               
                 projects_label = f"Projects: {', '.join(project_codes)}" if project_codes else f"Projects: {project_count}"
                 km_delivered_label = round(delivered_month_total, 1)
                 km_planned_label = round(planned_month_total, 1)
 
                 km_balance_label = round(max(km_planned_label - km_delivered_label, 0.0), 1)
                 pill_components = [
-                    ("projects", html.Span(projects_label, className="pch-pill pch-pill-projects mb-1")),
-                    ("productivity", html.Span(f"Productivity / Historical Avg: {fmt_prod_current} / {fmt_prod_overall} KM/day", className="pch-pill pch-pill-prod-month mb-1")),
-                    ("totals", html.Span(f"Total / Done / Balance: {km_planned_label:.1f} / {km_delivered_label:.1f} / {km_balance_label:.1f} KM", className="pch-pill pch-pill-towers mb-1")),
-                ]
+                                    ("projects", dbc.Button(
+                                        projects_label,
+                                        id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "projects"},
+                                        className="pch-pill pch-pill-projects mb-1", color="link"
+                                    )),
+                                    ("productivity", dbc.Button(
+                                        f"Productivity (Month/Overall): {fmt_prod_current} / {fmt_prod_overall} KM/day",
+                                        id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "productivity"},
+                                        className="pch-pill pch-pill-prod-month mb-1", color="link"
+                                    )),
+                                    ("totals", dbc.Button(
+                                        f"Total / Done / Balance: {km_planned_label:.1f} / {km_delivered_label:.1f} / {km_balance_label:.1f} KM",
+                                        id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "totals"},
+                                        className="pch-pill pch-pill-towers mb-1", color="link"
+                                    )),
+                                    ("gangs", dbc.Button(
+                                        f"Gangs: {int(gangs_total):,}",
+                                        id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "gangs"},
+                                        className="pch-pill pch-pill-gangs mb-1", color="link"
+                                    )),
+                                    ("loss", dbc.Button(
+                                        f"Lost Units: {lost_units_total:.1f} KM",
+                                        id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "loss"},
+                                        className="pch-pill pch-pill-loss mb-1", color="link"
+                                    )),
+                                ]
+
                 title_component = html.Div(
                     [
                         html.Span(str(pch or "Unassigned"), className="fw-semibold"),
@@ -4304,14 +5341,26 @@ def register_callbacks(
                 tile_cols = []
                 for r in sorted(rows, key=lambda x: str(x["project_name"])):
                     proj_name = str(r["project_name"]).strip()
-                    # Build robust compact code for modal open
+                    display_code = str(r.get("project_code", "")).strip()
+
+                    def _norm_cmp(s: str) -> str:
+                        return re.sub(r"\s+", "", s or "").lower()
+
+                    if display_code and _norm_cmp(display_code) != _norm_cmp(proj_name):
+                        proj_title = f"{display_code} : {proj_name}"
+                    else:
+                        proj_title = proj_name
+
                     try:
                         import re as _re
+
                         def _compact_code_text(s: str) -> str:
                             return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
                     except Exception:
+
                         def _compact_code_text(s: str) -> str:
                             return (s or "").strip().lower().replace(" ", "")
+
                     raw_code = r.get("project_code") or r.get("project_key") or proj_name
                     proj_code = _compact_code_text(str(raw_code))
                     current_month_value = pd.Timestamp.today().strftime("%Y-%m")
@@ -4323,20 +5372,94 @@ def register_callbacks(
                     ])
                     if use_modal_ids:
                         current_key_payload = f"{current_key_payload}||__modal__"
-                    tile_body = html.Div([
-                        html.Div(html.Strong(proj_name), className="mb-2"),
+
+                    tile_summary_children = [
+                        html.Div(html.Strong(proj_title), className="mb-2"),
                         html.Div([
                             html.Span("Regional Manager : ", className="text-muted me-1"),
-                            dbc.Badge(r.get("regional_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
+                            dbc.Badge(r.get("regional_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold"),
                         ], className="mb-1"),
                         html.Div([
                             html.Span("Project Manager : ", className="text-muted me-1"),
-                            dbc.Badge(r.get("project_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold")
+                            dbc.Badge(r.get("project_mgr", "-") or "-", color="light", text_color="dark", className="fw-semibold"),
                         ], className="mb-2"),
-                        html.Div([
-                            html.Span("Length Stringed : ", className="me-2"),
-                            dbc.Badge(f"{r['delivered_mt']:.1f} / {r['planned_mt']:.1f} KM", color="dark", className="me-2", style={"fontSize": "1.05rem"}),
-                        ], className="mb-2"),
+                    ]
+
+                    project_scope_cache: pd.DataFrame | None = None
+
+                    def _lazy_scope() -> pd.DataFrame:
+                        nonlocal project_scope_cache
+                        if project_scope_cache is None:
+                            project_scope_cache = _project_scope_for_row(
+                                r,
+                                primary_scope=scope_full,
+                                fallback_scope=scoped,
+                            )
+                        return project_scope_cache
+
+                    gangs_metric = None
+                    loss_metric = None
+                    tse_metric = None
+                    if focus_metric in {"gangs", "loss", "tse"}:
+                        scope_subset = _lazy_scope()
+                        if focus_metric == "gangs":
+                            gangs_metric = _count_gangs(scope_subset)
+                        elif focus_metric == "loss":
+                            loss_metric = _compute_project_loss_value(scope_subset, mode="stringing")
+                        elif focus_metric == "tse":
+                            tse_metric = _count_tse(scope_subset)
+
+                    norm_keys, compact_keys = _project_lookup_keys(r)
+                    prod_current_value = _lookup_with_keys(
+                        norm_keys, compact_keys, prod_current_norm_map, prod_current_compact_map
+                    )
+                    prod_overall_value = _lookup_with_keys(
+                        norm_keys, compact_keys, prod_overall_norm_map, prod_overall_compact_map
+                    )
+                    delivered_current_value = _lookup_with_keys(
+                        norm_keys, compact_keys, delivered_current_norm_map, delivered_current_compact_map
+                    )
+                    planned_current_value = _lookup_with_keys(
+                        norm_keys, compact_keys, planned_current_norm_map, planned_current_compact_map
+                    )
+
+                    tile_summary_children.extend(
+                        _build_tile_metric_rows(
+                            mode="stringing",
+                            focus_metric=focus_metric,
+                            prod_current_value=prod_current_value,
+                            prod_overall_value=prod_overall_value,
+                            total_current_value=(
+                                delivered_current_value if delivered_current_value is not None else r.get("delivered_mt", 0.0)
+                            ),
+                            total_planned_value=(
+                                planned_current_value if planned_current_value is not None else r.get("planned_mt", 0.0)
+                            ),
+                            gangs_value=gangs_metric,
+                            loss_value=loss_metric,
+                            tse_value=tse_metric,
+                        )
+                    )
+
+                    tile_main = html.Div(
+                        tile_summary_children,
+                        id={
+                            "type": "project-tile-trigger",
+                            "mode": "stringing",
+                            "project": proj_name,
+                            "code": proj_code or proj_name,
+                            "display": proj_title,
+                            "pch": str(pch),
+                        },
+                        n_clicks=0,
+                        role="button",
+                        tabIndex=0,
+                        className="project-tile-summary",
+                    )
+
+                    tile_body_children = [tile_main]
+
+                    tile_body_children.append(
                         html.Div([
                             html.Span("View Responsibilities : ", className="me-2"),
                             # For stringing, responsibilities still open the erection responsibilities modal filtered by project
@@ -4347,11 +5470,13 @@ def register_callbacks(
                                 className="p-0 me-1",
                             ),
                         ], className="mb-2"),
-                    ])
+                    )
+
+                    tile_body = html.Div(tile_body_children)
                     tile_cols.append(
                         dbc.Col(
                             dbc.Card(dbc.CardBody(tile_body), className="h-100 shadow-sm"),
-                            xs=12, sm=12, md=6, lg=4, className="mb-3"
+                            xs=12, sm=12, md=6, lg=4, className="mb-3",
                         )
                     )
                 body_children = (
@@ -4387,6 +5512,19 @@ def register_callbacks(
 
         df_day = data_selector.select("erection")
         scoped = apply_filters(df_day, project_list, months_ts, [])
+        try:
+            scope_frames, _, _ = _build_scope_frames(
+                "erection",
+                project_list=project_list,
+                gang_list=[],
+                months_value=month_list,
+                quick_range=quick_range,
+                kv_values=None,
+                method_values=None,
+            )
+            scope_full = scope_frames.get("full", pd.DataFrame()).copy()
+        except Exception:
+            scope_full = pd.DataFrame()
         export_df, _ = _prepare_erections_completed(
             scoped,
             range_start=range_start,
@@ -4508,6 +5646,14 @@ def register_callbacks(
             info_df = project_info_provider() if callable(project_info_provider) else None
         except Exception:
             info_df = None
+        # Ensure PCH normalizer default exists before we start building lookup maps.
+        if "_normalize_pch" not in locals():
+            def _normalize_pch(v):
+                return str(v or "").strip()
+            _PCH_ORDER = ()
+
+        info_name_to_pch: dict[str, str] = {}
+        info_code_to_pch: dict[str, str] = {}
         if isinstance(info_df, pd.DataFrame) and not info_df.empty:
             info = info_df.copy()
             info["project_name_display"] = info.get("Project Name", info.get("project_name", "")).astype(str)
@@ -4540,8 +5686,24 @@ def register_callbacks(
                                 info_key_map[key] = idx
             except Exception:
                 info_key_map = {}
+
+            if pch_col in info.columns:
+                info_name_to_pch = {
+                    _normalize_lower(str(row.get("project_name_display", ""))): _normalize_pch(row.get(pch_col, ""))
+                    for _, row in info.iterrows()
+                    if str(row.get("project_name_display", "")).strip()
+                }
+                if "project_code" in info.columns:
+                    try:
+                        info_code_to_pch = {
+                            re.sub(r"[^a-z0-9]", "", str(row.get("project_code", "")).strip().lower()): _normalize_pch(row.get(pch_col, ""))
+                            for _, row in info.iterrows()
+                            if str(row.get("project_code", "")).strip()
+                        }
+                    except Exception:
+                        info_code_to_pch = {}
         else:
-            info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])            
+            info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])
             info_key_map = {}
 
         # Build hierarchy: PCH -> Projects -> Locations
@@ -5010,13 +6172,88 @@ def register_callbacks(
             )
             towers_delivered_label = int(towers_delivered_total)
             towers_planned_label = int(towers_planned_total)
+            # Derive gangs and lost units per PCH (erection)
+            gangs_total = 0
+            lost_units_total = 0.0
+            try:
+                unit_short = "MT"
+                metric_col = "daily_prod_mt"
+                sub = _filter_scope_by_projects(scope_full, rows)
+                if sub.empty:
+                    sub = _filter_scope_by_projects(scoped, rows)
+
+                if not sub.empty:
+                    if "gang_name" in sub.columns:
+                        gangs_total = (
+                            sub["gang_name"].dropna().astype(str).str.strip().replace("", pd.NA).dropna().nunique()
+                        )
+                    try:
+                        overall_map, monthly_map = compute_project_baseline_maps(sub)
+                    except Exception:
+                        overall_map, monthly_map = {}, {}
+                    proj_col_for_gang = _detect_project_column(sub)
+                    if proj_col_for_gang:
+                        gang_project_map = (
+                            sub[["gang_name", proj_col_for_gang]]
+                            .dropna()
+                            .astype(str)
+                            .rename(columns={proj_col_for_gang: "project_name"})
+                            .drop_duplicates(subset=["gang_name", "project_name"], keep="last")
+                            .set_index("gang_name")["project_name"]
+                            .to_dict()
+                        )
+                    else:
+                        gang_project_map = {}
+                    for gang, gdf in sub.groupby("gang_name"):
+                        if gdf.empty:
+                            continue
+                        proj_for_gang = gang_project_map.get(str(gang))
+                        ov = overall_map.get(proj_for_gang)
+                        mm = monthly_map.get(proj_for_gang, {})
+                        try:
+                            _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss(
+                                gdf,
+                                loss_max_gap_days=config.loss_max_gap_days,
+                                baseline_mt_per_day=ov,
+                                baseline_by_month=mm,
+                            )
+                            if pd.notna(loss_val):
+                                lost_units_total += float(loss_val)
+                        except Exception:
+                            pass
+            except Exception:
+                gangs_total = gangs_total or 0
+                lost_units_total = lost_units_total or 0.0
 
             towers_balance_label = max(towers_planned_label - towers_delivered_label, 0)
             pill_components = [
-                ("projects", html.Span(projects_label, className="pch-pill pch-pill-projects me-2 mb-1")),
-                ("productivity", html.Span(f"Productivity / Historical Avg: {fmt_prod_current} / {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-month me-2 mb-1")),
-                ("totals", html.Span(f"Total / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}", className="pch-pill pch-pill-towers me-2 mb-1")),
-            ]
+                                ("projects", dbc.Button(
+                                    projects_label,
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "projects"},
+                                    className="pch-pill pch-pill-projects me-2 mb-1", color="link"
+                                )),
+                                ("productivity", dbc.Button(
+                                    f"Productivity (Month/Overall): {fmt_prod_current} / {fmt_prod_history} MT/day",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "productivity"},
+                                    className="pch-pill pch-pill-prod-month me-2 mb-1", color="link"
+                                )),
+                                ("totals", dbc.Button(
+                                    f"Total / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "totals"},
+                                    className="pch-pill pch-pill-towers me-2 mb-1", color="link"
+                                )),
+                                ("gangs", dbc.Button(
+                                    f"Gangs: {int(gangs_total):,}",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "gangs"},
+                                    className="pch-pill pch-pill-prod-overall me-2 mb-1", color="link", n_clicks=0, 
+                                )),
+                                ("loss", dbc.Button(
+                                    f"Lost Units: {lost_units_total:.1f} MT",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "loss"},
+                                    className="pch-pill pch-pill-loss me-2 mb-1", color="link", n_clicks=0, 
+                                )),
+                            ]
+
             header_pills = _filter_pch_header_pills(pill_components, pill_focus)
 
             header = dbc.Row(
@@ -5197,7 +6434,7 @@ def register_callbacks(
                         return (s or "").strip().lower().replace(" ", "")
                 raw_code = r.get("project_code") or r.get("project_key") or proj_name
                 proj_code = _compact_code_text(str(raw_code))
-                tile_body_children = [
+                tile_summary_children = [
                     html.Div(html.Strong(proj_name), className="mb-2"),
                     html.Div([
                         html.Span("Regional Manager : ", className="text-muted me-1"),
@@ -5283,50 +6520,56 @@ def register_callbacks(
                     norm_keys, compact_keys, towers_planned_norm_map, towers_planned_compact_map
                 )
 
-                prod_current_display = (
-                    f"{float(prod_current_value):.2f} MT/day"
-                    if prod_current_value is not None and pd.notna(prod_current_value)
-                    else "\u2014"
+                project_scope_cache: pd.DataFrame | None = None
+
+                def _lazy_scope() -> pd.DataFrame:
+                    nonlocal project_scope_cache
+                    if project_scope_cache is None:
+                        project_scope_cache = _project_scope_for_row(
+                            r,
+                            primary_scope=scope_full,
+                            fallback_scope=scoped,
+                        )
+                    return project_scope_cache
+
+                gangs_metric = None
+                loss_metric = None
+                if focus_metric in {"gangs", "loss"}:
+                    scope_subset = _lazy_scope()
+                    if focus_metric == "gangs":
+                        gangs_metric = _count_gangs(scope_subset)
+                    elif focus_metric == "loss":
+                        loss_metric = _compute_project_loss_value(scope_subset, mode="erection")
+
+                tile_summary_children.extend(
+                    _build_tile_metric_rows(
+                        mode="erection",
+                        focus_metric=focus_metric,
+                        prod_current_value=prod_current_value,
+                        prod_overall_value=prod_overall_value,
+                        total_current_value=towers_current_value,
+                        total_planned_value=towers_planned_value,
+                        gangs_value=gangs_metric,
+                        loss_value=loss_metric,
+                    )
                 )
-                prod_overall_display = (
-                    f"{float(prod_overall_value):.2f} MT/day"
-                    if prod_overall_value is not None and pd.notna(prod_overall_value)
-                    else "\u2014"
-                )
-                has_tower_data = (
-                    (towers_current_value is not None and pd.notna(towers_current_value))
-                    or (towers_planned_value is not None and pd.notna(towers_planned_value))
-                )
-                towers_current_display = (
-                    int(towers_current_value)
-                    if towers_current_value is not None and pd.notna(towers_current_value)
-                    else 0
-                )
-                towers_planned_display = (
-                    int(towers_planned_value)
-                    if towers_planned_value is not None and pd.notna(towers_planned_value)
-                    else 0
-                )
-                towers_summary_display = (
-                    f"{towers_current_display} delivered / {towers_planned_display} planned"
-                    if has_tower_data
-                    else "\u2014"
+                tile_main = html.Div(
+                    tile_summary_children,
+                    id={
+                        "type": "project-tile-trigger",
+                        "mode": "erection",
+                        "project": proj_name,
+                        "code": proj_code or proj_name,
+                        "display": proj_name,
+                        "pch": str(pch),
+                    },
+                    n_clicks=0,
+                    role="button",
+                    tabIndex=0,
+                    className="project-tile-summary",
                 )
 
-                tile_body_children.extend([
-                    html.Div([
-                        html.Span("Prod This Month : ", className="me-2"),
-                        dbc.Badge(prod_current_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
-                    ], className="mb-2"),
-                    html.Div([
-                        html.Span("Historical Avg : ", className="me-2"),
-                        dbc.Badge(prod_overall_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
-                    ], className="mb-2"),
-                    html.Div([
-                        html.Span("Towers This Month : ", className="me-2"),
-                        dbc.Badge(towers_summary_display, color="dark", className="me-2", style={"fontSize": "1.05rem"}),
-                    ], className="mb-2"),
-                ])
+                tile_body_children = [tile_main]
                 month_buttons = _month_buttons_for_project()
                 if month_buttons:
                     tile_body_children.append(html.Div(month_buttons, className="mb-1"))
@@ -5349,10 +6592,33 @@ def register_callbacks(
             )
             towers_balance_label = max(towers_planned_label - towers_delivered_label, 0)
             pill_components = [
-                ("projects", html.Span(projects_label, className="pch-pill pch-pill-projects mb-1")),
-                ("productivity", html.Span(f"Productivity / Historical Avg: {fmt_prod_current} / {fmt_prod_history} MT/day", className="pch-pill pch-pill-prod-month mb-1")),
-                ("totals", html.Span(f"Total / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}", className="pch-pill pch-pill-towers mb-1")),
-            ]
+                                ("projects", dbc.Button(
+                                    projects_label,
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "projects"},
+                                    className="pch-pill pch-pill-projects me-2 mb-1", color="link", n_clicks=0
+                                )),
+                                ("productivity", dbc.Button(
+                                    f"Productivity / Historical Avg: {fmt_prod_current} / {fmt_prod_history} MT/day",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "productivity"},
+                                    className="pch-pill pch-pill-prod-month me-2 mb-1", color="link", n_clicks=0
+                                )),
+                                ("totals", dbc.Button(
+                                    f"Total / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "totals"},
+                                    className="pch-pill pch-pill-towers me-2 mb-1", color="link", n_clicks=0
+                                )),
+                                ("gangs", dbc.Button(
+                                    f"Gangs: {int(gangs_total):,}",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "gangs"},
+                                    className="pch-pill pch-pill-gangs me-2 mb-1", color="link", n_clicks=0
+                                )),
+                                ("loss", dbc.Button(
+                                    f"Lost Units: {lost_units_total:.1f} MT",
+                                    id={"type": "summary-pill-trigger", "mode": "erection", "metric": "loss"},
+                                    className="pch-pill pch-pill-loss me-2 mb-1", color="link", n_clicks=0
+                                )),
+                            ]
+
             title_component = html.Div(
                 [
                     html.Span(str(pch or "Unassigned"), className="fw-semibold"),
@@ -5419,9 +6685,11 @@ def register_callbacks(
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
+        Input("f-kv", "value"),
+        Input("f-method", "value"),
         prevent_initial_call=True,
     )
-    def _render_pch_modal(focus_data, projects, months, quick_range):
+    def _render_pch_modal(focus_data, projects, months, quick_range, kv_filter, method_filter):
         if not isinstance(focus_data, dict) or not focus_data.get("metric"):
             raise PreventUpdate
         metric = str(focus_data.get("metric") or "").strip().lower()
@@ -5437,12 +6705,126 @@ def register_callbacks(
             months,
             quick_range,
             mode_value,
+            kv_filter,
+            method_filter,
             use_modal_ids=True,
             pill_focus=metric,
         )
         mode_label = "Stringing" if mode_value == "stringing" else "Erection"
         title = f"PCH-wise { _PCH_PILL_LABELS[metric] } ({mode_label})"
         return sections, active_item, title
+
+    @app.callback(
+        Output("store-project-tile-focus", "data"),
+        Output("project-detail-modal", "is_open"),
+        Input({"type": "project-tile-trigger", "mode": ALL, "project": ALL}, "n_clicks"),
+        Input("project-modal-close", "n_clicks"),
+        State("project-detail-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def _toggle_project_tile_modal(_, close_clicks, is_open):
+        trigger = _resolve_triggered_id()
+        if trigger == "project-modal-close":
+            return dash.no_update, False
+        if isinstance(trigger, dict) and trigger.get("type") == "project-tile-trigger":
+            payload = {
+                "project": trigger.get("project"),
+                "code": trigger.get("code"),
+                "display": trigger.get("display") or trigger.get("project"),
+                "mode": trigger.get("mode"),
+                "pch": trigger.get("pch"),
+                "ts": time.time(),
+            }
+            return payload, True
+        raise PreventUpdate
+
+    @app.callback(
+        Output("project-modal-summary", "children"),
+        Output("project-modal-title", "children"),
+        Input("store-project-tile-focus", "data"),
+        prevent_initial_call=True,
+    )
+    def _render_project_modal_summary(focus_data):
+        base_message = "Select a project tile to view its detailed view."
+        base_title = "Project Deep Dive"
+        if not isinstance(focus_data, dict):
+            return base_message, base_title
+
+        project_label = (focus_data.get("display") or focus_data.get("project") or "").strip()
+        code_label = (focus_data.get("code") or "").strip() or "-"
+        mode_label = str(focus_data.get("mode") or "erection").strip().title()
+        pch_label = str(focus_data.get("pch") or "-").strip() or "-"
+
+        def _kv(label: str, value: str) -> html.Div:
+            return html.Div(
+                [
+                    html.Div(label.upper(), className="project-label"),
+                    html.Div(value or "-", className="project-value"),
+                ],
+                className="project-modal-summary-item",
+            )
+
+        summary = dbc.Row(
+            [
+                dbc.Col(_kv("Project", project_label), md=4),
+                dbc.Col(_kv("Project Code", code_label), md=4),
+                dbc.Col(_kv("Mode", mode_label), md=2),
+                dbc.Col(_kv("PCH", pch_label), md=2),
+            ],
+            className="g-3",
+        )
+
+        title = f"{base_title} · {project_label}" if project_label else base_title
+        return summary, title
+
+    @app.callback(
+        Output("store-project-modal-section", "data"),
+        Input("project-modal-btn-erections", "n_clicks"),
+        Input("project-modal-btn-stringing", "n_clicks"),
+        Input("project-modal-btn-performance", "n_clicks"),
+        Input("store-project-tile-focus", "data"),
+        State("store-project-modal-section", "data"),
+        prevent_initial_call=True,
+    )
+    def _set_modal_section(btn_e, btn_s, btn_p, focus_data, current):
+        trigger = _resolve_triggered_id()
+        if trigger == "store-project-tile-focus":
+            return "erections"
+        if trigger == "project-modal-btn-erections":
+            return "erections"
+        if trigger == "project-modal-btn-stringing":
+            return "stringing"
+        if trigger == "project-modal-btn-performance":
+            return "performance"
+        return current or "erections"
+
+    @app.callback(
+        Output("project-modal-section-erections", "is_open"),
+        Output("project-modal-section-stringing", "is_open"),
+        Output("project-modal-section-performance", "is_open"),
+        Output("project-modal-btn-erections", "className"),
+        Output("project-modal-btn-stringing", "className"),
+        Output("project-modal-btn-performance", "className"),
+        Input("store-project-modal-section", "data"),
+    )
+    def _sync_modal_sections(active_section: str | None):
+        active = (active_section or "erections").strip().lower()
+
+        def _is_open(key: str) -> bool:
+            return active == key
+
+        def _class(key: str) -> str:
+            base = "modal-section-btn"
+            return f"{base} active" if active == key else base
+
+        return (
+            _is_open("erections"),
+            _is_open("stringing"),
+            _is_open("performance"),
+            _class("erections"),
+            _class("stringing"),
+            _class("performance"),
+        )
 
     # Toggle responsibilities visibility inside each project tile (pattern-matching IDs)
     @app.callback(
