@@ -972,45 +972,6 @@ def build_project_tile_modal() -> dbc.Modal:
         scrollable=True,
         backdrop="static",
     )
-
-
-def build_kpi_details_section() -> dbc.Card:
-    """Inline card showing the PCH-wise drilldown that previously lived inside a modal."""
-
-    drilldown = dbc.Card(
-        dbc.CardBody(
-            [
-                dbc.Accordion(
-                    id="kpi-pch-accordion",
-                    start_collapsed=True,
-                    always_open=False,
-                    flush=True,
-                    active_item=None,
-                    className="pch-accordion",
-                ),
-                # Hidden legacy element retained for callbacks that expect the node
-                html.Div(id="kpi-location-box", style={"display": "none"}),
-            ]
-        ),
-        className="shadow-sm",
-    )
-
-    return dbc.Card(
-        [
-            dbc.CardHeader(
-                [
-                    html.Div("PCH-wise Planned vs Delivered", className="section-title"),
-                    html.Div("Details synced with the active filters", className="section-sub"),
-                ],
-                className="d-flex flex-column",
-            ),
-            dbc.CardBody(drilldown),
-        ],
-        id="kpi-details-card",
-        className="viz-card shadow-soft section-gap-top",
-    )
-
-
 def build_kpi_pch_modal() -> dbc.Modal:
     """Modal variant of the PCH-wise drilldown used when summary pills are clicked."""
 
@@ -1260,14 +1221,12 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     trace_modal = build_trace_modal()
     pch_modal = build_kpi_pch_modal()
     project_modal = build_project_tile_modal()
-    kpi_details = build_kpi_details_section()
     layout = dbc.Container(
         [
             build_header("Productivity Dashboard", last_updated_text),
             
             controls,
             build_mode_summary_cards(),
-            kpi_details,
             build_kpi_cards(),
             build_project_details_card(),
             dbc.Row(
@@ -1576,7 +1535,19 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-project-tile-focus", data=None),
             dcc.Store(id="store-project-modal-section", data="erections"),
             dcc.Store(id="store-project-modal-click-meta", data=None),
-            dcc.Store(id="store-project-modal-selected-gang", data=None),
+            dcc.Store(id="project-modal-selected-gang", data=None),
+            dcc.Store(id="store-project-tile-meta", data={}),
+            html.Button(
+                id={
+                    "type": "project-tile-trigger",
+                    "mode": "placeholder",
+                    "project": "__placeholder__",
+                    "context": "placeholder",
+                },
+                n_clicks=0,
+                type="button",
+                style={"display": "none"},
+            ),
         ],
         fluid=True,
     )

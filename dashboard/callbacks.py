@@ -54,6 +54,14 @@ from .callback_utils import DataSelector, ResponsibilitiesAccessor, Responsibili
 
 
 LOGGER = logging.getLogger(__name__)
+if not LOGGER.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setLevel(logging.INFO)
+    _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
+    LOGGER.addHandler(_handler)
+    LOGGER.propagate = False
+LOGGER.setLevel(logging.INFO)
+LOGGER.info("dashboard.callbacks module loaded")
 
 BENCHMARK_MT_PER_DAY = 9.0
 BENCHMARK_KM_PER_MONTH = 5.0
@@ -4605,16 +4613,6 @@ def register_callbacks(
             _row(f"{total_unit} This Month", totals_display),
         ]
 
-    @app.callback(
-        Output("kpi-pch-accordion", "children"),
-        Output("kpi-pch-accordion", "active_item"),
-        Input("f-project", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-        Input("store-mode", "data"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
-    )
     def _populate_kpi_pch(
         projects,
         months,
@@ -4637,6 +4635,9 @@ def register_callbacks(
             focus_raw = str(pill_focus).strip().lower()
             if focus_raw in _PCH_PILL_LABELS and focus_raw != "projects":
                 focus_metric = focus_raw
+
+        tile_context = "modal" if use_modal_ids else "inline"
+        tile_metadata: dict[str, dict[str, Any]] = {}
 
         def _slugify_pch(value: Any) -> str:
             text = str(value or "").strip().lower()
@@ -4673,6 +4674,20 @@ def register_callbacks(
 
         def _compact_project_token(value: str) -> str:
             return re.sub(r"[^a-z0-9]", "", (value or "").strip().lower())
+
+        def _component_id_token(prefix: str, value: Any) -> str:
+            base = _compact_project_token(value)
+            if base:
+                return base
+            text = str(value or "").strip()
+            if not text:
+                text = prefix or "component"
+            try:
+                raw = text.encode("utf-8")
+            except Exception:
+                raw = text.encode("utf-8", errors="ignore")
+            digest = hashlib.sha1(raw).hexdigest()[:8]
+            return f"{prefix}-{digest}"
 
         def _filter_scope_by_projects(
             scope: pd.DataFrame | None, rows: list[dict[str, Any]]
@@ -5441,42 +5456,54 @@ def register_callbacks(
                         )
                     )
 
-                    tile_main = html.Div(
-                        tile_summary_children,
-                        id={
-                            "type": "project-tile-trigger",
-                            "mode": "stringing",
-                            "project": proj_name,
-                            "code": proj_code or proj_name,
-                            "display": proj_title,
-                            "pch": str(pch),
-                        },
-                        n_clicks=0,
-                        role="button",
-                        tabIndex=0,
-                        className="project-tile-summary",
-                    )
+                    project_token = _component_id_token("proj", proj_name)
+                    card_id = {
+                        "type": "project-tile-trigger",
+                        "mode": "stringing",
+                        "project": project_token,
+                        "context": tile_context,
+                    }
+                    tile_metadata[project_token] = {
+                        "project": proj_name,
+                        "code": proj_code or proj_name,
+                        "display": proj_title,
+                        "mode": "stringing",
+                        "pch": str(pch),
+                    }
 
-                    tile_body_children = [tile_main]
+                    tile_body_children = [
+                        html.Div(tile_summary_children, className="project-tile-summary"),
+                        html.Div(
+                            [
+                                html.Span("View Responsibilities : ", className="me-2"),
+                                dbc.Button(
+                                    current_month_label,
+                                    id={"type": "proj-resp-open", "key": current_key_payload},
+                                    color="link",
+                                    className="p-0 me-1",
+                                ),
+                            ],
+                            className="mb-2",
+                        ),
+                    ]
 
-                    tile_body_children.append(
-                        html.Div([
-                            html.Span("View Responsibilities : ", className="me-2"),
-                            # For stringing, responsibilities still open the erection responsibilities modal filtered by project
-                            dbc.Button(
-                                current_month_label,
-                                id={"type": "proj-resp-open", "key": current_key_payload},
-                                color="link",
-                                className="p-0 me-1",
-                            ),
-                        ], className="mb-2"),
-                    )
+                    tile_card = dbc.Card(dbc.CardBody(tile_body_children), className="h-100 shadow-sm")
 
-                    tile_body = html.Div(tile_body_children)
                     tile_cols.append(
                         dbc.Col(
-                            dbc.Card(dbc.CardBody(tile_body), className="h-100 shadow-sm"),
-                            xs=12, sm=12, md=6, lg=4, className="mb-3",
+                            html.Div(
+                                tile_card,
+                                id=card_id,
+                                n_clicks=0,
+                                className="project-tile-card",
+                                role="button",
+                                tabIndex=0,
+                            ),
+                            xs=12,
+                            sm=12,
+                            md=6,
+                            lg=4,
+                            className="mb-3",
                         )
                     )
                 body_children = (
@@ -5494,7 +5521,7 @@ def register_callbacks(
                 )
             if not pch_sections:
                 pch_sections = _empty_pch_items("No projects match the current filters.")
-            return pch_sections, None
+            return pch_sections, None, tile_metadata
 
         # --- Erection mode below ---
 
@@ -6553,35 +6580,47 @@ def register_callbacks(
                         loss_value=loss_metric,
                     )
                 )
-                tile_main = html.Div(
-                    tile_summary_children,
-                    id={
-                        "type": "project-tile-trigger",
-                        "mode": "erection",
-                        "project": proj_name,
-                        "code": proj_code or proj_name,
-                        "display": proj_name,
-                        "pch": str(pch),
-                    },
-                    n_clicks=0,
-                    role="button",
-                    tabIndex=0,
-                    className="project-tile-summary",
-                )
+                project_token = _component_id_token("proj", proj_name)
+                card_id = {
+                    "type": "project-tile-trigger",
+                    "mode": "erection",
+                    "project": project_token,
+                    "context": tile_context,
+                }
+                tile_metadata[project_token] = {
+                    "project": proj_name,
+                    "code": proj_code or proj_name,
+                    "display": proj_name,
+                    "mode": "erection",
+                    "pch": str(pch),
+                }
 
-                tile_body_children = [tile_main]
+                tile_body_children = [
+                    html.Div(tile_summary_children, className="project-tile-summary"),
+                ]
                 month_buttons = _month_buttons_for_project()
                 if month_buttons:
                     tile_body_children.append(html.Div(month_buttons, className="mb-1"))
                 else:
                     tile_body_children.append(html.Div("Micro Plan not available.", className="text-muted"))
 
-                tile_body = html.Div(tile_body_children)
+                tile_card = dbc.Card(dbc.CardBody(tile_body_children), className="h-100 shadow-sm")
 
                 tile_cols.append(
                     dbc.Col(
-                        dbc.Card(dbc.CardBody(tile_body), className="h-100 shadow-sm"),
-                        xs=12, sm=12, md=6, lg=4, className="mb-3"
+                        html.Div(
+                            tile_card,
+                            id=card_id,
+                            n_clicks=0,
+                            className="project-tile-card",
+                            role="button",
+                            tabIndex=0,
+                        ),
+                        xs=12,
+                        sm=12,
+                        md=6,
+                        lg=4,
+                        className="mb-3"
                     )
                 )
 
@@ -6641,7 +6680,7 @@ def register_callbacks(
         if not pch_sections:
             pch_sections = _empty_pch_items("No projects match the current filters.")
 
-        return pch_sections, None
+        return pch_sections, None, tile_metadata
 
     _PCH_PILL_LABELS = {
         "projects": "Projects Covered",
@@ -6681,6 +6720,7 @@ def register_callbacks(
         Output("kpi-pch-modal-accordion", "children"),
         Output("kpi-pch-modal-accordion", "active_item"),
         Output("kpi-pch-modal-title", "children"),
+        Output("store-project-tile-meta", "data"),
         Input("store-pch-modal-focus", "data"),
         Input("f-project", "value"),
         Input("f-month", "value"),
@@ -6700,7 +6740,7 @@ def register_callbacks(
             mode_value = "erection"
         if mode_value == "stringing" and not config.enable_stringing:
             raise PreventUpdate
-        sections, active_item = _populate_kpi_pch(
+        sections, active_item, tile_meta = _populate_kpi_pch(
             projects,
             months,
             quick_range,
@@ -6712,27 +6752,54 @@ def register_callbacks(
         )
         mode_label = "Stringing" if mode_value == "stringing" else "Erection"
         title = f"PCH-wise { _PCH_PILL_LABELS[metric] } ({mode_label})"
-        return sections, active_item, title
+        return sections, active_item, title, tile_meta
 
     @app.callback(
         Output("store-project-tile-focus", "data"),
         Output("project-detail-modal", "is_open"),
-        Input({"type": "project-tile-trigger", "mode": ALL, "project": ALL}, "n_clicks"),
+        Input({"type": "project-tile-trigger", "project": ALL, "mode": ALL, "context": ALL}, "n_clicks"),
         Input("project-modal-close", "n_clicks"),
         State("project-detail-modal", "is_open"),
+        State("store-project-tile-meta", "data"),
         prevent_initial_call=True,
     )
-    def _toggle_project_tile_modal(_, close_clicks, is_open):
+    def _toggle_project_tile_modal(tile_clicks, close_clicks, is_open, tile_meta_data):
+        ctx = dash.callback_context
+        triggered_entries = getattr(ctx, "triggered", None)
         trigger = _resolve_triggered_id()
+        LOGGER.info(
+            "project-modal-toggle trigger=%s entries=%s tile_clicks=%s close=%s open=%s",
+            trigger,
+            triggered_entries,
+            tile_clicks,
+            close_clicks,
+            is_open,
+        )
         if trigger == "project-modal-close":
             return dash.no_update, False
         if isinstance(trigger, dict) and trigger.get("type") == "project-tile-trigger":
+            if trigger.get("context") == "placeholder":
+                raise PreventUpdate
+            first_entry_value = None
+            if triggered_entries:
+                try:
+                    first_entry_value = triggered_entries[0].get("value")
+                except Exception:
+                    first_entry_value = None
+            if not first_entry_value:
+                raise PreventUpdate
+            project_key = trigger.get("project")
+            tile_meta = tile_meta_data or {}
+            meta = tile_meta.get(project_key or "")
+            if not meta:
+                LOGGER.warning("No tile metadata found for key %s", project_key)
+                raise PreventUpdate
             payload = {
-                "project": trigger.get("project"),
-                "code": trigger.get("code"),
-                "display": trigger.get("display") or trigger.get("project"),
-                "mode": trigger.get("mode"),
-                "pch": trigger.get("pch"),
+                "project": meta.get("project") or meta.get("display"),
+                "code": meta.get("code"),
+                "display": meta.get("display") or meta.get("project"),
+                "mode": meta.get("mode") or trigger.get("mode"),
+                "pch": meta.get("pch"),
                 "ts": time.time(),
             }
             return payload, True

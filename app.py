@@ -142,7 +142,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
 
     _, last_updated_text = initialise_data(active_config)
 
-    app_instance = Dash(__name__)
+    app_instance = Dash(__name__, suppress_callback_exceptions=True)
     app_instance.title = "KEC Productivity"
     app_instance.layout = build_layout(last_updated_text)
 
@@ -200,6 +200,30 @@ def create_app(config: AppConfig | None = None) -> Dash:
     @server.before_request
     def _capture_request_start() -> None:
         request.environ["request_start_time"] = time.perf_counter()
+
+    @server.before_request
+    def _trace_project_tile_updates() -> None:
+        if request.path != "/_dash-update-component":
+            return
+        try:
+            payload = request.get_json(silent=True) or {}
+        except Exception:
+            return
+        inputs = payload.get("inputs") or []
+        if not inputs:
+            return
+        LOGGER.info("dash payload preview %s", json.dumps(inputs[:1]))
+        for entry in inputs:
+            if isinstance(entry, list):
+                # Dash 2.16 may wrap entries for ALL-pattern callbacks
+                sub_entries = entry
+            else:
+                sub_entries = [entry]
+            for sub_entry in sub_entries:
+                entry_id = sub_entry.get("id") if isinstance(sub_entry, dict) else None
+                if isinstance(entry_id, dict) and entry_id.get("type") == "project-tile-trigger":
+                    LOGGER.info("project-tile update payload %s", json.dumps(payload))
+                    return
 
     @server.after_request
     def _log_request(response):  # type: ignore[override]

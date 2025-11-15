@@ -207,7 +207,11 @@ html {
   padding:14px;
   background:var(--surface-2);
   cursor:pointer;
+  width:100%;
+  text-align:left;
   transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  color:inherit;
+  height:100%;
 }
 .project-tile-summary:focus,
 .project-tile-summary:hover{
@@ -215,6 +219,13 @@ html {
   transform:translateY(-1px);
   box-shadow:var(--shadow-1);
   border-color:#bfc8e6;
+}
+.project-tile-card{
+  border:none;
+  background:transparent;
+}
+.project-tile-card .card-body{
+  padding:0;
 }
 
 /* --- Project modal buttons --------------------------------------------- */
