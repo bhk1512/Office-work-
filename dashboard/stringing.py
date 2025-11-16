@@ -88,6 +88,57 @@ def find_stringing_header_row(df_raw: pd.DataFrame, search_rows: int = 40) -> Tu
     return best[0], best[1]
 
 
+def _coerce_numeric_cell(value: object) -> Optional[int]:
+    """Best-effort coercion of a spreadsheet cell to an integer."""
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float):
+        if np.isnan(value):
+            return None
+        return int(round(value))
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        return int(round(float(match.group())))
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_stringing_number_of_tse(path: str | bytes | "pathlike", sheet_name: str, search_rows: int = 6) -> Optional[int]:
+    """
+    Locate the \"Number of TSE\" value from the top rows of a Stringing Compiled sheet.
+
+    The workbook typically places this label near the first row with the value in the
+    adjacent column. We scan a handful of rows before the main header and return the
+    first numeric value found next to the label.
+    """
+    try:
+        df = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=search_rows)
+    except Exception:
+        return None
+    if df is None or df.empty:
+        return None
+    targets = {"numberoftse", "nooftse", "numoftse"}
+    arr = df.to_numpy(object)
+    for row in arr:
+        for idx, cell in enumerate(row):
+            key = _canon_key(cell)
+            if not key:
+                continue
+            if key in targets:
+                neighbor = row[idx + 1] if idx + 1 < len(row) else None
+                coerced = _coerce_numeric_cell(neighbor)
+                if coerced is not None:
+                    return coerced
+    return None
+
+
 def read_stringing_sheet_robust(path: str | bytes | "pathlike", sheet_name: str) -> pd.DataFrame:
     """Read a stringing sheet by inferring the header row if needed.
 

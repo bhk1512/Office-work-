@@ -275,7 +275,7 @@ def build_controls() -> dbc.Card:
                     ],
                     className="g-2 mt-1",
                 ),
-                                # Row 3: Stringing-only filters (Line kV + Method)
+                # Row 3: Stringing-only filters (kept hidden for legacy compatibility)
                 html.Div(
                     [
                         dbc.Row(
@@ -1018,7 +1018,7 @@ def build_kpi_pch_modal() -> dbc.Modal:
     )
 
 def build_project_responsibilities_modal() -> dbc.Modal:
-    """Nested mini-modal to show Responsibilities chart for a selected project."""
+    """Nested mini-modal to show Monthly Plan chart for a selected project."""
     body = dbc.Card(
         dbc.CardBody(
             [
@@ -1169,37 +1169,6 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
         style={"width": "16px", "height": "16px", "marginRight": "8px"},
     )
 
-    # Mode banner + toggle (top-right)
-    mode_controls = html.Div(
-        [
-            html.Span(
-                "Mode",
-                id="mode-banner",
-                style={
-                    "fontSize": "12px",
-                    "color": "#64748B",
-                    "background": "#F1F5F9",
-                    "padding": "4px 8px",
-                    "borderRadius": "8px",
-                },
-            ),
-            dcc.RadioItems(
-                id="mode-toggle",
-                options=[
-                    {"label": "Erection", "value": "erection"},
-                    {"label": "Stringing", "value": "stringing"},
-                ],
-                value="erection",
-                inline=True,
-                style={"fontSize": "12px"},
-                inputStyle={"marginRight": "6px"},
-                labelStyle={"display": "inline-flex", "gap": "0", "marginRight": "10px"},
-            ),
-        ],
-        className="topbar__mode",
-        style={"marginLeft": "auto", "display": "flex", "gap": "10px", "alignItems": "center"},
-    )
-
     return html.Div(
         [
             html.Div(  # left icon badge
@@ -1216,7 +1185,6 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
                 ],
                 className="topbar__text",
             ),
-            mode_controls,
         ],
         className="topbar",
     )
@@ -1267,131 +1235,250 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                         md=6,
                         className="d-flex",
                     ),
-                    # RIGHT: Responsibilities (Figma-styled card with KPIs)
+                    # RIGHT: Monthly Plan cards
                     dbc.Col(
-                        dbc.Card(
+                        html.Div(
                             [
-                                dbc.CardHeader(
-                                    dbc.Row(
-                                        [
-                                            # Left: Title + subtitle
-                                            dbc.Col(
-                                                html.Div(
-                                                    [
-                                                        html.Div("Responsibilities", className="section-title"),
+                                dbc.Card(
+                                    [
+                                        dbc.CardHeader(
+                                            dbc.Row(
+                                                [
+                                                    # Left: Title + subtitle
+                                                    dbc.Col(
                                                         html.Div(
                                                             [
-                                                                "Target vs Delivered ",
-                                                                html.Span(
-                                                                    "(All periods)",
-                                                                    id="label-resp-period",
+                                                                html.Div("Monthly Plan (Erection)", className="section-title"),
+                                                                html.Div(
+                                                                    [
+                                                                        "Target vs Delivered ",
+                                                                        html.Span(
+                                                                            "(All periods)",
+                                                                            id="label-resp-period",
+                                                                        ),
+                                                                    ],
+                                                                    className="section-sub",
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        className="d-flex flex-column justify-content-center",
+                                                        lg=7, md=7, sm=12,
+                                                    ),
+                                                    # Right: filter pills
+                                                    dbc.Col(
+                                                        html.Div(
+                                                            [
+                                                                dbc.RadioItems(
+                                                                    id="f-resp-entity",
+                                                                    options=[
+                                                                        {"label": "Gangs", "value": "Gang"},
+                                                                        {"label": "Section Incharges", "value": "Section Incharge"},
+                                                                        {"label": "Supervisors", "value": "Supervisor"},
+                                                                    ],
+                                                                    value="Supervisor",
+                                                                    inline=True,
+                                                                    class_name="segment segment-xxs",
+                                                                    label_class_name="segment-label",
+                                                                    label_checked_class_name="segment-label--active",
+                                                                    input_class_name="segment-input",
+                                                                ),
+                                                                dbc.RadioItems(
+                                                                    id="f-resp-metric",
+                                                                    options=[
+                                                                        {"label": "Tower Weight", "value": "tower_weight"},
+                                                                        {"label": "Revenue", "value": "revenue"},
+                                                                    ],
+                                                                    value="tower_weight",
+                                                                    inline=True,
+                                                                    class_name="segment segment-xxs",
+                                                                    label_class_name="segment-label",
+                                                                    label_checked_class_name="segment-label--active",
+                                                                    input_class_name="segment-input",
                                                                 ),
                                                             ],
-                                                            className="section-sub",
+                                                            className="header-pills d-flex flex-row align-items-center justify-content-end",
                                                         ),
-                                                    ]
+                                                        width="auto",
+                                                    ),
+                                                ],
+                                                className="align-items-center  justify-content-between g-2",
+                                            )
+                                        ),
+                                        dbc.CardBody(
+                                            [
+                                                dcc.Graph(
+                                                    id="g-responsibilities",
+                                                    config={"displayModeBar": False},
+                                                    responsive=True,
+                                                    style={"height": "360px", "minHeight": "300px", "width": "100%"},
                                                 ),
-                                                className="d-flex flex-column justify-content-center",
-                                                lg=7, md=7, sm=12,  # reserve space so pills fit on the right
-                                            ),
-
-                                            # Right: BOTH pill groups on same row as the title
-                                            dbc.Col(
-                                                html.Div(
+                                                dbc.Row(
                                                     [
-                                                        dbc.RadioItems(
-                                                            id="f-resp-entity",
-                                                            options=[
-                                                                {"label": "Gangs", "value": "Gang"},
-                                                                {"label": "Section Incharges", "value": "Section Incharge"},
-                                                                {"label": "Supervisors", "value": "Supervisor"},
-                                                            ],
-                                                            value="Supervisor",
-                                                            inline=True,
-                                                            class_name="segment segment-xxs",
-                                                            label_class_name="segment-label",
-                                                            label_checked_class_name="segment-label--active",
-                                                            input_class_name="segment-input",
+                                                        dbc.Col(
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    [
+                                                                        html.Div(id="kpi-resp-target-value", className="kpi-value"),
+                                                                        html.Div("Total Target", className="kpi-sub"),
+                                                                    ]
+                                                                ),
+                                                                className="kpi kpi-blue",
+                                                            ),
+                                                            md=4,
                                                         ),
-                                                        dbc.RadioItems(
-                                                            id="f-resp-metric",
-                                                            options=[
-                                                                {"label": "Tower Weight", "value": "tower_weight"},
-                                                                {"label": "Revenue", "value": "revenue"},
-                                                            ],
-                                                            value="tower_weight",
-                                                            inline=True,
-                                                            class_name="segment segment-xxs",
-                                                            label_class_name="segment-label",
-                                                            label_checked_class_name="segment-label--active",
-                                                            input_class_name="segment-input",
+                                                        dbc.Col(
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    [
+                                                                        html.Div(id="kpi-resp-delivered-value", className="kpi-value"),
+                                                                        html.Div("Total Delivered", className="kpi-sub"),
+                                                                    ]
+                                                                ),
+                                                                className="kpi kpi-red",
+                                                            ),
+                                                            md=4,
+                                                        ),
+                                                        dbc.Col(
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    [
+                                                                        html.Div(id="kpi-resp-ach-value", className="kpi-value"),
+                                                                        html.Div("Overall Achievement", className="kpi-sub"),
+                                                                    ]
+                                                                ),
+                                                                className="kpi kpi-green",
+                                                            ),
+                                                            md=4,
                                                         ),
                                                     ],
-                                                    className="header-pills d-flex flex-row align-items-center justify-content-end"
-                                                ),
-                                                 width="auto",
-                                            ),
-                                        ],
-                                        # KEY: don't allow wrapping at desktop widths
-                                        className="align-items-center  justify-content-between g-2",
-                                    )
-                                ),
-                                dbc.CardBody(
-                                    [
-                                        dcc.Graph(
-                                            id="g-responsibilities",
-                                            config={"displayModeBar": False},
-                                            responsive=True,
-                                            style={"height": "360px", "minHeight": "300px", "width": "100%"},
-                                        ),
-
-                                        # KPI row
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(
-                                                    dbc.Card(
-                                                        dbc.CardBody(
-                                                            [
-                                                                html.Div(id="kpi-resp-target-value", className="kpi-value"),
-                                                                html.Div("Total Target", className="kpi-sub"),
-                                                            ]
-                                                        ),
-                                                        className="kpi kpi-blue",
-                                                    ),
-                                                    md=4
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Card(
-                                                        dbc.CardBody(
-                                                            [
-                                                                html.Div(id="kpi-resp-delivered-value", className="kpi-value"),
-                                                                html.Div("Total Delivered", className="kpi-sub"),
-                                                            ]
-                                                        ),
-                                                        className="kpi kpi-red",
-                                                    ),
-                                                    md=4
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Card(
-                                                        dbc.CardBody(
-                                                            [
-                                                                html.Div(id="kpi-resp-ach-value", className="kpi-value"),
-                                                                html.Div("Overall Achievement", className="kpi-sub"),
-                                                            ]
-                                                        ),
-                                                        className="kpi kpi-green",
-                                                    ),
-                                                    md=4
+                                                    className="g-2 mt-1 kpi-row-compact",
                                                 ),
                                             ],
-                                            className="g-2 mt-1 kpi-row-compact",
+                                            className="d-flex flex-column",
                                         ),
                                     ],
-                                    className="d-flex flex-column",
+                                    className="viz-card shadow-soft section-gap-top flex-fill w-100 responsibilities-card",
+                                ),
+                                dbc.Card(
+                                    [
+                                        dbc.CardHeader(
+                                            dbc.Row(
+                                                [
+                                                    dbc.Col(
+                                                        html.Div(
+                                                            [
+                                                                html.Div("Monthly Plan (Stringing)", className="section-title"),
+                                                                html.Div(
+                                                                    [
+                                                                        "Target vs Delivered ",
+                                                                        html.Span(
+                                                                            "(All periods)",
+                                                                            id="label-stringing-plan-period",
+                                                                        ),
+                                                                    ],
+                                                                    className="section-sub",
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        className="d-flex flex-column justify-content-center",
+                                                        lg=7, md=7, sm=12,
+                                                    ),
+                                                    dbc.Col(
+                                                        html.Div(
+                                                            [
+                                                                dbc.RadioItems(
+                                                                    id="f-stringing-plan-entity",
+                                                                    options=[
+                                                                        {"label": "Gangs", "value": "Gang"},
+                                                                        {"label": "Section Incharges", "value": "Section Incharge"},
+                                                                        {"label": "Supervisors", "value": "Supervisor"},
+                                                                    ],
+                                                                    value="Supervisor",
+                                                                    inline=True,
+                                                                    class_name="segment segment-xxs",
+                                                                    label_class_name="segment-label",
+                                                                    label_checked_class_name="segment-label--active",
+                                                                    input_class_name="segment-input",
+                                                                ),
+                                                                dbc.RadioItems(
+                                                                    id="f-stringing-plan-metric",
+                                                                    options=[
+                                                                        {"label": "Tower Weight", "value": "tower_weight"},
+                                                                        {"label": "Revenue", "value": "revenue"},
+                                                                    ],
+                                                                    value="tower_weight",
+                                                                    inline=True,
+                                                                    class_name="segment segment-xxs",
+                                                                    label_class_name="segment-label",
+                                                                    label_checked_class_name="segment-label--active",
+                                                                    input_class_name="segment-input",
+                                                                ),
+                                                            ],
+                                                            className="header-pills d-flex flex-row align-items-center justify-content-end",
+                                                        ),
+                                                        width="auto",
+                                                    ),
+                                                ],
+                                                className="align-items-center  justify-content-between g-2",
+                                            )
+                                        ),
+                                        dbc.CardBody(
+                                            [
+                                                dcc.Graph(
+                                                    id="g-stringing-plan",
+                                                    config={"displayModeBar": False},
+                                                    responsive=True,
+                                                    style={"height": "360px", "minHeight": "300px", "width": "100%"},
+                                                ),
+                                                dbc.Row(
+                                                    [
+                                                        dbc.Col(
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    [
+                                                                        html.Div(id="kpi-stringing-plan-target", className="kpi-value"),
+                                                                        html.Div("Total Target", className="kpi-sub"),
+                                                                    ]
+                                                                ),
+                                                                className="kpi kpi-blue",
+                                                            ),
+                                                            md=4,
+                                                        ),
+                                                        dbc.Col(
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    [
+                                                                        html.Div(id="kpi-stringing-plan-delivered", className="kpi-value"),
+                                                                        html.Div("Total Delivered", className="kpi-sub"),
+                                                                    ]
+                                                                ),
+                                                                className="kpi kpi-red",
+                                                            ),
+                                                            md=4,
+                                                        ),
+                                                        dbc.Col(
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    [
+                                                                        html.Div(id="kpi-stringing-plan-ach", className="kpi-value"),
+                                                                        html.Div("Overall Achievement", className="kpi-sub"),
+                                                                    ]
+                                                                ),
+                                                                className="kpi kpi-green",
+                                                            ),
+                                                            md=4,
+                                                        ),
+                                                    ],
+                                                    className="g-2 mt-1 kpi-row-compact",
+                                                ),
+                                            ],
+                                            className="d-flex flex-column",
+                                        ),
+                                    ],
+                                    className="viz-card shadow-soft section-gap-top flex-fill w-100 responsibilities-card",
                                 ),
                             ],
-                            className="viz-card shadow-soft section-gap-top flex-fill w-100 responsibilities-card",  # matches other cards
+                            className="d-flex flex-column gap-3 w-100",
                         ),
                         md=6,
                         className="d-flex",
@@ -1529,11 +1616,9 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_erections_card(),
             dcc.Store(id="store-click-meta", data=None),
             dcc.Store(id="store-dblclick", data=None),
-            dcc.Store(id="store-selected-gang", data=None),   
-            dcc.Store(id="store-mode", data="erection"),
+            dcc.Store(id="store-selected-gang", data=None),
             dcc.Store(id="store-filtered-scope", data=None),
             dcc.Store(id="store-pch-modal-focus", data=None),
-            html.Div(id="mode-data-debug", style={"display": "none"}),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
             build_project_responsibilities_modal(),
@@ -1542,6 +1627,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-kpi-selected-project", data=None),
             dcc.Store(id="store-proj-resp-code", data=None),
             dcc.Store(id="store-proj-resp-month", data=None),
+            dcc.Store(id="store-proj-resp-plan", data=None),
             dcc.Store(id="store-project-tile-focus", data=None),
             dcc.Store(id="store-project-modal-section", data="erections"),
             dcc.Store(id="store-project-modal-click-meta", data=None),

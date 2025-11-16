@@ -24,6 +24,7 @@ from .stringing import (
     add_length_units,
     read_stringing_sheet_robust,
     parse_project_code_from_filename,
+    extract_stringing_number_of_tse,
 )
 
 CONFIG = AppConfig()
@@ -311,6 +312,8 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             })
             continue
 
+        tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
+
         # Normalize columns
         try:
             compiled_norm, norm_report = normalize_stringing_columns(df_raw)
@@ -345,6 +348,12 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             compiled_norm["project"] = compiled_norm["project_name"]
         if "source_file" not in compiled_norm.columns:
             compiled_norm["source_file"] = wb.name
+
+        # Persist Number of TSE metadata for downstream consumers
+        if "number_of_tse" not in compiled_norm.columns:
+            compiled_norm["number_of_tse"] = pd.NA
+        if tse_value is not None:
+            compiled_norm["number_of_tse"] = int(tse_value)
 
         # Expand to daily
         try:
