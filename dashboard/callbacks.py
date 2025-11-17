@@ -40,7 +40,10 @@ from .charts import (
     build_empty_responsibilities_figure,
 )
 from .config import AppConfig
-from .data_loader import load_stringing_compiled_raw as _load_stringing_compiled_raw
+from .data_loader import (
+    load_stringing_compiled_raw as _load_stringing_compiled_raw,
+    _resolve_stringing_microplan_root,
+)
 from .filters import apply_filters, resolve_months
 from .metrics import (
     calc_idle_and_loss,
@@ -52,6 +55,15 @@ from .metrics import (
 )
 from .workbook import make_trace_workbook_bytes
 from .callback_utils import DataSelector, ResponsibilitiesAccessor, ResponsibilitiesPayload
+from .plan_utils import (
+    normalize_col_key as _normalize_col_key,
+    normalize_location as _normalize_location,
+    normalize_lower as _normalize_lower,
+    normalize_text as _normalize_text,
+    compact_project_key as _compact_project_key,
+    infer_project_hint as _infer_project_hint,
+    prepare_stringing_plan_frame as _prepare_stringing_plan_frame,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -103,6 +115,7 @@ _STRINGING_PLAN_CACHE: dict[str, Any] = {
     "frame": None,
     "completion": set(),
     "issues": [],
+    "index": [],
     "stored_at": 0.0,
     "last_written": 0.0,
 }
@@ -178,50 +191,6 @@ def _parse_completion_date(value: str | None) -> pd.Timestamp | None:
 
 def _default_completion_date() -> pd.Timestamp:
     return pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
-
-
-def _normalize_text(value: object) -> str:
-    text = str(value).replace("\u00a0", " ").strip()
-    lowered = text.lower()
-    if lowered in {"", "nan", "none", "null"}:
-        return ""
-    return text
-
-
-def _normalize_lower(value: object) -> str:
-    return _normalize_text(value).lower()
-
-
-def _compact_project_key(value: object) -> str:
-    text = _normalize_text(value).lower()
-    return re.sub(r"[^a-z0-9]", "", text)
-
-
-def _normalize_col_key(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value).strip().lower())
-
-
-def _normalize_location(value: object) -> str:
-    txt = _normalize_text(value)
-    if not txt:
-        return ""
-    if txt.endswith(".0") and txt.replace(".", "", 1).isdigit():
-        txt = txt.split(".", 1)[0]
-    return txt
-
-
-def _infer_project_hint(path: Path | str | None) -> tuple[str, str]:
-    if path is None:
-        return "", ""
-    path_obj = Path(path)
-    name = path_obj.stem
-    match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{2,4})\b", name, re.IGNORECASE)
-    code = ""
-    if match:
-        code = f"{match.group(1).upper()}-{match.group(2)}"
-    label = re.sub(r"(?i)(micro\s*plan\s*-\s*)", "", name).strip(" _-")
-    label = label or code
-    return code, label
 
 
 def _project_filter_candidates(
@@ -1152,7 +1121,7 @@ def register_callbacks(
 
         completion_keys = set(payload.completion_keys or set())
         if mode_key == "stringing":
-            plan_frame, plan_keys, _plan_issues = _load_stringing_plan_snapshot(config)
+            plan_frame, plan_keys, _plan_issues, _plan_index = _load_stringing_plan_snapshot(config)
             if isinstance(plan_frame, pd.DataFrame) and not plan_frame.empty:
                 completion_keys |= plan_keys
                 return plan_frame.copy(), completion_keys, payload.error, None
@@ -1698,6 +1667,7 @@ def register_callbacks(
         cfg: AppConfig,
         frame: pd.DataFrame,
         issues: list[dict[str, str]],
+        index_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         output_path = _stringing_plan_output_path(cfg)
         try:
@@ -1708,57 +1678,137 @@ def register_callbacks(
                 mode=mode,
                 if_sheet_exists="replace",
             ) as writer:
-                (frame if not frame.empty else pd.DataFrame()).to_excel(
-                    writer,
-                    sheet_name="Stringing Plan",
-                    index=False,
-                )
+                responsibilities_frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+                if responsibilities_frame is None or responsibilities_frame.empty:
+                    responsibilities_frame = pd.DataFrame()
+                for sheet in ("Stringing Plan", "MicroPlanResponsibilities"):
+                    responsibilities_frame.to_excel(writer, sheet_name=sheet, index=False)
+                index_frame = pd.DataFrame(index_rows or [])
+                index_frame.to_excel(writer, sheet_name="MicroPlanIndex", index=False)
                 issues_frame = (
                     pd.DataFrame(issues)
                     if issues
                     else pd.DataFrame([{"issue": "No issues detected"}])
                 )
-                issues_frame.to_excel(writer, sheet_name="Stringing Plan Issues", index=False)
+                for sheet in ("Stringing Plan Issues", "MicroPlanDataIssues"):
+                    issues_frame.to_excel(writer, sheet_name=sheet, index=False)
         except Exception as exc:
             LOGGER.warning("Unable to write Stringing plan snapshot to '%s': %s", output_path, exc)
 
-    def _maybe_write_stringing_plan_snapshot(cfg: AppConfig, frame: pd.DataFrame, issues: list[dict[str, str]]) -> None:
+    def _maybe_write_stringing_plan_snapshot(
+        cfg: AppConfig,
+        frame: pd.DataFrame,
+        issues: list[dict[str, str]],
+        index_rows: list[dict[str, Any]] | None = None,
+    ) -> None:
         cache = _STRINGING_PLAN_CACHE
         ts_now = time.time()
         last_written = cache.get("last_written", 0.0)
         if ts_now - last_written < _STRINGING_PLAN_CACHE_TTL_SECONDS:
             return
-        _write_stringing_plan_snapshot(cfg, frame, issues)
+        _write_stringing_plan_snapshot(cfg, frame, issues, index_rows or [])
         cache["last_written"] = ts_now
 
-    def _load_stringing_plan_snapshot(cfg: AppConfig) -> tuple[pd.DataFrame | None, set[tuple[str, str]], list[dict[str, str]]]:
+    def _load_stringing_plan_snapshot(
+        cfg: AppConfig,
+    ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], list[dict[str, str]], list[dict[str, Any]]]:
         cache = _STRINGING_PLAN_CACHE
         ts_now = time.time()
         if cache["frame"] is not None and (ts_now - cache["stored_at"] < _STRINGING_PLAN_CACHE_TTL_SECONDS):
             frame = cache["frame"]
             issues = cache["issues"]
             completion = cache["completion"]
-            return frame.copy(), set(completion), list(issues)
+            index_rows = cache.get("index", [])
+            return frame.copy(), set(completion), list(issues), list(index_rows)
 
-        root = Path("Raw Data") / "Micro Plans"
+        root = _resolve_stringing_microplan_root(config.data_path)
         frames: list[pd.DataFrame] = []
         completion_keys: set[tuple[str, str]] = set()
         issues: list[dict[str, str]] = []
+        index_rows: list[dict[str, Any]] = []
+
+        def _append_index_entry(
+            *,
+            workbook: Path | str | None,
+            sheet_name: str | None,
+            project_code: str,
+            project_label: str,
+            rows_cleaned: int,
+            status: str,
+            error: str,
+            issues_logged: int = 0,
+            input_rows: int = 0,
+            plan_month: str = "",
+        ) -> None:
+            index_rows.append(
+                {
+                    "file_path": str(workbook or ""),
+                    "sheet_name": sheet_name or "",
+                    "project_name": project_label or project_code or "",
+                    "project_key": project_code or project_label or "",
+                    "rows_cleaned": rows_cleaned,
+                    "input_rows": input_rows,
+                    "issues_logged": issues_logged,
+                    "plan_month": plan_month,
+                    "status": status,
+                    "error": error or "",
+                }
+            )
+
+        def _infer_plan_month_from_frame(frame: pd.DataFrame) -> str:
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return ""
+            candidate_columns = (
+                "plan_month",
+                "completion_date",
+                "final_sag_complete",
+                "paying_out_complete",
+                "paying_out_start",
+            )
+            for column in candidate_columns:
+                if column not in frame.columns:
+                    continue
+                series = pd.to_datetime(frame[column], errors="coerce")
+                series = series.dropna()
+                if series.empty:
+                    continue
+                ts = pd.Timestamp(series.iloc[0])
+                return ts.to_period("M").to_timestamp().strftime("%Y-%m")
+            return ""
 
         if not root.exists():
             message = f"Stringing micro plan root not found: {root}"
             LOGGER.warning(message)
             issues.append({"workbook": str(root), "sheet": "", "issue": "ROOT_NOT_FOUND"})
+            _append_index_entry(
+                workbook=root,
+                sheet_name="",
+                project_code="",
+                project_label="",
+                rows_cleaned=0,
+                status="error",
+                error="ROOT_NOT_FOUND",
+            )
         else:
+            preferred_sheet = getattr(cfg, "stringing_sheet_name", "")
             for workbook in sorted(root.rglob("*.xlsx")):
                 if workbook.name.startswith("~$"):
                     continue
+                project_code, project_label = _infer_project_hint(workbook)
                 try:
                     xls = pd.ExcelFile(workbook)
                 except Exception as exc:
                     issues.append({"workbook": str(workbook), "sheet": "", "issue": f"OPEN_FAILED: {exc}"})
+                    _append_index_entry(
+                        workbook=workbook,
+                        sheet_name="",
+                        project_code=project_code,
+                        project_label=project_label,
+                        rows_cleaned=0,
+                        status="error",
+                        error=f"OPEN_FAILED: {exc}",
+                    )
                     continue
-                preferred_sheet = getattr(cfg, "stringing_sheet_name", "")
                 sheet_name = next(
                     (
                         name
@@ -1771,13 +1821,30 @@ def register_callbacks(
                     sheet_name = next((name for name in xls.sheet_names if "string" in name.lower()), None)
                 if sheet_name is None:
                     issues.append({"workbook": str(workbook), "sheet": "", "issue": "NO_STRINGING_SHEET"})
+                    _append_index_entry(
+                        workbook=workbook,
+                        sheet_name="",
+                        project_code=project_code,
+                        project_label=project_label,
+                        rows_cleaned=0,
+                        status="error",
+                        error="NO_STRINGING_SHEET",
+                    )
                     continue
                 try:
                     df_raw = pd.read_excel(workbook, sheet_name=sheet_name, header=1)
                 except Exception as exc:
                     issues.append({"workbook": str(workbook), "sheet": sheet_name, "issue": f"READ_FAILED: {exc}"})
+                    _append_index_entry(
+                        workbook=workbook,
+                        sheet_name=sheet_name,
+                        project_code=project_code,
+                        project_label=project_label,
+                        rows_cleaned=0,
+                        status="error",
+                        error=f"READ_FAILED: {exc}",
+                    )
                     continue
-                project_code, project_label = _infer_project_hint(workbook)
                 normalized, plan_keys, local_issues = _prepare_stringing_plan_frame(
                     df_raw,
                     project_hint=project_label or project_code,
@@ -1791,15 +1858,29 @@ def register_callbacks(
                 completion_keys |= plan_keys
                 frames.append(normalized)
                 issues.extend(local_issues)
+                plan_month_value = _infer_plan_month_from_frame(normalized)
+                _append_index_entry(
+                    workbook=workbook,
+                    sheet_name=sheet_name,
+                    project_code=project_code,
+                    project_label=project_label,
+                    rows_cleaned=int(len(normalized)),
+                    input_rows=int(len(df_raw)),
+                    status="ok",
+                    error="",
+                    issues_logged=len(local_issues),
+                    plan_month=plan_month_value,
+                )
 
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        _write_stringing_plan_snapshot(cfg, frame, issues)
+        _write_stringing_plan_snapshot(cfg, frame, issues, index_rows)
         cache["frame"] = frame.copy()
         cache["completion"] = set(completion_keys)
         cache["issues"] = list(issues)
+        cache["index"] = list(index_rows)
         cache["stored_at"] = ts_now
         cache["last_written"] = ts_now
-        return frame, completion_keys, issues
+        return frame, completion_keys, issues, index_rows
 
     # --- shared: responsibilities figure + KPIs for a single project selection ---
     def _build_monthly_plan_for_project(
@@ -1858,6 +1939,7 @@ def register_callbacks(
             message = load_error_msg or f"No {plan_title} data found in the compiled workbook."
             return _empty_response(message)
 
+        completion_keys = set(completed_keys or set())
         df_atomic = df_atomic.copy()
         stringing_completion_keys: set[tuple[str, str]] = set()
         plan_source_path = None
@@ -1880,7 +1962,7 @@ def register_callbacks(
                 # ensure dtype consistency
                 if "stringing_span_completed" in df_atomic.columns:
                     df_atomic["stringing_span_completed"] = df_atomic["stringing_span_completed"].fillna(False)
-            _maybe_write_stringing_plan_snapshot(config, df_atomic, plan_issues)
+            _maybe_write_stringing_plan_snapshot(config, df_atomic, plan_issues, [])
 
         month_list = _ensure_list(months_value)
         months_ts = resolve_months(month_list, quick_range_value)
@@ -5681,6 +5763,54 @@ def register_callbacks(
         method_list = _normalize_str_list(method_filter, lower=True)
         pch_sections: list[dbc.AccordionItem] = []
         # Erection mode (existing flow)
+        stringing_plan_month_map: dict[str, set[pd.Timestamp]] = {}
+        if mode == "stringing":
+            try:
+                plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
+            except Exception:
+                plan_snapshot = None
+            if isinstance(plan_snapshot, pd.DataFrame) and not plan_snapshot.empty:
+                plan = plan_snapshot.copy()
+                if "completion_month" in plan.columns:
+                    plan["completion_month"] = pd.to_datetime(plan["completion_month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                elif "completion_date" in plan.columns:
+                    plan["completion_month"] = pd.to_datetime(plan["completion_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                elif "plan_month" in plan.columns:
+                    plan["completion_month"] = pd.to_datetime(plan["plan_month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                else:
+                    plan["completion_month"] = pd.NaT
+                plan["project_name_norm"] = plan.get("project_name", pd.Series([], dtype=str)).astype(str).map(_normalize_lower)
+                plan["project_key_norm"] = plan.get("project_key", pd.Series([], dtype=str)).astype(str).map(_normalize_lower)
+                plan["project_name_compact"] = plan.get("project_name", pd.Series([], dtype=str)).astype(str).map(_compact_project_key)
+                plan["project_key_compact"] = plan.get("project_key", pd.Series([], dtype=str)).astype(str).map(_compact_project_key)
+                for _, row in plan.iterrows():
+                    month_value = row.get("completion_month")
+                    if pd.isna(month_value):
+                        continue
+                    ts = pd.Timestamp(month_value)
+                    for key in (
+                        row.get("project_name_norm"),
+                        row.get("project_key_norm"),
+                        row.get("project_name_compact"),
+                        row.get("project_key_compact"),
+                    ):
+                        if key:
+                            stringing_plan_month_map.setdefault(key, set()).add(ts)
+
+        def _stringing_plan_months_for_project(name: str, code: str) -> list[pd.Timestamp]:
+            if not stringing_plan_month_map:
+                return []
+            keys: set[str] = set()
+            for candidate in (name, code):
+                if candidate:
+                    keys.add(_normalize_lower(candidate))
+                    keys.add(_compact_project_key(candidate))
+            months: set[pd.Timestamp] = set()
+            for key in keys:
+                if key and key in stringing_plan_month_map:
+                    months.update(stringing_plan_month_map[key])
+            return sorted(months)
+
         if mode == "stringing":
             # Stringing mode: build PCH-wise planned vs delivered (KM)
             project_list = _ensure_list(projects)
@@ -6202,16 +6332,6 @@ def register_callbacks(
 
                     raw_code = r.get("project_code") or r.get("project_key") or proj_name
                     proj_code = _compact_code_text(str(raw_code))
-                    current_month_value = pd.Timestamp.today().strftime("%Y-%m")
-                    current_month_label = pd.Timestamp.today().strftime("%b %Y")
-                    current_key_payload = "||".join([
-                        "stringing",
-                        proj_code or "",
-                        current_month_value,
-                        proj_name,
-                    ])
-                    if use_modal_ids:
-                        current_key_payload = f"{current_key_payload}||__modal__"
 
                     tile_summary_children = [
                         html.Div(html.Strong(proj_title), className="mb-2"),
@@ -6307,19 +6427,34 @@ def register_callbacks(
 
                     tile_body_children = [
                         html.Div(tile_summary_children, className="project-tile-summary"),
-                        html.Div(
-                            [
-                                html.Span("Monthly Plan (Stringing) : ", className="me-2"),
+                    ]
+                    stringing_month_buttons: list[Any] = []
+                    available_months = _stringing_plan_months_for_project(proj_name, raw_code)
+                    if available_months:
+                        stringing_month_buttons.append(html.Span("Monthly Plan (Stringing) : ", className="me-2"))
+                        available_months = available_months[-2:]
+                        for ts in available_months:
+                            label = ts.strftime("%b %Y")
+                            value = ts.strftime("%Y-%m")
+                            key_payload = "||".join([
+                                "stringing",
+                                proj_code or "",
+                                value or "",
+                                proj_name,
+                            ])
+                            if use_modal_ids:
+                                key_payload = f"{key_payload}||__modal__"
+                            stringing_month_buttons.append(
                                 dbc.Button(
-                                    current_month_label,
-                                    id={"type": "proj-resp-open", "key": current_key_payload},
+                                    label,
+                                    id={"type": "proj-resp-open", "key": key_payload},
                                     color="link",
                                     className="p-0 me-1",
-                                ),
-                            ],
-                            className="mb-2",
-                        ),
-                    ]
+                                )
+                            )
+                        tile_body_children.append(html.Div(stringing_month_buttons, className="mb-2"))
+                    else:
+                        tile_body_children.append(html.Div("Micro Plan not available.", className="text-muted mb-2"))
 
                     tile_card = dbc.Card(dbc.CardBody(tile_body_children), className="h-100 shadow-sm")
 

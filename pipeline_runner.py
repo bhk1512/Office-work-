@@ -301,7 +301,12 @@ def _write_stringing_artifacts(output_path: Path, raw_df: pd.DataFrame, sheet_na
     return parquet_dir
 
 
-def compile_stringing_to_workbook(input_dir: Optional[Path], files: Optional[List[Path]], output_path: Path, sheet_name: Optional[str] = None) -> Optional[Path]:
+def compile_stringing_to_workbook(
+    input_dir: Optional[Path],
+    files: Optional[List[Path]],
+    output_path: Path,
+    sheet_name: Optional[str] = None,
+) -> Optional[Path]:
     candidates = _stringing_candidates(input_dir, files)
     if not candidates:
         print("[pipeline] Stringing: no candidate files found; skipping.")
@@ -491,7 +496,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         else:
             parquet_dir = None
 
-        # --- NEW: Compile Stringing from the same DPR sources ---
+        # --- Compile Stringing from the DPR sources ---
         try:
             # Prefer writing stringing outputs to a sibling Parquets/Stringing folder
             base_dir = resolved_output.parent if resolved_output else BASE_DIR
@@ -503,9 +508,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             stringing_base.mkdir(parents=True, exist_ok=True)
             stringing_out = stringing_base / "StringingCompiled_Output.xlsx"
             print(f"[pipeline] Stringing: compiling to {stringing_out}")
+            stringing_input = resolved_input
+            stringing_files = resolved_files
             stringing_parquet_dir = compile_stringing_to_workbook(
-                resolved_input,
-                resolved_files,
+                stringing_input,
+                stringing_files,
                 stringing_out,
                 sheet_name=AppConfig().stringing_sheet_name,
             )

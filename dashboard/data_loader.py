@@ -108,12 +108,35 @@ def _load_pipeline_cfg(repo_root: Path) -> dict:
 
 def _resolve_stringing_raw_root(data_path_hint: Path | str) -> Path:
     """
+    Find RAW DPRs folder. Priority:
+    1) pipeline_config.json -> "input_directory" (relative to repo root)
+    2) <repo>/Raw Data/DPRs
+    3) <hint>/Raw Data/DPRs
+    """
+    repo_root = _repo_root_from(Path(__file__))
+    cfg = _load_pipeline_cfg(repo_root)
+    input_dir = cfg.get("input_directory")  # e.g., "Raw Data/DPRs"
+    if input_dir:
+        raw_root = (repo_root / input_dir).resolve()
+        if raw_root.exists():
+            print(f"[Stringing] RAW root from pipeline_config.json: {raw_root}")
+            return raw_root
+    cand1 = (repo_root / "Raw Data" / "DPRs").resolve()
+    if cand1.exists():
+        print(f"[Stringing] RAW root fallback <repo>/Raw Data/DPRs: {cand1}")
+        return cand1
+    cand2 = (Path(data_path_hint) / "Raw Data" / "DPRs").resolve()
+    print(f"[Stringing] RAW root ultimate fallback: {cand2}")
+    return cand2
+
+
+def _resolve_stringing_microplan_root(data_path_hint: Path | str | None = None) -> Path:
+    """
     Locate the Stringing Micro Plan root directory. Priority:
     1) pipeline_config.json -> "stringing_microplan_directory" (or "microplan_directory")
     2) <repo>/Raw Data/Micro Plans
     3) <hint>/Raw Data/Micro Plans
     """
-
     repo_root = _repo_root_from(Path(__file__))
     cfg = _load_pipeline_cfg(repo_root)
 
@@ -126,22 +149,21 @@ def _resolve_stringing_raw_root(data_path_hint: Path | str) -> Path:
         return candidate
 
     configured = cfg.get("stringing_microplan_directory") or cfg.get("microplan_directory")
-    candidates: list[tuple[str, Path | None]] = []
-    candidates.append(("pipeline_config", _resolve_candidate(configured)))
     repo_default = (repo_root / "Raw Data" / "Micro Plans").resolve()
-    candidates.append(("<repo>/Raw Data/Micro Plans", repo_default))
     hint_base = Path(data_path_hint) if data_path_hint else Path(".")
     hint_default = (hint_base / "Raw Data" / "Micro Plans").resolve()
-    candidates.append(("hint/Raw Data/Micro Plans", hint_default))
 
-    for label, candidate in candidates:
+    for label, candidate in (
+        ("pipeline_config", _resolve_candidate(configured)),
+        ("<repo>/Raw Data/Micro Plans", repo_default),
+        ("hint/Raw Data/Micro Plans", hint_default),
+    ):
         if candidate and candidate.exists():
             print(f"[Stringing] Micro plan root ({label}): {candidate}")
             return candidate
 
-    fallback = hint_default
-    print(f"[Stringing] Micro plan fallback: {fallback}")
-    return fallback
+    print(f"[Stringing] Micro plan fallback: {hint_default}")
+    return hint_default
 
 
 def _norm_sheet(s: str) -> str:
@@ -156,7 +178,7 @@ def _norm_sheet(s: str) -> str:
     """
     return re.sub(r'[^a-z0-9]+', '', str(s).lower())
 
-def _match_sheet_name(xl: "pd.ExcelFile", desired_sheet: str) -> str | None:
+def _match_sheet_name(sheet_names: Iterable[str], desired_sheet: str) -> str | None:
     """
     Return the actual sheet name from the workbook whose normalized form
     exactly equals the normalized desired_sheet. No aliases.
@@ -164,7 +186,7 @@ def _match_sheet_name(xl: "pd.ExcelFile", desired_sheet: str) -> str | None:
     want = _norm_sheet(desired_sheet)
     if not want:
         return None
-    for s in xl.sheet_names:
+    for s in sheet_names:
         if _norm_sheet(s) == want:
             return s  # return the exact name as present in the file
     return None
@@ -219,18 +241,54 @@ def _iter_excel_candidates(raw_root: Path) -> list[Path]:
     raw_root = raw_root.resolve()
     return sorted([p for p in raw_root.rglob("*.xls*") if p.is_file()])
 
-def _resolve_excel_sheet_name(xlsx_path: Path, desired_sheet: str) -> str | None:
-    """Return the actual sheet name matching *desired_sheet* (case/spacing agnostic)."""
+def _list_excel_sheet_names(xlsx_path: Path | str) -> tuple[list[str], str | None]:
+    """
+    Return all sheet names from *xlsx_path*.
+
+    Provides the names plus an optional error string if the workbook could not be opened.
+    """
     try:
         with pd.ExcelFile(xlsx_path) as xl:
-            actual = _match_sheet_name(xl, desired_sheet)
-            if actual:
-                return actual
-            if desired_sheet in xl.sheet_names:
-                return desired_sheet
-            return None
+            return list(xl.sheet_names), None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+
+
+def _resolve_excel_sheet_name(
+    xlsx_path: Path,
+    desired_sheet: str,
+    *,
+    contains_keyword: str | None = None,
+    sheet_names: Iterable[str] | None = None,
+) -> str | None:
+    """
+    Return the actual sheet name matching *desired_sheet* (case/spacing agnostic).
+
+    When *contains_keyword* is provided, fall back to the first sheet whose title
+    contains that keyword (case-insensitive) if the normalized match fails.
+    """
+    names: list[str]
+    try:
+        if sheet_names is not None:
+            names = [str(name) for name in sheet_names]
+        else:
+            with pd.ExcelFile(xlsx_path) as xl:
+                names = list(xl.sheet_names)
     except Exception:
         return None
+
+    actual = _match_sheet_name(names, desired_sheet)
+    if actual:
+        return actual
+    if desired_sheet in names:
+        return desired_sheet
+    if contains_keyword:
+        keyword = contains_keyword.strip().lower()
+        if keyword:
+            for sheet_name in names:
+                if keyword in sheet_name.lower():
+                    return sheet_name
+    return None
 
 
 
@@ -290,11 +348,13 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     """
     # Ensure we scan the correct RAW path (not the dataset path)
     raw_root = _resolve_stringing_raw_root(raw_root)
+    plan_root = _resolve_stringing_microplan_root(raw_root)
 
     # Stringing output root (flat structure under <repo>/Parquets/Stringing)
     out_root = _stringing_root(raw_root)
 
     candidates = _iter_excel_candidates(raw_root)
+    plan_candidates = _iter_excel_candidates(plan_root)
     compiled_frames: list[pd.DataFrame] = []
     daily_frames: list[pd.DataFrame] = []
     diag_rows: list[dict] = []
@@ -314,6 +374,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         error: str,
         issues_logged: int = 0,
         plan_month: str = "",
+        available_sheets: Iterable[str] | None = None,
     ) -> None:
         plan_index_rows.append(
             {
@@ -327,6 +388,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "plan_month": plan_month or "",
                 "status": status,
                 "error": error or "",
+                "available_sheets": "; ".join(available_sheets) if available_sheets else "",
             }
         )
 
@@ -335,10 +397,13 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
-        project_code, project_label = infer_project_hint(wb)
 
         # If the sheet does not exist, log and continue (so Diagnostics shows it)
-        actual_sheet = _resolve_excel_sheet_name(wb, sheet_name)
+        actual_sheet = _resolve_excel_sheet_name(
+            wb,
+            sheet_name,
+            contains_keyword="stringing",
+        )
         if not actual_sheet:
             diag_rows.append({
                 "Workbook": wb.name,
@@ -347,16 +412,6 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "DailyRows": 0,
                 "Status": "NO_TARGET_SHEET"
             })
-            _append_plan_index_entry(
-                workbook=wb,
-                sheet_name="",
-                project_code=project_code or proj,
-                project_label=project_label or proj,
-                rows_cleaned=0,
-                input_rows=0,
-                status="error",
-                error="NO_TARGET_SHEET",
-            )
             continue
 
         # Try robust parse of the desired sheet
@@ -377,16 +432,6 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "DailyRows": 0,
                 "Status": f"READ_FAIL: {type(exc).__name__}"
             })
-            _append_plan_index_entry(
-                workbook=wb,
-                sheet_name=actual_sheet,
-                project_code=project_code or proj,
-                project_label=project_label or proj,
-                rows_cleaned=0,
-                input_rows=0,
-                status="error",
-                error=f"READ_FAIL: {type(exc).__name__}",
-            )
             continue
 
         if df_raw is None or df_raw.empty:
@@ -397,16 +442,6 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "DailyRows": 0,
                 "Status": "EMPTY_SHEET"
             })
-            _append_plan_index_entry(
-                workbook=wb,
-                sheet_name=actual_sheet,
-                project_code=project_code or proj,
-                project_label=project_label or proj,
-                rows_cleaned=0,
-                input_rows=0,
-                status="error",
-                error="EMPTY_SHEET",
-            )
             continue
 
         tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
@@ -434,28 +469,6 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 wb.name,
                 ", ".join(deduped),
             )
-
-        plan_frame, _plan_completion, plan_issues = prepare_stringing_plan_frame(
-            df_raw,
-            project_hint=project_label or project_code or proj,
-            source_path=wb,
-            sheet_name=actual_sheet,
-        )
-        plan_frames.append(plan_frame)
-        plan_issue_rows.extend(plan_issues)
-        plan_month_value = _infer_plan_month_from_frame(plan_frame)
-        _append_plan_index_entry(
-            workbook=wb,
-            sheet_name=actual_sheet,
-            project_code=project_code or proj,
-            project_label=project_label or proj,
-            rows_cleaned=int(len(plan_frame)),
-            input_rows=int(len(df_raw)),
-            status="ok",
-            error="",
-            issues_logged=len(plan_issues),
-            plan_month=plan_month_value,
-        )
 
         # Inject project/source for traceability (fill blank project_name)
         if "project_name" not in compiled_norm.columns:
@@ -506,6 +519,83 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "Status": "NO_DAILY"
             })
 
+    if not plan_candidates:
+        LOGGER.warning("Stringing: no Micro Plan files found under '%s'", plan_root)
+
+    for wb in plan_candidates:
+        sheet_names, sheet_names_error = _list_excel_sheet_names(wb)
+        available_sheets = list(sheet_names)
+        if sheet_names_error:
+            available_sheets = [f"[error: {sheet_names_error}]"]
+        project_code, project_label = infer_project_hint(wb)
+        names_for_matching: Iterable[str] | None = sheet_names if sheet_names_error is None else None
+        actual_sheet = _resolve_excel_sheet_name(
+            wb,
+            sheet_name,
+            contains_keyword="stringing",
+            sheet_names=names_for_matching,
+        )
+        if not actual_sheet:
+            missing_issue = "NO_STRINGING_SHEET"
+            if sheet_names_error:
+                missing_issue = f"SHEET_LIST_FAILED: {sheet_names_error}"
+            plan_issue_rows.append({"workbook": str(wb), "sheet": "", "issue": missing_issue})
+            _append_plan_index_entry(
+                workbook=wb,
+                sheet_name="",
+                project_code=project_code,
+                project_label=project_label,
+                rows_cleaned=0,
+                input_rows=0,
+                status="error",
+                error=missing_issue,
+                available_sheets=available_sheets,
+            )
+            continue
+        try:
+            df_raw = pd.read_excel(wb, sheet_name=actual_sheet, header=1)
+        except Exception as exc:
+            plan_issue_rows.append({"workbook": str(wb), "sheet": actual_sheet, "issue": f"READ_FAILED: {exc}"})
+            _append_plan_index_entry(
+                workbook=wb,
+                sheet_name=actual_sheet,
+                project_code=project_code,
+                project_label=project_label,
+                rows_cleaned=0,
+                input_rows=0,
+                status="error",
+                error=f"READ_FAILED: {exc}",
+                available_sheets=available_sheets,
+            )
+            continue
+
+        normalized, _plan_completion, local_issues = prepare_stringing_plan_frame(
+            df_raw,
+            project_hint=project_label or project_code,
+            source_path=wb,
+            sheet_name=actual_sheet,
+        )
+        if project_code:
+            normalized["project_key"] = normalized["project_key"].replace("", project_code)
+        if project_label:
+            normalized["project_name"] = normalized["project_name"].replace("", project_label)
+        plan_frames.append(normalized)
+        plan_issue_rows.extend(local_issues)
+        plan_month_value = _infer_plan_month_from_frame(normalized)
+        _append_plan_index_entry(
+            workbook=wb,
+            sheet_name=actual_sheet,
+            project_code=project_code,
+            project_label=project_label,
+            rows_cleaned=int(len(normalized)),
+            input_rows=int(len(df_raw)),
+            status="ok",
+            error="",
+            issues_logged=len(local_issues),
+            plan_month=plan_month_value,
+            available_sheets=available_sheets,
+        )
+
     compiled_all = _concat_union(compiled_frames) if compiled_frames else pd.DataFrame()
     daily_all    = _concat_union(daily_frames) if daily_frames else pd.DataFrame()
     if plan_frames:
@@ -526,6 +616,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "plan_month",
                 "status",
                 "error",
+                "available_sheets",
             ]
         )
     plan_issue_df = pd.DataFrame(plan_issue_rows)
@@ -756,7 +847,7 @@ def _try_read_excel_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
     """
     try:
         with pd.ExcelFile(path) as xl:
-            actual = _match_sheet_name(xl, sheet_name)
+            actual = _match_sheet_name(xl.sheet_names, sheet_name)
             if not actual:
                 LOGGER.warning(
                     "Stringing: sheet matching '%s' (norm='%s') not found in '%s'. Available: %s",
