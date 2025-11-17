@@ -26,6 +26,7 @@ from .stringing import (
     parse_project_code_from_filename,
     extract_stringing_number_of_tse,
 )
+from .plan_utils import infer_project_hint, prepare_stringing_plan_frame
 
 CONFIG = AppConfig()
 
@@ -107,27 +108,40 @@ def _load_pipeline_cfg(repo_root: Path) -> dict:
 
 def _resolve_stringing_raw_root(data_path_hint: Path | str) -> Path:
     """
-    Find RAW DPRs folder. Priority:
-    1) pipeline_config.json -> "input_directory" (relative to repo root)
-    2) <repo>/Raw Data/DPRs
-    3) <hint>/Raw Data/DPRs
+    Locate the Stringing Micro Plan root directory. Priority:
+    1) pipeline_config.json -> "stringing_microplan_directory" (or "microplan_directory")
+    2) <repo>/Raw Data/Micro Plans
+    3) <hint>/Raw Data/Micro Plans
     """
+
     repo_root = _repo_root_from(Path(__file__))
     cfg = _load_pipeline_cfg(repo_root)
-    input_dir = cfg.get("input_directory")  # e.g., "Raw Data/DPRs"
-    if input_dir:
-        raw_root = (repo_root / input_dir).resolve()
-        if raw_root.exists():
-            print(f"[Stringing] RAW root from pipeline_config.json: {raw_root}")
-            return raw_root
-    # Fallbacks
-    cand1 = (repo_root / "Raw Data" / "DPRs").resolve()
-    if cand1.exists():
-        print(f"[Stringing] RAW root fallback <repo>/Raw Data/DPRs: {cand1}")
-        return cand1
-    cand2 = (Path(data_path_hint) / "Raw Data" / "DPRs").resolve()
-    print(f"[Stringing] RAW root ultimate fallback: {cand2}")
-    return cand2
+
+    def _resolve_candidate(path_like: str | Path | None) -> Path | None:
+        if not path_like:
+            return None
+        candidate = Path(path_like)
+        if not candidate.is_absolute():
+            candidate = (repo_root / candidate).resolve()
+        return candidate
+
+    configured = cfg.get("stringing_microplan_directory") or cfg.get("microplan_directory")
+    candidates: list[tuple[str, Path | None]] = []
+    candidates.append(("pipeline_config", _resolve_candidate(configured)))
+    repo_default = (repo_root / "Raw Data" / "Micro Plans").resolve()
+    candidates.append(("<repo>/Raw Data/Micro Plans", repo_default))
+    hint_base = Path(data_path_hint) if data_path_hint else Path(".")
+    hint_default = (hint_base / "Raw Data" / "Micro Plans").resolve()
+    candidates.append(("hint/Raw Data/Micro Plans", hint_default))
+
+    for label, candidate in candidates:
+        if candidate and candidate.exists():
+            print(f"[Stringing] Micro plan root ({label}): {candidate}")
+            return candidate
+
+    fallback = hint_default
+    print(f"[Stringing] Micro plan fallback: {fallback}")
+    return fallback
 
 
 def _norm_sheet(s: str) -> str:
@@ -245,6 +259,27 @@ def _concat_union(dfs: list[pd.DataFrame]) -> pd.DataFrame:
     aligned = [df.reindex(columns=cols) for df in normalized]
     return pd.concat(aligned, ignore_index=True)
 
+
+def _infer_plan_month_from_frame(frame: pd.DataFrame) -> str:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return ""
+    candidate_columns = (
+        "plan_month",
+        "completion_date",
+        "final_sag_complete",
+        "paying_out_complete",
+        "paying_out_start",
+    )
+    for column in candidate_columns:
+        if column not in frame.columns:
+            continue
+        series = pd.to_datetime(frame[column], errors="coerce").dropna()
+        if series.empty:
+            continue
+        ts = pd.Timestamp(series.iloc[0])
+        return ts.to_period("M").to_timestamp().strftime("%Y-%m")
+    return ""
+
 def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
     """
     1) Resolve RAW DPRs root from pipeline_config.json (like erection flow)
@@ -263,12 +298,44 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     compiled_frames: list[pd.DataFrame] = []
     daily_frames: list[pd.DataFrame] = []
     diag_rows: list[dict] = []
+    plan_frames: list[pd.DataFrame] = []
+    plan_index_rows: list[dict[str, Any]] = []
+    plan_issue_rows: list[dict[str, str]] = []
+
+    def _append_plan_index_entry(
+        *,
+        workbook: Path | str | None,
+        sheet_name: str | None,
+        project_code: str,
+        project_label: str,
+        rows_cleaned: int,
+        input_rows: int,
+        status: str,
+        error: str,
+        issues_logged: int = 0,
+        plan_month: str = "",
+    ) -> None:
+        plan_index_rows.append(
+            {
+                "file_path": str(workbook or ""),
+                "sheet_name": sheet_name or "",
+                "project_name": project_label or project_code or "",
+                "project_key": project_code or project_label or "",
+                "rows_cleaned": int(rows_cleaned),
+                "input_rows": int(input_rows),
+                "issues_logged": int(issues_logged),
+                "plan_month": plan_month or "",
+                "status": status,
+                "error": error or "",
+            }
+        )
 
     if not candidates:
         LOGGER.warning("Stringing: no Excel files found under '%s'", raw_root)
 
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
+        project_code, project_label = infer_project_hint(wb)
 
         # If the sheet does not exist, log and continue (so Diagnostics shows it)
         actual_sheet = _resolve_excel_sheet_name(wb, sheet_name)
@@ -280,6 +347,16 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "DailyRows": 0,
                 "Status": "NO_TARGET_SHEET"
             })
+            _append_plan_index_entry(
+                workbook=wb,
+                sheet_name="",
+                project_code=project_code or proj,
+                project_label=project_label or proj,
+                rows_cleaned=0,
+                input_rows=0,
+                status="error",
+                error="NO_TARGET_SHEET",
+            )
             continue
 
         # Try robust parse of the desired sheet
@@ -300,6 +377,16 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "DailyRows": 0,
                 "Status": f"READ_FAIL: {type(exc).__name__}"
             })
+            _append_plan_index_entry(
+                workbook=wb,
+                sheet_name=actual_sheet,
+                project_code=project_code or proj,
+                project_label=project_label or proj,
+                rows_cleaned=0,
+                input_rows=0,
+                status="error",
+                error=f"READ_FAIL: {type(exc).__name__}",
+            )
             continue
 
         if df_raw is None or df_raw.empty:
@@ -310,6 +397,16 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "DailyRows": 0,
                 "Status": "EMPTY_SHEET"
             })
+            _append_plan_index_entry(
+                workbook=wb,
+                sheet_name=actual_sheet,
+                project_code=project_code or proj,
+                project_label=project_label or proj,
+                rows_cleaned=0,
+                input_rows=0,
+                status="error",
+                error="EMPTY_SHEET",
+            )
             continue
 
         tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
@@ -337,6 +434,28 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 wb.name,
                 ", ".join(deduped),
             )
+
+        plan_frame, _plan_completion, plan_issues = prepare_stringing_plan_frame(
+            df_raw,
+            project_hint=project_label or project_code or proj,
+            source_path=wb,
+            sheet_name=actual_sheet,
+        )
+        plan_frames.append(plan_frame)
+        plan_issue_rows.extend(plan_issues)
+        plan_month_value = _infer_plan_month_from_frame(plan_frame)
+        _append_plan_index_entry(
+            workbook=wb,
+            sheet_name=actual_sheet,
+            project_code=project_code or proj,
+            project_label=project_label or proj,
+            rows_cleaned=int(len(plan_frame)),
+            input_rows=int(len(df_raw)),
+            status="ok",
+            error="",
+            issues_logged=len(plan_issues),
+            plan_month=plan_month_value,
+        )
 
         # Inject project/source for traceability (fill blank project_name)
         if "project_name" not in compiled_norm.columns:
@@ -389,6 +508,31 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
     compiled_all = _concat_union(compiled_frames) if compiled_frames else pd.DataFrame()
     daily_all    = _concat_union(daily_frames) if daily_frames else pd.DataFrame()
+    if plan_frames:
+        plan_responsibilities = pd.concat(plan_frames, ignore_index=True)
+    else:
+        plan_responsibilities, _, _ = prepare_stringing_plan_frame(pd.DataFrame())
+    plan_index_df = pd.DataFrame(plan_index_rows)
+    if plan_index_df.empty:
+        plan_index_df = pd.DataFrame(
+            columns=[
+                "file_path",
+                "sheet_name",
+                "project_name",
+                "project_key",
+                "rows_cleaned",
+                "input_rows",
+                "issues_logged",
+                "plan_month",
+                "status",
+                "error",
+            ]
+        )
+    plan_issue_df = pd.DataFrame(plan_issue_rows)
+    if plan_issue_df.empty:
+        plan_issue_sheet = pd.DataFrame(columns=["workbook", "sheet", "issue"])
+    else:
+        plan_issue_sheet = plan_issue_df
 
     # Write masters (overwrite each run) — keep a single directory (no nested daily folder)
     master_compiled = out_root / "StringingCompiled.parquet"
@@ -411,6 +555,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             if not daily_all.empty:
                 daily_all.to_excel(xw, sheet_name="Daily", index=False)
             pd.DataFrame(diag_rows).to_excel(xw, sheet_name="Diagnostics", index=False)
+            plan_responsibilities.to_excel(xw, sheet_name="MicroPlanResponsibilities", index=False)
+            plan_index_df.to_excel(xw, sheet_name="MicroPlanIndex", index=False)
+            plan_issue_sheet.to_excel(xw, sheet_name="MicroPlanDataIssues", index=False)
     except Exception as exc:
         LOGGER.warning("Stringing: failed writing combined Excel: %s", exc)
 
