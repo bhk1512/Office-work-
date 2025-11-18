@@ -344,87 +344,58 @@ def _pick_project_column(df: pd.DataFrame) -> str | None:
     return None
 
 
-def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
-    """Expand stringing records to per-day rows using PO start to F/S complete.
+def _empty_stage_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "project",
+            "gang_name",
+            "date",
+            "month",
+            "from_ap",
+            "to_ap",
+            "method",
+            "section_readiness",
+            "po_id",
+            "fs_start_date",
+            "fs_complete_date",
+            "status",
+            "length_km",
+            "daily_km",
+            "row_id",
+        ]
+    )
 
-    Rules align with erection expansion for date range inclusivity:
-    - Inclusive of both endpoints: [po_start_date, fs_complete_date]
-    - Rows with missing start/end or non-positive durations are skipped.
 
-    Output columns (if available in inputs):
-    - project, gang_name, date, month, from_ap, to_ap, method,
-      section_readiness, po_id, fs_start_date, fs_complete_date,
-      status, length_km, row_id.
-    """
+def _expand_stringing_stage_to_daily(
+    df: pd.DataFrame,
+    *,
+    end_column: str,
+    output_end_column: str,
+) -> pd.DataFrame:
+    """Internal helper to expand rows between PO start and a completion column."""
     if df is None or df.empty:
-        return pd.DataFrame(
-            columns=[
-                "project",
-                "gang_name",
-                "date",
-                "month",
-                "from_ap",
-                "to_ap",
-                "method",
-                "section_readiness",
-                "po_id",
-                "fs_start_date",
-                "fs_complete_date",
-                "status",
-                "length_km",
-                "daily_km",
-                "row_id",
-            ]
-        )
+        return _empty_stage_frame()
 
-    # Normalize column names first (map-only)
     normalized, _ = normalize_stringing_columns(df)
-    # Add length units (meters -> km) while preserving meters
     normalized, _length_metrics = add_length_units(normalized)
-
-    # Determine project column (optional)
     project_col = _pick_project_column(df) or _pick_project_column(normalized)
 
-    # Parse dates with the same helper semantics used elsewhere
     po_col = "po_start_date"
-    end_col = "fs_complete_date"
-    # Build working view to avoid pandas chained assignment traps
+    end_col = end_column
     work = normalized.copy()
 
     if po_col not in work.columns or end_col not in work.columns:
-        # Required dates missing; return empty with schema
-        return pd.DataFrame(
-            columns=[
-                "project",
-                "gang_name",
-                "date",
-                "month",
-                "from_ap",
-                "to_ap",
-                "method",
-                "section_readiness",
-                "po_id",
-                "fs_start_date",
-                "fs_complete_date",
-                "status",
-                "length_km",
-                "daily_km",
-                "row_id",
-            ]
-        )
+        return _empty_stage_frame()
 
     work[po_col] = work[po_col].map(_to_datetime_normalize)
     work[end_col] = work[end_col].map(_to_datetime_normalize)
 
-    # Validity: both dates present, duration positive (inclusive range >= 1 day)
     missing_dt = work[po_col].isna() | work[end_col].isna()
     duration_days = (work[end_col] - work[po_col]).dt.days + 1
     non_positive = (~missing_dt) & (duration_days <= 0)
     valid_mask = (~missing_dt) & (~non_positive)
     valid = work.loc[valid_mask].copy()
 
-    # Evenly distribute total section length across the active days
-    # Guard against divide-by-zero (already filtered non_positive above)
     if "length_km" in valid.columns:
         valid["_duration_days"] = duration_days.loc[valid.index].astype(float)
         valid["daily_km"] = (
@@ -436,26 +407,8 @@ def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
         valid["daily_km"] = np.nan
 
     if valid.empty:
-        return pd.DataFrame(
-            columns=[
-                "project",
-                "gang_name",
-                "date",
-                "month",
-                "from_ap",
-                "to_ap",
-                "method",
-                "section_readiness",
-                "po_id",
-                "fs_start_date",
-                "fs_complete_date",
-                "status",
-                "length_km",
-                "row_id",
-            ]
-        )
+        return _empty_stage_frame()
 
-    # Ensure expected columns exist to avoid KeyErrors on selection
     for col in [
         "gang_name",
         "from_ap",
@@ -473,53 +426,35 @@ def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
     for _, r in valid.iterrows():
         start: pd.Timestamp = r[po_col]
         end: pd.Timestamp = r[end_col]
-        # Daily inclusive range
         for d in pd.date_range(start, end, freq="D"):
             project_val = r[project_col] if project_col and project_col in valid.columns else pd.NA
             date_norm = d.normalize()
             month_ts = date_norm.to_period("M").to_timestamp()
-            rows.append(
-                {
-                    "project": project_val,
-                    "gang_name": r["gang_name"],
-                    "date": date_norm,
-                    "month": month_ts,
-                    "from_ap": r["from_ap"],
-                    "to_ap": r["to_ap"],
-                    "method": r["method"],
-                    "section_readiness": r["section_readiness"],
-                    "po_id": r["po"],
-                    "fs_start_date": r.get("fs_starting_date", pd.NA),
-                    "fs_complete_date": r[end_col],
-                    "status": r["status"],
-                    "length_km": r["length_km"],
-                    "daily_km": r.get("daily_km", np.nan),
-                }
-            )
+            row = {
+                "project": project_val,
+                "gang_name": r["gang_name"],
+                "date": date_norm,
+                "month": month_ts,
+                "from_ap": r["from_ap"],
+                "to_ap": r["to_ap"],
+                "method": r["method"],
+                "section_readiness": r["section_readiness"],
+                "po_id": r["po"],
+                "fs_start_date": r.get("fs_starting_date", pd.NA),
+                "fs_complete_date": r[end_col],
+                "status": r["status"],
+                "length_km": r["length_km"],
+                "daily_km": r.get("daily_km", np.nan),
+            }
+            if output_end_column and output_end_column != "fs_complete_date":
+                row[output_end_column] = r[end_col]
+            rows.append(row)
 
     if not rows:
-        return pd.DataFrame(
-            columns=[
-                "project",
-                "gang_name",
-                "date",
-                "month",
-                "from_ap",
-                "to_ap",
-                "method",
-                "section_readiness",
-                "po_id",
-                "fs_start_date",
-                "fs_complete_date",
-                "status",
-                "length_km",
-                "row_id",
-            ]
-        )
+        return _empty_stage_frame()
 
     out = pd.DataFrame(rows)
 
-    # Stable unique row id per (project, gang, date, from/to, po)
     def _mk_row_id(row: pd.Series) -> str:
         parts = [
             str(row.get("project", "")),
@@ -534,7 +469,6 @@ def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     out["row_id"] = out.apply(_mk_row_id, axis=1)
 
-    # Order columns to match expected schema
     wanted = [
         "project",
         "gang_name",
@@ -552,12 +486,33 @@ def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
         "daily_km",
         "row_id",
     ]
-    # Include only those that exist, then add missing as NA for predictability
+    if output_end_column and output_end_column not in wanted:
+        insert_at = wanted.index("fs_complete_date") + 1
+        wanted.insert(insert_at, output_end_column)
     for c in wanted:
         if c not in out.columns:
             out[c] = pd.NA
     out = out[wanted]
     return out
+
+
+def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Expand stringing records to per-day rows using PO start to F/S complete."""
+    return _expand_stringing_stage_to_daily(
+        df,
+        end_column="fs_complete_date",
+        output_end_column="fs_complete_date",
+    )
+
+
+def expand_stringing_to_daily_payout(df: pd.DataFrame) -> pd.DataFrame:
+    """Expand stringing records between PO start and P/O completion dates."""
+    return _expand_stringing_stage_to_daily(
+        df,
+        end_column="po_completion_date",
+        output_end_column="po_completion_date",
+    )
+
 
 
 def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:

@@ -123,6 +123,7 @@ _STRINGING_PLAN_CACHE: dict[str, Any] = {
     "stored_at": 0.0,
     "last_written": 0.0,
 }
+STRINGING_PLAN_ACCESSOR: ResponsibilitiesAccessor | None = None
 
 
 def _normalize_month_value(raw: Any) -> tuple[str | None, str | None]:
@@ -1091,6 +1092,8 @@ def register_callbacks(
         error_provider=stringing_plan_error_provider,
         logger=LOGGER,
     )
+    global STRINGING_PLAN_ACCESSOR
+    STRINGING_PLAN_ACCESSOR = stringing_plan_accessor
     plan_accessors: dict[str, ResponsibilitiesAccessor] = {
         "erection": responsibilities_accessor,
         "stringing": stringing_plan_accessor,
@@ -2545,7 +2548,11 @@ def register_callbacks(
             months_ts,
             date_columns=_STRINGING_PO_DATE_COLUMNS,
         )
-        has_plan_scope = _stringing_scope_has_plan(scope_meta, months_ts)
+        has_plan_scope = _stringing_scope_has_plan(
+            scope_meta,
+            months_ts,
+            date_columns=_STRINGING_PO_DATE_COLUMNS,
+        )
         frame = _get_stringing_po_daily_frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             if plan_total <= 0 and not has_plan_scope:
@@ -2717,7 +2724,11 @@ def register_callbacks(
                     months_ts,
                     date_columns=_STRINGING_FS_DATE_COLUMNS,
                 )
-                has_plan_scope = _stringing_scope_has_plan(scope_meta, months_ts)
+                has_plan_scope = _stringing_scope_has_plan(
+                    scope_meta,
+                    months_ts,
+                    date_columns=_STRINGING_FS_DATE_COLUMNS,
+                )
                 done_txt = _format_summary_value(total_delivered, unit_short)
                 if planned_total_value > 0:
                     total_txt = f"{planned_total_value:.1f} {unit_short}"
@@ -6037,7 +6048,9 @@ def register_callbacks(
         method_list = _normalize_str_list(method_filter, lower=True)
         pch_sections: list[dbc.AccordionItem] = []
         # Erection mode (existing flow)
-        stringing_plan_month_map: dict[str, set[pd.Timestamp]] = _load_stringing_plan_month_map() if mode == "stringing" else {}
+        stringing_plan_month_map: dict[str, set[pd.Timestamp]] = (
+            _load_stringing_plan_month_map(date_columns=_STRINGING_FS_DATE_COLUMNS) if mode == "stringing" else {}
+        )
 
         def _project_has_plan(name: str, code: str) -> bool:
             return _stringing_project_has_plan(stringing_plan_month_map, name, code)
@@ -8388,7 +8401,31 @@ def register_callbacks(
         raise PreventUpdate
 
 
-def _load_stringing_plan_month_map() -> dict[str, set[pd.Timestamp]]:
+def _stringing_plan_month_series(frame: pd.DataFrame, date_columns: Sequence[str]) -> pd.Series:
+    """Return a normalized month-series derived from the provided date columns."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.Series([], dtype="datetime64[ns]")
+
+    accumulator: pd.Series | None = None
+    for column in date_columns:
+        if column not in frame.columns:
+            continue
+        parsed = pd.to_datetime(frame[column], errors="coerce")
+        accumulator = parsed.copy() if accumulator is None else accumulator.fillna(parsed)
+
+    if accumulator is None and "completion_date" in frame.columns:
+        accumulator = pd.to_datetime(frame["completion_date"], errors="coerce")
+
+    if accumulator is None:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+
+    return accumulator.dt.to_period("M").dt.to_timestamp()
+
+
+def _load_stringing_plan_month_map(
+    *,
+    date_columns: Sequence[str] = _STRINGING_FS_DATE_COLUMNS,
+) -> dict[str, set[pd.Timestamp]]:
     try:
         plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
     except Exception:
@@ -8397,20 +8434,17 @@ def _load_stringing_plan_month_map() -> dict[str, set[pd.Timestamp]]:
     if not isinstance(plan_snapshot, pd.DataFrame) or plan_snapshot.empty:
         return plan_map
     plan = plan_snapshot.copy()
-    if "completion_month" in plan.columns:
-        plan["completion_month"] = pd.to_datetime(plan["completion_month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-    elif "completion_date" in plan.columns:
-        plan["completion_month"] = pd.to_datetime(plan["completion_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-    elif "plan_month" in plan.columns:
-        plan["completion_month"] = pd.to_datetime(plan["plan_month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-    else:
-        plan["completion_month"] = pd.NaT
+    plan_months = _stringing_plan_month_series(plan, date_columns)
+    plan["__plan_month"] = plan_months
+    plan = plan.dropna(subset=["__plan_month"])
+    if plan.empty:
+        return plan_map
     plan["__name_norm"] = plan.get("project_name", pd.Series([], dtype=str)).astype(str).map(_normalize_lower)
     plan["__code_norm"] = plan.get("project_key", pd.Series([], dtype=str)).astype(str).map(_normalize_lower)
     plan["__name_compact"] = plan.get("project_name", pd.Series([], dtype=str)).astype(str).map(_compact_project_key)
     plan["__code_compact"] = plan.get("project_key", pd.Series([], dtype=str)).astype(str).map(_compact_project_key)
     for _, row in plan.iterrows():
-        month_value = row.get("completion_month")
+        month_value = row.get("__plan_month")
         if pd.isna(month_value):
             continue
         ts = pd.Timestamp(month_value)
@@ -8425,16 +8459,27 @@ def _load_stringing_plan_month_map() -> dict[str, set[pd.Timestamp]]:
     return plan_map
 
 def _stringing_plan_keys(name: str | None, code: str | None) -> list[str]:
-    keys: list[str] = []
+    keys: set[str] = set()
+
+    def _add_value(raw: str) -> None:
+        if not raw:
+            return
+        norm = _normalize_lower(raw)
+        if norm:
+            keys.add(norm)
+        compact = _compact_project_key(raw)
+        if compact:
+            keys.add(compact)
+
     for value in (name, code):
         if not value:
             continue
-        norm = _normalize_lower(value)
-        if norm and norm not in keys:
-            keys.append(norm)
-        compact = _compact_project_key(value)
-        if compact and compact not in keys:
-            keys.append(compact)
+        text = str(value)
+        _add_value(text)
+        if " : " in text:
+            left, right = text.split(" : ", 1)
+            _add_value(left)
+            _add_value(right)
     return [key for key in keys if key]
 
 
@@ -8452,8 +8497,13 @@ def _stringing_plan_months_for_project(plan_map: Mapping[str, set[pd.Timestamp]]
     return sorted(months)
 
 
-def _stringing_scope_has_plan(scope_meta: dict[str, Any] | None, months_ts: list[pd.Timestamp]) -> bool:
-    plan_map = _load_stringing_plan_month_map()
+def _stringing_scope_has_plan(
+    scope_meta: dict[str, Any] | None,
+    months_ts: list[pd.Timestamp],
+    *,
+    date_columns: Sequence[str] = _STRINGING_FS_DATE_COLUMNS,
+) -> bool:
+    plan_map = _load_stringing_plan_month_map(date_columns=date_columns)
     if not plan_map:
         return False
     selected = (scope_meta or {}).get("selected") or {}
@@ -8488,82 +8538,118 @@ def _stringing_planned_total_for_dates(
     date_columns: Sequence[str],
 ) -> float:
     try:
-        plan_map = _load_stringing_plan_month_map()
-        if not plan_map:
+        plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
+        if not isinstance(plan_snapshot, pd.DataFrame) or plan_snapshot.empty:
             return 0.0
-        df_compiled = pd.DataFrame()
-        if callable(stringing_compiled_provider):
-            try:
-                df_compiled = stringing_compiled_provider()
-            except Exception:
-                df_compiled = pd.DataFrame()
-        if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
-            try:
-                df_compiled = _load_stringing_compiled_raw(config)
-            except Exception:
-                df_compiled = pd.DataFrame()
-        if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
+        plan = plan_snapshot.copy()
+        plan["__plan_month"] = _stringing_plan_month_series(plan, date_columns)
+        plan = plan.dropna(subset=["__plan_month"])
+        if plan.empty:
             return 0.0
-        comp = df_compiled.copy()
-        comp_proj_col = None
-        for cand in ("project_name", "project", "Project Name", "Project"):
-            if cand in comp.columns:
-                comp_proj_col = cand
-                break
-        if comp_proj_col is None:
+
+        def _detect_span_km(frame: pd.DataFrame) -> pd.Series | None:
+            candidates = {
+                "span_m",
+                "span m",
+                "span",
+                "span length",
+                "length_m",
+                "length m",
+                "length",
+                "span(km)",
+                "span_km",
+                "span(m)",
+            }
+            series_acc: pd.Series | None = None
+            for column in frame.columns:
+                norm = _normalize_col_key(column)
+                if norm not in candidates:
+                    continue
+                numeric = pd.to_numeric(frame[column], errors="coerce")
+                if "km" in norm.replace(" ", ""):
+                    km_values = numeric
+                else:
+                    km_values = numeric / 1000.0
+                if series_acc is None:
+                    series_acc = km_values
+                else:
+                    series_acc = series_acc.fillna(km_values)
+            if series_acc is not None:
+                return series_acc
+            if "tower_weight" in frame.columns:
+                return pd.to_numeric(frame["tower_weight"], errors="coerce") / 1000.0
+            return None
+        span_series = _detect_span_km(plan)
+        if span_series is None:
             return 0.0
-        date_col = next((dc for dc in date_columns if dc in comp.columns), None)
-        if date_col is None:
-            return 0.0
-        comp[date_col] = pd.to_datetime(comp[date_col], errors="coerce")
-        comp = comp.dropna(subset=[date_col])
-        if comp.empty:
-            return 0.0
-        comp[date_col] = comp[date_col].dt.to_period("M").dt.to_timestamp()
+        plan["plan_km"] = span_series.fillna(0.0)
         if months_ts:
-            comp = comp[comp[date_col].isin(months_ts)].copy()
-            if comp.empty:
+            month_set = {pd.Timestamp(ts) for ts in months_ts if pd.notna(ts)}
+            plan = plan[plan["__plan_month"].isin(month_set)].copy()
+            if plan.empty:
                 return 0.0
-        if "length_km" not in comp.columns and "length_m" in comp.columns:
-            comp["length_km"] = pd.to_numeric(comp["length_m"], errors="coerce") / 1000.0
-        comp["length_km"] = pd.to_numeric(comp.get("length_km", np.nan), errors="coerce")
-        comp["__project_name"] = comp[comp_proj_col].astype(str).str.strip()
-        comp["__project_name_norm"] = comp["__project_name"].map(_normalize_lower)
-        code_col = None
-        for cand in ("project_code", "Project Code", "project", "Project"):
-            if cand in comp.columns:
-                code_col = cand
-                break
-        if code_col:
-            comp["__project_code"] = comp[code_col].astype(str).str.strip()
-        else:
-            comp["__project_code"] = comp["__project_name"]
         selected = (scope_meta or {}).get("selected") or {}
-        project_filters = {
-            _normalize_lower(p)
-            for p in _normalize_str_list(selected.get("projects"))
-            if isinstance(p, str) and p.strip()
-        }
+        project_filters = _normalize_str_list(selected.get("projects"))
         if project_filters:
-            comp = comp[comp["__project_name_norm"].isin(project_filters)].copy()
-            if comp.empty:
-                return 0.0
-        grouped = (
-            comp.groupby("__project_name", dropna=False)
-            .agg(planned_km=("length_km", "sum"), project_code=("__project_code", "first"))
-            .reset_index()
-        )
-        total_planned = 0.0
-        for _, row in grouped.iterrows():
-            proj_name = str(row["__project_name"]).strip()
-            proj_code = str(row["project_code"]).strip()
-            if not _stringing_project_has_plan(plan_map, proj_name, proj_code):
-                continue
-            try:
-                total_planned += float(row["planned_km"] or 0.0)
-            except Exception:
-                continue
-        return total_planned
+            key_set: set[str] = set()
+            for project in project_filters:
+                key_set.update(_stringing_plan_keys(project, project))
+            if key_set:
+                name_series = plan.get("project_name")
+                if name_series is None:
+                    name_series = pd.Series([""] * len(plan), index=plan.index)
+                else:
+                    name_series = name_series.astype(str)
+                code_series = plan.get("project_key")
+                if code_series is None:
+                    code_series = name_series.copy()
+                else:
+                    code_series = code_series.astype(str)
+                mask = (
+                    name_series.map(_normalize_lower).isin(key_set)
+                    | name_series.map(_compact_project_key).isin(key_set)
+                    | code_series.map(_normalize_lower).isin(key_set)
+                    | code_series.map(_compact_project_key).isin(key_set)
+                )
+                plan = plan[mask].copy()
+                if plan.empty:
+                    return 0.0
+        return float(plan["plan_km"].sum())
     except Exception:
         LOGGER.exception("Failed to compute stringing planned totals.")
         return 0.0
+
+
+def _load_stringing_plan_snapshot(
+    cfg: AppConfig,
+) -> tuple[pd.DataFrame | None, set[tuple[str, str]], list[dict[str, str]], list[dict[str, Any]]]:
+    cache = _STRINGING_PLAN_CACHE
+    ts_now = time.time()
+    cached_frame = cache["frame"]
+    if (
+        isinstance(cached_frame, pd.DataFrame)
+        and not cached_frame.empty
+        and (ts_now - cache["stored_at"] < _STRINGING_PLAN_CACHE_TTL_SECONDS)
+    ):
+        issues = cache["issues"]
+        completion = cache["completion"]
+        index_rows = cache.get("index", [])
+        return cached_frame.copy(), set(completion), list(issues), list(index_rows)
+
+    accessor = STRINGING_PLAN_ACCESSOR
+    if accessor is None:
+        return None, set(), [], []
+
+    payload = accessor.load()
+    if payload.has_frame:
+        frame = payload.frame.copy()
+        completion_keys = set(payload.completion_keys or set())
+        cache["frame"] = frame.copy()
+        cache["completion"] = set(completion_keys)
+        cache["issues"] = []
+        cache["index"] = []
+        cache["stored_at"] = ts_now
+        cache["last_written"] = ts_now
+        return frame, completion_keys, [], []
+
+    return None, set(), [], []

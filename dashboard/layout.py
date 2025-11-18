@@ -370,6 +370,7 @@ def build_mode_summary_cards() -> dbc.Row:
     stringing_rows = [
         ("Projects Covered", "stringing-card-projects", "projects"),
         ("Total / Done / Balance", "stringing-card-totals", "totals"),
+        ("P/O Completion", "stringing-card-po-completion", "po_completion"),
         ("Gangs", "stringing-card-gangs", "gangs"),
         ("Productivity / Historical Avg", "stringing-card-productivity", "productivity"),
         ("Lost Units", "stringing-card-loss", "loss"),
@@ -392,6 +393,7 @@ _LUCIDE_TREND_UP   = "7 17 17 7M7 7h10v10"
 _LUCIDE_ACTIVITY   = "22 12h-4l-3 9-6-18-3 9H2"
 
 def build_kpi_cards() -> dbc.Row:
+    # Keep nodes present for callbacks but hide them from the cleaned-up home view.
     return dbc.Row(
         [
             # 1) Avg Output / Gang / Day  (blue)
@@ -491,11 +493,13 @@ def build_kpi_cards() -> dbc.Row:
         ],
         id="kpi-row",
         className="g-3 align-items-stretch row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-5",
+        style={"display": "none"},
     )
 
 
 def build_project_details_card() -> dbc.Card:
     """Project Overview card: the body is dynamic (message OR 3-col grid)."""
+    # Keep element for callbacks but hide from the streamlined home view.
     return dbc.Card(
         dbc.CardBody(
             [
@@ -515,6 +519,7 @@ def build_project_details_card() -> dbc.Card:
             className="project-card",        # blue surface on CardBody
         ),
         className="mb-3 project-card-wrap",  # neutral wrapper
+        style={"display": "none"},
     )
 
 
@@ -539,9 +544,11 @@ def build_trace_block() -> dbc.Card:
     contents.extend([
         Download(id="download-trace-xlsx"),
     ])
+    # Keep block rendered (callbacks expect ids) but hide it on the simplified home screen.
     return dbc.Card(
         dbc.CardBody(contents),
         className="mt-4 shadow-sm",
+        style={"display": "none"},
     )
 
 
@@ -640,6 +647,7 @@ def build_erections_card() -> dbc.Card:
     return dbc.Card(
         dbc.CardBody(body),
         className="mt-4 shadow-sm",
+        style={"display": "none"},
     )
 
 
@@ -1207,6 +1215,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_mode_summary_cards(),
             build_kpi_cards(),
             build_project_details_card(),
+            # Hide historical graph + plan cards to keep home screen minimal while callbacks remain intact.
+            # Hide gang performance + ranking cards on the home screen while keeping callbacks wired.
             dbc.Row(
                 [
                     # LEFT: Projects over Months (only)
@@ -1486,6 +1496,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                 ],
                 className="mb-4",
                 align="stretch",
+                style={"display": "none"},
             ),
             dbc.Row(
                 [
@@ -1611,6 +1622,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                     ),
                 ],
                 className="mb-4",
+                style={"display": "none"},
             ),
             build_trace_block(),
             build_erections_card(),

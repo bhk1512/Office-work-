@@ -349,15 +349,27 @@ class DataSelector:
         where_clauses: list[str] = []
         params: list[object] = []
 
-        if months and "month" in columns:
-            where_clauses.append("month IN (SELECT * FROM UNNEST(?))")
-            params.append([self._timestamp_to_py(ts) for ts in months])
-        if projects and "project_name" in columns:
-            where_clauses.append("project_name IN (SELECT * FROM UNNEST(?))")
-            params.append(list(projects))
-        if gangs and "gang_name" in columns:
-            where_clauses.append("gang_name IN (SELECT * FROM UNNEST(?))")
-            params.append(list(gangs))
+        def _append_in_clause(expression: str, values: Sequence[object]) -> None:
+            if not values:
+                return
+            placeholders = ", ".join("?" for _ in values)
+            where_clauses.append(f"{expression} IN ({placeholders})")
+            params.extend(values)
+
+        def _append_column_clause(
+            column: str,
+            values: Sequence[object],
+            *,
+            transform: Callable[[object], object] | None = None,
+        ) -> None:
+            if column not in columns or not values:
+                return
+            converted = [transform(value) if transform else value for value in values]
+            _append_in_clause(column, converted)
+
+        _append_column_clause("month", months, transform=lambda ts: self._timestamp_to_py(ts))
+        _append_column_clause("project_name", projects)
+        _append_column_clause("gang_name", gangs)
 
         leftover_kv: set[str] = set()
         leftover_method: set[str] = set()
@@ -365,17 +377,15 @@ class DataSelector:
         if mode == "stringing":
             if kv_filter and kv_filter != {"400", "765"}:
                 if "line_kv" in columns:
-                    where_clauses.append("COALESCE(line_kv, '') IN (SELECT * FROM UNNEST(?))")
-                    params.append(sorted(kv_filter))
+                    _append_in_clause("COALESCE(line_kv, '')", sorted(kv_filter))
                 else:
                     leftover_kv = set(kv_filter)
             if method_filter and method_filter != {"manual", "tse"}:
+                sorted_methods = sorted(method_filter)
                 if "method_norm" in columns:
-                    where_clauses.append("COALESCE(method_norm, '') IN (SELECT * FROM UNNEST(?))")
-                    params.append(sorted(method_filter))
+                    _append_in_clause("COALESCE(method_norm, '')", sorted_methods)
                 elif "method" in columns:
-                    where_clauses.append("lower(COALESCE(method, '')) IN (SELECT * FROM UNNEST(?))")
-                    params.append(sorted(method_filter))
+                    _append_in_clause("lower(COALESCE(method, ''))", sorted_methods)
                 else:
                     leftover_method = set(method_filter)
 
