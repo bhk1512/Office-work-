@@ -20,7 +20,10 @@ from dashboard.stringing import (
     read_stringing_sheet_robust,
     parse_project_code_from_filename,
 )
-from microplan_compile import compile_microplans_to_workbook
+from microplan_compile import (
+    compile_microplans_to_workbook,
+    compile_stringing_microplans_to_workbook,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -435,6 +438,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 
 
+    stringing_out_path: Path | None = None
+
     if not args.skip_compile:
         # Ensure fresh outputs on every compile run
         # 1) Remove any existing compiled workbook
@@ -497,19 +502,23 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             parquet_dir = None
 
         # --- Compile Stringing from the DPR sources ---
+        # Always attempt to refresh micro plan outputs even if DPR compilation fails.
+        # Many sites currently have malformed DPRs, but we still want the micro plans.
+        base_dir = resolved_output.parent if resolved_output else BASE_DIR
+        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+            stringing_base = base_dir.parent / "Stringing"
+        else:
+            # Fallback: put stringing next to the current base
+            stringing_base = base_dir / "Stringing" if base_dir.name != "Stringing" else base_dir
+        stringing_base.mkdir(parents=True, exist_ok=True)
+        stringing_out = stringing_base / "StringingCompiled_Output.xlsx"
+        stringing_out_path = stringing_out
+
+        stringing_input = resolved_input
+        stringing_files = resolved_files
+
         try:
-            # Prefer writing stringing outputs to a sibling Parquets/Stringing folder
-            base_dir = resolved_output.parent if resolved_output else BASE_DIR
-            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
-                stringing_base = base_dir.parent / "Stringing"
-            else:
-                # Fallback: put stringing next to the current base
-                stringing_base = base_dir / "Stringing" if base_dir.name != "Stringing" else base_dir
-            stringing_base.mkdir(parents=True, exist_ok=True)
-            stringing_out = stringing_base / "StringingCompiled_Output.xlsx"
             print(f"[pipeline] Stringing: compiling to {stringing_out}")
-            stringing_input = resolved_input
-            stringing_files = resolved_files
             stringing_parquet_dir = compile_stringing_to_workbook(
                 stringing_input,
                 stringing_files,
@@ -520,6 +529,27 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 print(f"[pipeline] Stringing: compiled parquet at {stringing_parquet_dir}")
         except Exception as exc:
             print(f"[pipeline] Stringing: failed to compile from DPRs: {exc}")
+
+        if micro_input_dir:
+            try:
+                print(f"[pipeline] Stringing MicroPlan: scanning '{micro_input_dir}' and writing to '{stringing_out}'")
+                compile_stringing_microplans_to_workbook(
+                    input_dir=micro_input_dir,
+                    output_path=str(stringing_out),
+                )
+            except Exception as exc:
+                print(f"[pipeline] Stringing MicroPlan: failed to compile micro plans: {exc}")
+        else:
+            print("[pipeline] Stringing MicroPlan: no input directory configured; skipping.")
+
+        if stringing_out.exists():
+            try:
+                export_workbook_to_parquet(
+                    stringing_out,
+                    sheets=("MicroPlanResponsibilities", "MicroPlanIndex", "MicroPlanDataIssues"),
+                )
+            except Exception as exc:
+                print(f"[pipeline] Stringing: failed to export Micro Plan sheets to parquet: {exc}")
     else:
         print("[pipeline] Skipping compilation step as requested.")
         parquet_dir = None
@@ -549,7 +579,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     else:
         dataset_target = Path(dashboard.DATA_PATH)
 
-    new_config = dashboard.AppConfig(data_path=dataset_target)
+    if stringing_out_path and stringing_out_path.exists():
+        stringing_target = stringing_out_path
+    else:
+        stringing_target = Path(dashboard.CONFIG.stringing_data_path)
+
+    new_config = dashboard.AppConfig(data_path=dataset_target, stringing_data_path=stringing_target)
     dashboard.CONFIG = new_config
     dashboard.DATA_PATH = dataset_target
     dashboard.app = dashboard.create_app(new_config)

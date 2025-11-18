@@ -338,6 +338,37 @@ def _infer_plan_month_from_frame(frame: pd.DataFrame) -> str:
         return ts.to_period("M").to_timestamp().strftime("%Y-%m")
     return ""
 
+
+def _load_precompiled_stringing_microplan(out_root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+    """
+    Reuse micro plan sheets written by the standalone microplan compiler if they exist.
+    Falls back to None when the workbook is absent or unreadable.
+    """
+    workbook = out_root / "StringingCompiled_Output.xlsx"
+    if not workbook.exists():
+        return None
+
+    try:
+        sheets = pd.read_excel(
+            workbook,
+            sheet_name=[
+                "MicroPlanResponsibilities",
+                "MicroPlanIndex",
+                "MicroPlanDataIssues",
+            ],
+        )
+    except ValueError:
+        # Some sheets missing; let caller rebuild from raw inputs.
+        return None
+    except Exception as exc:
+        LOGGER.warning("Stringing: failed to read micro plan sheets from '%s': %s", workbook, exc)
+        return None
+
+    responsibilities = sheets.get("MicroPlanResponsibilities", pd.DataFrame())
+    index_df = sheets.get("MicroPlanIndex", pd.DataFrame())
+    issues_df = sheets.get("MicroPlanDataIssues", pd.DataFrame())
+    return responsibilities, index_df, issues_df
+
 def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
     """
     1) Resolve RAW DPRs root from pipeline_config.json (like erection flow)
@@ -519,111 +550,139 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "Status": "NO_DAILY"
             })
 
-    if not plan_candidates:
-        LOGGER.warning("Stringing: no Micro Plan files found under '%s'", plan_root)
+    precompiled_plan = _load_precompiled_stringing_microplan(out_root)
+    plan_responsibilities: pd.DataFrame | None = None
+    plan_index_df: pd.DataFrame | None = None
+    plan_issue_sheet: pd.DataFrame | None = None
 
-    for wb in plan_candidates:
-        sheet_names, sheet_names_error = _list_excel_sheet_names(wb)
-        available_sheets = list(sheet_names)
-        if sheet_names_error:
-            available_sheets = [f"[error: {sheet_names_error}]"]
-        project_code, project_label = infer_project_hint(wb)
-        names_for_matching: Iterable[str] | None = sheet_names if sheet_names_error is None else None
-        actual_sheet = _resolve_excel_sheet_name(
-            wb,
-            sheet_name,
-            contains_keyword="stringing",
-            sheet_names=names_for_matching,
-        )
-        if not actual_sheet:
-            missing_issue = "NO_STRINGING_SHEET"
+    if precompiled_plan is None:
+        if not plan_candidates:
+            LOGGER.warning("Stringing: no Micro Plan files found under '%s'", plan_root)
+
+        for wb in plan_candidates:
+            sheet_names, sheet_names_error = _list_excel_sheet_names(wb)
+            available_sheets = list(sheet_names)
             if sheet_names_error:
-                missing_issue = f"SHEET_LIST_FAILED: {sheet_names_error}"
-            plan_issue_rows.append({"workbook": str(wb), "sheet": "", "issue": missing_issue})
-            _append_plan_index_entry(
-                workbook=wb,
-                sheet_name="",
-                project_code=project_code,
-                project_label=project_label,
-                rows_cleaned=0,
-                input_rows=0,
-                status="error",
-                error=missing_issue,
-                available_sheets=available_sheets,
+                available_sheets = [f"[error: {sheet_names_error}]"]
+            project_code, project_label = infer_project_hint(wb)
+            names_for_matching: Iterable[str] | None = sheet_names if sheet_names_error is None else None
+            actual_sheet = _resolve_excel_sheet_name(
+                wb,
+                sheet_name,
+                contains_keyword="stringing",
+                sheet_names=names_for_matching,
             )
-            continue
-        try:
-            df_raw = pd.read_excel(wb, sheet_name=actual_sheet, header=1)
-        except Exception as exc:
-            plan_issue_rows.append({"workbook": str(wb), "sheet": actual_sheet, "issue": f"READ_FAILED: {exc}"})
+            if not actual_sheet:
+                missing_issue = "NO_STRINGING_SHEET"
+                if sheet_names_error:
+                    missing_issue = f"SHEET_LIST_FAILED: {sheet_names_error}"
+                plan_issue_rows.append({"workbook": str(wb), "sheet": "", "issue": missing_issue})
+                _append_plan_index_entry(
+                    workbook=wb,
+                    sheet_name="",
+                    project_code=project_code,
+                    project_label=project_label,
+                    rows_cleaned=0,
+                    input_rows=0,
+                    status="error",
+                    error=missing_issue,
+                    available_sheets=available_sheets,
+                )
+                continue
+            try:
+                df_raw = pd.read_excel(wb, sheet_name=actual_sheet, header=1)
+            except Exception as exc:
+                plan_issue_rows.append({"workbook": str(wb), "sheet": actual_sheet, "issue": f"READ_FAILED: {exc}"})
+                _append_plan_index_entry(
+                    workbook=wb,
+                    sheet_name=actual_sheet,
+                    project_code=project_code,
+                    project_label=project_label,
+                    rows_cleaned=0,
+                    input_rows=0,
+                    status="error",
+                    error=f"READ_FAILED: {exc}",
+                    available_sheets=available_sheets,
+                )
+                continue
+
+            normalized, _plan_completion, local_issues = prepare_stringing_plan_frame(
+                df_raw,
+                project_hint=project_label or project_code,
+                source_path=wb,
+                sheet_name=actual_sheet,
+            )
+            if project_code:
+                normalized["project_key"] = normalized["project_key"].replace("", project_code)
+            if project_label:
+                normalized["project_name"] = normalized["project_name"].replace("", project_label)
+            plan_frames.append(normalized)
+            plan_issue_rows.extend(local_issues)
+            plan_month_value = _infer_plan_month_from_frame(normalized)
             _append_plan_index_entry(
                 workbook=wb,
                 sheet_name=actual_sheet,
                 project_code=project_code,
                 project_label=project_label,
-                rows_cleaned=0,
-                input_rows=0,
-                status="error",
-                error=f"READ_FAILED: {exc}",
+                rows_cleaned=int(len(normalized)),
+                input_rows=int(len(df_raw)),
+                status="ok",
+                error="",
+                issues_logged=len(local_issues),
+                plan_month=plan_month_value,
                 available_sheets=available_sheets,
             )
-            continue
 
-        normalized, _plan_completion, local_issues = prepare_stringing_plan_frame(
-            df_raw,
-            project_hint=project_label or project_code,
-            source_path=wb,
-            sheet_name=actual_sheet,
-        )
-        if project_code:
-            normalized["project_key"] = normalized["project_key"].replace("", project_code)
-        if project_label:
-            normalized["project_name"] = normalized["project_name"].replace("", project_label)
-        plan_frames.append(normalized)
-        plan_issue_rows.extend(local_issues)
-        plan_month_value = _infer_plan_month_from_frame(normalized)
-        _append_plan_index_entry(
-            workbook=wb,
-            sheet_name=actual_sheet,
-            project_code=project_code,
-            project_label=project_label,
-            rows_cleaned=int(len(normalized)),
-            input_rows=int(len(df_raw)),
-            status="ok",
-            error="",
-            issues_logged=len(local_issues),
-            plan_month=plan_month_value,
-            available_sheets=available_sheets,
-        )
-
-    compiled_all = _concat_union(compiled_frames) if compiled_frames else pd.DataFrame()
-    daily_all    = _concat_union(daily_frames) if daily_frames else pd.DataFrame()
-    if plan_frames:
-        plan_responsibilities = pd.concat(plan_frames, ignore_index=True)
+        compiled_all = _concat_union(compiled_frames) if compiled_frames else pd.DataFrame()
+        daily_all    = _concat_union(daily_frames) if daily_frames else pd.DataFrame()
+        if plan_frames:
+            plan_responsibilities = pd.concat(plan_frames, ignore_index=True)
+        else:
+            plan_responsibilities, _, _ = prepare_stringing_plan_frame(pd.DataFrame())
+        plan_index_df = pd.DataFrame(plan_index_rows)
+        if plan_index_df.empty:
+            plan_index_df = pd.DataFrame(
+                columns=[
+                    "file_path",
+                    "sheet_name",
+                    "project_name",
+                    "project_key",
+                    "rows_cleaned",
+                    "input_rows",
+                    "issues_logged",
+                    "plan_month",
+                    "status",
+                    "error",
+                    "available_sheets",
+                ]
+            )
+        plan_issue_df = pd.DataFrame(plan_issue_rows)
+        if plan_issue_df.empty:
+            plan_issue_sheet = pd.DataFrame(columns=["workbook", "sheet", "issue"])
+        else:
+            plan_issue_sheet = plan_issue_df
     else:
-        plan_responsibilities, _, _ = prepare_stringing_plan_frame(pd.DataFrame())
-    plan_index_df = pd.DataFrame(plan_index_rows)
-    if plan_index_df.empty:
-        plan_index_df = pd.DataFrame(
-            columns=[
-                "file_path",
-                "sheet_name",
-                "project_name",
-                "project_key",
-                "rows_cleaned",
-                "input_rows",
-                "issues_logged",
-                "plan_month",
-                "status",
-                "error",
-                "available_sheets",
-            ]
-        )
-    plan_issue_df = pd.DataFrame(plan_issue_rows)
-    if plan_issue_df.empty:
-        plan_issue_sheet = pd.DataFrame(columns=["workbook", "sheet", "issue"])
-    else:
-        plan_issue_sheet = plan_issue_df
+        plan_responsibilities, plan_index_df, plan_issue_sheet = precompiled_plan
+        compiled_all = _concat_union(compiled_frames) if compiled_frames else pd.DataFrame()
+        daily_all    = _concat_union(daily_frames) if daily_frames else pd.DataFrame()
+        if plan_index_df.empty:
+            plan_index_df = pd.DataFrame(
+                columns=[
+                    "file_path",
+                    "sheet_name",
+                    "project_name",
+                    "project_key",
+                    "rows_cleaned",
+                    "input_rows",
+                    "issues_logged",
+                    "plan_month",
+                    "status",
+                    "error",
+                    "available_sheets",
+                ]
+            )
+        if plan_issue_sheet.empty:
+            plan_issue_sheet = pd.DataFrame(columns=["workbook", "sheet", "issue"])
 
     # Write masters (overwrite each run) — keep a single directory (no nested daily folder)
     master_compiled = out_root / "StringingCompiled.parquet"

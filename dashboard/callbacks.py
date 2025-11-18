@@ -1121,9 +1121,8 @@ def register_callbacks(
 
         completion_keys = set(payload.completion_keys or set())
         if mode_key == "stringing":
-            plan_frame, plan_keys, _plan_issues, _plan_index = _load_stringing_plan_snapshot(config)
+            plan_frame, _plan_keys, _plan_issues, _plan_index = _load_stringing_plan_snapshot(config)
             if isinstance(plan_frame, pd.DataFrame) and not plan_frame.empty:
-                completion_keys |= plan_keys
                 return plan_frame.copy(), completion_keys, payload.error, None
         load_error = payload.error
         if allow_workbook_fallback and not has_plan_provider.get(mode_key, False):
@@ -1611,12 +1610,17 @@ def register_callbacks(
         if "completion_date" not in normalized.columns:
             normalized["completion_date"] = pd.NaT
         normalized["completion_date"] = pd.to_datetime(normalized["completion_date"], errors="coerce")
-        normalized["completion_date"] = normalized["completion_date"].fillna(
-            pd.to_datetime(normalized.get("final_sag_complete"), errors="coerce")
-        )
-        normalized["completion_date"] = normalized["completion_date"].fillna(
-            pd.to_datetime(normalized.get("paying_out_complete"), errors="coerce")
-        )
+
+        def _fill_completion_from(column_name: str) -> None:
+            if column_name not in normalized.columns:
+                return
+            fallback = pd.to_datetime(normalized[column_name], errors="coerce")
+            if fallback is None:
+                return
+            normalized["completion_date"] = normalized["completion_date"].fillna(fallback)
+
+        _fill_completion_from("final_sag_complete")
+        _fill_completion_from("paying_out_complete")
         return normalized, completion_pairs, issues
 
     def _stringing_plan_output_path(cfg: AppConfig) -> Path:
@@ -1720,6 +1724,18 @@ def register_callbacks(
             completion = cache["completion"]
             index_rows = cache.get("index", [])
             return frame.copy(), set(completion), list(issues), list(index_rows)
+
+        payload = stringing_plan_accessor.load()
+        if payload.has_frame:
+            frame = payload.frame.copy()
+            completion_keys = set(payload.completion_keys or set())
+            cache["frame"] = frame.copy()
+            cache["completion"] = set(completion_keys)
+            cache["issues"] = []
+            cache["index"] = []
+            cache["stored_at"] = ts_now
+            cache["last_written"] = ts_now
+            return frame, completion_keys, [], []
 
         root = _resolve_stringing_microplan_root(config.data_path)
         frames: list[pd.DataFrame] = []
@@ -1845,7 +1861,7 @@ def register_callbacks(
                         error=f"READ_FAILED: {exc}",
                     )
                     continue
-                normalized, plan_keys, local_issues = _prepare_stringing_plan_frame(
+                normalized, _plan_keys, local_issues = _prepare_stringing_plan_frame(
                     df_raw,
                     project_hint=project_label or project_code,
                     source_path=workbook,
@@ -1855,7 +1871,6 @@ def register_callbacks(
                     normalized["project_key"] = normalized["project_key"].replace("", project_code)
                 if project_label:
                     normalized["project_name"] = normalized["project_name"].replace("", project_label)
-                completion_keys |= plan_keys
                 frames.append(normalized)
                 issues.extend(local_issues)
                 plan_month_value = _infer_plan_month_from_frame(normalized)
@@ -1941,7 +1956,6 @@ def register_callbacks(
 
         completion_keys = set(completed_keys or set())
         df_atomic = df_atomic.copy()
-        stringing_completion_keys: set[tuple[str, str]] = set()
         plan_source_path = None
         plan_sheet_name = None
         if workbook is not None:
@@ -1951,18 +1965,16 @@ def register_callbacks(
                 plan_source_path = getattr(workbook, "io", None)
         plan_issues: list[dict[str, str]] = []
         if plan_key == "stringing":
-            if "stringing_span_completed" not in df_atomic.columns:
-                df_atomic, stringing_completion_keys, plan_issues = _prepare_stringing_plan_frame(
+            if workbook is not None and "stringing_span_completed" not in df_atomic.columns:
+                df_atomic, _plan_completion_keys, plan_issues = _prepare_stringing_plan_frame(
                     df_atomic,
                     source_path=plan_source_path,
                     sheet_name=plan_sheet_name,
                 )
-                completion_keys |= stringing_completion_keys
-            else:
-                # ensure dtype consistency
-                if "stringing_span_completed" in df_atomic.columns:
-                    df_atomic["stringing_span_completed"] = df_atomic["stringing_span_completed"].fillna(False)
-            _maybe_write_stringing_plan_snapshot(config, df_atomic, plan_issues, [])
+            elif "stringing_span_completed" in df_atomic.columns:
+                df_atomic["stringing_span_completed"] = df_atomic["stringing_span_completed"].fillna(False)
+            if workbook is not None:
+                _maybe_write_stringing_plan_snapshot(config, df_atomic, plan_issues, [])
 
         month_list = _ensure_list(months_value)
         months_ts = resolve_months(month_list, quick_range_value)
@@ -2053,8 +2065,6 @@ def register_callbacks(
             (proj, loc) in completed_keys
             for proj, loc in zip(df_entity["project_name_lc"], df_entity["location_no_norm"])
         ]
-        if plan_key == "stringing" and "stringing_span_completed" in df_entity.columns:
-            df_entity["is_completed"] = df_entity["is_completed"] | df_entity["stringing_span_completed"].fillna(False)
 
         df_entity["revenue_planned"] = pd.to_numeric(df_entity.get("revenue_planned", 0.0), errors="coerce").fillna(0.0)
         df_entity["revenue_realised"] = pd.to_numeric(df_entity.get("revenue_realised", 0.0), errors="coerce").fillna(0.0)

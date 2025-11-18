@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import RLock
 from typing import Tuple
 
@@ -23,6 +23,7 @@ from .data_loader import (
     load_stringing_daily as _load_stringing_daily,
     load_stringing_compiled_raw as _load_stringing_compiled_raw,
 )
+from .plan_utils import compute_stringing_completion_pairs
 from .services.responsibilities import (
     ResponsibilitiesSnapshot,
     load_responsibilities_snapshot,
@@ -87,6 +88,8 @@ class AppDataStore:
         self._stringing_compiled: pd.DataFrame | None = None
         self._project_info: pd.DataFrame | None = None
         self._responsibilities: ResponsibilitiesSnapshot = ResponsibilitiesSnapshot(None, set(), None)
+        self._stringing_responsibilities: ResponsibilitiesSnapshot = ResponsibilitiesSnapshot(None, set(), None)
+        self._stringing_completion_keys: set[tuple[str, str]] = set()
         self.metadata = DatasetMetadata(display_timezone=config.display_timezone)
         self._daily_version = 0
         self._stringing_version = 0
@@ -109,6 +112,8 @@ class AppDataStore:
         with self._lock:
             self._project_info = project_info.copy()
             self._responsibilities = load_responsibilities_snapshot(cfg)
+            stringing_cfg = replace(cfg, data_path=cfg.stringing_data_path)
+            self._stringing_responsibilities = load_responsibilities_snapshot(stringing_cfg)
 
         self._maybe_preload_stringing(cfg)
 
@@ -146,6 +151,7 @@ class AppDataStore:
             self._augment_stringing_frame(working)
             self._stringing_daily = working
             self._stringing_compiled = None
+            self._stringing_completion_keys = compute_stringing_completion_pairs(working)
             self._register_duckdb_table(DUCKDB_TABLE_STRINGING, self._stringing_daily)
 
     def get_stringing(self) -> pd.DataFrame:
@@ -183,6 +189,20 @@ class AppDataStore:
     def get_responsibilities_error(self) -> str | None:
         with self._lock:
             return self._responsibilities.error
+
+    def get_stringing_responsibilities_frame(self) -> pd.DataFrame:
+        with self._lock:
+            return self._stringing_responsibilities.require_frame()
+
+    def get_stringing_responsibilities_completion_keys(self) -> set[tuple[str, str]]:
+        with self._lock:
+            completion = set(self._stringing_responsibilities.completion_keys)
+            completion.update(self._stringing_completion_keys)
+            return completion
+
+    def get_stringing_responsibilities_error(self) -> str | None:
+        with self._lock:
+            return self._stringing_responsibilities.error
 
     def get_duckdb_connection(self) -> duckdb.DuckDBPyConnection:
         return self._duckdb_conn

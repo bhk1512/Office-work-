@@ -58,6 +58,18 @@ def _resolve_default_data_path() -> Path:
 
 
 _DEFAULT_DATA_PATH = _resolve_default_data_path()
+
+
+def _resolve_default_stringing_data_path() -> Path:
+    """Resolve the default dataset root for stringing artifacts."""
+
+    override = os.getenv("STRINGING_DATA_PATH")
+    if override:
+        return Path(override)
+    return Path("Parquets") / "Stringing" / "StringingCompiled_Output.xlsx"
+
+
+_DEFAULT_STRINGING_DATA_PATH = _resolve_default_stringing_data_path()
 _DEFAULT_CSP_SCRIPT_SRC = ("https://unpkg.com", "https://cdn.plot.ly", "https://cdn.jsdelivr.net")
 _DEFAULT_CSP_STYLE_SRC = (
     "https://fonts.googleapis.com",
@@ -94,6 +106,7 @@ class AppConfig:
     preferred_sheet: str = "ProdDailyExpandedSingles"
     default_benchmark: float = 9.0
     data_path: Path = _DEFAULT_DATA_PATH
+    stringing_data_path: Path = _DEFAULT_STRINGING_DATA_PATH
     allowed_data_root: Path = Path(os.getenv("ALLOWED_DATA_ROOT", ".")).resolve()
 
     # Stringing (uses sibling folder under Parquets by default)
@@ -127,10 +140,16 @@ class AppConfig:
 
         resolved_root = Path(self.allowed_data_root).expanduser().resolve()
         resolved_data = Path(self.data_path).expanduser().resolve()
+        resolved_stringing = Path(self.stringing_data_path).expanduser().resolve()
 
         if resolved_root != resolved_data and resolved_root not in resolved_data.parents:
             raise ValueError(
                 f"DATA_PATH '{resolved_data}' must reside inside ALLOWED_DATA_ROOT '{resolved_root}'."
+            )
+
+        if resolved_root != resolved_stringing and resolved_root not in resolved_stringing.parents:
+            raise ValueError(
+                f"STRINGING_DATA_PATH '{resolved_stringing}' must reside inside ALLOWED_DATA_ROOT '{resolved_root}'."
             )
 
 

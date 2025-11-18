@@ -31,7 +31,8 @@ import argparse
 import os
 import re
 from glob import glob
-from typing import Optional
+from pathlib import Path
+from typing import Callable, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -64,6 +65,53 @@ MICROPLAN_SCHEMA_V1 = {
     }
 }
 CURRENT_MICROPLAN_SCHEMA = MICROPLAN_SCHEMA_V1
+
+
+STRINGING_MICROPLAN_SCHEMA = {
+    "required": {
+        "gang_name": ["gang name", "gang"],
+        # Treat span/section length as the responsibility metric (tower weight analogue)
+        "tower_weight": [
+            "span (m)",
+            "span m",
+            "span length",
+            "length (m)",
+            "length_m",
+            "length",
+            "section length",
+            "section length miter",
+            "section length meter",
+        ],
+    },
+    "optional": {
+        "section_incharge": ["section incharge", "section in-charge", "section_incharge"],
+        "supervisor": ["supervisor"],
+        "serial": ["s. no.", "s no", "serial", "serial no", "jmc no", "span no"],
+        "span_from": ["from ap", "from_ap", "from tower", "start tower", "from"],
+        "span_to": ["to ap", "to_ap", "to tower", "end tower", "to"],
+        "section_name": ["section name", "section"],
+        "span_length": [
+            "span (m)",
+            "span m",
+            "span length",
+            "length (m)",
+            "length_m",
+            "length",
+        ],
+        "method": ["method"],
+        "gang_strength": ["gang strength", "gang_strength"],
+        "paying_out_start": ["paying out start", "po_start_date", "p/o start", "po start"],
+        "paying_out_complete": [
+            "paying out completed",
+            "po_completion_date",
+            "p/o completed",
+            "po completion",
+        ],
+        "final_sag_complete": ["final sag complete", "fs_complete_date", "final sag"],
+        "project_name": ["project name", "project", "project title"],
+        "project_key": ["project code", "project key", "project id"],
+    },
+}
 
 
 # Output sheet names
@@ -102,21 +150,49 @@ _DETECTION_TOKENS_RAW = {
 
 _DETECTION_TOKENS = {_norm_text(s) for s in _DETECTION_TOKENS_RAW}
 
-def _pick_erection_sheet(path: str) -> str:
+_STRINGING_DETECTION_TOKENS_RAW = {
+    "stringing",
+    "span",
+    "from ap",
+    "to ap",
+    "span (m)",
+    "gang name",
+    "section incharge",
+    "supervisor",
+    "section name",
+    "section length",
+    "tower erection",
+    "insulator hoisting",
+    "paying out start",
+    "paying out completed",
+    "final sag",
+}
+
+_STRINGING_DETECTION_TOKENS = {_norm_text(s) for s in _STRINGING_DETECTION_TOKENS_RAW}
+
+def _pick_sheet_with_keyword(path: str, keyword: str | None) -> str:
     """
     Return the sheet whose name contains 'erection' (case-insensitive).
     If none found, fall back to the first sheet.
     """
     wb = load_workbook(path, read_only=True, data_only=True, keep_links=False)
     
-    for ws in wb.worksheets:
-        if "erection" in ws.title.strip().lower():
-            return ws.title
+    normalized = (keyword or "").strip().lower()
+    if normalized:
+        for ws in wb.worksheets:
+            if normalized in ws.title.strip().lower():
+                return ws.title
     # fallback: first visible
     return wb.worksheets[0].title
 
 
-def _detect_header_row(path: str, sheet: str, max_rows: int = HEADER_SCAN_MAX_ROWS) -> int:
+def _detect_header_row(
+    path: str,
+    sheet: str,
+    *,
+    max_rows: int = HEADER_SCAN_MAX_ROWS,
+    detection_tokens: set[str] | None = None,
+) -> int:
     """
     Detect the header row by scanning the first `max_rows` rows without any
     index-based column limits. If you want to ignore far-right noise, we slice
@@ -137,11 +213,12 @@ def _detect_header_row(path: str, sheet: str, max_rows: int = HEADER_SCAN_MAX_RO
     # Evaluate each candidate row; only consider the first MICROPLAN_LEFT_WIDTH cells
     width = MICROPLAN_LEFT_WIDTH if isinstance(MICROPLAN_LEFT_WIDTH, int) and MICROPLAN_LEFT_WIDTH > 0 else prev.shape[1]
 
+    tokens = detection_tokens or _DETECTION_TOKENS
     for r in range(len(prev)):
         # slice row to left window, coerce to strings safely
         row_vals = prev.iloc[r].tolist()[:width]
         toks = {_norm_text(v) for v in row_vals if v is not None and str(v).strip() != ""}
-        score = sum(1 for t in _DETECTION_TOKENS if t in toks)
+        score = sum(1 for t in tokens if t in toks)
         if score > best_score:
             best_row, best_score = r, score
 
@@ -297,11 +374,21 @@ def _safe_read_excel_by_header(path: str, sheet_name: str, header_row: int) -> p
     df.columns = [str(c).strip() if c is not None else "" for c in df.columns]
     return df
 
-def read_microplan_file(path: str,
-                        schema: dict,
-                        header_scan_rows: int = HEADER_SCAN_MAX_ROWS) -> pd.DataFrame:
-    sheet = _pick_erection_sheet(path)
-    header_row = _detect_header_row(path,sheet, max_rows=header_scan_rows)
+def read_microplan_file(
+    path: str,
+    schema: dict,
+    *,
+    header_scan_rows: int = HEADER_SCAN_MAX_ROWS,
+    sheet_keyword: str | None = "erection",
+    detection_tokens: set[str] | None = None,
+) -> pd.DataFrame:
+    sheet = _pick_sheet_with_keyword(path, sheet_keyword)
+    header_row = _detect_header_row(
+        path,
+        sheet,
+        max_rows=header_scan_rows,
+        detection_tokens=detection_tokens,
+    )
 
     df = _safe_read_excel_by_header(path, sheet, header_row)
 
@@ -309,9 +396,18 @@ def read_microplan_file(path: str,
     # Find first completely empty row after header
     mask_empty = df.isna().all(axis=1)
     if mask_empty.any():
-        first_empty_idx = mask_empty.idxmax()  # index of first True
-        # truncate everything after this row
-        df = df.loc[:first_empty_idx-1]
+        cutoff = None
+        seen_data = False
+        for idx, is_empty in mask_empty.items():
+            if is_empty:
+                if seen_data:
+                    cutoff = idx
+                    break
+            else:
+                seen_data = True
+        if cutoff is not None:
+            # truncate everything after the first empty row that comes after real data
+            df = df.loc[:cutoff - 1]
 
     rename_map = {}
     for col in df.columns:
@@ -320,7 +416,8 @@ def read_microplan_file(path: str,
             rename_map[col] = canon
     df = df.rename(columns=rename_map)
 
-    needed = ["gang_name", "section_incharge", "supervisor", "tower_weight", "revenue_planned", "revenue_realised", "location_no"]
+    required_keys = list(schema.get("required", {}).keys()) if isinstance(schema, dict) else []
+    needed = required_keys or ["gang_name", "section_incharge", "supervisor", "tower_weight", "revenue_planned", "revenue_realised", "location_no"]
     missing = [c for c in needed if c not in df.columns]
     if missing:
         raise ValueError(f"Required columns missing: {missing}. Columns read: {list(df.columns)}")
@@ -331,12 +428,17 @@ def read_microplan_file(path: str,
             df[col] = df[col].ffill().astype(str).str.strip()
     
     # location as stable string id (not numeric), trimmed
-    df["location_no"] = df["location_no"].astype(object).map(
-        lambda x: str(x).strip() if x is not None and str(x).strip() != "" else None
-    )
+    if "location_no" in df.columns:
+        df["location_no"] = df["location_no"].astype(object).map(
+            lambda x: str(x).strip() if x is not None and str(x).strip() != "" else None
+        )
 
     for c in ("tower_weight", "revenue_planned", "revenue_realised"):
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        else:
+            # Some stringing templates do not track revenue; keep schema stable with zeros.
+            df[c] = 0.0
 
     mask = (df["revenue_planned"].fillna(0) == 0) & (df["revenue_realised"].fillna(0) == 0) & (df["tower_weight"].fillna(0) == 0)
     df = df.loc[~mask].reset_index(drop=True)
@@ -422,9 +524,89 @@ def build_responsibilities_atomic(df_clean: pd.DataFrame,
         "tower_type","manpower","power_tools_issued","material_feeding",
         "starting_date","completion_date","tack_welding","final_checking"
     ]
-    return out[cols]
+    return out.reindex(columns=cols)
 
 
+def _stringing_record_adapter(
+    df_clean: pd.DataFrame,
+    *,
+    plan_month: Optional[pd.Timestamp],
+    project_name: str,
+    project_key: str,
+    source_path: str,
+) -> pd.DataFrame:
+    """
+    Convert stringing span rows into the canonical MicroPlan responsibilities schema.
+    """
+
+    if df_clean is None or df_clean.empty:
+        return df_clean
+
+    work = df_clean.copy()
+
+    meta_name, meta_key = _stringing_project_metadata(str(source_path)) if source_path else ("", "")
+    inferred_name = meta_name or project_name or project_key
+    inferred_key = meta_key or project_key or normalize_key(inferred_name or "")
+    work["project_name"] = inferred_name
+    work["project_key"] = inferred_key
+
+    def _text_series(name: str) -> pd.Series:
+        if name in work.columns:
+            return work[name].astype(str).str.strip()
+        return pd.Series([""] * len(work.index), index=work.index)
+
+    span_from = _text_series("span_from")
+    span_to = _text_series("span_to")
+    serial = _text_series("serial")
+    section_name = _text_series("section_name")
+
+    labels: list[str] = []
+    for idx in range(len(work.index)):
+        from_ap = span_from.iloc[idx]
+        to_ap = span_to.iloc[idx]
+        serial_val = serial.iloc[idx]
+        section_val = section_name.iloc[idx]
+        if from_ap and to_ap:
+            label = f"{from_ap} \u2192 {to_ap}"
+        else:
+            if section_val:
+                cleaned = section_val
+                if re.search(r"\s[-–]\s", section_val):
+                    parts = [p.strip() for p in re.split(r"\s[-–]\s", section_val, maxsplit=1) if p.strip()]
+                    if len(parts) == 2:
+                        cleaned = f"{parts[0]} \u2192 {parts[1]}"
+                label = cleaned
+            else:
+                label = from_ap or to_ap or serial_val or f"Span {idx + 1}"
+        labels.append(label)
+
+    work["location_no"] = labels
+    work["tower_weight"] = pd.to_numeric(work.get("tower_weight"), errors="coerce").fillna(0.0)
+    for column in ("revenue_planned", "revenue_realised"):
+        if column not in work.columns:
+            work[column] = 0.0
+
+    completion_candidates: list[pd.Series] = []
+    if "completion_date" in work.columns:
+        completion_candidates.append(pd.to_datetime(work["completion_date"], errors="coerce"))
+    if "final_sag_complete" in work.columns:
+        completion_candidates.append(pd.to_datetime(work["final_sag_complete"], errors="coerce"))
+    if "paying_out_complete" in work.columns:
+        completion_candidates.append(pd.to_datetime(work["paying_out_complete"], errors="coerce"))
+    if "paying_out_start" in work.columns:
+        completion_candidates.append(pd.to_datetime(work["paying_out_start"], errors="coerce"))
+
+    completion = None
+    for series in completion_candidates:
+        completion = series.copy() if completion is None else completion.fillna(series)
+
+    if completion is None:
+        completion = pd.Series([pd.NaT] * len(work.index))
+    if plan_month is not None:
+        completion = completion.fillna(plan_month)
+    work["completion_date"] = completion
+
+    return work
 
 
 def _safe_write_df(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str, index: bool = False) -> None:
@@ -462,12 +644,37 @@ def _open_writer_overwriting_sheets(output_path: str) -> pd.ExcelWriter:
 # === Main Compile  ===
 # ======================
 
+def _default_project_metadata(path: str) -> tuple[str, str]:
+    name = infer_project_name_from_filename(path)
+    key = normalize_key(name)
+    return name, key
+
+
+def _stringing_project_metadata(path: str) -> tuple[str, str]:
+    path_obj = Path(path)
+    search_targets = [path_obj.stem]
+    for parent in path_obj.parents:
+        search_targets.append(parent.name)
+        if len(search_targets) > 5:
+            break
+    for target in search_targets:
+        match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{2,4})\b", target, re.IGNORECASE)
+        if match:
+            cleaned = f"{match.group(1).upper()}{match.group(2)}"
+            return cleaned, cleaned.lower()
+    return _default_project_metadata(path)
+
+
 def compile_microplans_to_workbook(
     input_dir: str,
     output_path: str,
     *,
     schema: dict = CURRENT_MICROPLAN_SCHEMA,
-    glob_pattern: str = MICROPLAN_GLOB_PATTERN
+    glob_pattern: str = MICROPLAN_GLOB_PATTERN,
+    sheet_keyword: str | None = "erection",
+    detection_tokens: set[str] | None = None,
+    record_adapter: Callable[..., pd.DataFrame] | None = None,
+    project_metadata_provider: Callable[[str], tuple[str, str]] | None = None,
 ) -> None:
     """
     - Finds files with 'micro plan' in the name (case-insensitive).
@@ -483,14 +690,32 @@ def compile_microplans_to_workbook(
     
     issues: list[dict] = []
 
+    tokens = detection_tokens or _DETECTION_TOKENS
+    metadata_provider = project_metadata_provider or _default_project_metadata
+
     for p in paths:
-        proj_name = infer_project_name_from_filename(p)
-        proj_key  = normalize_key(proj_name)
+        proj_name, proj_key = metadata_provider(p)
+        proj_name = proj_name or infer_project_name_from_filename(p)
+        proj_key = proj_key or normalize_key(proj_name)
         plan_month = infer_plan_month_from_filename(p)
         
         # if write_raw_per_project else None
         try:
-            df_clean = read_microplan_file(p, schema)
+            df_clean = read_microplan_file(
+                p,
+                schema,
+                header_scan_rows=HEADER_SCAN_MAX_ROWS,
+                sheet_keyword=sheet_keyword,
+                detection_tokens=tokens,
+            )
+            if callable(record_adapter):
+                df_clean = record_adapter(
+                    df_clean,
+                    plan_month=plan_month,
+                    project_name=proj_name,
+                    project_key=proj_key,
+                    source_path=p,
+                )
             # --- Data Issues: record rows where in-file completion_date's month differs from folder month
             try:
                 if "completion_date" in df_clean.columns and plan_month is not None:
@@ -583,6 +808,22 @@ def compile_microplans_to_workbook(
 
 
 
+def compile_stringing_microplans_to_workbook(input_dir: str, output_path: str) -> None:
+    """
+    Compile stringing plan workbooks using the standard Micro Plan pipeline.
+    """
+
+    compile_microplans_to_workbook(
+        input_dir=input_dir,
+        output_path=output_path,
+        schema=STRINGING_MICROPLAN_SCHEMA,
+        sheet_keyword="string",
+        detection_tokens=_STRINGING_DETECTION_TOKENS,
+        record_adapter=_stringing_record_adapter,
+        project_metadata_provider=_stringing_project_metadata,
+    )
+
+
 # ======================
 # === CLI Entrypoint ===
 # ======================
@@ -606,3 +847,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

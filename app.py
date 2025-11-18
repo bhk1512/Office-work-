@@ -79,6 +79,18 @@ def get_responsibilities_error() -> str | None:
     return DATA_STORE.get_responsibilities_error()
 
 
+def get_stringing_responsibilities_df() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_responsibilities_frame()
+
+
+def get_stringing_responsibilities_completion_keys() -> set[tuple[str, str]]:
+    return DATA_STORE.get_stringing_responsibilities_completion_keys()
+
+
+def get_stringing_responsibilities_error() -> str | None:
+    return DATA_STORE.get_stringing_responsibilities_error()
+
+
 def set_df_day(df: pd.DataFrame) -> None:
     """Compatibility shim retained for the pipeline runner."""
 
@@ -410,9 +422,9 @@ def create_app(config: AppConfig | None = None) -> Dash:
         responsibilities_provider=get_responsibilities_df,
         responsibilities_completion_provider=get_responsibilities_completion_keys,
         responsibilities_error_provider=get_responsibilities_error,
-        stringing_plan_provider=get_df_stringing_compiled,
-        stringing_plan_completion_provider=None,
-        stringing_plan_error_provider=None,
+        stringing_plan_provider=get_stringing_responsibilities_df,
+        stringing_plan_completion_provider=get_stringing_responsibilities_completion_keys,
+        stringing_plan_error_provider=get_stringing_responsibilities_error,
     )
     return app_instance
 

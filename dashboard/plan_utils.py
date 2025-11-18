@@ -156,6 +156,25 @@ def prepare_stringing_plan_frame(
     if project_hint:
         project_names = project_names.where(project_names.astype(bool), project_hint)
         project_codes = project_codes.where(project_codes.astype(bool), project_hint)
+
+    def _coerce_project_code(value: str | None) -> str:
+        text = normalize_text(value or "")
+        match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{2,4})\b", text, re.IGNORECASE)
+        if match:
+            return f"{match.group(1).upper()}{match.group(2)}"
+        return ""
+
+    def _derive_project_identity(name_raw: str, code_raw: str, hint: str | None) -> tuple[str, str]:
+        code = _coerce_project_code(code_raw) or _coerce_project_code(name_raw) or _coerce_project_code(hint)
+        if code:
+            return code, code.lower()
+        fallback = normalize_text(name_raw) or normalize_text(code_raw) or normalize_text(hint)
+        if fallback:
+            clean_code = _coerce_project_code(fallback)
+            if clean_code:
+                return clean_code, clean_code.lower()
+            return fallback, fallback.lower()
+        return "", ""
     serial_values, _ = _resolve_series("serial", default="")
     serial_values = serial_values.map(normalize_text)
     span_from, _ = _resolve_series("span_from", default="")
@@ -204,8 +223,13 @@ def prepare_stringing_plan_frame(
     final_sag_values = final_sag_complete.tolist()
 
     for idx in range(span_count):
-        project_name = project_name_vals[idx]
-        project_code = project_code_vals[idx] or project_name
+        project_name_raw = project_name_vals[idx]
+        project_code_raw = project_code_vals[idx]
+        project_name, project_code = _derive_project_identity(
+            project_name_raw,
+            project_code_raw,
+            project_hint,
+        )
         from_ap = from_vals[idx]
         to_ap = to_vals[idx]
         serial_label = serial_vals[idx]
@@ -288,6 +312,84 @@ def prepare_stringing_plan_frame(
     return normalized, completion_pairs, issues
 
 
+def compute_stringing_completion_pairs(df: pd.DataFrame) -> set[tuple[str, str]]:
+    """
+    Derive completed (project, span) pairs from the DPR-derived daily dataframe
+    by looking for rows that have a valid Final Sag / F/S Completion date.
+    """
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return set()
+
+    col_lookup = {normalize_col_key(col): col for col in df.columns}
+
+    def _resolve_column(candidates: Sequence[str]) -> str | None:
+        for candidate in candidates:
+            key = normalize_col_key(candidate)
+            if key in col_lookup:
+                return col_lookup[key]
+        return None
+
+    fs_col = _resolve_column(
+        (
+            "fs_complete_date",
+            "final_sag_complete",
+            "final sag complete",
+            "f/s/ completion date",
+            "f/s completion date",
+        )
+    )
+    project_col = _resolve_column(("project_name", "project", "project title", "project code"))
+    from_col = _resolve_column(("from_ap", "from ap", "start tower"))
+    to_col = _resolve_column(("to_ap", "to ap", "end tower"))
+    location_col = _resolve_column(("location_no", "location number", "span label", "span"))
+
+    if fs_col is None or project_col is None:
+        return set()
+
+    relevant_cols = {project_col, fs_col}
+    if from_col:
+        relevant_cols.add(from_col)
+    if to_col:
+        relevant_cols.add(to_col)
+    if location_col:
+        relevant_cols.add(location_col)
+
+    work = df[list(relevant_cols)].copy()
+    work[fs_col] = pd.to_datetime(work[fs_col], errors="coerce")
+    work = work.dropna(subset=[fs_col])
+    if work.empty:
+        return set()
+
+    arrow = " \u2192 "
+    completion_pairs: set[tuple[str, str]] = set()
+    for idx in work.index:
+        project_raw = work.at[idx, project_col]
+        key_options = {
+            normalize_lower(project_raw),
+            compact_project_key(project_raw),
+        }
+        key_options = {key for key in key_options if key}
+        if not key_options:
+            continue
+
+        start_label = normalize_text(work.at[idx, from_col]) if from_col else ""
+        end_label = normalize_text(work.at[idx, to_col]) if to_col else ""
+        derived_location = ""
+        if start_label and end_label:
+            derived_location = normalize_location(f"{start_label}{arrow}{end_label}")
+        elif start_label or end_label:
+            derived_location = normalize_location(start_label or end_label)
+        elif location_col:
+            derived_location = normalize_location(work.at[idx, location_col])
+        if not derived_location:
+            continue
+
+        for key in key_options:
+            completion_pairs.add((key, derived_location))
+    return completion_pairs
+
+
 __all__ = [
     "normalize_text",
     "normalize_lower",
@@ -296,4 +398,5 @@ __all__ = [
     "compact_project_key",
     "infer_project_hint",
     "prepare_stringing_plan_frame",
+    "compute_stringing_completion_pairs",
 ]
