@@ -369,10 +369,11 @@ def _empty_stage_frame() -> pd.DataFrame:
 def _expand_stringing_stage_to_daily(
     df: pd.DataFrame,
     *,
+    start_column: str,
     end_column: str,
     output_end_column: str,
 ) -> pd.DataFrame:
-    """Internal helper to expand rows between PO start and a completion column."""
+    """Internal helper to expand rows between a start column and a completion column."""
     if df is None or df.empty:
         return _empty_stage_frame()
 
@@ -380,18 +381,18 @@ def _expand_stringing_stage_to_daily(
     normalized, _length_metrics = add_length_units(normalized)
     project_col = _pick_project_column(df) or _pick_project_column(normalized)
 
-    po_col = "po_start_date"
+    start_col = start_column
     end_col = end_column
     work = normalized.copy()
 
-    if po_col not in work.columns or end_col not in work.columns:
+    if start_col not in work.columns or end_col not in work.columns:
         return _empty_stage_frame()
 
-    work[po_col] = work[po_col].map(_to_datetime_normalize)
+    work[start_col] = work[start_col].map(_to_datetime_normalize)
     work[end_col] = work[end_col].map(_to_datetime_normalize)
 
-    missing_dt = work[po_col].isna() | work[end_col].isna()
-    duration_days = (work[end_col] - work[po_col]).dt.days + 1
+    missing_dt = work[start_col].isna() | work[end_col].isna()
+    duration_days = (work[end_col] - work[start_col]).dt.days + 1
     non_positive = (~missing_dt) & (duration_days <= 0)
     valid_mask = (~missing_dt) & (~non_positive)
     valid = work.loc[valid_mask].copy()
@@ -424,7 +425,7 @@ def _expand_stringing_stage_to_daily(
 
     rows: List[Dict[str, object]] = []
     for _, r in valid.iterrows():
-        start: pd.Timestamp = r[po_col]
+        start: pd.Timestamp = r[start_col]
         end: pd.Timestamp = r[end_col]
         for d in pd.date_range(start, end, freq="D"):
             project_val = r[project_col] if project_col and project_col in valid.columns else pd.NA
@@ -440,7 +441,7 @@ def _expand_stringing_stage_to_daily(
                 "method": r["method"],
                 "section_readiness": r["section_readiness"],
                 "po_id": r["po"],
-                "fs_start_date": r.get("fs_starting_date", pd.NA),
+                "fs_start_date": r.get("fs_starting_date", r.get(start_col, pd.NA)),
                 "fs_complete_date": r[end_col],
                 "status": r["status"],
                 "length_km": r["length_km"],
@@ -497,9 +498,10 @@ def _expand_stringing_stage_to_daily(
 
 
 def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
-    """Expand stringing records to per-day rows using PO start to F/S complete."""
+    """Expand stringing records to per-day rows using F/S start to F/S complete."""
     return _expand_stringing_stage_to_daily(
         df,
+        start_column="fs_starting_date",
         end_column="fs_complete_date",
         output_end_column="fs_complete_date",
     )
@@ -509,6 +511,7 @@ def expand_stringing_to_daily_payout(df: pd.DataFrame) -> pd.DataFrame:
     """Expand stringing records between PO start and P/O completion dates."""
     return _expand_stringing_stage_to_daily(
         df,
+        start_column="po_start_date",
         end_column="po_completion_date",
         output_end_column="po_completion_date",
     )

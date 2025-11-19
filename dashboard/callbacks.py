@@ -191,6 +191,55 @@ def _resolve_triggered_id() -> Any:
         return raw
 
 
+def _filter_completion_rows(frame: pd.DataFrame, *, completion_column: str) -> pd.DataFrame:
+    """Return only the rows whose normalized date matches the completion column."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame()
+    if completion_column not in frame.columns or "date" not in frame.columns:
+        return pd.DataFrame()
+    try:
+        completion_norm = pd.to_datetime(frame[completion_column], errors="coerce").dt.normalize()
+        date_norm = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+    except Exception:
+        return pd.DataFrame()
+    mask = completion_norm.notna() & date_norm.notna() & (completion_norm == date_norm)
+    if not mask.any():
+        return pd.DataFrame()
+    return frame.loc[mask].copy()
+
+
+def _sum_completion_totals(
+    frame: pd.DataFrame,
+    *,
+    value_column: str,
+    completion_column: str,
+    fallback_columns: Sequence[tuple[str, float]] | None = None,
+) -> float | None:
+    """Sum *value_column* for rows attributed to their completion dates."""
+    completion_rows = _filter_completion_rows(frame, completion_column=completion_column)
+    if completion_rows.empty:
+        return None
+
+    def _coerce_sum(column: str, scale: float = 1.0) -> float | None:
+        if column not in completion_rows.columns:
+            return None
+        series = pd.to_numeric(completion_rows[column], errors="coerce").dropna()
+        if series.empty:
+            return None
+        total_value = float(series.sum()) * scale
+        return total_value if not pd.isna(total_value) else None
+
+    total = _coerce_sum(value_column, 1.0)
+    if total is not None:
+        return total
+
+    for column, scale in fallback_columns or ():
+        total = _coerce_sum(column, scale)
+        if total is not None:
+            return total
+    return None
+
+
 _ERECTIONS_EXPORT_COLUMNS = [
     "completion_date",
     "project_name",
@@ -2467,6 +2516,32 @@ def register_callbacks(
         total_potential = total_delivered + total_lost if (total_delivered or total_lost) else total_metric
         balance_value = max(total_potential - total_delivered, 0.0)
 
+        completion_override: float | None = None
+        if is_stringing:
+            completion_override = _sum_completion_totals(
+                scoped_full,
+                value_column="length_km",
+                completion_column="fs_complete_date",
+                fallback_columns=[
+                    ("span (m)", 0.001),
+                    ("span_m", 0.001),
+                    ("length", 0.001),
+                    ("length_m", 0.001),
+                    ("tower_weight", 0.001),
+                ],
+            )
+        else:
+            completion_override = _sum_completion_totals(
+                scoped_full,
+                value_column="tower_weight",
+                completion_column="completion_date",
+            )
+        if completion_override is not None:
+            total_delivered = completion_override
+            total_metric = completion_override if not total_lost else completion_override + total_lost
+            total_potential = total_delivered + total_lost if total_lost else total_delivered
+            balance_value = max(total_potential - total_delivered, 0.0)
+
         def _nunique(frame: pd.DataFrame, column: str) -> int:
             if column not in frame.columns or frame.empty:
                 return 0
@@ -2619,8 +2694,13 @@ def register_callbacks(
         scoped_base = _stringing_scope(frame, kv_values, method_values)
         scoped_full = apply_filters(scoped_base, projects, months_ts, gangs)
 
-        done_total = 0.0
-        if isinstance(scoped_full, pd.DataFrame) and not scoped_full.empty and "daily_km" in scoped_full.columns:
+        done_total = _sum_completion_totals(
+            scoped_full,
+            value_column="length_km",
+            completion_column="po_completion_date",
+            fallback_columns=[("po", 0.001)],
+        ) or 0.0
+        if done_total == 0.0 and isinstance(scoped_full, pd.DataFrame) and not scoped_full.empty and "daily_km" in scoped_full.columns:
             done_total = float(pd.to_numeric(scoped_full["daily_km"], errors="coerce").dropna().sum())
 
         done_txt = _format_summary_value(done_total, "KM")
@@ -2817,7 +2897,6 @@ def register_callbacks(
         Output("erection-card-loss", "children"),
         Output("stringing-card-projects", "children"),
         Output("stringing-card-totals", "children"),
-        Output("stringing-card-po-completion", "children"),
         Output("stringing-card-gangs", "children"),
         Output("stringing-card-productivity", "children"),
         Output("stringing-card-loss", "children"),
@@ -2873,7 +2952,6 @@ def register_callbacks(
             erection_summary["lost_units"],
             stringing_summary["projects"],
             stringing_summary["totals"],
-            stringing_summary.get("po_completion", "-"),
             stringing_summary["gangs"],
             stringing_summary["productivity"],
             stringing_summary["lost_units"],
@@ -5757,6 +5835,8 @@ def register_callbacks(
         gangs_value: int | None = None,
         loss_value: float | None = None,
         tse_value: int | None = None,
+        po_planned_value: float | None = None,
+        po_done_value: float | None = None,
     ) -> list[html.Div]:
         """
         Build the dynamic KPI rows rendered inside each project tile.
@@ -5788,6 +5868,14 @@ def register_callbacks(
                 return float(value)
             except Exception:
                 return default
+
+        def _optional_number(value: float | int | None) -> float | None:
+            if value is None or pd.isna(value):
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
 
         focus = (focus_metric or "").strip().lower()
         if focus not in _PCH_PILL_LABELS or focus == "projects":
@@ -5841,11 +5929,30 @@ def register_callbacks(
             value = "\u2014" if tse_value is None else f"{int(tse_value):,}"
             return [_row("No. of TSE", value)]
 
-        return [
+        rows = [
             _row("Prod This Month", _fmt_prod(prod_current_value)),
             _row("Historical Avg", _fmt_prod(prod_overall_value)),
             _row(f"{total_unit} This Month", totals_display),
         ]
+
+        po_plan = _optional_number(po_planned_value)
+        po_done = _optional_number(po_done_value)
+        if is_stringing and focus is None and (po_plan is not None or po_done is not None):
+            plan_label = f"{po_plan:.1f} KM" if po_plan is not None else "No Plan"
+            done_label = f"{po_done:.1f} KM" if po_done is not None else "\u2014"
+            if po_plan is not None:
+                balance_value = max(po_plan - (po_done or 0.0), 0.0)
+                balance_label = f"{balance_value:.1f} KM"
+            else:
+                balance_label = "\u2014"
+            rows.append(
+                _row(
+                    "P/O Total Planned / Done / Balance",
+                    f"{plan_label} / {done_label} / {balance_label}",
+                )
+            )
+
+        return rows
 
     def _populate_kpi_pch(
         projects,
@@ -6148,13 +6255,28 @@ def register_callbacks(
                 proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
                 if proj_col is None:
                     return _empty_pch_items("Missing project information in the dataset."), None
-                delivered_km_by_project = (
-                    scoped.groupby(scoped[proj_col].astype(str))
-                          .agg({"daily_km": "sum"})
-                          .rename(columns={"daily_km": "delivered_km"})
-                ) if "daily_km" in scoped.columns else pd.DataFrame(columns=["delivered_km"])
-                if "daily_km" in scoped.columns:
-                    scoped_month = scoped.copy()
+                scoped_norm = scoped.copy()
+                if proj_col != "project_name":
+                    scoped_norm = scoped_norm.rename(columns={proj_col: "project_name"})
+                scoped_norm["project_name"] = scoped_norm["project_name"].astype(str).str.strip()
+                completion_rows = _filter_completion_rows(scoped_norm, completion_column="fs_complete_date")
+                if not completion_rows.empty and "length_km" in completion_rows.columns:
+                    delivered_km_by_project = (
+                        completion_rows.groupby("project_name")["length_km"]
+                        .sum()
+                        .rename("delivered_km")
+                        .to_frame()
+                    )
+                    completion_rows = completion_rows.copy()
+                    completion_rows["month"] = pd.to_datetime(completion_rows["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                    current_rows = completion_rows[completion_rows["month"] == current_month_ts]
+                    if not current_rows.empty:
+                        delivered_km_current_series = current_rows.groupby("project_name")["length_km"].sum()
+                elif "daily_km" in scoped_norm.columns:
+                    delivered_km_by_project = (
+                        scoped_norm.groupby("project_name")["daily_km"].sum().rename("delivered_km").to_frame()
+                    )
+                    scoped_month = scoped_norm.copy()
                     if "month" not in scoped_month.columns and "date" in scoped_month.columns:
                         scoped_month["date"] = pd.to_datetime(scoped_month["date"], errors="coerce")
                         scoped_month = scoped_month.dropna(subset=["date"])
@@ -6164,7 +6286,11 @@ def register_callbacks(
                     if "month" in scoped_month.columns:
                         scoped_current = scoped_month[scoped_month["month"] == current_month_ts]
                         if not scoped_current.empty:
-                            delivered_km_current_series = scoped_current.groupby(scoped_current[proj_col].astype(str))["daily_km"].sum()
+                            delivered_km_current_series = (
+                                scoped_current.groupby("project_name")["daily_km"].sum()
+                            )
+                else:
+                    delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
             else:
                 delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
                 delivered_km_current_series = pd.Series(dtype=float)
@@ -6229,6 +6355,7 @@ def register_callbacks(
                 if not projects_df.empty
                 else {}
             )
+
             if not planned_km_current_series.empty:
                 planned_km_current_series = planned_km_current_series.rename(
                     index=lambda key: project_label_by_key.get(str(key), key)
@@ -6398,6 +6525,84 @@ def register_callbacks(
                 delivered_current_norm_map, delivered_current_compact_map = _build_lookup_maps(delivered_km_current_series.to_dict())
             if isinstance(planned_km_current_series, pd.Series) and not planned_km_current_series.empty:
                 planned_current_norm_map, planned_current_compact_map = _build_lookup_maps(planned_km_current_series.to_dict())
+
+            po_plan_lookup_raw: dict[str, float] = {}
+            po_plan_norm_map: dict[str, float] = {}
+            po_plan_compact_map: dict[str, float] = {}
+            try:
+                po_plan_union, _ = _stringing_plan_totals_by_project(
+                    months_ts,
+                    current_month=None,
+                    date_columns=_STRINGING_PO_DATE_COLUMNS,
+                )
+            except Exception:
+                LOGGER.exception("Failed to load P/O plan totals for tiles")
+                po_plan_union = pd.DataFrame()
+            if isinstance(po_plan_union, pd.DataFrame) and not po_plan_union.empty:
+                po_plan_reset = po_plan_union.reset_index().rename(columns={"index": "project_key_norm"})
+                for _, entry in po_plan_reset.iterrows():
+                    plan_value = entry.get("planned_km")
+                    if pd.isna(plan_value):
+                        continue
+                    try:
+                        numeric_value = float(plan_value)
+                    except (TypeError, ValueError):
+                        continue
+                    label_candidates = [
+                        entry.get("project_name_plan"),
+                        project_label_by_key.get(str(entry.get("project_key_norm")), ""),
+                        entry.get("project_key_norm"),
+                    ]
+                    for candidate in label_candidates:
+                        text = str(candidate or "").strip()
+                        if not text:
+                            continue
+                        po_plan_lookup_raw[text] = numeric_value
+                if po_plan_lookup_raw:
+                    po_plan_norm_map, po_plan_compact_map = _build_lookup_maps(po_plan_lookup_raw)
+
+            po_done_lookup_raw: dict[str, float] = {}
+            po_done_norm_map: dict[str, float] = {}
+            po_done_compact_map: dict[str, float] = {}
+            po_frame = _get_stringing_po_daily_frame()
+            if isinstance(po_frame, pd.DataFrame) and not po_frame.empty:
+                po_scoped = _stringing_scope(po_frame, kv_list, method_list)
+                po_filtered = apply_filters(po_scoped, project_list, months_ts, [])
+                if isinstance(po_filtered, pd.DataFrame) and not po_filtered.empty:
+                    proj_col = "project_name" if "project_name" in po_filtered.columns else (
+                        "project" if "project" in po_filtered.columns else None
+                    )
+                    if proj_col:
+                        work = po_filtered.copy()
+                        work[proj_col] = work[proj_col].astype(str).str.strip()
+                        work = work.rename(columns={proj_col: "project_name"})
+                        work = work[work["project_name"] != ""]
+                        completion_work = _filter_completion_rows(work, completion_column="po_completion_date")
+                        if not completion_work.empty and "length_km" in completion_work.columns:
+                            po_grouped = completion_work.groupby("project_name")["length_km"].sum()
+                        elif "daily_km" in work.columns:
+                            work = work.dropna(subset=["project_name", "daily_km"])
+                            po_grouped = work.groupby("project_name")["daily_km"].sum(min_count=1)
+                        else:
+                            po_grouped = pd.Series(dtype=float)
+                        if not po_grouped.empty:
+                            for label, raw_val in po_grouped.items():
+                                if pd.isna(raw_val):
+                                    continue
+                                try:
+                                    numeric_value = float(raw_val)
+                                except (TypeError, ValueError):
+                                    continue
+                                display_label = _format_stringing_project_label(str(label))
+                                norm_key = _compact_project_key(label) or _normalize_lower(label)
+                                for name in (display_label, project_label_by_key.get(norm_key), norm_key):
+                                    if not name:
+                                        continue
+                                    text = str(name).strip()
+                                    if text:
+                                        po_done_lookup_raw[text] = numeric_value
+            if po_done_lookup_raw:
+                po_done_norm_map, po_done_compact_map = _build_lookup_maps(po_done_lookup_raw)
 
             if isinstance(df_day, pd.DataFrame) and not df_day.empty and "daily_km" in df_day.columns:
                 day_filtered = df_day.copy()
@@ -6684,6 +6889,12 @@ def register_callbacks(
                     planned_current_value = _lookup_with_keys(
                         norm_keys, compact_keys, planned_current_norm_map, planned_current_compact_map
                     )
+                    po_plan_value = _lookup_with_keys(
+                        norm_keys, compact_keys, po_plan_norm_map, po_plan_compact_map
+                    )
+                    po_done_value = _lookup_with_keys(
+                        norm_keys, compact_keys, po_done_norm_map, po_done_compact_map
+                    )
 
                     plan_available = bool(r.get("_stringing_plan_available"))
                     plan_total_value = float(r.get("planned_km", 0.0) or 0.0)
@@ -6706,6 +6917,8 @@ def register_callbacks(
                             gangs_value=gangs_metric,
                             loss_value=loss_metric,
                             tse_value=tse_metric,
+                            po_planned_value=po_plan_value,
+                            po_done_value=po_done_value,
                         )
                     )
 
@@ -7949,14 +8162,32 @@ def register_callbacks(
         Output("kpi-pch-modal", "is_open"),
         Input({"type": "summary-pill-trigger", "mode": ALL, "metric": ALL}, "n_clicks"),
         Input("kpi-pch-modal-close", "n_clicks"),
+        Input("f-project", "value"),
         State("kpi-pch-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _toggle_pch_modal(pill_clicks, close_clicks, is_open):
+    def _toggle_pch_modal(pill_clicks, close_clicks, project_values, is_open):
         trigger = _resolve_triggered_id()
+        ctx = dash.callback_context
+        triggered_entries = getattr(ctx, "triggered", None)
+        trigger_value = None
+        if triggered_entries:
+            try:
+                trigger_value = triggered_entries[0].get("value")
+            except Exception:
+                trigger_value = None
+
         if trigger == "kpi-pch-modal-close":
             return dash.no_update, False
+        if trigger == "f-project":
+            selected_projects = _normalize_str_list(_ensure_list(project_values))
+            if not selected_projects:
+                return dash.no_update, False
+            payload = {"metric": "projects", "mode": "erection"}
+            return payload, True
         if isinstance(trigger, dict) and trigger.get("type") == "summary-pill-trigger":
+            if not trigger_value:
+                raise PreventUpdate
             metric = str(trigger.get("metric") or "").strip().lower()
             mode = str(trigger.get("mode") or "").strip().lower() or "erection"
             if metric not in _PCH_PILL_LABELS:
@@ -8131,7 +8362,13 @@ def register_callbacks(
             _project_summary_for_mode("stringing", is_stringing=True) if config.enable_stringing else None
         )
 
-        def _summary_card(title: str, summary_payload: dict[str, str], include_tse: bool = False) -> dbc.Col:
+        def _summary_card(
+            title: str,
+            summary_payload: dict[str, str],
+            *,
+            include_tse: bool = False,
+            include_po: bool = False,
+        ) -> dbc.Col:
             rows = [
                 ("Projects Covered", summary_payload.get("projects", "-")),
                 ("Total Planned / Done / Balance", summary_payload.get("totals", "-")),
@@ -8139,6 +8376,8 @@ def register_callbacks(
                 ("Productivity / Historical Avg", summary_payload.get("productivity", "-")),
                 ("Lost Units", summary_payload.get("lost_units", "-")),
             ]
+            if include_po:
+                rows.append(("P/O Total Planned / Done / Balance", summary_payload.get("po_completion", "-")))
             if include_tse:
                 rows.append(("No. of TSE", summary_payload.get("tse", "-")))
             pills = [
@@ -8172,6 +8411,7 @@ def register_callbacks(
                     "Stringing Snapshot",
                     stringing_summary or _empty_summary_payload(True),
                     include_tse=True,
+                    include_po=True,
                 )
             )
 
@@ -8532,7 +8772,11 @@ def _format_stringing_project_label(value: str) -> str:
     return text
 
 
-def _stringing_plan_span_series(frame: pd.DataFrame) -> pd.Series | None:
+def _stringing_plan_span_series(
+    frame: pd.DataFrame,
+    *,
+    fallback_norms: Sequence[str] | None = None,
+) -> pd.Series | None:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return None
 
@@ -8541,12 +8785,18 @@ def _stringing_plan_span_series(frame: pd.DataFrame) -> pd.Series | None:
         "span m",
         "span",
         "span length",
+        "span (m)",
+        "span(km)",
+        "span_km",
+        "span(k m)",
+        "span(m)",
+        "span (km)",
         "length_m",
         "length m",
         "length",
-        "span(km)",
-        "span_km",
-        "span(m)",
+        "length (m)",
+        "length(km)",
+        "length_km",
     }
     series_acc: pd.Series | None = None
     for column in frame.columns:
@@ -8554,15 +8804,41 @@ def _stringing_plan_span_series(frame: pd.DataFrame) -> pd.Series | None:
         if norm not in candidates:
             continue
         numeric = pd.to_numeric(frame[column], errors="coerce")
-        km_values = numeric if "km" in norm.replace(" ", "") else numeric / 1000.0
+        norm_key = norm.replace(" ", "")
+        if "km" in norm_key:
+            km_values = numeric
+        elif norm in {"length_m", "length", "p/o", "span_m", "span (m)", "span"}:
+            km_values = numeric / 1000.0
+        else:
+            km_values = numeric / 1000.0
         if series_acc is None:
             series_acc = km_values
         else:
             series_acc = series_acc.fillna(km_values)
     if series_acc is not None:
         return series_acc
-    if "tower_weight" in frame.columns:
-        return pd.to_numeric(frame["tower_weight"], errors="coerce") / 1000.0
+
+    fallback_norms = tuple(fallback_norms or ())
+    if fallback_norms:
+        for column in frame.columns:
+            norm = _normalize_col_key(column)
+            if norm not in fallback_norms:
+                continue
+            numeric = pd.to_numeric(frame[column], errors="coerce")
+            norm_key = norm.replace(" ", "")
+            if "km" in norm_key:
+                km_values = numeric
+            elif norm in {"length_m", "length", "p/o", "span_m", "span (m)", "span"}:
+                km_values = numeric / 1000.0
+            else:
+                km_values = numeric
+            if series_acc is None:
+                series_acc = km_values
+            else:
+                series_acc = series_acc.fillna(km_values)
+        if series_acc is not None:
+            return series_acc
+
     return None
 
 
@@ -8570,6 +8846,7 @@ def _stringing_plan_totals_by_project(
     months_ts: Sequence[pd.Timestamp],
     *,
     current_month: pd.Timestamp | None = None,
+    date_columns: Sequence[str] = _STRINGING_FS_DATE_COLUMNS,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Return per-project planned KM (deduplicated) from Micro Plan responsibilities."""
 
@@ -8584,12 +8861,17 @@ def _stringing_plan_totals_by_project(
         return empty_df, empty_series
 
     plan = plan_snapshot.copy()
-    plan["__plan_month"] = _stringing_plan_month_series(plan, _STRINGING_FS_DATE_COLUMNS)
+    plan["__plan_month"] = _stringing_plan_month_series(plan, date_columns)
     plan = plan.dropna(subset=["__plan_month"])
     if plan.empty:
         return empty_df, empty_series
 
-    span_series = _stringing_plan_span_series(plan)
+    fallback_norms: tuple[str, ...]
+    if tuple(date_columns) == _STRINGING_PO_DATE_COLUMNS:
+        fallback_norms = ("p/o",)
+    else:
+        fallback_norms = ("span (m)", "span_m", "length", "length_m", "tower_weight")
+    span_series = _stringing_plan_span_series(plan, fallback_norms=fallback_norms)
     if span_series is None:
         return empty_df, empty_series
     plan["__plan_km"] = span_series.fillna(0.0)
@@ -8689,7 +8971,11 @@ def _stringing_planned_total_for_dates(
     date_columns: Sequence[str],
 ) -> float:
     try:
-        plan_df, _ = _stringing_plan_totals_by_project(months_ts, current_month=None)
+        plan_df, _ = _stringing_plan_totals_by_project(
+            months_ts,
+            current_month=None,
+            date_columns=date_columns,
+        )
     except Exception:
         LOGGER.exception("Failed to compute stringing planned totals from compiled data.")
         plan_df = pd.DataFrame()

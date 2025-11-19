@@ -299,6 +299,13 @@ def prepare_stringing_plan_frame(
     if "completion_date" not in normalized.columns:
         normalized["completion_date"] = pd.NaT
     normalized["completion_date"] = pd.to_datetime(normalized["completion_date"], errors="coerce")
+
+    if "tower_weight" in normalized.columns:
+        base_span = pd.to_numeric(normalized["tower_weight"], errors="coerce")
+        for alias in ("span (m)", "span_m", "length", "length_m"):
+            if alias not in normalized.columns:
+                normalized[alias] = base_span
+
     def _fill_completion_from(column_name: str) -> None:
         if column_name not in normalized.columns:
             return
