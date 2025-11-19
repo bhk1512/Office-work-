@@ -415,6 +415,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
         active_config,
         # Provide a preloaded stringing data provider for instant switching
         duckdb_connection=DATA_STORE.get_duckdb_connection(),
+        duckdb_lock=DATA_STORE.get_duckdb_lock(),
         stringing_data_provider=get_df_stringing_day,
         stringing_compiled_provider=get_df_stringing_compiled,
         project_info_provider=get_df_projinfo,

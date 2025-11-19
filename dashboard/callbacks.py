@@ -26,6 +26,7 @@ from datetime import datetime
 from dash.exceptions import PreventUpdate
 from dash.dcc import send_bytes
 from uuid import uuid4
+from threading import RLock
 
 try:
     from dash import ctx as dash_ctx
@@ -1117,6 +1118,7 @@ def register_callbacks(
     config: AppConfig,
     *,
     duckdb_connection: duckdb.DuckDBPyConnection | None = None,
+    duckdb_lock: RLock | None = None,
     stringing_data_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_compiled_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
@@ -1139,6 +1141,7 @@ def register_callbacks(
         data_provider=data_provider,
         stringing_provider=stringing_data_provider,
         duckdb_connection=duckdb_connection,
+        duckdb_lock=duckdb_lock,
         logger=LOGGER,
     )
     global DATA_SELECTOR, _PROJECT_INFO_PROVIDER
@@ -2696,7 +2699,7 @@ def register_callbacks(
 
         done_total = _sum_completion_totals(
             scoped_full,
-            value_column="length_km",
+            value_column="po_km",
             completion_column="po_completion_date",
             fallback_columns=[("po", 0.001)],
         ) or 0.0
@@ -8807,7 +8810,7 @@ def _stringing_plan_span_series(
         norm_key = norm.replace(" ", "")
         if "km" in norm_key:
             km_values = numeric
-        elif norm in {"length_m", "length", "p/o", "span_m", "span (m)", "span"}:
+        elif norm in {"length_m", "length", "p/o", "span_m", "span (m)", "span", "tower_weight", "po_km"}:
             km_values = numeric / 1000.0
         else:
             km_values = numeric / 1000.0
@@ -8828,7 +8831,7 @@ def _stringing_plan_span_series(
             norm_key = norm.replace(" ", "")
             if "km" in norm_key:
                 km_values = numeric
-            elif norm in {"length_m", "length", "p/o", "span_m", "span (m)", "span"}:
+            elif norm in {"length_m", "length", "p/o", "span_m", "span (m)", "span", "tower_weight", "po_km"}:
                 km_values = numeric / 1000.0
             else:
                 km_values = numeric

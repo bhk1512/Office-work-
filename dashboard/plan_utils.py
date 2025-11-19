@@ -103,6 +103,7 @@ def prepare_stringing_plan_frame(
         "gang_name": ("Gang Name", "gang_name"),
         "supervisor": ("Supervisor", "supervisor"),
         "section_incharge": ("Section Incharge", "section_incharge", "section incharge"),
+        "po_length": ("P/O", "po", "p/o length", "po length", "p/o"),
     }
 
     def _resolve_series(key: str, default: Any = "") -> tuple[pd.Series, bool]:
@@ -183,6 +184,8 @@ def prepare_stringing_plan_frame(
     span_to = span_to.map(normalize_text)
     span_length_series, _ = _resolve_series("span_length", default=0.0)
     span_length = pd.to_numeric(span_length_series, errors="coerce").fillna(0.0)
+    po_length_series, _ = _resolve_series("po_length", default=0.0)
+    po_length = pd.to_numeric(po_length_series, errors="coerce").fillna(0.0)
     method_values, _ = _resolve_series("method", default="")
     method_values = method_values.map(normalize_text)
     gang_strength_series, gang_has_col = _resolve_series("gang_strength", default=pd.NA)
@@ -267,6 +270,7 @@ def prepare_stringing_plan_frame(
                     "entity_name": entity_name,
                     "location_no": span_label,
                     "tower_weight": span_length_value,
+                    "p/o": float(po_length[idx]) if idx < len(po_length) and pd.notna(po_length[idx]) else 0.0,
                     "revenue_planned": 0.0,
                     "revenue_realised": 0.0,
                     "stringing_span_completed": span_completed,
@@ -288,6 +292,7 @@ def prepare_stringing_plan_frame(
         ("entity_name", ""),
         ("location_no", ""),
         ("tower_weight", 0.0),
+        ("p/o", 0.0),
         ("revenue_planned", 0.0),
         ("revenue_realised", 0.0),
         ("stringing_span_completed", False),

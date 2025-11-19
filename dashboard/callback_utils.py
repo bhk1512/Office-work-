@@ -105,12 +105,14 @@ class DataSelector:
         data_provider: Callable[[], pd.DataFrame],
         stringing_provider: Callable[[], pd.DataFrame] | None,
         duckdb_connection: duckdb.DuckDBPyConnection | None = None,
+        duckdb_lock: RLock | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._config = config
         self._data_provider = data_provider
         self._stringing_provider = stringing_provider
         self._duckdb_connection = duckdb_connection
+        self._duckdb_lock = duckdb_lock
         self._logger = logger or logging.getLogger(__name__)
         self._lock = RLock()
         self._cache: dict[str, _FrameCacheEntry] = {}
@@ -171,15 +173,27 @@ class DataSelector:
             )
 
         try:
-            scopes = self._scopes_via_duckdb(
-                mode,
-                months_list,
-                project_list,
-                gang_list,
-                kv_set,
-                method_set,
-                connection=conn,
-            )
+            if self._duckdb_lock is not None:
+                with self._duckdb_lock:
+                    scopes = self._scopes_via_duckdb(
+                        mode,
+                        months_list,
+                        project_list,
+                        gang_list,
+                        kv_set,
+                        method_set,
+                        connection=conn,
+                    )
+            else:
+                scopes = self._scopes_via_duckdb(
+                    mode,
+                    months_list,
+                    project_list,
+                    gang_list,
+                    kv_set,
+                    method_set,
+                    connection=conn,
+                )
         except Exception as exc:  # pragma: no cover - defensive logging
             self._logger.warning("DuckDB scope query failed for mode '%s': %s", mode, exc)
             scopes = None

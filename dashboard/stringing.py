@@ -372,6 +372,7 @@ def _expand_stringing_stage_to_daily(
     start_column: str,
     end_column: str,
     output_end_column: str,
+    value_column: str = "length_km",
 ) -> pd.DataFrame:
     """Internal helper to expand rows between a start column and a completion column."""
     if df is None or df.empty:
@@ -390,6 +391,8 @@ def _expand_stringing_stage_to_daily(
 
     work[start_col] = work[start_col].map(_to_datetime_normalize)
     work[end_col] = work[end_col].map(_to_datetime_normalize)
+    if "po" in work.columns and "po_km" not in work.columns:
+        work["po_km"] = pd.to_numeric(work["po"], errors="coerce") / 1000.0
 
     missing_dt = work[start_col].isna() | work[end_col].isna()
     duration_days = (work[end_col] - work[start_col]).dt.days + 1
@@ -397,15 +400,18 @@ def _expand_stringing_stage_to_daily(
     valid_mask = (~missing_dt) & (~non_positive)
     valid = work.loc[valid_mask].copy()
 
-    if "length_km" in valid.columns:
-        valid["_duration_days"] = duration_days.loc[valid.index].astype(float)
-        valid["daily_km"] = (
-            pd.to_numeric(valid["length_km"], errors="coerce")
-            .astype(float)
-            .div(valid["_duration_days"].where(valid["_duration_days"] > 0, np.nan))
-        )
+    metric_column = value_column if value_column in valid.columns else None
+    if metric_column is None and "length_km" in valid.columns:
+        metric_column = "length_km"
+
+    valid["_duration_days"] = duration_days.loc[valid.index].astype(float)
+    if metric_column:
+        metric_values = pd.to_numeric(valid[metric_column], errors="coerce")
     else:
-        valid["daily_km"] = np.nan
+        metric_values = pd.Series(np.nan, index=valid.index)
+    metric_values = metric_values.fillna(pd.to_numeric(valid.get("length_km"), errors="coerce"))
+    valid["_metric_km"] = metric_values
+    valid["daily_km"] = valid["_metric_km"].div(valid["_duration_days"].where(valid["_duration_days"] > 0, np.nan))
 
     if valid.empty:
         return _empty_stage_frame()
@@ -445,6 +451,7 @@ def _expand_stringing_stage_to_daily(
                 "fs_complete_date": r[end_col],
                 "status": r["status"],
                 "length_km": r["length_km"],
+                "po_km": r.get("po_km", pd.NA),
                 "daily_km": r.get("daily_km", np.nan),
             }
             if output_end_column and output_end_column != "fs_complete_date":
@@ -484,6 +491,7 @@ def _expand_stringing_stage_to_daily(
         "fs_complete_date",
         "status",
         "length_km",
+        "po_km",
         "daily_km",
         "row_id",
     ]
@@ -504,6 +512,7 @@ def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
         start_column="fs_starting_date",
         end_column="fs_complete_date",
         output_end_column="fs_complete_date",
+        value_column="length_km",
     )
 
 
@@ -514,6 +523,7 @@ def expand_stringing_to_daily_payout(df: pd.DataFrame) -> pd.DataFrame:
         start_column="po_start_date",
         end_column="po_completion_date",
         output_end_column="po_completion_date",
+        value_column="po_km",
     )
 
 

@@ -207,6 +207,11 @@ class AppDataStore:
     def get_duckdb_connection(self) -> duckdb.DuckDBPyConnection:
         return self._duckdb_conn
 
+    def get_duckdb_lock(self) -> RLock:
+        """Return the re-entrant lock guarding DuckDB access."""
+
+        return self._duckdb_lock
+
     def _maybe_preload_stringing(self, config: AppConfig) -> None:
         if not config.enable_stringing:
             return
