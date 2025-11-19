@@ -1221,11 +1221,6 @@ def register_callbacks(
                     ),
                     None,
                 )
-                if sheet_name is None:
-                    sheet_name = next(
-                        (name for name in workbook.sheet_names if "stringing" in str(name).lower()),
-                        None,
-                    )
                 if not sheet_name:
                     LOGGER.warning("Stringing sheet missing in workbook '%s'; sheets=%s", workbook_path, workbook.sheet_names)
                     return (
@@ -2289,6 +2284,7 @@ def register_callbacks(
         is_stringing: bool,
         meta_signature: str,
         cache_key: str | None,
+        scope_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "has_rows": not (scoped_full.empty and scoped_all.empty),
@@ -2485,6 +2481,43 @@ def register_callbacks(
             )
 
         projects_count = _nunique(loss_scope, "project_name") or _nunique(scoped_full, "project_name")
+        if is_stringing:
+            try:
+                plan_df, _ = _stringing_plan_totals_by_project(
+                    months_ts,
+                    current_month=months_ts[-1] if months_ts else None,
+                )
+            except Exception:
+                plan_df = pd.DataFrame()
+            if isinstance(plan_df, pd.DataFrame) and not plan_df.empty:
+                plan_keys = set(plan_df.index.astype(str))
+                selected = (scope_meta or {}).get("selected") or {}
+                project_filters = _normalize_str_list(selected.get("projects"))
+                if project_filters:
+                    filter_keys = {
+                        _compact_project_key(value) or _normalize_lower(value)
+                        for value in project_filters
+                        if str(value).strip()
+                    }
+                    filter_keys = {key for key in filter_keys if key}
+                    if filter_keys:
+                        plan_keys = {key for key in plan_keys if key in filter_keys}
+                delivered_keys: set[str] = set()
+                for frame in (loss_scope, scoped_full):
+                    if not isinstance(frame, pd.DataFrame) or frame.empty or "project_name" not in frame.columns:
+                        continue
+                    delivered_keys.update(
+                        frame["project_name"]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .map(lambda value: _compact_project_key(value) or _normalize_lower(value))
+                    )
+                delivered_keys = {key for key in delivered_keys if key}
+                total_project_keys = plan_keys | delivered_keys
+                total_project_keys = {key for key in total_project_keys if key}
+                if total_project_keys:
+                    projects_count = len(total_project_keys)
         gangs_count = _nunique(loss_scope, "gang_name") or _nunique(scoped_full, "gang_name")
 
         result.update(
@@ -2632,6 +2665,7 @@ def register_callbacks(
                 is_stringing=is_stringing,
                 meta_signature=meta_signature,
                 cache_key=project_gang_key,
+                scope_meta=scope_meta,
             )
 
             loss_scope = components["loss_scope"]
@@ -6135,15 +6169,11 @@ def register_callbacks(
                 delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
                 delivered_km_current_series = pd.Series(dtype=float)
 
-            plan_totals_df, plan_current_lookup = _stringing_plan_totals_by_project(
+            plan_union, plan_current_lookup = _stringing_plan_totals_by_project(
                 months_ts,
                 current_month=current_month_ts,
-                date_columns=_STRINGING_FS_DATE_COLUMNS,
             )
-            if plan_totals_df.empty:
-                plan_totals_df = pd.DataFrame(columns=["planned_km", "project_name_plan"])
-            planned_km_by_project = plan_totals_df.copy()
-            planned_km_current_series = pd.Series(dtype=float)
+            planned_km_current_series = plan_current_lookup.copy()
 
             try:
                 tse_norm_lookup, tse_alias_lookup = _get_stringing_tse_lookup()
@@ -6162,28 +6192,26 @@ def register_callbacks(
                 delivered_union = delivered_union[delivered_union["project_key_norm"].astype(str).str.strip() != ""]
                 if not delivered_union.empty:
                     delivered_union = (
-                        delivered_union.reset_index(drop=True)
-                        .groupby("project_key_norm")
-                        .agg(
-                            delivered_km=("delivered_km", "sum"),
-                            project_name_delivered=("project_name_delivered", "first"),
-                        )
+                        delivered_union.set_index("project_key_norm")[["delivered_km", "project_name_delivered"]]
                     )
             else:
-                delivered_union = pd.DataFrame(columns=["delivered_km", "project_name_delivered"])
+                delivered_union = pd.DataFrame(columns=["delivered_km", "project_name_delivered"]).set_index(
+                    pd.Index([], name="project_key_norm")
+                )
+
+            if not plan_union.empty:
+                plan_union = plan_union.copy()
+            else:
+                plan_union = pd.DataFrame(columns=["planned_km", "project_name_plan"]).set_index(
+                    pd.Index([], name="project_key_norm")
+                )
 
             projects_df = (
-                planned_km_by_project
-                .join(delivered_union, how="outer")
+                plan_union.join(delivered_union, how="outer")
                 .fillna({"planned_km": 0.0, "delivered_km": 0.0})
                 .reset_index()
                 .rename(columns={"index": "project_key_norm"})
             )
-            projects_df["project_key_norm"] = projects_df["project_key_norm"].astype(str)
-            if "project_name_plan" not in projects_df.columns:
-                projects_df["project_name_plan"] = ""
-            if "project_name_delivered" not in projects_df.columns:
-                projects_df["project_name_delivered"] = ""
             delivered_names = projects_df["project_name_delivered"].fillna("").astype(str)
             plan_names = projects_df["project_name_plan"].fillna("").astype(str)
             projects_df["project_name"] = delivered_names.where(
@@ -6201,9 +6229,9 @@ def register_callbacks(
                 if not projects_df.empty
                 else {}
             )
-            if plan_current_lookup:
-                planned_km_current_series = pd.Series(
-                    {project_label_by_key.get(key, key): value for key, value in plan_current_lookup.items()}
+            if not planned_km_current_series.empty:
+                planned_km_current_series = planned_km_current_series.rename(
+                    index=lambda key: project_label_by_key.get(str(key), key)
                 )
             else:
                 planned_km_current_series = pd.Series(dtype=float)
@@ -6658,7 +6686,12 @@ def register_callbacks(
                     )
 
                     plan_available = bool(r.get("_stringing_plan_available"))
-                    planned_effective = planned_current_value if plan_available else None
+                    plan_total_value = float(r.get("planned_km", 0.0) or 0.0)
+                    plan_has_data = plan_available or plan_total_value > 0
+                    if planned_current_value is None and plan_has_data:
+                        planned_effective = plan_total_value
+                    else:
+                        planned_effective = planned_current_value
                     tile_summary_children.extend(
                         _build_tile_metric_rows(
                             mode="stringing",
@@ -6668,8 +6701,8 @@ def register_callbacks(
                             total_current_value=(
                                 delivered_current_value if delivered_current_value is not None else r.get("delivered_mt", 0.0)
                             ),
-                            total_planned_value=planned_effective,
-                            plan_available=plan_available,
+                            total_planned_value=planned_effective if plan_has_data else None,
+                            plan_available=plan_has_data,
                             gangs_value=gangs_metric,
                             loss_value=loss_metric,
                             tse_value=tse_metric,
@@ -8536,40 +8569,30 @@ def _stringing_plan_span_series(frame: pd.DataFrame) -> pd.Series | None:
 def _stringing_plan_totals_by_project(
     months_ts: Sequence[pd.Timestamp],
     *,
-    current_month: pd.Timestamp,
-    date_columns: Sequence[str] = _STRINGING_FS_DATE_COLUMNS,
-) -> tuple[pd.DataFrame, dict[str, float]]:
+    current_month: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Return per-project planned KM (deduplicated) from Micro Plan responsibilities."""
+
     try:
         plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
     except Exception:
         plan_snapshot = None
 
     empty_df = pd.DataFrame(columns=["planned_km", "project_name_plan"])
-    empty_lookup: dict[str, float] = {}
+    empty_series = pd.Series(dtype=float)
     if not isinstance(plan_snapshot, pd.DataFrame) or plan_snapshot.empty:
-        return empty_df, empty_lookup
+        return empty_df, empty_series
 
     plan = plan_snapshot.copy()
-    plan["__plan_month"] = _stringing_plan_month_series(plan, date_columns)
+    plan["__plan_month"] = _stringing_plan_month_series(plan, _STRINGING_FS_DATE_COLUMNS)
     plan = plan.dropna(subset=["__plan_month"])
     if plan.empty:
-        return empty_df, empty_lookup
+        return empty_df, empty_series
 
     span_series = _stringing_plan_span_series(plan)
     if span_series is None:
-        return empty_df, empty_lookup
-
-    plan["__plan_km"] = pd.to_numeric(span_series, errors="coerce").fillna(0.0)
-    plan = plan[plan["__plan_km"] > 0].copy()
-    if plan.empty:
-        return empty_df, empty_lookup
-
-    if months_ts:
-        month_set = {pd.Timestamp(ts) for ts in months_ts if pd.notna(ts)}
-        if month_set:
-            plan = plan[plan["__plan_month"].isin(month_set)].copy()
-    if plan.empty:
-        return empty_df, empty_lookup
+        return empty_df, empty_series
+    plan["__plan_km"] = span_series.fillna(0.0)
 
     plan["__project_name"] = plan.get("project_name", pd.Series([""] * len(plan), index=plan.index)).astype(str)
     plan["__project_key"] = plan.get("project_key", pd.Series([""] * len(plan), index=plan.index)).astype(str)
@@ -8578,13 +8601,30 @@ def _stringing_plan_totals_by_project(
     )
     plan["__project_display"] = plan["__project_display"].map(_format_stringing_project_label)
     plan["__project_norm"] = plan["__project_key"].map(_compact_project_key)
-    missing_norm = plan["__project_norm"] == ""
+    missing_norm = plan["__project_norm"].astype(str).str.strip() == ""
     if missing_norm.any():
-        plan.loc[missing_norm, "__project_norm"] = plan.loc[missing_norm, "__project_display"].map(_compact_project_key)
+        plan.loc[missing_norm, "__project_norm"] = plan.loc[missing_norm, "__project_display"].map(
+            lambda value: _compact_project_key(value) or _normalize_lower(value)
+        )
     plan["__project_norm"] = plan["__project_norm"].fillna("")
     plan = plan[plan["__project_norm"] != ""].copy()
     if plan.empty:
-        return empty_df, empty_lookup
+        return empty_df, empty_series
+
+    location_series = plan.get("location_no")
+    if location_series is not None:
+        plan["__location_norm"] = location_series.map(_normalize_location)
+        plan = plan.drop_duplicates(
+            subset=["__project_norm", "__location_norm", "__plan_month"],
+            keep="last",
+        )
+
+    if months_ts:
+        month_set = {pd.Timestamp(ts) for ts in months_ts if pd.notna(ts)}
+        if month_set:
+            plan = plan[plan["__plan_month"].isin(month_set)].copy()
+    if plan.empty:
+        return empty_df, empty_series
 
     totals = (
         plan.groupby("__project_norm")
@@ -8595,19 +8635,17 @@ def _stringing_plan_totals_by_project(
         .sort_index()
     )
     totals.index.name = "project_key_norm"
-    if not totals.empty:
-        name_series = totals["project_name_plan"].astype(str)
-        totals["project_name_plan"] = name_series.where(
-            name_series.str.strip() != "", totals.index.astype(str)
-        )
 
-    current_lookup = {}
+    plan_current = pd.Series(dtype=float)
     if current_month is not None and not pd.isna(current_month):
-        current = plan[plan["__plan_month"] == current_month]
-        if not current.empty:
-            current_lookup = current.groupby("__project_norm")["__plan_km"].sum().to_dict()
+        current_month = pd.Timestamp(current_month)
+        plan_current = plan[plan["__plan_month"] == current_month]
+        if not plan_current.empty:
+            plan_current = plan_current.groupby("__project_norm")["__plan_km"].sum()
+        else:
+            plan_current = pd.Series(dtype=float)
 
-    return totals, current_lookup
+    return totals, plan_current
 
 
 def _stringing_scope_has_plan(
@@ -8651,54 +8689,29 @@ def _stringing_planned_total_for_dates(
     date_columns: Sequence[str],
 ) -> float:
     try:
-        plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
-        if not isinstance(plan_snapshot, pd.DataFrame) or plan_snapshot.empty:
-            return 0.0
-        plan = plan_snapshot.copy()
-        plan["__plan_month"] = _stringing_plan_month_series(plan, date_columns)
-        plan = plan.dropna(subset=["__plan_month"])
-        if plan.empty:
-            return 0.0
-
-        span_series = _stringing_plan_span_series(plan)
-        if span_series is None:
-            return 0.0
-        plan["plan_km"] = span_series.fillna(0.0)
-        if months_ts:
-            month_set = {pd.Timestamp(ts) for ts in months_ts if pd.notna(ts)}
-            plan = plan[plan["__plan_month"].isin(month_set)].copy()
-            if plan.empty:
-                return 0.0
-        selected = (scope_meta or {}).get("selected") or {}
-        project_filters = _normalize_str_list(selected.get("projects"))
-        if project_filters:
-            key_set: set[str] = set()
-            for project in project_filters:
-                key_set.update(_stringing_plan_keys(project, project))
-            if key_set:
-                name_series = plan.get("project_name")
-                if name_series is None:
-                    name_series = pd.Series([""] * len(plan), index=plan.index)
-                else:
-                    name_series = name_series.astype(str)
-                code_series = plan.get("project_key")
-                if code_series is None:
-                    code_series = name_series.copy()
-                else:
-                    code_series = code_series.astype(str)
-                mask = (
-                    name_series.map(_normalize_lower).isin(key_set)
-                    | name_series.map(_compact_project_key).isin(key_set)
-                    | code_series.map(_normalize_lower).isin(key_set)
-                    | code_series.map(_compact_project_key).isin(key_set)
-                )
-                plan = plan[mask].copy()
-                if plan.empty:
-                    return 0.0
-        return float(plan["plan_km"].sum())
+        plan_df, _ = _stringing_plan_totals_by_project(months_ts, current_month=None)
     except Exception:
-        LOGGER.exception("Failed to compute stringing planned totals.")
+        LOGGER.exception("Failed to compute stringing planned totals from compiled data.")
+        plan_df = pd.DataFrame()
+
+    if not isinstance(plan_df, pd.DataFrame) or plan_df.empty:
         return 0.0
+
+    selected = (scope_meta or {}).get("selected") or {}
+    project_filters = _normalize_str_list(selected.get("projects"))
+    if project_filters:
+        filter_keys = {
+            _compact_project_key(value) or _normalize_lower(value)
+            for value in project_filters
+            if str(value).strip()
+        }
+        filter_keys = {key for key in filter_keys if key}
+        if filter_keys:
+            plan_df = plan_df[plan_df.index.isin(filter_keys)].copy()
+            if plan_df.empty:
+                return 0.0
+
+    return float(plan_df["planned_km"].sum())
 
 
 def _load_stringing_plan_snapshot(
