@@ -5915,7 +5915,7 @@ def register_callbacks(
             )
 
         if focus == "totals":
-            return [_row("Total Planned / Done / Balance", totals_focus_display)]
+            return [_row("F/S Total Planned / Done / Balance", totals_focus_display)]
         if focus == "gangs":
             value = "\u2014" if gangs_value is None else f"{int(gangs_value):,}"
             return [_row("Gangs", value)]
@@ -6795,7 +6795,7 @@ def register_callbacks(
                                         className="pch-pill pch-pill-prod-month mb-1", color="link"
                                     )),
                                     ("totals", dbc.Button(
-                                        f"Total Planned / Done / Balance: {planned_display} / {km_delivered_label:.1f} / {balance_display} KM",
+                                        f"F/S Total Planned / Done / Balance: {planned_display} / {km_delivered_label:.1f} / {balance_display} KM",
                                         id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "totals"},
                                         className="pch-pill pch-pill-towers mb-1", color="link"
                                     )),
@@ -7740,7 +7740,7 @@ def register_callbacks(
                                     className="pch-pill pch-pill-prod-month me-2 mb-1", color="link"
                                 )),
                                 ("totals", dbc.Button(
-                                    f"Total Planned / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
+                                    f"F/S Total Planned / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
                                     id={"type": "summary-pill-trigger", "mode": "erection", "metric": "totals"},
                                     className="pch-pill pch-pill-towers me-2 mb-1", color="link"
                                 )),
@@ -8111,7 +8111,7 @@ def register_callbacks(
                                     className="pch-pill pch-pill-prod-month me-2 mb-1", color="link", n_clicks=0
                                 )),
                                 ("totals", dbc.Button(
-                                    f"Total Planned / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
+                                    f"F/S Total Planned / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
                                     id={"type": "summary-pill-trigger", "mode": "erection", "metric": "totals"},
                                     className="pch-pill pch-pill-towers me-2 mb-1", color="link", n_clicks=0
                                 )),
@@ -8153,7 +8153,7 @@ def register_callbacks(
 
     _PCH_PILL_LABELS = {
         "projects": "Projects Covered",
-        "totals": "Total Planned / Done / Balance",
+        "totals": "F/S Total Planned / Done / Balance",
         "gangs": "Gangs",
         "productivity": "Productivity / Historical Avg",
         "loss": "Lost Units",
@@ -8374,7 +8374,7 @@ def register_callbacks(
         ) -> dbc.Col:
             rows = [
                 ("Projects Covered", summary_payload.get("projects", "-")),
-                ("Total Planned / Done / Balance", summary_payload.get("totals", "-")),
+                ("F/S Total Planned / Done / Balance", summary_payload.get("totals", "-")),
                 ("Gangs", summary_payload.get("gangs", "-")),
                 ("Productivity / Historical Avg", summary_payload.get("productivity", "-")),
                 ("Lost Units", summary_payload.get("lost_units", "-")),
@@ -9036,3 +9036,4 @@ def _load_stringing_plan_snapshot(
         return frame, completion_keys, [], []
 
     return None, set(), [], []
+

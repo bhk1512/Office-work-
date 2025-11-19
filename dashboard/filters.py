@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
@@ -10,6 +11,14 @@ LOGGER = logging.getLogger(__name__)
 
 
 DateRange = Tuple[pd.Timestamp, pd.Timestamp]
+
+
+def _normalize_project_token(value: object) -> str:
+    """Return a compact identifier that ignores whitespace and punctuation."""
+    text = "" if value is None else str(value).strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", text)
 
 
 def apply_filters(
@@ -22,9 +31,30 @@ def apply_filters(
 
     filtered = data.copy()
 
-    # Project filter (only if column is present)
-    if projects and "project_name" in filtered.columns:
-        filtered = filtered[filtered["project_name"].isin(projects)]
+    # Project filter (checks both project_name and project columns, plus compact tokens)
+    if projects:
+        project_values = [str(project).strip() for project in projects if str(project).strip()]
+        if project_values:
+            normalized_targets = {_normalize_project_token(value) for value in project_values}
+            normalized_targets.discard("")
+            project_mask = None
+            seen_project_column = False
+            for column in ("project_name", "project"):
+                if column not in filtered.columns:
+                    continue
+                seen_project_column = True
+                column_series = filtered[column].astype(str)
+                mask = column_series.isin(project_values)
+                if not mask.any() and normalized_targets:
+                    normalized_series = column_series.map(_normalize_project_token)
+                    mask = normalized_series.isin(normalized_targets)
+                if mask.any():
+                    project_mask = mask if project_mask is None else (project_mask | mask)
+            if project_mask is not None:
+                filtered = filtered[project_mask]
+            elif seen_project_column:
+                # Requested project filters but nothing matched.
+                filtered = filtered.iloc[0:0]
 
     # Month filter with resilience: compute month from date if missing
     if months:
