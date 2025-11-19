@@ -82,6 +82,7 @@ _STRINGING_KV_RANGE = {"400", "765"}
 _STRINGING_FS_DATE_COLUMNS = ("final_sag_complete", "fs_complete_date", "fs_completed_date", "fs_completion_date")
 _STRINGING_PO_DATE_COLUMNS = ("paying_out_complete", "po_completion_date", "po_completion")
 BENCHMARK_KM_PER_MONTH = 5.0
+_PROJECT_CODE_PATTERN = re.compile(r"(?i)\b([A-Z]{2,4})\s*[-_/ ]*(\d{2,5})\b")
 
 # App-wide config instance for callback logic
 config = AppConfig()
@@ -124,6 +125,25 @@ _STRINGING_PLAN_CACHE: dict[str, Any] = {
     "last_written": 0.0,
 }
 STRINGING_PLAN_ACCESSOR: ResponsibilitiesAccessor | None = None
+
+
+def _extract_project_code(value: object) -> str:
+    """
+    Return the canonical project code from a label or identifier.
+
+    The code is derived from the portion before a "CODE : Name" separator and
+    then normalized via a regex that captures the alphanumeric code pattern.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ""
+    if " : " in text:
+        text = text.split(" : ", 1)[0].strip()
+    match = _PROJECT_CODE_PATTERN.search(text) if _PROJECT_CODE_PATTERN else None
+    if match:
+        prefix, digits = match.groups()
+        return f"{prefix.upper()} {digits}"
+    return text
 
 
 def _normalize_month_value(raw: Any) -> tuple[str | None, str | None]:
@@ -217,21 +237,16 @@ def _project_filter_candidates(
         if normalized and normalized not in candidates:
             candidates.append(normalized)
 
-    _add(project_label)
-    if project_label and ":" in project_label:
-        left, right = project_label.split(":", 1)
-        _add(left)
-        _add(right)
-    if project_label:
-        _add(project_label.replace(":", " "))
-
-    code_value = project_code or ""
-    if code_value:
-        compact = code_value.replace(" ", "")
+    sources = [project_code, project_label]
+    for source in sources:
+        code_value = _extract_project_code(source)
+        if not code_value:
+            continue
         _add(code_value)
-        _add(compact)
-        _add(compact.upper())
-        _add(compact.lower())
+        flattened = re.sub(r"[^A-Za-z0-9]", "", code_value)
+        _add(flattened)
+        _add(flattened.upper())
+        _add(flattened.lower())
 
     return candidates
 
@@ -5775,7 +5790,7 @@ def register_callbacks(
             )
 
         if focus == "totals":
-            return [_row("Total / Done / Balance", totals_focus_display)]
+            return [_row("Total Planned / Done / Balance", totals_focus_display)]
         if focus == "gangs":
             value = "\u2014" if gangs_value is None else f"{int(gangs_value):,}"
             return [_row("Gangs", value)]
@@ -5860,6 +5875,37 @@ def register_callbacks(
         def _compact_project_token(value: str) -> str:
             return re.sub(r"[^a-z0-9]", "", (value or "").strip().lower())
 
+        def _project_code_key_sets(entry: Mapping[str, Any] | None) -> tuple[list[str], list[str]]:
+            norm_keys: list[str] = []
+            compact_keys: list[str] = []
+            if not isinstance(entry, Mapping):
+                return norm_keys, compact_keys
+            seen: set[str] = set()
+            for field in ("project_code", "code", "project", "project_name", "project_name_display"):
+                code_value = _extract_project_code(entry.get(field))
+                if not code_value:
+                    continue
+                canonical = code_value.lower()
+                if canonical in seen:
+                    continue
+                seen.add(canonical)
+                norm_key = _normalize_lower(code_value)
+                if norm_key and norm_key not in norm_keys:
+                    norm_keys.append(norm_key)
+                compact_key = _compact_project_token(code_value)
+                if compact_key and compact_key not in compact_keys:
+                    compact_keys.append(compact_key)
+            return norm_keys, compact_keys
+
+        def _resolve_project_code(entry: Mapping[str, Any] | None) -> str:
+            if not isinstance(entry, Mapping):
+                return ""
+            for field in ("project_code", "code", "project", "project_name", "project_name_display"):
+                code_value = _extract_project_code(entry.get(field))
+                if code_value:
+                    return code_value
+            return ""
+
         def _component_id_token(prefix: str, value: Any) -> str:
             base = _compact_project_token(value)
             if base:
@@ -5879,44 +5925,17 @@ def register_callbacks(
         ) -> pd.DataFrame:
             if not isinstance(scope, pd.DataFrame) or scope.empty or not rows:
                 return pd.DataFrame()
-            match_norm: set[str] = set()
-            match_compact: set[str] = set()
             match_codes: set[str] = set()
             for entry in rows:
-                title = str(entry.get("project_name", "")).strip()
-                base = title.split(" : ", 1)[1] if " : " in title else title
-                norm = _normalize_lower(base)
-                if norm:
-                    match_norm.add(norm)
-                compact = _compact_project_token(base)
-                if compact:
-                    match_compact.add(compact)
-                code = str(entry.get("project_code", "")).strip()
-                if code and code.lower() != "nan":
-                    compact_code = _compact_project_token(code)
-                    if compact_code:
-                        match_codes.add(compact_code)
-            if not (match_norm or match_compact or match_codes):
+                _, compact_keys = _project_code_key_sets(entry)
+                match_codes.update(compact_keys)
+            if not match_codes:
                 return pd.DataFrame()
 
             mask = pd.Series(False, index=scope.index)
-
-            def _apply_norm(column: str) -> None:
-                nonlocal mask
-                if column in scope.columns and match_norm:
-                    mask |= scope[column].astype(str).map(_normalize_lower).isin(match_norm)
-
-            def _apply_compact(column: str) -> None:
-                nonlocal mask
-                if column in scope.columns and match_compact:
-                    mask |= scope[column].astype(str).map(_compact_project_token).isin(match_compact)
-
-            for column in ("project_name", "project", "project_name_display"):
-                _apply_norm(column)
-            for column in ("project_name", "project", "project_name_display"):
-                _apply_compact(column)
-            if match_codes and "project_code" in scope.columns:
-                mask |= scope["project_code"].astype(str).map(_compact_project_token).isin(match_codes)
+            for column in ("project_code", "project", "project_name", "project_name_display"):
+                if column in scope.columns:
+                    mask |= scope[column].astype(str).map(_compact_project_token).isin(match_codes)
 
             if not mask.any():
                 return scope.iloc[0:0].copy()
@@ -6116,50 +6135,15 @@ def register_callbacks(
                 delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
                 delivered_km_current_series = pd.Series(dtype=float)
 
-            # Planned KM from compiled stringing dataset (section-level total length)
-            df_compiled = pd.DataFrame()
-            if callable(stringing_compiled_provider):
-                try:
-                    df_compiled = stringing_compiled_provider()
-                except Exception:
-                    df_compiled = pd.DataFrame()
-            if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
-                try:
-                    df_compiled = _load_stringing_compiled_raw(config)
-                except Exception:
-                    df_compiled = pd.DataFrame()
-            planned_km_by_project = pd.DataFrame(columns=["planned_km"])
+            plan_totals_df, plan_current_lookup = _stringing_plan_totals_by_project(
+                months_ts,
+                current_month=current_month_ts,
+                date_columns=_STRINGING_FS_DATE_COLUMNS,
+            )
+            if plan_totals_df.empty:
+                plan_totals_df = pd.DataFrame(columns=["planned_km", "project_name_plan"])
+            planned_km_by_project = plan_totals_df.copy()
             planned_km_current_series = pd.Series(dtype=float)
-            if isinstance(df_compiled, pd.DataFrame) and not df_compiled.empty:
-                comp = df_compiled.copy()
-                # Detect project/name column robustly
-                comp_proj_col = None
-                for cand in ("project_name", "project", "Project Name", "Project"):
-                    if cand in comp.columns:
-                        comp_proj_col = cand
-                        break
-                if comp_proj_col is not None:
-                    fs_candidates = ("final_sag_complete", "fs_complete_date", "fs_completed_date", "fs_completion_date")
-                    date_col = next((dc for dc in fs_candidates if dc in comp.columns), None)
-                    if date_col is not None:
-                        comp[date_col] = pd.to_datetime(comp[date_col], errors="coerce")
-                        comp = comp.dropna(subset=[date_col])
-                        comp[date_col] = comp[date_col].dt.to_period("M").dt.to_timestamp()
-                        if months_ts:
-                            comp = comp[comp[date_col].isin(months_ts)].copy()
-                    else:
-                        comp = comp.iloc[0:0]
-                    # Ensure length_km exists
-                    if "length_km" not in comp.columns and "length_m" in comp.columns:
-                        comp["length_km"] = pd.to_numeric(comp["length_m"], errors="coerce") / 1000.0
-                    comp["length_km"] = pd.to_numeric(comp.get("length_km", np.nan), errors="coerce")
-                    planned_km_by_project = (
-                        comp.groupby(comp[comp_proj_col].astype(str))["length_km"].sum().to_frame("planned_km")
-                    )
-                    if date_col is not None and date_col in comp.columns:
-                        comp_current = comp[comp[date_col] == current_month_ts].copy()
-                        if not comp_current.empty:
-                            planned_km_current_series = comp_current.groupby(comp_current[comp_proj_col].astype(str))["length_km"].sum()
 
             try:
                 tse_norm_lookup, tse_alias_lookup = _get_stringing_tse_lookup()
@@ -6168,19 +6152,62 @@ def register_callbacks(
                 tse_norm_lookup, tse_alias_lookup = {}, {}
 
             # Merge planned and delivered into a projects table
+            delivered_union = delivered_km_by_project.copy()
+            if not delivered_union.empty:
+                delivered_union = delivered_union.copy()
+                delivered_union["project_name_delivered"] = delivered_union.index.astype(str)
+                delivered_union["project_key_norm"] = delivered_union["project_name_delivered"].map(
+                    lambda value: _compact_project_key(value) or _normalize_lower(value)
+                )
+                delivered_union = delivered_union[delivered_union["project_key_norm"].astype(str).str.strip() != ""]
+                if not delivered_union.empty:
+                    delivered_union = (
+                        delivered_union.reset_index(drop=True)
+                        .groupby("project_key_norm")
+                        .agg(
+                            delivered_km=("delivered_km", "sum"),
+                            project_name_delivered=("project_name_delivered", "first"),
+                        )
+                    )
+            else:
+                delivered_union = pd.DataFrame(columns=["delivered_km", "project_name_delivered"])
+
             projects_df = (
                 planned_km_by_project
-                .join(delivered_km_by_project, how="outer")
-                .fillna(0.0)
+                .join(delivered_union, how="outer")
+                .fillna({"planned_km": 0.0, "delivered_km": 0.0})
                 .reset_index()
-                .rename(columns={"index": "project_name"})
+                .rename(columns={"index": "project_key_norm"})
             )
-            if "project_name" not in projects_df.columns:
-                # If group key preserved original name
-                for cand in ("project_name", "project", "Project Name"):
-                    if cand in projects_df.columns:
-                        projects_df = projects_df.rename(columns={cand: "project_name"})
-                        break
+            projects_df["project_key_norm"] = projects_df["project_key_norm"].astype(str)
+            if "project_name_plan" not in projects_df.columns:
+                projects_df["project_name_plan"] = ""
+            if "project_name_delivered" not in projects_df.columns:
+                projects_df["project_name_delivered"] = ""
+            delivered_names = projects_df["project_name_delivered"].fillna("").astype(str)
+            plan_names = projects_df["project_name_plan"].fillna("").astype(str)
+            projects_df["project_name"] = delivered_names.where(
+                delivered_names.str.strip() != "",
+                plan_names,
+            )
+            projects_df["project_name"] = projects_df["project_name"].fillna("")
+            projects_df["project_name"] = projects_df["project_name"].where(
+                projects_df["project_name"].str.strip() != "",
+                projects_df["project_key_norm"],
+            )
+            projects_df["project_name"] = projects_df["project_name"].astype(str).map(_format_stringing_project_label)
+            project_label_by_key = (
+                projects_df.set_index("project_key_norm")["project_name"].to_dict()
+                if not projects_df.empty
+                else {}
+            )
+            if plan_current_lookup:
+                planned_km_current_series = pd.Series(
+                    {project_label_by_key.get(key, key): value for key, value in plan_current_lookup.items()}
+                )
+            else:
+                planned_km_current_series = pd.Series(dtype=float)
+            projects_df = projects_df.drop(columns=["project_name_plan", "project_name_delivered"], errors="ignore")
             projects_df["project_name_display"] = projects_df["project_name"].astype(str)
 
             # Project meta (PCH, managers) from Project Details
@@ -6272,9 +6299,17 @@ def register_callbacks(
                     proj_display_name = str(proj)
                 proj_display = f"{proj_code} : {proj_display_name}".strip(" :") if proj_code else proj_display_name
                 plan_months = _project_plan_months(proj_display_name, proj_code or proj_display_name)
+                resolved_code = (
+                    _extract_project_code(proj_code)
+                    or _extract_project_code(proj_display)
+                    or _extract_project_code(proj)
+                )
+                if not resolved_code:
+                    resolved_code = proj_code or proj
                 rec = {
                     "project_name": proj_display,
-                    "project_code": proj_code or proj,
+                    "project_code": resolved_code,
+                    "code": resolved_code,
                     "regional_mgr": (meta.get("regional_mgr", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "regional_mgr" in meta.columns) else ""),
                     "project_mgr": (meta.get("project_mgr", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_mgr" in meta.columns) else ""),
                     "planning_eng": (meta.get("planning_eng", pd.Series([""])).iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "planning_eng" in meta.columns) else ""),
@@ -6410,22 +6445,7 @@ def register_callbacks(
                 lost_units_total = 0.0
 
                 def _project_lookup_keys(row: dict[str, Any]) -> tuple[list[str], list[str]]:
-                    display = str(row.get("project_name", "")).strip()
-                    base = display.split(" : ", 1)[1] if " : " in display else display
-                    code = str(row.get("project_code", "")).strip()
-                    texts = [display, base, code]
-                    norm_keys: list[str] = []
-                    compact_keys: list[str] = []
-                    for text in texts:
-                        if not text or text.lower() == "nan":
-                            continue
-                        norm_key = _normalize_lower(text)
-                        if norm_key and norm_key not in norm_keys:
-                            norm_keys.append(norm_key)
-                        compact_key = _compact_code(text)
-                        if compact_key and compact_key not in compact_keys:
-                            compact_keys.append(compact_key)
-                    return norm_keys, compact_keys
+                    return _project_code_key_sets(row)
 
                 def _lookup_with_keys(norm_keys: list[str], compact_keys: list[str], norm_map: Mapping[str, float], compact_map: Mapping[str, float]) -> float | None:
                     for key in norm_keys:
@@ -6438,8 +6458,8 @@ def register_callbacks(
 
                 for r in sorted(rows, key=lambda x: str(x["project_name"])):
                     norm_keys, compact_keys = _project_lookup_keys(r)
-                    code_value = str(r.get("project_code", "")).strip()
-                    if code_value and code_value.lower() not in ("", "nan") and code_value not in project_codes:
+                    code_value = _resolve_project_code(r)
+                    if code_value and code_value not in project_codes:
                         project_codes.append(code_value)
                     has_plan = bool(r.get("_stringing_plan_available"))
 
@@ -6539,7 +6559,7 @@ def register_callbacks(
                                         className="pch-pill pch-pill-prod-month mb-1", color="link"
                                     )),
                                     ("totals", dbc.Button(
-                                        f"Total / Done / Balance: {planned_display} / {km_delivered_label:.1f} / {balance_display} KM",
+                                        f"Total Planned / Done / Balance: {planned_display} / {km_delivered_label:.1f} / {balance_display} KM",
                                         id={"type": "summary-pill-trigger", "mode": "stringing", "metric": "totals"},
                                         className="pch-pill pch-pill-towers mb-1", color="link"
                                     )),
@@ -6569,28 +6589,14 @@ def register_callbacks(
                 tile_cols = []
                 for r in sorted(rows, key=lambda x: str(x["project_name"])):
                     proj_name = str(r["project_name"]).strip()
-                    display_code = str(r.get("project_code", "")).strip()
-
-                    def _norm_cmp(s: str) -> str:
-                        return re.sub(r"\s+", "", s or "").lower()
-
-                    if display_code and _norm_cmp(display_code) != _norm_cmp(proj_name):
+                    display_code = _resolve_project_code(r)
+                    if display_code and _compact_project_token(display_code) != _compact_project_token(proj_name):
                         proj_title = f"{display_code} : {proj_name}"
                     else:
                         proj_title = proj_name
 
-                    try:
-                        import re as _re
-
-                        def _compact_code_text(s: str) -> str:
-                            return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
-                    except Exception:
-
-                        def _compact_code_text(s: str) -> str:
-                            return (s or "").strip().lower().replace(" ", "")
-
-                    raw_code = r.get("project_code") or r.get("project_key") or proj_name
-                    proj_code = _compact_code_text(str(raw_code))
+                    raw_code_for_keys = display_code or r.get("project_code") or r.get("project_key") or proj_name
+                    proj_code = _compact_project_token(str(raw_code_for_keys or proj_name))
 
                     tile_summary_children = [
                         html.Div(html.Strong(proj_title), className="mb-2"),
@@ -6679,7 +6685,7 @@ def register_callbacks(
                     }
                     tile_metadata[project_token] = {
                         "project": proj_name,
-                        "code": proj_code or proj_name,
+                        "code": display_code or proj_name,
                         "display": proj_title,
                         "mode": "stringing",
                         "pch": str(pch),
@@ -7089,7 +7095,14 @@ def register_callbacks(
             except Exception:
                 proj_code2 = ""
             proj_display_name2 = str(meta.get("project_name_display", pd.Series([proj])).iloc[0]) if isinstance(meta, pd.DataFrame) and not meta.empty else str(proj)
-            proj_display2 = f"{proj_code2} : {proj_display_name2}".strip(" :") if proj_code2 else proj_display_name2
+            resolved_code2 = (
+                _extract_project_code(proj_code2)
+                or _extract_project_code(proj_display_name2)
+                or _extract_project_code(proj)
+            )
+            if not resolved_code2:
+                resolved_code2 = proj_code2
+            proj_display2 = f"{resolved_code2} : {proj_display_name2}".strip(" :") if resolved_code2 else proj_display_name2
             key = (pch_label, proj_display2)
             if key in aggregated:
                 continue
@@ -7098,7 +7111,8 @@ def register_callbacks(
             aggregated[key] = {
                 "pch": pch_label,
                 "project_name": proj_display2,
-                "project_code": proj_code2,
+                "project_code": resolved_code2 or proj_code2,
+                "code": resolved_code2 or proj_code2,
                 "planned_mt": 0.0,
                 "delivered_mt": mt_del,
                 "planned_nos": 0,
@@ -7127,18 +7141,20 @@ def register_callbacks(
                 def _compact_code(s: str) -> str:
                     return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
                 proj = str(meta_row.get("project_name_display", "")).strip()
-                code = str(meta_row.get("project_code", meta_row.get("Project Code", "")))
-                proj_key = _compact_code(code) or _compact_code(proj)
+                code_raw = str(meta_row.get("project_code", meta_row.get("Project Code", "")))
+                resolved_code = _extract_project_code(code_raw) or _extract_project_code(proj)
+                proj_key = _compact_code(resolved_code or code_raw) or _compact_code(proj)
                 if not proj or proj_key in aggregated_by_proj_key:
                     continue
                 raw_pch = str(meta_row.get(pch_col, "")) if pch_col in meta_row.index else ""
                 pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
-                proj_display = f"{code} : {proj}".strip(" :") if code else proj
+                proj_display = f"{resolved_code} : {proj}".strip(" :") if resolved_code else proj
                 key = (pch_label, proj_display)
                 aggregated[key] = {
                     "pch": pch_label,
                     "project_name": proj_display,
-                    "project_code": (str(meta_row.get("project_code", meta_row.get("Project Code", ""))) if isinstance(meta_row, pd.Series) else ""),
+                    "project_code": resolved_code or code_raw,
+                    "code": resolved_code or code_raw,
                     "planned_mt": 0.0,
                     "delivered_mt": 0.0,
                     "planned_nos": 0,
@@ -7301,22 +7317,7 @@ def register_callbacks(
                         towers_planned_compact_map[compact_key] = int(count)
 
         def _project_lookup_keys(row: dict[str, Any]) -> tuple[list[str], list[str]]:
-            display = str(row.get("project_name", "")).strip()
-            base = display.split(" : ", 1)[1] if " : " in display else display
-            code = str(row.get("project_code", "")).strip()
-            texts = [display, base, code]
-            norm_keys: list[str] = []
-            compact_keys: list[str] = []
-            for text in texts:
-                if not text:
-                    continue
-                norm_key = _normalize_lower(text)
-                if norm_key and norm_key not in norm_keys:
-                    norm_keys.append(norm_key)
-                compact_key = _compact_key(text)
-                if compact_key and compact_key not in compact_keys:
-                    compact_keys.append(compact_key)
-            return norm_keys, compact_keys
+            return _project_code_key_sets(row)
 
         def _lookup_with_key(
             norm_keys: list[str],
@@ -7381,12 +7382,8 @@ def register_callbacks(
 
             for r in sorted(rows, key=lambda x: str(x["project_name"])):
                 norm_keys, compact_keys = _project_lookup_keys(r)
-                code_value = str(r.get("project_code", "")).strip()
-                if not code_value:
-                    project_label = str(r.get("project_name", "")).strip()
-                    if " : " in project_label:
-                        code_value = project_label.split(" : ", 1)[0].strip()
-                if code_value and code_value.lower() != "nan" and code_value not in project_codes:
+                code_value = _resolve_project_code(r)
+                if code_value and code_value not in project_codes:
                     project_codes.append(code_value)
 
                 prod_current_value, _ = _lookup_with_key(
@@ -7494,7 +7491,7 @@ def register_callbacks(
                                     className="pch-pill pch-pill-prod-month me-2 mb-1", color="link"
                                 )),
                                 ("totals", dbc.Button(
-                                    f"Total / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
+                                    f"Total Planned / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
                                     id={"type": "summary-pill-trigger", "mode": "erection", "metric": "totals"},
                                     className="pch-pill pch-pill-towers me-2 mb-1", color="link"
                                 )),
@@ -7528,6 +7525,7 @@ def register_callbacks(
             tile_cols = []
             for r in sorted(rows, key=lambda x: str(x["project_name"])):
                 proj_name = str(r["project_name"]).strip()
+                display_code = _resolve_project_code(r)
                 # (legacy header removed)
                 # Detect if Micro Plan rows exist for this project using robust name/code matching
                 import re as _re
@@ -7680,16 +7678,8 @@ def register_callbacks(
 
                 # Build the grid tile representation used for the new layout
                 key = f"{pch}::{proj_name}"
-                # Build compact code for modal IDs (match against project_key)
-                try:
-                    import re as _re
-                    def _compact_code_text(s: str) -> str:
-                        return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
-                except Exception:
-                    def _compact_code_text(s: str) -> str:
-                        return (s or "").strip().lower().replace(" ", "")
-                raw_code = r.get("project_code") or r.get("project_key") or proj_name
-                proj_code = _compact_code_text(str(raw_code))
+                raw_code = display_code or r.get("project_code") or r.get("project_key") or proj_name
+                proj_code = _compact_project_token(str(raw_code))
                 tile_summary_children = [
                     html.Div(html.Strong(proj_name), className="mb-2"),
                     html.Div([
@@ -7819,7 +7809,7 @@ def register_callbacks(
                 }
                 tile_metadata[project_token] = {
                     "project": proj_name,
-                    "code": proj_code or proj_name,
+                    "code": display_code or proj_name,
                     "display": proj_name,
                     "mode": "erection",
                     "pch": str(pch),
@@ -7872,7 +7862,7 @@ def register_callbacks(
                                     className="pch-pill pch-pill-prod-month me-2 mb-1", color="link", n_clicks=0
                                 )),
                                 ("totals", dbc.Button(
-                                    f"Total / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
+                                    f"Total Planned / Done / Balance: {towers_planned_label} / {towers_delivered_label} / {towers_balance_label}",
                                     id={"type": "summary-pill-trigger", "mode": "erection", "metric": "totals"},
                                     className="pch-pill pch-pill-towers me-2 mb-1", color="link", n_clicks=0
                                 )),
@@ -7914,7 +7904,7 @@ def register_callbacks(
 
     _PCH_PILL_LABELS = {
         "projects": "Projects Covered",
-        "totals": "Total / Done / Balance",
+        "totals": "Total Planned / Done / Balance",
         "gangs": "Gangs",
         "productivity": "Productivity / Historical Avg",
         "loss": "Lost Units",
@@ -8111,7 +8101,7 @@ def register_callbacks(
         def _summary_card(title: str, summary_payload: dict[str, str], include_tse: bool = False) -> dbc.Col:
             rows = [
                 ("Projects Covered", summary_payload.get("projects", "-")),
-                ("Total / Done / Balance", summary_payload.get("totals", "-")),
+                ("Total Planned / Done / Balance", summary_payload.get("totals", "-")),
                 ("Gangs", summary_payload.get("gangs", "-")),
                 ("Productivity / Historical Avg", summary_payload.get("productivity", "-")),
                 ("Lost Units", summary_payload.get("lost_units", "-")),
@@ -8496,6 +8486,129 @@ def _stringing_plan_months_for_project(plan_map: Mapping[str, set[pd.Timestamp]]
         months.update(plan_map.get(key, ()))
     return sorted(months)
 
+_STRINGING_PROJECT_CODE_PATTERN = re.compile(r"^(TA|TB)\s*-?\s*(\d{2,4})$", re.IGNORECASE)
+
+
+def _format_stringing_project_label(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = _STRINGING_PROJECT_CODE_PATTERN.match(text)
+    if match:
+        return f"{match.group(1).upper()} {match.group(2)}"
+    return text
+
+
+def _stringing_plan_span_series(frame: pd.DataFrame) -> pd.Series | None:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+
+    candidates = {
+        "span_m",
+        "span m",
+        "span",
+        "span length",
+        "length_m",
+        "length m",
+        "length",
+        "span(km)",
+        "span_km",
+        "span(m)",
+    }
+    series_acc: pd.Series | None = None
+    for column in frame.columns:
+        norm = _normalize_col_key(column)
+        if norm not in candidates:
+            continue
+        numeric = pd.to_numeric(frame[column], errors="coerce")
+        km_values = numeric if "km" in norm.replace(" ", "") else numeric / 1000.0
+        if series_acc is None:
+            series_acc = km_values
+        else:
+            series_acc = series_acc.fillna(km_values)
+    if series_acc is not None:
+        return series_acc
+    if "tower_weight" in frame.columns:
+        return pd.to_numeric(frame["tower_weight"], errors="coerce") / 1000.0
+    return None
+
+
+def _stringing_plan_totals_by_project(
+    months_ts: Sequence[pd.Timestamp],
+    *,
+    current_month: pd.Timestamp,
+    date_columns: Sequence[str] = _STRINGING_FS_DATE_COLUMNS,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    try:
+        plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
+    except Exception:
+        plan_snapshot = None
+
+    empty_df = pd.DataFrame(columns=["planned_km", "project_name_plan"])
+    empty_lookup: dict[str, float] = {}
+    if not isinstance(plan_snapshot, pd.DataFrame) or plan_snapshot.empty:
+        return empty_df, empty_lookup
+
+    plan = plan_snapshot.copy()
+    plan["__plan_month"] = _stringing_plan_month_series(plan, date_columns)
+    plan = plan.dropna(subset=["__plan_month"])
+    if plan.empty:
+        return empty_df, empty_lookup
+
+    span_series = _stringing_plan_span_series(plan)
+    if span_series is None:
+        return empty_df, empty_lookup
+
+    plan["__plan_km"] = pd.to_numeric(span_series, errors="coerce").fillna(0.0)
+    plan = plan[plan["__plan_km"] > 0].copy()
+    if plan.empty:
+        return empty_df, empty_lookup
+
+    if months_ts:
+        month_set = {pd.Timestamp(ts) for ts in months_ts if pd.notna(ts)}
+        if month_set:
+            plan = plan[plan["__plan_month"].isin(month_set)].copy()
+    if plan.empty:
+        return empty_df, empty_lookup
+
+    plan["__project_name"] = plan.get("project_name", pd.Series([""] * len(plan), index=plan.index)).astype(str)
+    plan["__project_key"] = plan.get("project_key", pd.Series([""] * len(plan), index=plan.index)).astype(str)
+    plan["__project_display"] = plan["__project_name"].where(
+        plan["__project_name"].str.strip() != "", plan["__project_key"]
+    )
+    plan["__project_display"] = plan["__project_display"].map(_format_stringing_project_label)
+    plan["__project_norm"] = plan["__project_key"].map(_compact_project_key)
+    missing_norm = plan["__project_norm"] == ""
+    if missing_norm.any():
+        plan.loc[missing_norm, "__project_norm"] = plan.loc[missing_norm, "__project_display"].map(_compact_project_key)
+    plan["__project_norm"] = plan["__project_norm"].fillna("")
+    plan = plan[plan["__project_norm"] != ""].copy()
+    if plan.empty:
+        return empty_df, empty_lookup
+
+    totals = (
+        plan.groupby("__project_norm")
+        .agg(
+            planned_km=("__plan_km", "sum"),
+            project_name_plan=("__project_display", "last"),
+        )
+        .sort_index()
+    )
+    totals.index.name = "project_key_norm"
+    if not totals.empty:
+        name_series = totals["project_name_plan"].astype(str)
+        totals["project_name_plan"] = name_series.where(
+            name_series.str.strip() != "", totals.index.astype(str)
+        )
+
+    current_lookup = {}
+    if current_month is not None and not pd.isna(current_month):
+        current = plan[plan["__plan_month"] == current_month]
+        if not current.empty:
+            current_lookup = current.groupby("__project_norm")["__plan_km"].sum().to_dict()
+
+    return totals, current_lookup
+
 
 def _stringing_scope_has_plan(
     scope_meta: dict[str, Any] | None,
@@ -8547,39 +8660,7 @@ def _stringing_planned_total_for_dates(
         if plan.empty:
             return 0.0
 
-        def _detect_span_km(frame: pd.DataFrame) -> pd.Series | None:
-            candidates = {
-                "span_m",
-                "span m",
-                "span",
-                "span length",
-                "length_m",
-                "length m",
-                "length",
-                "span(km)",
-                "span_km",
-                "span(m)",
-            }
-            series_acc: pd.Series | None = None
-            for column in frame.columns:
-                norm = _normalize_col_key(column)
-                if norm not in candidates:
-                    continue
-                numeric = pd.to_numeric(frame[column], errors="coerce")
-                if "km" in norm.replace(" ", ""):
-                    km_values = numeric
-                else:
-                    km_values = numeric / 1000.0
-                if series_acc is None:
-                    series_acc = km_values
-                else:
-                    series_acc = series_acc.fillna(km_values)
-            if series_acc is not None:
-                return series_acc
-            if "tower_weight" in frame.columns:
-                return pd.to_numeric(frame["tower_weight"], errors="coerce") / 1000.0
-            return None
-        span_series = _detect_span_km(plan)
+        span_series = _stringing_plan_span_series(plan)
         if span_series is None:
             return 0.0
         plan["plan_km"] = span_series.fillna(0.0)

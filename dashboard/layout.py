@@ -362,15 +362,15 @@ def build_mode_summary_cards() -> dbc.Row:
 
     erection_rows = [
         ("Projects Covered", "erection-card-projects", "projects"),
-        ("Total / Done / Balance", "erection-card-totals", "totals"),
+        ("Total Planned / Done / Balance", "erection-card-totals", "totals"),
         ("Gangs", "erection-card-gangs", "gangs"),
         ("Productivity / Historical Avg", "erection-card-productivity", "productivity"),
         ("Lost Units", "erection-card-loss", "loss"),
     ]
     stringing_rows = [
         ("Projects Covered", "stringing-card-projects", "projects"),
-        ("Total / Done / Balance", "stringing-card-totals", "totals"),
-        ("P/O Completion", "stringing-card-po-completion", "po_completion"),
+        ("Total Planned / Done / Balance", "stringing-card-totals", "totals"),
+        ("P/O Total Planned / Done / Balance", "stringing-card-po-completion", "po_completion"),
         ("Gangs", "stringing-card-gangs", "gangs"),
         ("Productivity / Historical Avg", "stringing-card-productivity", "productivity"),
         ("Lost Units", "stringing-card-loss", "loss"),
