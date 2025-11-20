@@ -2015,6 +2015,43 @@ def register_callbacks(
         return frame, completion_keys, issues, index_rows
 
     # --- shared: responsibilities figure + KPIs for a single project selection ---
+    def _stringing_length_km_series(frame: pd.DataFrame) -> pd.Series:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.Series([], dtype=float)
+
+        length_km_cols = [
+            "length_km",
+            "string_km",
+            "planned_km",
+            "po_km",
+            "daily_km",
+        ]
+        meter_cols = [
+            "length_m",
+            "length (m)",
+            "span_m",
+            "span (m)",
+            "span length",
+            "length",
+            "p/o",
+        ]
+
+        for col in length_km_cols:
+            if col in frame.columns:
+                series = pd.to_numeric(frame[col], errors="coerce")
+                return series.fillna(0.0)
+
+        for col in meter_cols:
+            if col in frame.columns:
+                series = pd.to_numeric(frame[col], errors="coerce")
+                return (series / 1000.0).fillna(0.0)
+
+        if "tower_weight" in frame.columns:
+            series = pd.to_numeric(frame["tower_weight"], errors="coerce")
+            return (series / 1000.0).fillna(0.0)
+
+        return pd.Series(0.0, index=frame.index, dtype=float)
+
     def _build_monthly_plan_for_project(
         project_value: str | Sequence[str] | None,
         entity_value: str | None,
@@ -2062,6 +2099,8 @@ def register_callbacks(
         entity = (entity_value or "Supervisor").strip()
         metric = (metric_value or "tower_weight").strip()
         metric = metric if metric in {"revenue", "tower_weight"} else "tower_weight"
+        stringing_length_label = plan_key == "stringing" and metric == "tower_weight"
+        stringing_length_label = plan_key == "stringing" and metric == "tower_weight"
 
         df_atomic, completed_keys, load_error_msg, workbook = _fetch_monthly_plan(
             plan_key,
@@ -2161,6 +2200,9 @@ def register_callbacks(
         if df_entity.empty:
             return _empty_response("No plan entries found for the selected project.")
 
+        if stringing_length_label:
+            df_entity["__stringing_length_km"] = _stringing_length_km_series(df_entity)
+
         # Entity filter (Supervisor / Section Incharge / Gang)
         ent_map = {
             "supervisor": "supervisor",
@@ -2186,6 +2228,11 @@ def register_callbacks(
         df_entity["revenue_planned"] = pd.to_numeric(df_entity.get("revenue_planned", 0.0), errors="coerce").fillna(0.0)
         df_entity["revenue_realised"] = pd.to_numeric(df_entity.get("revenue_realised", 0.0), errors="coerce").fillna(0.0)
         df_entity["tower_weight"] = pd.to_numeric(df_entity.get("tower_weight", 0.0), errors="coerce").fillna(0.0)
+        if stringing_length_label:
+            length_series = pd.to_numeric(
+                df_entity.get("__stringing_length_km"), errors="coerce"
+            ).fillna(0.0)
+            df_entity["tower_weight"] = length_series
 
         df_entity["delivered_revenue"] = np.where(
             df_entity["revenue_realised"] > 0,
@@ -2241,6 +2288,9 @@ def register_callbacks(
             aggregated["delivered_tower_weight"],
         )
 
+        axis_override = "Length (KM)" if stringing_length_label else None
+        unit_override = "KM" if stringing_length_label else None
+
         # Ensure chart builder has the target column by metric name
         if "revenue_planned" in aggregated.columns and "revenue" not in aggregated.columns:
             aggregated["revenue"] = aggregated["revenue_planned"]
@@ -2252,6 +2302,8 @@ def register_callbacks(
             aggregated,
             entity_label=entity,
             metric=metric,
+            axis_title_override=axis_override,
+            unit_label_override=unit_override,
             title=None,
             top_n=20,
         )
@@ -2268,7 +2320,9 @@ def register_callbacks(
         def fmt_num(value: float) -> str:
             if metric == "revenue":
                 return f"\u20b9{value:,.0f}"
-            return f"{value:,.0f} MT"
+            unit = "KM" if stringing_length_label else "MT"
+            precision = 1 if stringing_length_label else 0
+            return f"{value:,.{precision}f} {unit}"
 
         kpi_target_txt = fmt_num(total_target)
         kpi_deliv_txt = fmt_num(total_delivered)
@@ -3645,7 +3699,7 @@ def register_callbacks(
         entity_value = (entity_value or "Supervisor").strip()
         metric_value = (metric_value or "tower_weight").strip()
         metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
-        use_stringing_length = plan_key == "stringing" and metric_value == "tower_weight"
+        stringing_length_label = plan_key == "stringing" and metric_value == "tower_weight"
 
         df_atomic, completed_keys, load_error_msg, workbook = _fetch_monthly_plan(
             plan_key,
@@ -3771,6 +3825,9 @@ def register_callbacks(
         if df_project.empty:
             return _empty_response(f"Selected project not found in {plan_noun} data.")
 
+        if stringing_length_label:
+            df_project["__stringing_length_km"] = _stringing_length_km_series(df_project)
+
         if not active_months:
             return _empty_response(f"Select a month to view the {plan_noun.lower()}.")
 
@@ -3798,13 +3855,32 @@ def register_callbacks(
             df_entity["revenue_realised"],
             np.where(df_entity["is_completed"], df_entity["revenue_planned"], 0.0),
         )
-        df_entity["delivered_tower_weight"] = np.where(
-            df_entity["is_completed"], df_entity["tower_weight"], 0.0
-        )
-        if use_stringing_length:
-            df_entity["length_km"] = df_entity["tower_weight"] / 1000.0
-            df_entity["delivered_length_km"] = df_entity["delivered_tower_weight"] / 1000.0
-
+        if stringing_length_label:
+            length_series = pd.to_numeric(
+                df_entity.get("__stringing_length_km"), errors="coerce"
+            ).fillna(0.0)
+            df_entity["tower_weight"] = length_series
+            df_entity["delivered_tower_weight"] = np.where(
+                df_entity["is_completed"], length_series, 0.0
+            )
+        else:
+            df_entity["delivered_tower_weight"] = np.where(
+                df_entity["is_completed"], df_entity["tower_weight"], 0.0
+            )
+        if stringing_length_label:
+            df_entity["tower_weight"] = (
+                pd.to_numeric(df_entity["tower_weight"], errors="coerce").fillna(0.0) / 1000.0
+            )
+            df_entity["delivered_tower_weight"] = (
+                pd.to_numeric(df_entity["delivered_tower_weight"], errors="coerce").fillna(0.0) / 1000.0
+            )
+        if stringing_length_label:
+            df_entity["tower_weight"] = (
+                pd.to_numeric(df_entity["tower_weight"], errors="coerce").fillna(0.0) / 1000.0
+            )
+            df_entity["delivered_tower_weight"] = (
+                pd.to_numeric(df_entity["delivered_tower_weight"], errors="coerce").fillna(0.0) / 1000.0
+            )
         df_entity = df_entity[df_entity["entity_name"].astype(bool)].copy()
         if df_entity.empty:
             return _empty_response("No plan entries found for the selected filters.")
@@ -3821,21 +3897,8 @@ def register_callbacks(
             .sum()
         )
         aggregated = aggregated.rename(columns={"revenue_planned": "revenue"})
-        if use_stringing_length:
-            aggregated["length_km"] = aggregated["tower_weight"] / 1000.0
-            aggregated["delivered_length_km"] = aggregated["delivered_tower_weight"] / 1000.0
-
-        if metric_value == "revenue":
-            target_metric_col = "revenue_planned"
-            delivered_metric_col = "delivered_revenue"
-        elif use_stringing_length:
-            target_metric_col = "length_km"
-            delivered_metric_col = "delivered_length_km"
-        else:
-            target_metric_col = "tower_weight"
-            delivered_metric_col = "delivered_tower_weight"
-
-        chart_metric = "length_km" if use_stringing_length else metric_value
+        target_metric_col = "revenue_planned" if metric_value == "revenue" else "tower_weight"
+        delivered_metric_col = "delivered_revenue" if metric_value == "revenue" else "delivered_tower_weight"
 
         def _collect_locations(values: pd.Series) -> list[str]:
             seen: set[str] = set()
@@ -3893,17 +3956,21 @@ def register_callbacks(
         if aggregated.empty:
             return _empty_response("No plan entries found for the selected filters.")
 
-        if metric_value == "revenue":
-            aggregated["delivered_value"] = aggregated["delivered_revenue"]
-        elif use_stringing_length:
-            aggregated["delivered_value"] = aggregated["delivered_length_km"]
-        else:
-            aggregated["delivered_value"] = aggregated["delivered_tower_weight"]
+        aggregated["delivered_value"] = np.where(
+            metric_value == "revenue",
+            aggregated["delivered_revenue"],
+            aggregated["delivered_tower_weight"],
+        )
+
+        axis_override = "Length (KM)" if stringing_length_label else None
+        unit_override = "KM" if stringing_length_label else None
 
         fig = build_responsibilities_chart(
             aggregated,
             entity_label=entity_value,
-            metric=chart_metric,
+            metric=metric_value,
+            axis_title_override=axis_override,
+            unit_label_override=unit_override,
             title=None,
             top_n=20,
         )
@@ -3912,21 +3979,17 @@ def register_callbacks(
             total_target = float(aggregated["revenue"].sum())
             total_delivered = float(aggregated["delivered_revenue"].sum())
         else:
-            if use_stringing_length:
-                total_target = float(aggregated["length_km"].sum())
-                total_delivered = float(aggregated["delivered_length_km"].sum())
-            else:
-                total_target = float(aggregated["tower_weight"].sum())
-                total_delivered = float(aggregated["delivered_tower_weight"].sum())
+            total_target = float(aggregated["tower_weight"].sum())
+            total_delivered = float(aggregated["delivered_tower_weight"].sum())
 
         achievement = 0.0 if total_target == 0 else (total_delivered / total_target) * 100.0
 
         def fmt_num(value: float) -> str:
             if metric_value == "revenue":
                 return f"\u20b9{value:,.0f}"
-            if use_stringing_length:
-                return f"{value:,.2f} KM"
-            return f"{value:,.0f} MT"
+            unit = "KM" if stringing_length_label else "MT"
+            precision = 1 if stringing_length_label else 0
+            return f"{value:,.{precision}f} {unit}"
 
         kpi_target_txt = fmt_num(total_target)
         kpi_deliv_txt = fmt_num(total_delivered)
