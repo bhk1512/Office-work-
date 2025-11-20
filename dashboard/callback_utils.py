@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from threading import RLock
 from typing import Callable, Iterable, Sequence
@@ -382,7 +383,17 @@ class DataSelector:
             _append_in_clause(column, converted)
 
         _append_column_clause("month", months, transform=lambda ts: self._timestamp_to_py(ts))
-        _append_column_clause("project_name", projects)
+        project_values = [p for p in projects if p and str(p).strip()]
+        _append_column_clause("project_name", project_values)
+        _append_column_clause("project", project_values)
+        normalized_tokens = [
+            token
+            for token in {self._normalize_project_token(p) for p in project_values}
+            if token
+        ]
+        if normalized_tokens:
+            project_norm_expr = "regexp_replace(lower(coalesce(project_name, project, '')), '[^a-z0-9]', '')"
+            _append_in_clause(project_norm_expr, normalized_tokens)
         _append_column_clause("gang_name", gangs)
 
         leftover_kv: set[str] = set()
@@ -456,6 +467,12 @@ class DataSelector:
                 mask = result["method"].astype(str).str.lower().isin(method_filter)
                 result = result.loc[mask]
         return result
+
+    def _normalize_project_token(self, value: object) -> str:
+        text = "" if value is None else str(value).strip().lower()
+        if not text:
+            return ""
+        return re.sub(r"[^a-z0-9]", "", text)
 
     def _normalize_dataframe(self, raw_df: pd.DataFrame, mode: str) -> pd.DataFrame:
         working = raw_df
