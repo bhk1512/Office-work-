@@ -3645,6 +3645,7 @@ def register_callbacks(
         entity_value = (entity_value or "Supervisor").strip()
         metric_value = (metric_value or "tower_weight").strip()
         metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
+        use_stringing_length = plan_key == "stringing" and metric_value == "tower_weight"
 
         df_atomic, completed_keys, load_error_msg, workbook = _fetch_monthly_plan(
             plan_key,
@@ -3800,6 +3801,9 @@ def register_callbacks(
         df_entity["delivered_tower_weight"] = np.where(
             df_entity["is_completed"], df_entity["tower_weight"], 0.0
         )
+        if use_stringing_length:
+            df_entity["length_km"] = df_entity["tower_weight"] / 1000.0
+            df_entity["delivered_length_km"] = df_entity["delivered_tower_weight"] / 1000.0
 
         df_entity = df_entity[df_entity["entity_name"].astype(bool)].copy()
         if df_entity.empty:
@@ -3817,9 +3821,21 @@ def register_callbacks(
             .sum()
         )
         aggregated = aggregated.rename(columns={"revenue_planned": "revenue"})
+        if use_stringing_length:
+            aggregated["length_km"] = aggregated["tower_weight"] / 1000.0
+            aggregated["delivered_length_km"] = aggregated["delivered_tower_weight"] / 1000.0
 
-        target_metric_col = "revenue_planned" if metric_value == "revenue" else "tower_weight"
-        delivered_metric_col = "delivered_revenue" if metric_value == "revenue" else "delivered_tower_weight"
+        if metric_value == "revenue":
+            target_metric_col = "revenue_planned"
+            delivered_metric_col = "delivered_revenue"
+        elif use_stringing_length:
+            target_metric_col = "length_km"
+            delivered_metric_col = "delivered_length_km"
+        else:
+            target_metric_col = "tower_weight"
+            delivered_metric_col = "delivered_tower_weight"
+
+        chart_metric = "length_km" if use_stringing_length else metric_value
 
         def _collect_locations(values: pd.Series) -> list[str]:
             seen: set[str] = set()
@@ -3877,16 +3893,17 @@ def register_callbacks(
         if aggregated.empty:
             return _empty_response("No plan entries found for the selected filters.")
 
-        aggregated["delivered_value"] = np.where(
-            metric_value == "revenue",
-            aggregated["delivered_revenue"],
-            aggregated["delivered_tower_weight"],
-        )
+        if metric_value == "revenue":
+            aggregated["delivered_value"] = aggregated["delivered_revenue"]
+        elif use_stringing_length:
+            aggregated["delivered_value"] = aggregated["delivered_length_km"]
+        else:
+            aggregated["delivered_value"] = aggregated["delivered_tower_weight"]
 
         fig = build_responsibilities_chart(
             aggregated,
             entity_label=entity_value,
-            metric=metric_value,
+            metric=chart_metric,
             title=None,
             top_n=20,
         )
@@ -3895,14 +3912,20 @@ def register_callbacks(
             total_target = float(aggregated["revenue"].sum())
             total_delivered = float(aggregated["delivered_revenue"].sum())
         else:
-            total_target = float(aggregated["tower_weight"].sum())
-            total_delivered = float(aggregated["delivered_tower_weight"].sum())
+            if use_stringing_length:
+                total_target = float(aggregated["length_km"].sum())
+                total_delivered = float(aggregated["delivered_length_km"].sum())
+            else:
+                total_target = float(aggregated["tower_weight"].sum())
+                total_delivered = float(aggregated["delivered_tower_weight"].sum())
 
         achievement = 0.0 if total_target == 0 else (total_delivered / total_target) * 100.0
 
         def fmt_num(value: float) -> str:
             if metric_value == "revenue":
                 return f"\u20b9{value:,.0f}"
+            if use_stringing_length:
+                return f"{value:,.2f} KM"
             return f"{value:,.0f} MT"
 
         kpi_target_txt = fmt_num(total_target)
