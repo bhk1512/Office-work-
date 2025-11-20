@@ -409,7 +409,15 @@ def _expand_stringing_stage_to_daily(
         metric_values = pd.to_numeric(valid[metric_column], errors="coerce")
     else:
         metric_values = pd.Series(np.nan, index=valid.index)
-    metric_values = metric_values.fillna(pd.to_numeric(valid.get("length_km"), errors="coerce"))
+
+    # Prefer the requested value_column, then fall back:
+    # - to length_km when the primary metric is not already length-based
+    # - to po_km when the primary metric is not already PO-based
+    if value_column != "length_km":
+        metric_values = metric_values.fillna(pd.to_numeric(valid.get("length_km"), errors="coerce"))
+    if value_column != "po_km":
+        metric_values = metric_values.fillna(pd.to_numeric(valid.get("po_km"), errors="coerce"))
+
     valid["_metric_km"] = metric_values
     valid["daily_km"] = valid["_metric_km"].div(valid["_duration_days"].where(valid["_duration_days"] > 0, np.nan))
 
@@ -506,10 +514,10 @@ def _expand_stringing_stage_to_daily(
 
 
 def expand_stringing_to_daily(df: pd.DataFrame) -> pd.DataFrame:
-    """Expand stringing records to per-day rows using F/S start to F/S complete."""
+    """Expand stringing records to per-day rows using P/O start to F/S complete."""
     return _expand_stringing_stage_to_daily(
         df,
-        start_column="fs_starting_date",
+        start_column="po_start_date",
         end_column="fs_complete_date",
         output_end_column="fs_complete_date",
         value_column="length_km",

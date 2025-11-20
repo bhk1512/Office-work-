@@ -368,7 +368,10 @@ def build_responsibilities_chart(
     entity_label: str,                  # "Gang" | "Section Incharge" | "Supervisor"
     metric: str = "tower_weight",       # "revenue" | "tower_weight"
     title: str | None = None,
-    top_n: int = 20
+    top_n: int = 20,
+    *,
+    axis_title_override: str | None = None,
+    unit_label_override: str | None = None,
 ) -> go.Figure:
     if df.empty:
         return build_empty_responsibilities_figure("No Micro Plan data for the selected project.")
@@ -376,7 +379,8 @@ def build_responsibilities_chart(
     df = df.copy()
 
     metric = metric if metric in ("revenue", "tower_weight") else "tower_weight"
-    axis_title = "Revenue" if metric == "revenue" else "Tower Weight (MT)"
+    default_axis = "Revenue" if metric == "revenue" else "Tower Weight (MT)"
+    axis_title = axis_title_override or default_axis
 
     g = (
         df.groupby("entity_name", as_index=False)[metric]
@@ -483,8 +487,10 @@ def build_responsibilities_chart(
         target_value_label = "Target: \u20b9%{y:,.0f}"
         delivered_value_label = "Delivered: \u20b9%{y:,.0f}"
     else:
-        target_value_label = "Target: %{y:,.0f} MT"
-        delivered_value_label = "Delivered: %{y:,.0f} MT"
+        unit = unit_label_override or "MT"
+        precision = 1 if (unit_label_override or "").upper() == "KM" else 0
+        target_value_label = f"Target: %{{y:,.{precision}f}} {unit}"
+        delivered_value_label = f"Delivered: %{{y:,.{precision}f}} {unit}"
 
     target_hover_template = (
         "<b>%{x}</b><br>"
@@ -543,4 +549,3 @@ def build_responsibilities_chart(
     fig.update_yaxes(gridcolor="#e9ecef", zeroline=False, rangemode="tozero", showspikes=False)
 
     return fig
-
