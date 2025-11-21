@@ -9,6 +9,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+import urllib.parse
 import dash_bootstrap_components as dbc 
 import pandas as pd
 from io import BytesIO
@@ -84,6 +85,7 @@ _STRINGING_FS_DATE_COLUMNS = ("final_sag_complete", "fs_complete_date", "fs_comp
 _STRINGING_PO_DATE_COLUMNS = ("paying_out_complete", "po_completion_date", "po_completion")
 BENCHMARK_KM_PER_MONTH = 5.0
 _PROJECT_CODE_PATTERN = re.compile(r"(?i)\b([A-Z]{2,4})\s*[-_/ ]*(\d{2,5})\b")
+_PROJECT_MODAL_QUERY_PARAM = "projectModal"
 
 # App-wide config instance for callback logic
 config = AppConfig()
@@ -190,6 +192,25 @@ def _resolve_triggered_id() -> Any:
         return json.loads(raw)
     except Exception:
         return raw
+
+
+def _href_has_project_modal_flag(href: str | None) -> bool:
+    """Return True when the provided href contains the modal query flag."""
+    if not href:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(str(href))
+    except Exception:
+        return False
+    params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    values = params.get(_PROJECT_MODAL_QUERY_PARAM)
+    if not values:
+        return False
+    for value in values:
+        normalized = str(value).strip().lower()
+        if normalized and normalized not in {"0", "false", "none"}:
+            return True
+    return False
 
 
 def _filter_completion_rows(frame: pd.DataFrame, *, completion_column: str) -> pd.DataFrame:
@@ -299,6 +320,36 @@ def _project_filter_candidates(
         _add(flattened.lower())
 
     return candidates
+
+
+def _match_tile_meta_entry(
+    project_label: str | None,
+    tile_meta: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Locate the stored tile metadata entry that best matches *project_label*.
+
+    The helper normalizes both the requested label/code and the cached tile
+    metadata entries so we can safely resolve selections from the free-form
+    project filter back to the same payload used by tile clicks.
+    """
+
+    if not project_label or not tile_meta:
+        return None
+
+    target_tokens = set(_normalize_str_list(_project_filter_candidates(project_label, project_label), lower=True))
+    if not target_tokens:
+        return None
+
+    for meta in tile_meta.values():
+        if not isinstance(meta, Mapping):
+            continue
+        meta_label = meta.get("project") or meta.get("display")
+        meta_code = meta.get("code")
+        meta_tokens = set(_normalize_str_list(_project_filter_candidates(meta_label, meta_code), lower=True))
+        if meta_tokens & target_tokens:
+            return dict(meta)
+    return None
 
 
 def _format_decimal(value: float | int | None) -> str:
@@ -3193,6 +3244,34 @@ def register_callbacks(
         """,
         Output("project-modal-scroll-wire", "children"),
         Input("store-project-modal-click-meta", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(historyState){
+        const NO = window.dash_clientside.no_update;
+        if (!historyState || !historyState.action) return NO;
+        const ACTION = historyState.action;
+        const PARAM = "projectModal";
+        try {
+            const url = new URL(window.location.href);
+            if (ACTION === "open") {
+                if (url.searchParams.get(PARAM) === "1") return NO;
+                url.searchParams.set(PARAM, "1");
+                window.history.pushState({ projectModal: true }, "", url.toString());
+            } else if (ACTION === "close") {
+                if (!url.searchParams.has(PARAM)) return NO;
+                window.history.back();
+            }
+        } catch (err) {
+            console.warn("project-modal history update failed", err);
+        }
+        return Date.now();
+        }
+        """,
+        Output("project-modal-history-wire", "children"),
+        Input("store-project-modal-history", "data"),
         prevent_initial_call=True,
     )
 
@@ -8291,11 +8370,10 @@ def register_callbacks(
         Output("kpi-pch-modal", "is_open"),
         Input({"type": "summary-pill-trigger", "mode": ALL, "metric": ALL}, "n_clicks"),
         Input("kpi-pch-modal-close", "n_clicks"),
-        Input("f-project", "value"),
         State("kpi-pch-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _toggle_pch_modal(pill_clicks, close_clicks, project_values, is_open):
+    def _toggle_pch_modal(pill_clicks, close_clicks, is_open):
         trigger = _resolve_triggered_id()
         ctx = dash.callback_context
         triggered_entries = getattr(ctx, "triggered", None)
@@ -8308,12 +8386,6 @@ def register_callbacks(
 
         if trigger == "kpi-pch-modal-close":
             return dash.no_update, False
-        if trigger == "f-project":
-            selected_projects = _normalize_str_list(_ensure_list(project_values))
-            if not selected_projects:
-                return dash.no_update, False
-            payload = {"metric": "projects", "mode": "erection"}
-            return payload, True
         if isinstance(trigger, dict) and trigger.get("type") == "summary-pill-trigger":
             if not trigger_value:
                 raise PreventUpdate
@@ -8370,29 +8442,88 @@ def register_callbacks(
     @app.callback(
         Output("store-project-tile-focus", "data"),
         Output("project-detail-modal", "is_open"),
+        Output("store-project-modal-history", "data"),
         Input({"type": "project-tile-trigger", "project": ALL, "mode": ALL, "context": ALL}, "n_clicks"),
-        Input("project-modal-close", "n_clicks"),
+        Input("project-modal-close-top", "n_clicks"),
         Input({"type": "proj-resp-open", "key": ALL}, "n_clicks"),
+        Input("f-project", "value"),
+        Input("project-modal-location", "href"),
         State("project-detail-modal", "is_open"),
         State("store-project-tile-meta", "data"),
         prevent_initial_call=True,
     )
-    def _toggle_project_tile_modal(tile_clicks, close_clicks, _resp_open_clicks, is_open, tile_meta_data):
+    def _toggle_project_tile_modal(
+        tile_clicks,
+        close_icon_clicks,
+        _resp_open_clicks,
+        project_values,
+        location_href,
+        is_open,
+        tile_meta_data,
+    ):
         ctx = dash.callback_context
         triggered_entries = getattr(ctx, "triggered", None)
         trigger = _resolve_triggered_id()
+        wants_modal_flag = _href_has_project_modal_flag(location_href)
         LOGGER.info(
-            "project-modal-toggle trigger=%s entries=%s tile_clicks=%s close=%s open=%s",
+            "project-modal-toggle trigger=%s entries=%s tile_clicks=%s close_top=%s open=%s flag=%s",
             trigger,
             triggered_entries,
             tile_clicks,
-            close_clicks,
+            close_icon_clicks,
             is_open,
+            wants_modal_flag,
         )
-        if trigger == "project-modal-close":
-            return dash.no_update, False
+
+        history_payload = dash.no_update
+
+        def _history_action(action: str) -> dict[str, Any]:
+            return {"action": action, "ts": time.time()}
+
+        if trigger == "project-modal-close-top":
+            if not is_open:
+                raise PreventUpdate
+            return dash.no_update, False, _history_action("close")
+
+        if trigger == "project-modal-location":
+            if wants_modal_flag and not is_open:
+                return dash.no_update, True, dash.no_update
+            if not wants_modal_flag and is_open:
+                return dash.no_update, False, dash.no_update
+            raise PreventUpdate
+
         if isinstance(trigger, dict) and trigger.get("type") == "proj-resp-open":
             raise PreventUpdate
+        if trigger == "f-project":
+            normalized_projects = _normalize_str_list(_ensure_list(project_values))
+            if not normalized_projects:
+                if is_open:
+                    history_payload = _history_action("close")
+                return None, False, history_payload
+            target_label = normalized_projects[-1]
+            matched_meta = _match_tile_meta_entry(target_label, tile_meta_data if isinstance(tile_meta_data, Mapping) else None)
+            project_code = _extract_project_code(target_label)
+            payload = {
+                "project": target_label,
+                "code": project_code or target_label,
+                "display": target_label,
+                "mode": "erection",
+                "pch": None,
+                "ts": time.time(),
+            }
+            if matched_meta:
+                payload.update(
+                    {
+                        "project": matched_meta.get("project") or payload["project"],
+                        "display": matched_meta.get("display") or payload["display"],
+                        "code": matched_meta.get("code") or payload["code"],
+                        "mode": matched_meta.get("mode") or payload["mode"],
+                        "pch": matched_meta.get("pch"),
+                    }
+                )
+            if not is_open:
+                history_payload = _history_action("open")
+            return payload, True, history_payload
         if isinstance(trigger, dict) and trigger.get("type") == "project-tile-trigger":
             if trigger.get("context") == "placeholder":
                 raise PreventUpdate
@@ -8418,7 +8549,9 @@ def register_callbacks(
                 "pch": meta.get("pch"),
                 "ts": time.time(),
             }
-            return payload, True
+            if not is_open:
+                history_payload = _history_action("open")
+            return payload, True, history_payload
         raise PreventUpdate
 
     @app.callback(
@@ -8583,9 +8716,9 @@ def register_callbacks(
             label = "Monthly Plan (Stringing)" if plan_mode == "stringing" else "Monthly Plan (Erection)"
             months = _collect_plan_months(plan_mode)
             if not months:
-                return html.Div("Micro Plan not available.", className="text-muted summary-plan-empty mb-2")
-            children: list[Any] = [html.Span(f"{label} : ", className="me-2")]
+                return html.Div("Micro Plan not available.", className="summary-plan-tile summary-plan-empty text-muted")
             mode_token = "stringing" if plan_mode == "stringing" else "erection"
+            link_buttons: list[Any] = []
             for ts in months:
                 label_text = ts.strftime("%b %Y")
                 month_value = ts.strftime("%Y-%m")
@@ -8598,17 +8731,23 @@ def register_callbacks(
                     ]
                 )
                 payload = f"{payload}||__modal__"
-                children.append(
+                link_buttons.append(
                     dbc.Button(
                         label_text,
                         id={"type": "proj-resp-open", "key": payload},
                         color="link",
-                        className="p-0 me-1",
+                        className="summary-plan-link",
                     )
                 )
             return html.Div(
-                children,
-                className="summary-plan-buttons d-flex flex-wrap align-items-center gap-2 mb-2",
+                [
+                    html.Div(label, className="summary-plan-tile__title"),
+                    html.Div(
+                        link_buttons,
+                        className="summary-plan-tile__links d-flex flex-wrap gap-2",
+                    ),
+                ],
+                className="summary-plan-tile",
             )
 
         def _summary_card(
@@ -8639,18 +8778,15 @@ def register_callbacks(
                 )
                 for label, value in rows
             ]
-            children = [
-                html.Div(title, className="fw-semibold mb-3"),
-                *pills,
-            ]
+            children = [html.Div(title, className="snapshot-card__title fw-semibold mb-2"), *pills]
             if actions:
                 children.append(
-                    html.Div(actions, className="summary-card-actions d-flex flex-column gap-3 mt-3")
+                    html.Div(actions, className="summary-card-actions d-flex flex-column gap-2 mt-2")
                 )
             return dbc.Col(
                 dbc.Card(
-                    dbc.CardBody(children, className="d-flex flex-column gap-2"),
-                    className="shadow-sm h-100",
+                    dbc.CardBody(children, className="d-flex flex-column gap-1 summary-card-body"),
+                    className="shadow-sm h-100 snapshot-card",
                 ),
                 xs=12,
                 md=6,
@@ -8728,7 +8864,7 @@ def register_callbacks(
                 )
             )
 
-        summary_layout = dbc.Row(cards, className="g-3 project-modal-summary-table")
+        summary_layout = dbc.Row(cards, className="g-2 project-modal-summary-table")
         title = f"{base_title} · {title_label}" if title_label else base_title
         return summary_layout, title
 

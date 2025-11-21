@@ -946,10 +946,23 @@ def build_project_tile_modal() -> dbc.Modal:
 
     return dbc.Modal(
         [
-            dbc.ModalHeader(dbc.ModalTitle(id="project-modal-title", children="Project Deep Dive"), close_button=False),
-            dbc.ModalBody([summary_card, *sections, html.Div(id="project-modal-scroll-wire", style={"display": "none"})]),
-            dbc.ModalFooter(
-                dbc.Button("Close", id="project-modal-close", className="ms-auto")
+            dbc.ModalHeader(
+                [
+                    dbc.ModalTitle(id="project-modal-title", children="Project Deep Dive"),
+                    html.Button(
+                        type="button",
+                        className="btn-close project-modal-close-top",
+                        id="project-modal-close-top",
+                        n_clicks=0,
+                        **{"aria-label": "Close project details", "title": "Close"},
+                    ),
+                ],
+                close_button=False,
+                className="project-modal-header",
+            ),
+            dbc.ModalBody(
+                [summary_card, *sections, html.Div(id="project-modal-scroll-wire", style={"display": "none"})],
+                className="project-modal-body",
             ),
         ],
         id="project-detail-modal",
@@ -1121,8 +1134,8 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
 
     # Build small inline SVGs as IMG data URIs (Dash-safe across versions)
     cube_svg_str = '''
-<svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-     xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
   <path d="M12 2L20 6.5V17.5L12 22L4 17.5V6.5L12 2Z" stroke="white" stroke-width="1.6"/>
   <path d="M12 2V12L20 17.5" stroke="white" stroke-width="1.6"/>
   <path d="M12 12L4 17.5" stroke="white" stroke-width="1.6"/>
@@ -1130,7 +1143,7 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
 '''.strip()
     cube_img = html.Img(
         src="data:image/svg+xml;utf8," + urllib.parse.quote(cube_svg_str),
-        style={"width": "22px", "height": "22px"},
+        style={"width": "18px", "height": "18px"},
     )
 
     calendar_svg_str = '''
@@ -1148,19 +1161,16 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
 
     return html.Div(
         [
-            html.Div(  # left icon badge
-                html.Div(cube_img, className="brand-badge"),
-                className="topbar__icon"
-            ),
-            html.Div(  # right text block
+            html.Div(
                 [
+                    html.Div(cube_img, className="brand-badge"),
                     html.Div(title, className="topbar__title"),
-                    html.Div(
-                        [calendar_img, html.Span(f"Last Updated On: {last_updated_text}")],
-                        className="topbar__meta",
-                    ),
                 ],
-                className="topbar__text",
+                className="topbar__left",
+            ),
+            html.Div(
+                [calendar_img, html.Span(f"Last Updated On: {last_updated_text}")],
+                className="topbar__meta",
             ),
         ],
         className="topbar",
@@ -1178,6 +1188,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     project_modal = build_project_tile_modal()
     layout = dbc.Container(
         [
+            dcc.Location(id="project-modal-location", refresh=False),
             build_header("Productivity Dashboard", last_updated_text),
             
             controls,
@@ -1615,6 +1626,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="project-modal-selected-gang", data=None),
             dcc.Store(id="store-project-modal-performance-mode", data="erection|0"),
             dcc.Store(id="store-project-tile-meta", data={}),
+            dcc.Store(id="store-project-modal-history", data=None),
+            html.Div(id="project-modal-history-wire", style={"display": "none"}),
             html.Button(
                 id={
                     "type": "project-tile-trigger",

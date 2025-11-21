@@ -417,49 +417,63 @@ html {
 /* === Topbar (Figma-like) === */
 .topbar{
   display:flex;
-  align-items:flex-start;
-  gap:16px;
-  padding:8px 4px 20px 4px;
+  align-items:center;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:12px;
+  padding:4px 4px 10px 4px;
 }
 
-.topbar__icon{ flex:0 0 auto; }
+.topbar__left{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  flex:1 1 auto;
+  min-width:0;
+}
 
 .brand-badge{
-  width:44px; height:44px;
-  border-radius:14px;
+  width:38px; height:38px;
+  border-radius:12px;
   background: linear-gradient(180deg,#2563eb 0%, #1d4ed8 100%);
   box-shadow: var(--shadow-2);
   display:flex; align-items:center; justify-content:center;
 }
 .brand-badge__icon{ display:flex; line-height:0; }
 
-.topbar__text{ display:flex; flex-direction:column; gap:6px; }
 .topbar__title{
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji", "Segoe UI Symbol";
   font-weight: 800;
-  font-size: 34px;
+  font-size: 30px;
   letter-spacing: .2px;
   color: #1f2937; /* slate-800 */
 }
 
 .topbar__meta{
   display:flex; align-items:center;
-  gap:8px;
-  font-size: 15px;
+  gap:6px;
+  font-size: 14px;
   font-weight: 600;
   color: #64748B; /* slate-500/600 */
   background: #f1f5f9;   /* subtle chip bg */
   border: 1px solid #E6E9F0;
-  padding: 6px 10px;
+  padding: 4px 12px;
   width: fit-content;
   border-radius: 999px;
   box-shadow: var(--shadow-1);
+  margin-left:auto;
+  flex-shrink:0;
 }
 
 /* small tweaks for tighter top spacing on narrow screens */
 @media (max-width: 640px){
-  .topbar__title{ font-size: 28px; }
-  .brand-badge{ width:40px; height:40px; border-radius:12px; }
+  .topbar{ gap:10px; }
+  .topbar__title{ font-size: 24px; }
+  .brand-badge{ width:34px; height:34px; border-radius:11px; }
+  .topbar__meta{
+    width:100%;
+    justify-content:flex-start;
+  }
 }
 
 
@@ -896,4 +910,141 @@ html {
   margin-top: 4px;
   margin-left: 0;             /* center under value */
   flex: 0 0 auto !important;  /* override earlier full-width rule */
+}
+
+#project-detail-modal .modal-dialog{
+  margin: 1.15rem auto;
+}
+
+#project-detail-modal .modal-content {
+  border-radius: 20px;
+  box-shadow: var(--shadow-2);
+}
+
+/* --- Project detail modal tweaks --- */
+.project-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px 8px;
+  border-bottom: 1px solid var(--border, #e6e9f0);
+}
+
+#project-detail-modal .modal-title{
+  font-size: 1.35rem;
+  font-weight: 800;
+}
+
+.project-modal-close-top {
+  margin-left: auto;
+}
+
+.project-modal-body{
+  padding: 10px 16px 14px;
+}
+
+.project-modal-summary-table{
+  margin-bottom: 0.75rem;
+  --bs-gutter-x: 0.85rem;
+  --bs-gutter-y: 0.85rem;
+}
+
+.project-modal-body .mb-4{
+  margin-bottom: 0.85rem !important;
+}
+
+.project-modal-body .snapshot-card .card-body{
+  padding: 10px 14px;
+}
+
+.project-modal-body .summary-card-body{
+  gap: 6px;
+}
+
+.project-modal-body .snapshot-card__title{
+  font-size: 1rem;
+}
+
+.project-modal-body .summary-pill{
+  padding: 7px 14px;
+  gap: 8px;
+  margin: 0;
+}
+
+.project-modal-body .summary-pill + .summary-pill{
+  margin-top: 4px;
+}
+
+.project-modal-body .section-title{
+  margin-bottom: 4px;
+}
+
+.project-modal-body .section-sub{
+  margin-bottom: 6px;
+}
+
+.project-modal-body .filter-field{
+  margin-bottom: 0.75rem;
+}
+
+.project-modal-body .summary-card-actions{
+  gap: 0.75rem !important;
+}
+
+.project-modal-body .summary-card-actions .summary-plan-tile{
+  margin-bottom: 0;
+}
+
+.project-modal-body .summary-card-actions .d-flex{
+  width: 100%;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.project-modal-body .summary-card-actions .modal-section-btn{
+  flex: 1 1 calc(50% - 8px);
+  min-width: 0;
+  padding: 0.6rem 0.95rem;
+  font-size: 0.95rem;
+}
+
+.project-modal-body .summary-plan-tile{
+  width: 100%;
+  border: 1px solid var(--border, #e6e9f0);
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+
+.summary-plan-tile__title{
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: #0f172a;
+}
+
+.summary-plan-tile__links{
+  font-size: 0.9rem;
+}
+
+.summary-plan-link{
+  padding: 0;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.summary-plan-link + .summary-plan-link{
+  margin-left: 6px;
+}
+
+.summary-plan-link:hover{
+  text-decoration: underline;
+}
+
+.summary-plan-empty{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10px;
+  min-height: 46px;
 }
