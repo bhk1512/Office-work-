@@ -777,7 +777,7 @@ def build_project_tile_modal() -> dbc.Modal:
                 "project-modal-erections-range",
                 "project-modal-erections-search",
                 "Erections Completed",
-                # "Completion date (defaults to yesterday)",
+                "Completion date (defaults to yesterday)",
             ),
             _completed_table(
                 "project-modal-erections-table",
