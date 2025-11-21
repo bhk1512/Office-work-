@@ -122,7 +122,6 @@ def _build_trace_contents(
                             ],
                             data=[],
                             page_size=10,
-                            virtualization=True,
                             fixed_rows={"headers": True},
                             style_table={"overflowX": "auto", "maxHeight": "380px"},
                             style_cell={
@@ -149,7 +148,6 @@ def _build_trace_contents(
                             ],
                             data=[],
                             page_size=10,
-                            virtualization=True,
                             fixed_rows={"headers": True},
                             style_table={"overflowX": "auto", "maxHeight": "380px"},
                             style_cell={
@@ -630,7 +628,6 @@ def build_erections_card() -> dbc.Card:
         page_size=15,
         sort_action="native",
         filter_action="native",
-        virtualization=True,
         fixed_rows={"headers": True},
         style_table={"overflowX": "auto", "maxHeight": "500px"},
         style_cell={
@@ -760,7 +757,8 @@ def build_project_tile_modal() -> dbc.Modal:
             page_size=15,
             sort_action="native",
             filter_action="native",
-            virtualization=True,
+            # Keep virtualization disabled because these cards start hidden and
+            # Dash fails to compute row heights when toggled from display:none.
             fixed_rows={"headers": True},
             style_table={"overflowX": "auto", "maxHeight": "480px"},
             style_cell={
@@ -883,7 +881,13 @@ def build_project_tile_modal() -> dbc.Modal:
                                             id="project-modal-topbot-metric",
                                             options=[
                                                 {"label": "Productivity", "value": "prod"},
-                                                {"label": "Erection", "value": "erection"},
+                                                {
+                                                    "label": html.Span(
+                                                        "Erection",
+                                                        id="project-modal-topbot-mode-label",
+                                                    ),
+                                                    "value": "erection",
+                                                },
                                             ],
                                             value="prod",
                                             inline=True,

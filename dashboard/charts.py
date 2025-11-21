@@ -84,8 +84,9 @@ def create_top_bottom_gangs_charts(
         hoverline = "Avg: %{y:.2f} MT/day"
 
     per_gang = per_gang.sort_values("daily_prod_mt", ascending=False)
-    top5 = per_gang.head(5)
-    bottom5 = per_gang.tail(5)
+    # Copy slices so later assignments (hover metadata) don't operate on views.
+    top5 = per_gang.head(5).copy()
+    bottom5 = per_gang.tail(5).copy()
 
 
     # ---------- NEW: add meta = project at last activity + last date ----------

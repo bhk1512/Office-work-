@@ -5400,6 +5400,46 @@ def register_callbacks(
         return idle_data, daily_data
 
     @app.callback(
+        Output("project-modal-topbot-mode-label", "children"),
+        Output("project-modal-tbl-idle-intervals", "columns"),
+        Output("project-modal-tbl-daily-prod", "columns"),
+        Input("store-project-modal-performance-mode", "data"),
+    )
+    def _sync_project_modal_trace_ui(performance_mode):
+        eff_mode = _modal_mode_from_store(performance_mode, "erection")
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        is_stringing = eff_mode == "stringing"
+
+        idle_columns = [
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Interval Start", "id": "interval_start"},
+            {"name": "Interval End", "id": "interval_end"},
+            {"name": "Raw Gap (days)", "id": "raw_gap_days"},
+            {"name": "Idle Counted (days)", "id": "idle_days_capped"},
+            {
+                "name": "Baseline (KM/Month)" if is_stringing else "Baseline (MT/day)",
+                "id": "baseline",
+            },
+            {
+                "name": "Cumulative Loss (KM)" if is_stringing else "Cumulative Loss (MT)",
+                "id": "cumulative_loss",
+            },
+        ]
+        daily_columns = [
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Project", "id": "project_name"},
+            {"name": "Date", "id": "date"},
+            {
+                "name": "KM/Month" if is_stringing else "MT/day",
+                "id": "daily_prod_mt",
+            },
+        ]
+
+        label = "Stringing" if is_stringing else "Erection"
+        return label, idle_columns, daily_columns
+
+    @app.callback(
         Output("project-modal-avp-list", "children"),
         Output("project-modal-actual-vs-bench", "figure"),
         Output("project-modal-top5", "figure"),
