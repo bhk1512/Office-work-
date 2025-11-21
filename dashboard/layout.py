@@ -561,10 +561,10 @@ def build_erections_card() -> dbc.Card:
                 html.Div(
                     [
                         html.Div("Erections Completed", className="section-title mb-2", id="lbl-erections-title"),
-                        html.Div(
-                            "Completion date (defaults to yesterday)",
-                            className="fw-semibold mb-1",
-                        ),
+                        # html.Div(
+                        #     "Completion date (defaults to yesterday)",
+                        #     className="fw-semibold mb-1",
+                        # ),
                         dcc.DatePickerRange(
                             id="erections-completion-range",
                             min_date_allowed=datetime(2021, 1, 1),
@@ -777,7 +777,7 @@ def build_project_tile_modal() -> dbc.Modal:
                 "project-modal-erections-range",
                 "project-modal-erections-search",
                 "Erections Completed",
-                "Completion date (defaults to yesterday)",
+                # "Completion date (defaults to yesterday)",
             ),
             _completed_table(
                 "project-modal-erections-table",
