@@ -938,40 +938,6 @@ def build_project_tile_modal() -> dbc.Modal:
 
     performance_section = html.Div([performance_cards, trace_block])
 
-    button_row = html.Div(
-        [
-            dbc.Button(
-                "Show Completed Erections",
-                id="project-modal-btn-erections",
-                color="primary",
-                size="lg",
-                className="modal-section-btn",
-            ),
-            dbc.Button(
-                "Show Completed Stringing",
-                id="project-modal-btn-stringing",
-                color="primary",
-                size="lg",
-                className="modal-section-btn",
-            ),
-            dbc.Button(
-                "Show Gang Performance (Erection)",
-                id="project-modal-btn-performance-erection",
-                color="primary",
-                size="lg",
-                className="modal-section-btn",
-            ),
-            dbc.Button(
-                "Show Gang Performance (Stringing)",
-                id="project-modal-btn-performance-stringing",
-                color="primary",
-                size="lg",
-                className="modal-section-btn",
-            ),
-        ],
-        className="modal-section-button-row",
-    )
-
     sections = [
         dbc.Collapse(erections_section, id="project-modal-section-erections", is_open=False),
         dbc.Collapse(stringing_section, id="project-modal-section-stringing", is_open=False),
@@ -981,7 +947,7 @@ def build_project_tile_modal() -> dbc.Modal:
     return dbc.Modal(
         [
             dbc.ModalHeader(dbc.ModalTitle(id="project-modal-title", children="Project Deep Dive"), close_button=False),
-            dbc.ModalBody([summary_card, button_row, *sections, html.Div(id="project-modal-scroll-wire", style={"display": "none"})]),
+            dbc.ModalBody([summary_card, *sections, html.Div(id="project-modal-scroll-wire", style={"display": "none"})]),
             dbc.ModalFooter(
                 dbc.Button("Close", id="project-modal-close", className="ms-auto")
             ),

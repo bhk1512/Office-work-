@@ -8491,15 +8491,135 @@ def register_callbacks(
             _project_summary_for_mode("stringing", is_stringing=True) if config.enable_stringing else None
         )
 
+        import re as _re
+
+        display_label = project_display or project_name or lookup_label
+
+        def _compact_project_value(value: Any) -> str:
+            text = "" if value is None else str(value).strip().lower()
+            if not text:
+                return ""
+            return _re.sub(r"[^a-z0-9]", "", text)
+
+        match_normals: set[str] = set()
+        match_compacts: set[str] = set()
+
+        def _register_match_value(value: Any) -> None:
+            text = "" if value is None else str(value).strip()
+            if not text:
+                return
+            lowered = text.lower()
+            match_normals.add(lowered)
+            compact = _re.sub(r"[^a-z0-9]", "", lowered)
+            if compact:
+                match_compacts.add(compact)
+
+        for candidate in project_list:
+            _register_match_value(candidate)
+        for candidate in (project_code, project_display, project_name, lookup_label):
+            _register_match_value(candidate)
+
+        project_code_token = _compact_project_value(project_code or display_label)
+
+        def _collect_plan_months(plan_mode: str) -> list[pd.Timestamp]:
+            try:
+                frame, _, _, _ = _fetch_monthly_plan(plan_mode)
+            except Exception:
+                LOGGER.exception("Unable to load %s monthly plan for modal summary", plan_mode)
+                return []
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return []
+            work = frame.copy()
+            if "completion_month" in work.columns:
+                work["completion_month"] = pd.to_datetime(
+                    work["completion_month"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+            elif "plan_month" in work.columns:
+                work["completion_month"] = pd.to_datetime(
+                    work["plan_month"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+            elif "completion_date" in work.columns:
+                work["completion_month"] = pd.to_datetime(
+                    work["completion_date"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+            else:
+                work["completion_month"] = pd.NaT
+            if "completion_month" not in work.columns:
+                return []
+            match_columns = [
+                column
+                for column in (
+                    "project_name",
+                    "project",
+                    "project_key",
+                    "project_name_display",
+                    "Project Name",
+                    "Project Code",
+                )
+                if column in work.columns
+            ]
+            if not match_columns or (not match_normals and not match_compacts):
+                return []
+            mask = pd.Series(False, index=work.index)
+            for column in match_columns:
+                series = work[column].astype(str).str.strip().str.lower()
+                col_mask = pd.Series(False, index=series.index)
+                if match_normals:
+                    col_mask |= series.isin(match_normals)
+                if match_compacts:
+                    col_mask |= series.str.replace(r"[^a-z0-9]", "", regex=True).isin(match_compacts)
+                mask |= col_mask
+            if not mask.any():
+                return []
+            subset = work.loc[mask, "completion_month"].dropna()
+            if subset.empty:
+                return []
+            months = sorted({pd.Timestamp(value) for value in subset})
+            if not months:
+                return []
+            return months[-2:]
+
+        def _monthly_plan_block(plan_mode: str) -> html.Div | None:
+            label = "Monthly Plan (Stringing)" if plan_mode == "stringing" else "Monthly Plan (Erection)"
+            months = _collect_plan_months(plan_mode)
+            if not months:
+                return html.Div("Micro Plan not available.", className="text-muted summary-plan-empty mb-2")
+            children: list[Any] = [html.Span(f"{label} : ", className="me-2")]
+            mode_token = "stringing" if plan_mode == "stringing" else "erection"
+            for ts in months:
+                label_text = ts.strftime("%b %Y")
+                month_value = ts.strftime("%Y-%m")
+                payload = "||".join(
+                    [
+                        mode_token,
+                        project_code_token or "",
+                        month_value or "",
+                        display_label or project_name or "",
+                    ]
+                )
+                payload = f"{payload}||__modal__"
+                children.append(
+                    dbc.Button(
+                        label_text,
+                        id={"type": "proj-resp-open", "key": payload},
+                        color="link",
+                        className="p-0 me-1",
+                    )
+                )
+            return html.Div(
+                children,
+                className="summary-plan-buttons d-flex flex-wrap align-items-center gap-2 mb-2",
+            )
+
         def _summary_card(
             title: str,
             summary_payload: dict[str, str],
             *,
             include_tse: bool = False,
             include_po: bool = False,
+            actions: list[Any] | None = None,
         ) -> dbc.Col:
             rows = [
-                ("Projects Covered", summary_payload.get("projects", "-")),
                 ("F/S Total Planned / Done / Balance", summary_payload.get("totals", "-")),
                 ("Gangs", summary_payload.get("gangs", "-")),
                 ("Productivity / Historical Avg", summary_payload.get("productivity", "-")),
@@ -8519,20 +8639,83 @@ def register_callbacks(
                 )
                 for label, value in rows
             ]
+            children = [
+                html.Div(title, className="fw-semibold mb-3"),
+                *pills,
+            ]
+            if actions:
+                children.append(
+                    html.Div(actions, className="summary-card-actions d-flex flex-column gap-3 mt-3")
+                )
             return dbc.Col(
                 dbc.Card(
-                    dbc.CardBody(
-                        [html.Div(title, className="fw-semibold mb-3"), *pills],
-                        className="d-flex flex-column gap-2",
-                    ),
+                    dbc.CardBody(children, className="d-flex flex-column gap-2"),
                     className="shadow-sm h-100",
                 ),
                 xs=12,
                 md=6,
             )
 
+        erection_actions: list[Any] = []
+        plan_block = _monthly_plan_block("erection")
+        if plan_block is not None:
+            erection_actions.append(plan_block)
+        erection_actions.append(
+            html.Div(
+                [
+                    dbc.Button(
+                        "Show Completed Towers",
+                        id="project-modal-btn-erections",
+                        color="primary",
+                        size="lg",
+                        className="modal-section-btn",
+                    ),
+                    dbc.Button(
+                        "Show Gang Performance",
+                        id="project-modal-btn-performance-erection",
+                        color="primary",
+                        size="lg",
+                        className="modal-section-btn",
+                    ),
+                ],
+                className="d-flex flex-wrap gap-2",
+            )
+        )
+
+        stringing_actions: list[Any] | None = None
+        if config.enable_stringing:
+            stringing_actions = []
+            plan_block_stringing = _monthly_plan_block("stringing")
+            if plan_block_stringing is not None:
+                stringing_actions.append(plan_block_stringing)
+            stringing_actions.append(
+                html.Div(
+                    [
+                        dbc.Button(
+                            "Show Completed Stringing",
+                            id="project-modal-btn-stringing",
+                            color="primary",
+                            size="lg",
+                            className="modal-section-btn",
+                        ),
+                        dbc.Button(
+                            "Show Gang Performance",
+                            id="project-modal-btn-performance-stringing",
+                            color="primary",
+                            size="lg",
+                            className="modal-section-btn",
+                        ),
+                    ],
+                    className="d-flex flex-wrap gap-2",
+                )
+            )
+
         cards: list[dbc.Col] = [
-            _summary_card("Erection Snapshot", erection_summary or _empty_summary_payload(False)),
+            _summary_card(
+                "Erection Snapshot",
+                erection_summary or _empty_summary_payload(False),
+                actions=erection_actions,
+            ),
         ]
         if config.enable_stringing:
             cards.append(
@@ -8541,6 +8724,7 @@ def register_callbacks(
                     stringing_summary or _empty_summary_payload(True),
                     include_tse=True,
                     include_po=True,
+                    actions=stringing_actions,
                 )
             )
 
