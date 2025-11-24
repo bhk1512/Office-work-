@@ -200,6 +200,14 @@ html {
   box-shadow:0 1px 2px rgba(0,0,0,.1), 0 6px 18px rgba(0,0,0,.12);
 }
 
+.stringing-scope-control{
+  margin-left:auto;
+}
+.stringing-scope-control .filter-label{
+  font-size:.85rem;
+  margin-bottom:0;
+}
+
 /* --- Project tiles ----------------------------------------------------- */
 .project-tile-summary{
   border:1px solid var(--border);
@@ -792,7 +800,16 @@ html {
 
 /* Quick range radios under Months */
 .filter-card .filter-quick-under-months{
-  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  flex-wrap:nowrap;
+}
+
+@media (max-width: 991.98px){
+  .filter-card .filter-quick-under-months{
+    flex-wrap:wrap;
+  }
 }
 .filter-card .filter-quick-items .form-check{
   display:inline-flex; align-items:center; margin:0 10px 0 0;
@@ -801,7 +818,10 @@ html {
 .filter-card .filter-quick-items label{ font-weight:600; color:#0f172a; cursor:pointer; }
 
 /* Clear link + Reset button alignment */
-.filter-card .filter-clear-link{ font-size:13px; }
+.filter-card .filter-clear-link{
+  font-size:13px;
+  white-space:nowrap;
+}
 .filter-card .filter-reset-btn{ margin-left:0; }
 
 #trace-anchor, #tables-anchor { scroll-margin-top: 80px; }

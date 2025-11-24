@@ -170,7 +170,7 @@ def build_controls() -> dbc.Card:
     return dbc.Card(
         dbc.CardBody(
             [
-                # Row 1: Projects, Gangs, Months
+                # Row 1: Projects + Months (gang filter removed from UI)
                 dbc.Row(
                     [
                         dbc.Col(
@@ -185,21 +185,7 @@ def build_controls() -> dbc.Card:
                                 ],
                                 className="filter-field",
                             ),
-                            md=4,
-                        ),
-                        dbc.Col(
-                            html.Div(
-                                [
-                                    dcc.Dropdown(
-                                        id="f-gang",
-                                        multi=True,
-                                        placeholder="Select gang(s)",
-                                        className="filter-select",
-                                    ),
-                                ],
-                                className="filter-field",
-                            ),
-                            md=4,
+                            md=6,
                         ),
                         dbc.Col(
                             html.Div(
@@ -216,7 +202,7 @@ def build_controls() -> dbc.Card:
                                 ],
                                 className="filter-field",
                             ),
-                            md=4,
+                            md=6,
                         ),
                     ],
                     className="g-3",
@@ -235,12 +221,9 @@ def build_controls() -> dbc.Card:
                                 size="sm",
                                 className="filter-reset-btn",
                             ),
-                            md=4,
+                            md=6,
                             className="d-flex align-items-center",
                         ),
-
-                        # Middle spacer (keeps radios visually under the Months column)
-                        dbc.Col(md=4),
 
                         # Right: Quick-range radios + Clear link, under Months
                         dbc.Col(
@@ -268,58 +251,22 @@ def build_controls() -> dbc.Card:
                                 ],
                                 className="filter-quick-under-months",
                             ),
-                            md=4,
+                            md=6,
+                            className="d-flex justify-content-md-end",
                         ),
                     ],
                     className="g-2 mt-1",
                 ),
-                # Row 3: Stringing-only filters (kept hidden for legacy compatibility)
+
+                # Hidden gang dropdown to keep callbacks wired without showing the control.
                 html.Div(
-                    [
-                        dbc.Row(
-                            [
-                                # Left: Line kV chips
-                                dbc.Col(
-                                    html.Div(
-                                        [
-                                            html.Div("Line (kV)", className="filter-label mb-1"),
-                                            dbc.Checklist(
-                                                id="f-kv",
-                                                options=[
-                                                    {"label": "400 kV", "value": "400"},
-                                                    {"label": "765 kV", "value": "765"},
-                                                ],
-                                                value=["400", "765"],  # default: overall (both)
-                                                inline=True,
-                                            ),
-                                        ]
-                                    ),
-                                    md=6,
-                                ),
-                                # Right: Method chips
-                                dbc.Col(
-                                    html.Div(
-                                        [
-                                            html.Div("Method", className="filter-label mb-1"),
-                                            dbc.Checklist(
-                                                id="f-method",
-                                                options=[
-                                                    {"label": "Manual", "value": "manual"},
-                                                    {"label": "TSE", "value": "tse"},
-                                                ],
-                                                value=["manual", "tse"],  # default: overall (both)
-                                                inline=True,
-                                            ),
-                                        ]
-                                    ),
-                                    md=6,
-                                ),
-                            ],
-                            className="g-2",
-                        )
-                    ],
-                    id="stringing-filters-wrap",
-                    style={"display": "none"},  # shown only in stringing mode by callback
+                    dcc.Dropdown(
+                        id="f-gang",
+                        multi=True,
+                        placeholder="Select gang(s)",
+                        className="filter-select",
+                    ),
+                    style={"display": "none"},
                 ),
             ]
         ),
@@ -331,11 +278,45 @@ def build_mode_summary_cards() -> dbc.Row:
     """Twin overview cards for Erection and Stringing metrics."""
 
     def _card(title: str, rows: list[tuple[str, str, str]], mode_key: str) -> dbc.Col:
+        header_controls = None
+        if mode_key == "stringing":
+            header_controls = html.Div(
+                [
+                    html.Div("Deployment", className="filter-label mb-1 me-2"),
+                    dbc.RadioItems(
+                        id="f-stringing-scope",
+                        options=[
+                            {"label": "All", "value": "all"},
+                            {"label": "Manual", "value": "manual"},
+                            {"label": "TSE", "value": "tse"},
+                            {"label": "Hotline", "value": "hotline"},
+                        ],
+                        value="all",
+                        inline=True,
+                        class_name="segment segment--compact",
+                        label_class_name="segment-label",
+                        label_checked_class_name="segment-label--active",
+                        input_class_name="segment-input",
+                    ),
+                ],
+                className="stringing-scope-control d-flex flex-wrap align-items-center gap-2",
+            )
+
         return dbc.Col(
             dbc.Card(
                 dbc.CardBody(
                     [
-                        html.Div(title, className="fw-semibold mb-3"),
+                        html.Div(
+                            [
+                                html.Div(title, className="fw-semibold"),
+                                header_controls,
+                            ],
+                            className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3"
+                            if header_controls
+                            else None,
+                        )
+                        if header_controls
+                        else html.Div(title, className="fw-semibold mb-3"),
                     ]
                     + [
                         html.Div(
@@ -1610,6 +1591,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-dblclick", data=None),
             dcc.Store(id="store-selected-gang", data=None),
             dcc.Store(id="store-filtered-scope", data=None),
+            dcc.Store(id="store-stringing-scope", data="all"),
             dcc.Store(id="store-pch-modal-focus", data=None),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
@@ -1621,6 +1603,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-proj-resp-month", data=None),
             dcc.Store(id="store-proj-resp-plan", data=None),
             dcc.Store(id="store-project-tile-focus", data=None),
+            dcc.Store(id="store-project-modal-focus-cache", data=None),
             dcc.Store(id="store-project-modal-section", data="erections"),
             dcc.Store(id="store-project-modal-click-meta", data=None),
             dcc.Store(id="project-modal-selected-gang", data=None),

@@ -14,7 +14,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 from io import BytesIO
 import traceback
-from typing import Any, Callable, Mapping, Sequence, TypeVar
+from typing import Any, Callable, Mapping, Sequence, TypeVar, TYPE_CHECKING
 
 import dash
 import duckdb
@@ -83,6 +83,7 @@ BENCHMARK_MT_PER_DAY = 9.0
 _STRINGING_KV_RANGE = {"400", "765"}
 _STRINGING_FS_DATE_COLUMNS = ("final_sag_complete", "fs_complete_date", "fs_completed_date", "fs_completion_date")
 _STRINGING_PO_DATE_COLUMNS = ("paying_out_complete", "po_completion_date", "po_completion")
+_STRINGING_METHODS = ("manual", "tse", "hotline")
 BENCHMARK_KM_PER_MONTH = 5.0
 _PROJECT_CODE_PATTERN = re.compile(r"(?i)\b([A-Z]{2,4})\s*[-_/ ]*(\d{2,5})\b")
 _PROJECT_MODAL_QUERY_PARAM = "projectModal"
@@ -130,6 +131,32 @@ _STRINGING_PLAN_CACHE: dict[str, Any] = {
 STRINGING_PLAN_ACCESSOR: ResponsibilitiesAccessor | None = None
 
 
+if TYPE_CHECKING:
+    _get_stringing_tse_lookup: Callable[[], tuple[dict[str, int], dict[str, str]]]
+
+
+def _get_stringing_tse_lookup() -> tuple[dict[str, int], dict[str, str]]:
+    """Fallback stub replaced inside register_callbacks."""
+    return {}, {}
+
+
+def _default_stringing_kv_values() -> list[str]:
+    return sorted(_STRINGING_KV_RANGE)
+
+
+def _default_stringing_method_values() -> list[str]:
+    return list(_STRINGING_METHODS)
+
+
+def _method_filters_for_scope(selection: str | None) -> list[str]:
+    normalized = _normalize_deployment_filter(selection)
+    if normalized == "tse":
+        return ["tse"]
+    if normalized == "manual":
+        return ["manual"]
+    if normalized == "hotline":
+        return ["hotline"]
+    return list(_STRINGING_METHODS)
 def _extract_project_code(value: object) -> str:
     """
     Return the canonical project code from a label or identifier.
@@ -778,6 +805,14 @@ def _normalize_mode(value: str | None) -> str:
     return (value or "erection").strip().lower()
 
 
+def _normalize_deployment_filter(value: str | None) -> str:
+    """Normalize deployment radio selection into the canonical scope key."""
+    text = (value or "").strip().lower()
+    if text in _STRINGING_METHODS:
+        return text
+    return "all"
+
+
 def _normalize_str_list(values: Sequence[Any] | None, *, lower: bool = False) -> list[str]:
     result: list[str] = []
     if not values:
@@ -985,13 +1020,160 @@ def _stringing_scope(work: pd.DataFrame, kv_values, method_values) -> pd.DataFra
     if kv_set and kv_set != {"400", "765"}:
         work = work[work["__line_kv__"].isin(kv_set)]
 
+    method_series = None
+    if "method" in work.columns:
+        method_series = work["method"].astype(str).str.strip().str.lower()
+    elif "method_norm" in work.columns:
+        method_series = work["method_norm"].astype(str).str.strip().str.lower()
+
     method_set = {m.lower() for m in _normalize_str_list(method_values)}
-    if method_set and method_set != {"manual", "tse"}:
-        if "method" in work.columns:
-            work = work[work["method"].astype(str).str.lower().isin(method_set)]
+    method_universe = {m.lower() for m in _STRINGING_METHODS}
+    if method_series is not None and method_set:
+        if method_set == {"tse"}:
+            work = work[method_series == "tse"]
+        elif method_set == {"hotline"}:
+            work = work[method_series == "hotline"]
+        elif method_set == {"manual"}:
+            work = work[method_series == "manual"]
+        elif method_set == method_universe:
+            pass
         else:
-            work = work.iloc[0:0]
+            work = work[method_series.isin(method_set)]
+    elif method_set and not method_universe.issuperset(method_set):
+        work = work.iloc[0:0]
     return work
+
+
+def _reference_frame_for_deployment(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame | None:
+    for key in ("full", "project", "month", "project_gang"):
+        frame = frames.get(key)
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            return frame
+    return None
+
+
+def _build_deployment_metadata(reference_frame: pd.DataFrame | None, scope_value: str | None) -> dict[str, Any]:
+    selection = _normalize_deployment_filter(scope_value)
+    metadata = {"selection": selection, "tse_norm": [], "tse_compact": []}
+    if selection == "all":
+        return metadata
+    tse_norm_map, tse_alias_map = _get_stringing_tse_lookup()
+    norm_keys = {key for key, value in tse_norm_map.items() if value}
+    compact_keys = {alias for alias, canonical in tse_alias_map.items() if canonical in norm_keys}
+    if isinstance(reference_frame, pd.DataFrame) and not reference_frame.empty:
+        method_column = None
+        for candidate in ("method", "Method"):
+            if candidate in reference_frame.columns:
+                method_column = candidate
+                break
+        if method_column:
+            mask = reference_frame[method_column].astype(str).str.strip().str.lower() == "tse"
+        else:
+            mask = pd.Series(False, index=reference_frame.index)
+        if mask.any():
+            for project_column in (
+                "project_name",
+                "project",
+                "project_name_display",
+                "Project Name",
+                "project_code",
+                "project_key",
+            ):
+                if project_column not in reference_frame.columns:
+                    continue
+                values = (
+                    reference_frame.loc[mask, project_column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .replace("", pd.NA)
+                    .dropna()
+                )
+                for value in values:
+                    norm_key = _normalize_lower(value)
+                    if norm_key:
+                        norm_keys.add(norm_key)
+                    compact_key = _compact_project_key(value)
+                    if compact_key:
+                        compact_keys.add(compact_key)
+    metadata["tse_norm"] = sorted(norm_keys)
+    metadata["tse_compact"] = sorted(compact_keys)
+    return metadata
+
+
+def _project_match_mask(
+    frame: pd.DataFrame,
+    *,
+    norm_keys: set[str],
+    compact_keys: set[str],
+) -> pd.Series:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.Series(False, index=getattr(frame, "index", pd.Index([])))
+    mask = pd.Series(False, index=frame.index)
+    if not norm_keys and not compact_keys:
+        return mask
+    candidate_columns = (
+        "project_name",
+        "project",
+        "project_name_display",
+        "Project Name",
+        "project_code",
+        "project_key",
+    )
+    for column in candidate_columns:
+        if column not in frame.columns:
+            continue
+        values = frame[column].astype(str).str.strip()
+        normalized = values.map(_normalize_lower)
+        if norm_keys:
+            mask = mask | normalized.isin(norm_keys)
+        if compact_keys:
+            compact_series = values.map(_compact_project_key)
+            mask = mask | compact_series.isin(compact_keys)
+    return mask.fillna(False)
+
+
+def _filter_frame_with_metadata(frame: pd.DataFrame, metadata: dict[str, Any]) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame):
+        return frame
+    selection = _normalize_deployment_filter((metadata or {}).get("selection"))
+    if selection == "all":
+        return frame
+    norm_keys = set((metadata or {}).get("tse_norm") or [])
+    compact_keys = set((metadata or {}).get("tse_compact") or [])
+    if not norm_keys and not compact_keys:
+        return frame.iloc[0:0].copy() if selection == "tse" else frame.copy()
+    mask = _project_match_mask(frame, norm_keys=norm_keys, compact_keys=compact_keys)
+    return frame.loc[mask].copy() if selection == "tse" else frame.loc[~mask].copy()
+
+
+def _filter_frame_for_deployment(frame: pd.DataFrame, selection: str | None) -> pd.DataFrame:
+    metadata = _build_deployment_metadata(frame, selection)
+    filtered = _filter_frame_with_metadata(frame, metadata)
+    return _filter_frame_by_method(filtered, selection)
+
+
+def _filter_frame_by_method(frame: pd.DataFrame, selection: str | None) -> pd.DataFrame:
+    selection_value = _normalize_deployment_filter(selection)
+    if selection_value == "all" or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    if "method" in frame.columns:
+        method_series = frame["method"].astype(str).str.strip().str.lower()
+    elif "method_norm" in frame.columns:
+        method_series = frame["method_norm"].astype(str).str.strip().str.lower()
+    else:
+        return frame
+    if selection_value == "tse":
+        mask = method_series == "tse"
+    elif selection_value == "hotline":
+        mask = method_series == "hotline"
+    elif selection_value == "manual":
+        mask = method_series == "manual"
+    else:
+        return frame
+    if not mask.any():
+        return frame.iloc[0:0].copy()
+    return frame.loc[mask].copy()
 
 
 def _build_scope_frames(
@@ -1003,6 +1185,7 @@ def _build_scope_frames(
     quick_range: str | None,
     kv_values: Sequence[str] | None,
     method_values: Sequence[str] | None,
+    deployment_filter: str | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[pd.Timestamp], float]:
     selector = DATA_SELECTOR
     if selector is None:
@@ -1045,13 +1228,19 @@ def _build_scope_frames(
         full_scope = scoped_frames.get("full", pd.DataFrame()).copy()
         project_gang_scope = scoped_frames.get("project_gang", pd.DataFrame()).copy()
 
+    frames = {
+        "month": month_scope,
+        "project": project_scope,
+        "full": full_scope,
+        "project_gang": project_gang_scope,
+    }
+    if eff_mode == "stringing":
+        reference = _reference_frame_for_deployment(frames)
+        metadata = _build_deployment_metadata(reference, deployment_filter)
+        frames = {name: _filter_frame_with_metadata(frame, metadata) for name, frame in frames.items()}
+
     return (
-        {
-            "month": month_scope,
-            "project": project_scope,
-            "full": full_scope,
-            "project_gang": project_gang_scope,
-        },
+        frames,
         normalized_months,
         _avg_days_in_selected_months(normalized_months),
     )
@@ -1068,6 +1257,7 @@ def _build_scope_meta_payload(
     method_values: Sequence[str] | None,
     kv_list: list[str],
     method_list: list[str],
+    deployment_filter: str | None = None,
 ) -> dict[str, Any]:
     frames, months_ts, days_factor = _build_scope_frames(
         eff_mode,
@@ -1077,6 +1267,7 @@ def _build_scope_meta_payload(
         quick_range=quick_range,
         kv_values=kv_values,
         method_values=method_values,
+        deployment_filter=deployment_filter,
     )
     scope_keys = {name: _remember_scope_frame(frame) for name, frame in frames.items()}
     rows_meta = {name: int(len(frame.index)) for name, frame in frames.items()}
@@ -1088,6 +1279,7 @@ def _build_scope_meta_payload(
         "quick_range": quick_range,
         "kv": kv_list,
         "methods": method_list,
+        "stringing_scope": _normalize_deployment_filter(deployment_filter),
     }
     signature = hashlib.sha1(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1105,6 +1297,7 @@ def _build_scope_meta_payload(
             "quick_range": quick_range,
             "kv": kv_list,
             "methods": method_list,
+            "stringing_scope": _normalize_deployment_filter(deployment_filter),
         },
     }
 
@@ -1119,6 +1312,7 @@ def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame
         quick_range=selected.get("quick_range"),
         kv_values=selected.get("kv", []),
         method_values=selected.get("methods", []),
+        deployment_filter=selected.get("stringing_scope"),
     )
     for name, frame in scopes.items():
         cache_key = (meta.get("scopes") or {}).get(name)
@@ -1407,6 +1601,8 @@ def register_callbacks(
             if code_token:
                 aliases.setdefault(_compact_project_key(code_token), canonical_key)
         return canonical, aliases
+
+    global _get_stringing_tse_lookup
 
     def _get_stringing_tse_lookup() -> tuple[dict[str, int], dict[str, str]]:
         if not config.enable_stringing:
@@ -3024,6 +3220,7 @@ def register_callbacks(
         kv_values = _extract_list("kv")
         method_values = _extract_list("methods", lower=True)
         quick_range = selected.get("quick_range")
+        stringing_scope = selected.get("stringing_scope")
 
         current_mode = _normalize_mode((scope_meta or {}).get("mode"))
 
@@ -3041,6 +3238,7 @@ def register_callbacks(
                     method_values=method_values,
                     kv_list=kv_values,
                     method_list=method_values,
+                    deployment_filter=stringing_scope if mode_name == "stringing" else "all",
                 )
             except Exception:
                 LOGGER.exception("Unable to build %s scope for summary cards", mode_name)
@@ -3279,51 +3477,23 @@ def register_callbacks(
 
     @app.callback(
         Output("f-project", "value"),
-        Output("f-month", "value"),
         Output("f-gang", "value"),
-        Output("f-quick-range", "value"),
         Input("btn-reset-filters", "n_clicks"),
-        Input("link-clear-quick-range", "n_clicks"),
         prevent_initial_call=True,
     )
     def handle_filter_reset(
         reset_clicks: int | None,
-        clear_quick_clicks: int | None,
-    ) -> tuple[Any, Any, Any, Any]:
-        ctx = dash.callback_context
-        if not ctx.triggered:
+    ) -> tuple[Any, Any]:
+        if not reset_clicks:
             raise PreventUpdate
-        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        # Clear only quick range if that link was clicked
-        if trigger_id == "link-clear-quick-range":
-            return dash.no_update, dash.no_update, dash.no_update, None
-        # On mode toggle or Reset click: reset all filters to defaults
-        if trigger_id == "btn-reset-filters":
-            # Compute default month from the latest data date in the active mode's dataset
-            try:
-                df = data_selector.select("erection")
-                latest_date = None
-                if isinstance(df, pd.DataFrame) and not df.empty and "date" in df.columns:
-                    dates = pd.to_datetime(df["date"], errors="coerce").dropna()
-                    if not dates.empty:
-                        latest_date = dates.max()
-                default_month = (
-                    pd.Timestamp(latest_date).strftime("%Y-%m") if latest_date is not None else datetime.today().strftime("%Y-%m")
-                )
-            except Exception:
-                default_month = datetime.today().strftime("%Y-%m")
-            return None, [default_month], None, None
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-
-
+        return None, None
     @app.callback(
         Output("store-filtered-scope", "data"),
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
         prevent_initial_call=False,
     )
     def _sync_filtered_scope_store(
@@ -3331,13 +3501,16 @@ def register_callbacks(
         months: Sequence[str] | None,
         quick_range: str | None,
         gangs: Sequence[str] | None,
-        kv_values: Sequence[str] | None,
-        method_values: Sequence[str] | None,
+        stringing_scope: str | None,
     ) -> dict[str, Any]:
         eff_mode = "erection"
         project_list = _normalize_str_list(_ensure_list(projects))
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
+        kv_values = _default_stringing_kv_values()
+        method_values = _method_filters_for_scope(stringing_scope)
+        if not method_values:
+            method_values = list(_STRINGING_METHODS)
         kv_list = _normalize_str_list(kv_values)
         method_list = _normalize_str_list(method_values, lower=True)
 
@@ -3349,6 +3522,7 @@ def register_callbacks(
             quick_range=quick_range,
             kv_values=kv_values,
             method_values=method_values,
+            deployment_filter=stringing_scope,
         )
 
         scope_keys = {name: _remember_scope_frame(frame) for name, frame in frames.items()}
@@ -3361,6 +3535,7 @@ def register_callbacks(
             "quick_range": quick_range,
             "kv": kv_list,
             "methods": method_list,
+            "stringing_scope": _normalize_deployment_filter(stringing_scope),
         }
         signature = hashlib.sha1(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -3378,6 +3553,7 @@ def register_callbacks(
                 "quick_range": quick_range,
                 "kv": kv_list,
                 "methods": method_list,
+                "stringing_scope": _normalize_deployment_filter(stringing_scope),
             },
         }
 
@@ -3395,6 +3571,54 @@ def register_callbacks(
         start_iso = start.date().isoformat()
         end_iso = end.date().isoformat()
         return start_iso, end_iso, start_iso, end_iso
+
+
+    @app.callback(
+        Output("store-stringing-scope", "data"),
+        Input("f-stringing-scope", "value"),
+        Input("project-modal-stringing-scope", "value"),
+        Input("btn-reset-filters", "n_clicks"),
+        State("store-stringing-scope", "data"),
+        prevent_initial_call=False,
+    )
+    def _sync_stringing_scope_store(
+        home_value: str | None,
+        modal_value: str | None,
+        reset_clicks: int | None,
+        current_value: str | None,
+    ) -> str:
+        ctx = dash.callback_context
+        next_value = current_value or "all"
+        if ctx.triggered:
+            trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+            if trigger == "btn-reset-filters":
+                next_value = "all"
+            elif trigger == "project-modal-stringing-scope" and modal_value:
+                next_value = modal_value
+            elif trigger == "f-stringing-scope" and home_value:
+                next_value = home_value
+        return _normalize_deployment_filter(next_value)
+
+
+    @app.callback(
+        Output("f-stringing-scope", "value"),
+        Output("project-modal-stringing-scope", "value"),
+        Input("store-stringing-scope", "data"),
+        State("f-stringing-scope", "value"),
+        State("project-modal-stringing-scope", "value"),
+        prevent_initial_call=False,
+    )
+    def _broadcast_stringing_scope(
+        scope_value: str | None,
+        home_value: str | None,
+        modal_value: str | None,
+    ) -> tuple[Any, Any]:
+        normalized = _normalize_deployment_filter(scope_value)
+        home_current = _normalize_deployment_filter(home_value)
+        modal_current = _normalize_deployment_filter(modal_value)
+        home_out = normalized if normalized != home_current else dash.no_update
+        modal_out = normalized if normalized != modal_current else dash.no_update
+        return home_out, modal_out
 
 
     @app.callback(
@@ -3471,65 +3695,98 @@ def register_callbacks(
             LOGGER.exception("Failed to build month options: %s", exc)
             return []
 
-    @app.callback(
-        Output("f-month", "value", allow_duplicate=True),
-        Input("f-month", "options"),
-        State("f-month", "value"),
-        State("f-quick-range", "value"),
-        prevent_initial_call='initial_duplicate',
-    )
-    def ensure_default_month(options, current_value, quick_range):
+    def _resolve_reset_month_value() -> str:
         try:
-            # If user cleared all months (empty list) keep it blank instead of forcing latest.
-            if isinstance(current_value, list) and len(current_value) == 0:
-                return dash.no_update
-            # When quick-range is active its callback sets months=None; do not override it here.
-            if quick_range:
-                return dash.no_update
-            # If a month already selected and appears in options, keep it
-            if current_value:
-                selected = set(current_value if isinstance(current_value, (list, tuple)) else [current_value])
-                opt_values = {opt.get("value") for opt in (options or [])}
-                if selected & opt_values:
-                    return dash.no_update
-            # Pick the latest available month option (based on data), not today's month
-            opt_values = [opt.get("value") for opt in (options or []) if isinstance(opt, dict)]
-            if not opt_values:
-                return dash.no_update
-            # Parse values like YYYY-MM and choose the max
-            def _parse(val: str):
-                try:
-                    y, m = val.split("-")
-                    return int(y) * 100 + int(m)
-                except Exception:
-                    return -1
-            latest = max(opt_values, key=_parse)
-            return [latest]
+            df = data_selector.select("erection")
+            latest_date = None
+            if isinstance(df, pd.DataFrame) and not df.empty and "date" in df.columns:
+                dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+                if not dates.empty:
+                    latest_date = dates.max()
+            if latest_date is None:
+                return datetime.today().strftime("%Y-%m")
+            return pd.Timestamp(latest_date).strftime("%Y-%m")
         except Exception:
+            return datetime.today().strftime("%Y-%m")
+
+    def _pick_latest_month_value(
+        options: Sequence[dict[str, Any]] | None,
+        current_value: Sequence[str] | str | None,
+    ) -> Any:
+        if isinstance(current_value, list) and len(current_value) == 0:
+            return dash.no_update
+        if current_value:
+            selected = set(current_value if isinstance(current_value, (list, tuple)) else [current_value])
+            opt_values = {opt.get("value") for opt in (options or []) if isinstance(opt, dict)}
+            if selected & opt_values:
+                return dash.no_update
+        opt_values = [opt.get("value") for opt in (options or []) if isinstance(opt, dict)]
+        if not opt_values:
             return dash.no_update
 
-    @app.callback(
-        Output("f-month", "value", allow_duplicate=True),
-        Input("f-quick-range", "value"),
-        prevent_initial_call=True,
-    )
-    def _clear_month_value_on_quick_change(qr):
-        # When a quick-range is chosen, let code derive months from it; drop stale manual months.
-        if qr:
-            return None
-        return dash.no_update
+        def _parse(val: str) -> int:
+            try:
+                y, m = val.split("-")
+                return int(y) * 100 + int(m)
+            except Exception:
+                return -1
+
+        latest = max(opt_values, key=_parse)
+        return [latest]
 
     @app.callback(
-        Output("f-quick-range", "value", allow_duplicate=True),
+        Output("f-month", "value"),
+        Input("btn-reset-filters", "n_clicks"),
+        Input("f-month", "options"),
+        Input("f-quick-range", "value"),
+        State("f-month", "value"),
+        prevent_initial_call=True,
+    )
+    def sync_month_filter_value(
+        reset_clicks: int | None,
+        options: Sequence[dict[str, Any]] | None,
+        quick_range_value: str | None,
+        current_value: Sequence[str] | str | None,
+    ) -> Any:
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+        if trigger_id == "btn-reset-filters":
+            return [_resolve_reset_month_value()]
+        if trigger_id == "f-quick-range" and quick_range_value:
+            return None
+        if quick_range_value:
+            return dash.no_update
+        return _pick_latest_month_value(options, current_value)
+
+    @app.callback(
+        Output("f-quick-range", "value"),
+        Input("btn-reset-filters", "n_clicks"),
+        Input("link-clear-quick-range", "n_clicks"),
         Input("f-month", "value"),
         State("f-quick-range", "value"),
         prevent_initial_call=True,
     )
-    def _clear_quick_range_on_month_change(months, quick_range_value):
-        # Reset quick-range when manual months are selected so filters stay mutually exclusive.
-        month_list = _ensure_list(months)
-        if month_list and quick_range_value:
+    def sync_quick_range_value(
+        reset_clicks: int | None,
+        clear_quick_clicks: int | None,
+        months: Sequence[str] | str | None,
+        quick_range_value: str | None,
+    ) -> Any:
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+        if trigger_id in {"btn-reset-filters", "link-clear-quick-range"}:
             return None
+
+        if trigger_id == "f-month":
+            month_list = _ensure_list(months)
+            if month_list and quick_range_value:
+                return None
         return dash.no_update
 
 
@@ -4932,6 +5189,7 @@ def register_callbacks(
         gangs,
         kv_values,
         method_values,
+        stringing_scope: str | None = None,
     ) -> dict[str, Any]:
         project_candidates = _project_filter_candidates(project_name, project_code)
         project_list = _normalize_str_list(project_candidates)
@@ -4950,6 +5208,7 @@ def register_callbacks(
             method_values=method_list,
             kv_list=_normalize_str_list(kv_list),
             method_list=_normalize_str_list(method_list, lower=True),
+            deployment_filter=stringing_scope if eff_mode == "stringing" else "all",
         )
 
     @app.callback(
@@ -5362,8 +5621,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
         Input("store-project-modal-performance-mode", "data"),
         prevent_initial_call=True,
     )
@@ -5373,8 +5631,7 @@ def register_callbacks(
         months,
         quick_range,
         gangs,
-        kv_values,
-        method_values,
+        stringing_scope,
         performance_mode,
     ):
         project_name = (focus_data or {}).get("project")
@@ -5384,6 +5641,8 @@ def register_callbacks(
         eff_mode = _modal_mode_from_store(performance_mode, "erection")
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
+        kv_values = _default_stringing_kv_values()
+        method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
         scope_meta = _build_project_scope_meta(
             project_name,
             project_code,
@@ -5393,6 +5652,7 @@ def register_callbacks(
             gangs,
             kv_values,
             method_values,
+            stringing_scope,
         )
         base_scope = _scope_frame_from_store(scope_meta, "project")
         if base_scope.empty or "gang_name" not in base_scope.columns:
@@ -5420,8 +5680,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
         Input("store-project-modal-performance-mode", "data"),
         prevent_initial_call=True,
     )
@@ -5433,8 +5692,7 @@ def register_callbacks(
         months,
         quick_range,
         gangs,
-        kv_values,
-        method_values,
+        stringing_scope,
         performance_mode,
     ):
         project_name = (focus_data or {}).get("project")
@@ -5444,6 +5702,8 @@ def register_callbacks(
         eff_mode = _modal_mode_from_store(performance_mode, "erection")
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
+        kv_values = _default_stringing_kv_values()
+        method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
         ctx = dash.callback_context
         triggered_id = None
         if ctx.triggered:
@@ -5474,6 +5734,7 @@ def register_callbacks(
             gangs,
             kv_values,
             method_values,
+            stringing_scope,
         )
         idle_data, daily_data = _compute_trace_table_payload(scope_meta, gang_focus)
         return idle_data, daily_data
@@ -5528,8 +5789,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
         Input("store-project-modal-performance-mode", "data"),
     )
     def _update_project_modal_performance(
@@ -5538,8 +5798,7 @@ def register_callbacks(
         months,
         quick_range,
         gangs,
-        kv_values,
-        method_values,
+        stringing_scope,
         performance_mode,
     ):
         empty_fig = go.Figure()
@@ -5556,6 +5815,8 @@ def register_callbacks(
         eff_mode = _modal_mode_from_store(performance_mode, "erection")
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
+        kv_values = _default_stringing_kv_values()
+        method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
 
         scope_meta = _build_project_scope_meta(
             project_name,
@@ -5566,6 +5827,7 @@ def register_callbacks(
             gangs,
             kv_values,
             method_values,
+            stringing_scope,
         )
 
         try:
@@ -5749,8 +6011,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
     )
     def _update_modal_stringing_table(
         start_date,
@@ -5760,8 +6021,7 @@ def register_callbacks(
         months,
         quick_range,
         gangs,
-        kv_values,
-        method_values,
+        stringing_scope,
     ):
         if not config.enable_stringing:
             return []
@@ -5784,8 +6044,8 @@ def register_callbacks(
         project_list = _normalize_str_list(candidate_ids)
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
-        kv_list = _ensure_list(kv_values)
-        method_list = _ensure_list(method_values)
+        kv_list = _default_stringing_kv_values()
+        method_list = _method_filters_for_scope(stringing_scope)
 
         months_ts = resolve_months(months_list, quick_range)
 
@@ -5797,6 +6057,7 @@ def register_callbacks(
             quick_range=quick_range,
             kv_values=kv_list,
             method_values=method_list,
+            deployment_filter=stringing_scope,
         )
         scoped = frames.get("project_gang", pd.DataFrame()).copy()
         if "date" not in scoped.columns or scoped.empty:
@@ -6169,6 +6430,7 @@ def register_callbacks(
         mode_value: str | None,
         kv_filter,
         method_filter,
+        stringing_scope,
         *,
         use_modal_ids: bool = False,
         pill_focus: str | None = None,
@@ -6414,6 +6676,7 @@ def register_callbacks(
 
         kv_list = _ensure_list(kv_filter)
         method_list = _normalize_str_list(method_filter, lower=True)
+        deployment_scope = _normalize_deployment_filter(stringing_scope)
         pch_sections: list[dbc.AccordionItem] = []
         # Erection mode (existing flow)
         stringing_plan_month_map: dict[str, set[pd.Timestamp]] = (
@@ -6445,6 +6708,7 @@ def register_callbacks(
             # Delivered KM from per-day stringing dataset
             df_day = data_selector.select("stringing")
             scoped = apply_filters(df_day, project_list, months_ts, [])
+            scoped = _filter_frame_for_deployment(scoped, deployment_scope)
             try:
                 scope_frames, _, _ = _build_scope_frames(
                     "stringing",
@@ -6454,6 +6718,7 @@ def register_callbacks(
                     quick_range=quick_range,
                     kv_values=kv_list,
                     method_values=method_list,
+                    deployment_filter=deployment_scope,
                 )
                 scope_full = scope_frames.get("full", pd.DataFrame()).copy()
             except Exception:
@@ -6776,6 +7041,7 @@ def register_callbacks(
             if isinstance(po_frame, pd.DataFrame) and not po_frame.empty:
                 po_scoped = _stringing_scope(po_frame, kv_list, method_list)
                 po_filtered = apply_filters(po_scoped, project_list, months_ts, [])
+                po_filtered = _filter_frame_for_deployment(po_filtered, deployment_scope)
                 if isinstance(po_filtered, pd.DataFrame) and not po_filtered.empty:
                     proj_col = "project_name" if "project_name" in po_filtered.columns else (
                         "project" if "project" in po_filtered.columns else None
@@ -8410,11 +8676,10 @@ def register_callbacks(
         Input("f-project", "value"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
         prevent_initial_call=True,
     )
-    def _render_pch_modal(focus_data, projects, months, quick_range, kv_filter, method_filter):
+    def _render_pch_modal(focus_data, projects, months, quick_range, stringing_scope):
         if not isinstance(focus_data, dict) or not focus_data.get("metric"):
             raise PreventUpdate
         metric = str(focus_data.get("metric") or "").strip().lower()
@@ -8425,6 +8690,8 @@ def register_callbacks(
             mode_value = "erection"
         if mode_value == "stringing" and not config.enable_stringing:
             raise PreventUpdate
+        kv_filter = _default_stringing_kv_values()
+        method_filter = _method_filters_for_scope(stringing_scope) if mode_value == "stringing" else []
         sections, active_item, tile_meta = _populate_kpi_pch(
             projects,
             months,
@@ -8432,12 +8699,24 @@ def register_callbacks(
             mode_value,
             kv_filter,
             method_filter,
+            stringing_scope,
             use_modal_ids=True,
             pill_focus=metric,
         )
         mode_label = "Stringing" if mode_value == "stringing" else "Erection"
         title = f"PCH-wise { _PCH_PILL_LABELS[metric] } ({mode_label})"
         return sections, active_item, title, tile_meta
+
+    @app.callback(
+        Output("store-project-modal-focus-cache", "data"),
+        Input("store-project-tile-focus", "data"),
+        prevent_initial_call=False,
+    )
+    def _cache_project_modal_focus(focus_payload):
+        """Mirror the latest project focus payload for history-driven modal opens."""
+        if isinstance(focus_payload, Mapping):
+            return focus_payload
+        return None
 
     @app.callback(
         Output("store-project-tile-focus", "data"),
@@ -8450,6 +8729,7 @@ def register_callbacks(
         Input("project-modal-location", "href"),
         State("project-detail-modal", "is_open"),
         State("store-project-tile-meta", "data"),
+        State("store-project-modal-focus-cache", "data"),
         prevent_initial_call=True,
     )
     def _toggle_project_tile_modal(
@@ -8460,6 +8740,7 @@ def register_callbacks(
         location_href,
         is_open,
         tile_meta_data,
+        focus_cache,
     ):
         ctx = dash.callback_context
         triggered_entries = getattr(ctx, "triggered", None)
@@ -8486,8 +8767,12 @@ def register_callbacks(
             return dash.no_update, False, _history_action("close")
 
         if trigger == "project-modal-location":
-            if wants_modal_flag and not is_open:
-                return dash.no_update, True, dash.no_update
+            if wants_modal_flag:
+                if not focus_cache:
+                    # Ignore stray modal query params until a project has been selected.
+                    raise PreventUpdate
+                if not is_open:
+                    return dash.no_update, True, dash.no_update
             if not wants_modal_flag and is_open:
                 return dash.no_update, False, dash.no_update
             raise PreventUpdate
@@ -8561,8 +8846,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("f-kv", "value"),
-        Input("f-method", "value"),
+        Input("store-stringing-scope", "data"),
         prevent_initial_call=True,
     )
     def _render_project_modal_summary(
@@ -8570,8 +8854,7 @@ def register_callbacks(
         months,
         quick_range,
         gangs,
-        kv_values,
-        method_values,
+        stringing_scope,
     ):
         base_message = "Select a project tile to view its detailed view."
         base_title = "Project Deep Dive"
@@ -8594,8 +8877,8 @@ def register_callbacks(
 
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
-        kv_list = _normalize_str_list(_ensure_list(kv_values))
-        method_list = _normalize_str_list(_ensure_list(method_values), lower=True)
+        kv_list = _normalize_str_list(_default_stringing_kv_values())
+        method_list = _normalize_str_list(_method_filters_for_scope(stringing_scope), lower=True)
 
         def _project_summary_for_mode(mode_value: str, *, is_stringing: bool) -> dict[str, str]:
             kv_payload = kv_list if is_stringing else []
@@ -8611,6 +8894,7 @@ def register_callbacks(
                     method_values=method_payload,
                     kv_list=kv_payload,
                     method_list=method_payload,
+                    deployment_filter=stringing_scope if is_stringing else "all",
                 )
             except Exception:
                 LOGGER.exception(
@@ -8757,6 +9041,7 @@ def register_callbacks(
             include_tse: bool = False,
             include_po: bool = False,
             actions: list[Any] | None = None,
+            controls: Any | None = None,
         ) -> dbc.Col:
             rows = [
                 ("F/S Total Planned / Done / Balance", summary_payload.get("totals", "-")),
@@ -8778,7 +9063,20 @@ def register_callbacks(
                 )
                 for label, value in rows
             ]
-            children = [html.Div(title, className="snapshot-card__title fw-semibold mb-2"), *pills]
+            if controls is not None:
+                header = html.Div(
+                    [
+                        html.Div(title, className="snapshot-card__title fw-semibold"),
+                        html.Div(
+                            controls,
+                            className="stringing-scope-control d-flex flex-wrap align-items-center gap-2",
+                        ),
+                    ],
+                    className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2",
+                )
+            else:
+                header = html.Div(title, className="snapshot-card__title fw-semibold mb-2")
+            children = [header, *pills]
             if actions:
                 children.append(
                     html.Div(actions, className="summary-card-actions d-flex flex-column gap-2 mt-2")
@@ -8819,6 +9117,7 @@ def register_callbacks(
         )
 
         stringing_actions: list[Any] | None = None
+        stringing_scope_control: Any | None = None
         if config.enable_stringing:
             stringing_actions = []
             plan_block_stringing = _monthly_plan_block("stringing")
@@ -8845,6 +9144,23 @@ def register_callbacks(
                     className="d-flex flex-wrap gap-2",
                 )
             )
+            stringing_scope_control = [
+                html.Div("Deployment", className="filter-label mb-1 me-2"),
+                dbc.RadioItems(
+                    id="project-modal-stringing-scope",
+                    options=[
+                        {"label": "All", "value": "all"},
+                        {"label": "Manual", "value": "manual"},
+                        {"label": "TSE", "value": "tse"},
+                        {"label": "Hotline", "value": "hotline"},
+                    ],
+                    value="all",
+                    class_name="segment",
+                    label_class_name="segment-label",
+                    label_checked_class_name="segment-label--active",
+                    input_class_name="segment-input",
+                ),
+            ]
 
         cards: list[dbc.Col] = [
             _summary_card(
@@ -8861,6 +9177,7 @@ def register_callbacks(
                     include_tse=True,
                     include_po=True,
                     actions=stringing_actions,
+                    controls=stringing_scope_control,
                 )
             )
 

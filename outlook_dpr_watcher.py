@@ -2,18 +2,14 @@
 # Run: python outlook_dpr_run_and_monitor_latest_by_date.py
 
 import os, time, pathlib, datetime as dt, re
+import pandas as pd
 import pythoncom
 import win32com.client as win32
 
 # ---------------- CONFIG ----------------
 FOLDER_PATH = "Inbox/DPRs"           # <-- use exact Outlook path for your folder
 DOWNLOAD_DIR = r"C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs"
-
-ALLOWED_SENDERS = {
-    "palp04@kecrpg.com","chaudharys1@kecrpg.com","janvendrak@kecrpg.com",
-    "dbharath@kecrpg.com","jayasuryaa@kecrpg.com","samantaraysk@kecrpg.com",
-    "kumarsan50@kecrpg.com","ranjanr33@kecrpg.com",
-}
+EMAIL_CONFIG_PATH = pathlib.Path(DOWNLOAD_DIR).parent / "Email_config.xlsx"
 
 # Subject phrases (tolerant)
 SUBJECT_PATTERNS = [
@@ -29,13 +25,52 @@ ATTACHMENT_MUST_CONTAIN = [r"d\W*p\W*r"]   # dpr, d.p.r, d p r, d-p-r, etc.
 ALLOWED_EXTS = {".xlsx",".xls"}
 
 # Backfill window
-BACKFILL_DAYS = 1
+BACKFILL_DAYS = 4
 BACKFILL_ONLY_UNREAD = False
 BACKFILL_MAX = 1000
 # ---------------------------------------
 
 def logprint(*args): print(*args, flush=True)
 def norm(s): return (s or "").lower()
+
+def _normalize_for_contains(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", norm(value))
+
+def _split_possible_subjects(value) -> list[str]:
+    if value is None:
+        return []
+    try:
+        if pd.isna(value):
+            return []
+    except Exception:
+        pass
+    text = str(value)
+    parts = re.split(r"[|,;\n]+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+def load_email_config(path: pathlib.Path = EMAIL_CONFIG_PATH) -> dict[str, dict]:
+    path = pathlib.Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Email configuration file not found at {path}")
+    df = pd.read_excel(path)
+    config: dict[str, dict] = {}
+    for _, row in df.iterrows():
+        email_raw = row.get("Email")
+        if pd.isna(email_raw):
+            continue
+        email = str(email_raw).strip().lower()
+        if not email:
+            continue
+        name_raw = row.get("Name")
+        name = "" if pd.isna(name_raw) else str(name_raw).strip()
+        config[email] = {
+            "name": name,
+            "possible_subjects": _split_possible_subjects(row.get("Possible_subject")),
+        }
+    return config
+
+EMAIL_CONFIG = load_email_config()
+ALLOWED_SENDERS = set(EMAIL_CONFIG.keys())
 
 # --- Outlook helpers ---
 def get_smtp_address(mail) -> str:
@@ -56,16 +91,28 @@ def is_mail_item(item) -> bool:
     try: return getattr(item, "Class", None) == 43  # olMailItem
     except Exception: return False
 
-def subject_matches(subj: str) -> bool:
-    s = norm(subj)
+def subject_matches(subj: str, sender_email: str | None = None) -> bool:
+    text = subj or ""
+    lowered = norm(text)
     for pat in SUBJECT_PATTERNS:
-        if re.search(pat, s, flags=re.IGNORECASE): return True
+        if re.search(pat, lowered, flags=re.IGNORECASE):
+            return True
+    if sender_email:
+        sender_cfg = EMAIL_CONFIG.get(sender_email)
+        if sender_cfg:
+            normalized_subj = _normalize_for_contains(text)
+            for candidate in sender_cfg.get("possible_subjects", []):
+                candidate_norm = _normalize_for_contains(candidate)
+                if candidate_norm and candidate_norm in normalized_subj:
+                    return True
     return False
 
 def should_process(mail) -> bool:
     if not is_mail_item(mail): return False
-    if get_smtp_address(mail) not in ALLOWED_SENDERS: return False
-    if not subject_matches(getattr(mail, "Subject", "") or ""): return False
+    sender = get_smtp_address(mail)
+    if sender not in ALLOWED_SENDERS: return False
+    subject = getattr(mail, "Subject", "") or ""
+    if not subject_matches(subject, sender): return False
     return True
 
 # --- Project code extraction ---
@@ -158,17 +205,30 @@ def extract_report_date(mail, fallback_to_received=True) -> dt.date:
 def canonical_name(project_code: str, report_date: dt.date, ext: str) -> str:
     return f"{project_code} - DPR - {report_date:%Y-%m-%d}{ext}"
 
-def purge_previous_versions(download_dir: pathlib.Path, project_code: str, ext: str):
+def _date_from_canonical_filename(filename: str, prefix: str, ext: str) -> dt.date | None:
+    try:
+        suffix_len = len(ext)
+        date_slice = filename[len(prefix):-suffix_len] if suffix_len else filename[len(prefix):]
+        return dt.datetime.strptime(date_slice, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def purge_previous_versions(download_dir: pathlib.Path, project_code: str, ext: str, report_date: dt.date) -> bool:
     """
-    Remove any files for this project regardless of date, so only the newest remains.
-    Looks for filenames starting with '<PROJECT> - DPR - ' and same extension.
+    Remove older files for this project so only the newest remains.
+    Returns False if an equal/newer file already exists and should be kept.
     """
-    prefix = f"{project_code} - DPR - ".lower()
+    prefix = f"{project_code} - DPR - "
+    prefix_lower = prefix.lower()
     for fn in os.listdir(download_dir):
         fl = fn.lower()
-        if fl.startswith(prefix) and fl.endswith(ext.lower()):
+        if fl.startswith(prefix_lower) and fl.endswith(ext.lower()):
+            existing_date = _date_from_canonical_filename(fn, prefix, ext)
+            if existing_date and existing_date >= report_date:
+                return False
             try: os.remove(download_dir / fn)
             except Exception: pass
+    return True
 
 def save_latest_for_mail(mail) -> list[str]:
     saved = []
@@ -177,6 +237,8 @@ def save_latest_for_mail(mail) -> list[str]:
 
     # We’ll compute project per attachment (best accuracy), date once per mail (typical)
     mail_date = extract_report_date(mail, fallback_to_received=True)
+    download_dir = pathlib.Path(DOWNLOAD_DIR)
+    download_dir.mkdir(parents=True, exist_ok=True)
 
     for i in range(1, atts.Count + 1):
         att = atts.Item(i)
@@ -194,11 +256,11 @@ def save_latest_for_mail(mail) -> list[str]:
             continue
 
         ext = os.path.splitext(name)[1].lower()
-        # purge any previous versions for this project/ext
-        purge_previous_versions(pathlib.Path(DOWNLOAD_DIR), project, ext)
+        # purge any previous versions for this project/ext; skip if a newer file already exists
+        if not purge_previous_versions(download_dir, project, ext, mail_date):
+            continue
         # save with canonical "<PROJECT> - DPR - <YYYY-MM-DD><ext>"
-        target = pathlib.Path(DOWNLOAD_DIR, canonical_name(project, mail_date, ext))
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = download_dir / canonical_name(project, mail_date, ext)
         att.SaveAsFile(str(target))
         saved.append(str(target))
     return saved
@@ -230,7 +292,7 @@ def get_folder_by_path(ns, path_str):
 def backfill(folder):
     items = folder.Items
     items.Sort("[ReceivedTime]", True)
-    since = dt.datetime.now() - dt.timedelta(hours=24)
+    since = dt.datetime.now() - dt.timedelta(days=BACKFILL_DAYS)
     r = items.Restrict(f"[ReceivedTime] >= '{since:%m/%d/%Y %I:%M %p}'")
     if BACKFILL_ONLY_UNREAD:
         r = r.Restrict("[Unread] = true")
