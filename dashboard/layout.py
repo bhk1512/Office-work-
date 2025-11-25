@@ -834,6 +834,7 @@ def build_project_tile_modal() -> dbc.Modal:
             ),
         ],
         className="shadow-sm mb-4",
+        id="project-modal-anchor-erections",
     )
 
     stringing_section = dbc.Card(
@@ -861,6 +862,7 @@ def build_project_tile_modal() -> dbc.Modal:
             ),
         ],
         className="shadow-sm mb-4",
+        id="project-modal-anchor-stringing",
     )
 
     performance_cards = dbc.Row(
@@ -976,7 +978,9 @@ def build_project_tile_modal() -> dbc.Modal:
         className="shadow-sm",
     )
 
-    performance_section = html.Div([performance_cards, trace_block])
+    performance_section = html.Div(
+        [performance_cards, trace_block], id="project-modal-anchor-performance"
+    )
 
     sections = [
         dbc.Collapse(erections_section, id="project-modal-section-erections", is_open=False),
@@ -1668,6 +1672,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-project-modal-scope", data=None),
             dcc.Store(id="project-modal-selected-gang", data=None),
             dcc.Store(id="store-project-modal-performance-mode", data="erection|0"),
+            dcc.Store(id="project-modal-scroll-target", data=None),
             dcc.Store(id="store-project-tile-meta", data={}),
             dcc.Store(id="store-project-modal-history", data=None),
             html.Div(id="project-modal-history-wire", style={"display": "none"}),

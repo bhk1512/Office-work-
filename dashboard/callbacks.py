@@ -3399,23 +3399,55 @@ def register_callbacks(
 
     app.clientside_callback(
         """
-        function(meta){
-        if(!meta || !meta.source || !meta.gang) return "";
-        const CHART_SOURCES = new Set(["project-modal-actual-vs-bench","project-modal-top5","project-modal-bottom5"]);
-        if (!CHART_SOURCES.has(meta.source)) return "";
+        function(meta, scrollTarget){
+        const ctx = window.dash_clientside && window.dash_clientside.callback_context;
+        const trig = ctx && ctx.triggered && ctx.triggered.length ? ctx.triggered[0] : null;
+        const prop = trig && trig.prop_id ? trig.prop_id : "";
+        const NO = window.dash_clientside.no_update;
 
-        let tries = 0;
-        function go(){
-            const anchor = document.getElementById("project-modal-trace-anchor");
-            if (!anchor) { if (tries++ < 25) setTimeout(go, 60); return; }
-            anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (prop === "store-project-modal-click-meta.data") {
+            if(!meta || !meta.source || !meta.gang) return "";
+            const CHART_SOURCES = new Set(["project-modal-actual-vs-bench","project-modal-top5","project-modal-bottom5"]);
+            if (!CHART_SOURCES.has(meta.source)) return "";
+
+            let tries = 0;
+            function go(){
+                const anchor = document.getElementById("project-modal-trace-anchor");
+                if (!anchor) { if (tries++ < 25) setTimeout(go, 60); return; }
+                anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+            setTimeout(go, 0);
+            return String(Date.now());
         }
-        setTimeout(go, 0);
-        return String(Date.now());
+
+        if (prop === "project-modal-scroll-target.data") {
+            if (!scrollTarget || !scrollTarget.anchor) return NO;
+            const anchorId = scrollTarget.anchor;
+            let tries = 0;
+            function go(){
+                const target = document.getElementById(anchorId);
+                if (!target) {
+                    if (tries++ < 40) setTimeout(go, 75);
+                    return;
+                }
+                const rect = target.getBoundingClientRect();
+                const hidden = rect.height === 0;
+                if (hidden && tries++ < 40) {
+                    setTimeout(go, 75);
+                    return;
+                }
+                target.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+            setTimeout(go, 0);
+            return String(Date.now());
+        }
+
+        return NO;
         }
         """,
         Output("project-modal-scroll-wire", "children"),
         Input("store-project-modal-click-meta", "data"),
+        Input("project-modal-scroll-target", "data"),
         prevent_initial_call=True,
     )
 
@@ -9285,6 +9317,7 @@ def register_callbacks(
     @app.callback(
         Output("store-project-modal-section", "data"),
         Output("store-project-modal-performance-mode", "data"),
+        Output("project-modal-scroll-target", "data"),
         Input("project-modal-btn-erections", "n_clicks"),
         Input("project-modal-btn-stringing", "n_clicks"),
         Input("project-modal-btn-performance-erection", "n_clicks"),
@@ -9309,23 +9342,50 @@ def register_callbacks(
         def _payload(mode_value: str) -> str:
             return _compose_modal_mode_payload(mode_value)
 
+        def _scroll_payload(anchor_id: str) -> dict[str, float]:
+            return {"anchor": anchor_id, "ts": time.time()}
+
         if trigger == "store-project-tile-focus":
             perf_mode = _resolve_focus_mode(focus_data, perf_mode)
             if perf_mode == "stringing" and not config.enable_stringing:
                 perf_mode = "erection"
-            return "erections", _payload(perf_mode)
+            return "erections", _payload(perf_mode), dash.no_update
         if trigger == "project-modal-btn-erections":
-            return "erections", _payload(perf_mode)
+            if not btn_e:
+                raise PreventUpdate
+            return (
+                "erections",
+                _payload(perf_mode),
+                _scroll_payload("project-modal-anchor-erections"),
+            )
         if trigger == "project-modal-btn-stringing":
             if not config.enable_stringing:
                 raise PreventUpdate
-            return "stringing", _payload(perf_mode)
+            if not btn_s:
+                raise PreventUpdate
+            return (
+                "stringing",
+                _payload(perf_mode),
+                _scroll_payload("project-modal-anchor-stringing"),
+            )
         if trigger == "project-modal-btn-performance-erection":
-            return "performance", _payload("erection")
+            if not btn_perf_e:
+                raise PreventUpdate
+            return (
+                "performance",
+                _payload("erection"),
+                _scroll_payload("project-modal-anchor-performance"),
+            )
         if trigger == "project-modal-btn-performance-stringing":
+            if not btn_perf_s:
+                raise PreventUpdate
             target_mode = "stringing" if config.enable_stringing else "erection"
-            return "performance", _payload(target_mode)
-        return (current_section or "erections"), _payload(perf_mode)
+            return (
+                "performance",
+                _payload(target_mode),
+                _scroll_payload("project-modal-anchor-performance"),
+            )
+        return (current_section or "erections"), _payload(perf_mode), dash.no_update
 
     @app.callback(
         Output("project-modal-section-erections", "is_open"),
