@@ -8950,7 +8950,8 @@ def register_callbacks(
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
         kv_list = _normalize_str_list(_default_stringing_kv_values())
-        method_list = _normalize_str_list(_method_filters_for_scope(stringing_scope), lower=True)
+        deployment_scope = _normalize_deployment_filter(stringing_scope)
+        method_list = _normalize_str_list(_method_filters_for_scope(deployment_scope), lower=True)
 
         def _project_summary_for_mode(mode_value: str, *, is_stringing: bool) -> dict[str, str]:
             kv_payload = kv_list if is_stringing else []
@@ -8966,7 +8967,7 @@ def register_callbacks(
                     method_values=method_payload,
                     kv_list=kv_payload,
                     method_list=method_payload,
-                    deployment_filter=stringing_scope if is_stringing else "all",
+                    deployment_filter=deployment_scope if is_stringing else "all",
                 )
             except Exception:
                 LOGGER.exception(
@@ -9226,7 +9227,7 @@ def register_callbacks(
                         {"label": "TSE", "value": "tse"},
                         {"label": "Hotline", "value": "hotline"},
                     ],
-                    value="all",
+                    value=deployment_scope,
                     class_name="segment",
                     label_class_name="segment-label",
                     label_checked_class_name="segment-label--active",
@@ -9265,7 +9266,7 @@ def register_callbacks(
                             {"label": "TSE", "value": "tse"},
                             {"label": "Hotline", "value": "hotline"},
                         ],
-                        value="all",
+                        value=deployment_scope,
                     ),
                 ],
                 style={"display": "none"},
