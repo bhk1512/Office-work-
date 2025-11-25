@@ -1267,6 +1267,7 @@ def _build_scope_meta_payload(
     method_list: list[str],
     deployment_filter: str | None = None,
 ) -> dict[str, Any]:
+    normalized_scope = _normalize_deployment_filter(deployment_filter)
     frames, months_ts, days_factor = _build_scope_frames(
         eff_mode,
         project_list=project_list,
@@ -1275,7 +1276,7 @@ def _build_scope_meta_payload(
         quick_range=quick_range,
         kv_values=kv_values,
         method_values=method_values,
-        deployment_filter=deployment_filter,
+        deployment_filter=normalized_scope,
     )
     scope_keys = {name: _remember_scope_frame(frame) for name, frame in frames.items()}
     rows_meta = {name: int(len(frame.index)) for name, frame in frames.items()}
@@ -1287,7 +1288,7 @@ def _build_scope_meta_payload(
         "quick_range": quick_range,
         "kv": kv_list,
         "methods": method_list,
-        "stringing_scope": _normalize_deployment_filter(deployment_filter),
+        "stringing_scope": normalized_scope,
     }
     signature = hashlib.sha1(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1305,13 +1306,14 @@ def _build_scope_meta_payload(
             "quick_range": quick_range,
             "kv": kv_list,
             "methods": method_list,
-            "stringing_scope": _normalize_deployment_filter(deployment_filter),
+            "stringing_scope": normalized_scope,
         },
     }
 
 
 def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame]:
     selected = meta.get("selected") or {}
+    normalized_scope = _normalize_deployment_filter(selected.get("stringing_scope"))
     scopes, _, _ = _build_scope_frames(
         _normalize_mode(meta.get("mode")),
         project_list=selected.get("projects", []),
@@ -1320,7 +1322,7 @@ def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame
         quick_range=selected.get("quick_range"),
         kv_values=selected.get("kv", []),
         method_values=selected.get("methods", []),
-        deployment_filter=selected.get("stringing_scope"),
+        deployment_filter=normalized_scope,
     )
     for name, frame in scopes.items():
         cache_key = (meta.get("scopes") or {}).get(name)
@@ -3006,6 +3008,7 @@ def register_callbacks(
             unit_short = "KM" if is_stringing else "MT"
             prod_unit = "KM/month" if is_stringing else "MT/day"
             meta_signature = scope_meta.get("signature") or "nosig"
+            selected = scope_meta.get("selected") or {}
 
             scoped_full = _scope_frame_from_store(scope_meta, "full").copy()
             scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
@@ -3034,6 +3037,42 @@ def register_callbacks(
             total_lost = components["total_lost"]
             total_potential = components["total_potential"]
             balance_value = components["balance_value"]
+            balance_reference_delivered = total_delivered
+            if is_stringing:
+                deployment_scope = _normalize_deployment_filter(selected.get("stringing_scope"))
+                if deployment_scope != "all":
+                    try:
+                        frames_all, _, _ = _build_scope_frames(
+                            "stringing",
+                            project_list=selected.get("projects", []),
+                            gang_list=selected.get("gangs", []),
+                            months_value=selected.get("months", []),
+                            quick_range=selected.get("quick_range"),
+                            kv_values=selected.get("kv", []),
+                            method_values=selected.get("methods", []),
+                            deployment_filter="all",
+                        )
+                        scoped_full_all = frames_all.get("full", pd.DataFrame()).copy()
+                        scoped_all_all = frames_all.get("project_gang", pd.DataFrame()).copy()
+                    except Exception:
+                        scoped_full_all = pd.DataFrame()
+                        scoped_all_all = pd.DataFrame()
+                    if not (scoped_full_all.empty and scoped_all_all.empty):
+                        scope_meta_all = dict(scope_meta)
+                        scope_meta_all["selected"] = dict(selected)
+                        scope_meta_all["selected"]["stringing_scope"] = "all"
+                        all_components = _compute_mode_summary_components(
+                            scoped_full=scoped_full_all,
+                            scoped_all=scoped_all_all,
+                            months_ts=months_ts,
+                            days_factor=days_factor,
+                            metric_col=metric_col,
+                            is_stringing=True,
+                            meta_signature=f"{meta_signature}::all-deployments",
+                            cache_key=None,
+                            scope_meta=scope_meta_all,
+                        )
+                        balance_reference_delivered = all_components["total_delivered"]
 
             def _collect_project_labels(frame: pd.DataFrame | None) -> list[str]:
                 if not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -3139,7 +3178,10 @@ def register_callbacks(
                 done_txt = _format_summary_value(total_delivered, unit_short)
                 if planned_total_value > 0:
                     total_txt = f"{planned_total_value:.1f} {unit_short}"
-                    balance_txt = _format_summary_value(max(planned_total_value - total_delivered, 0.0), unit_short)
+                    balance_txt = _format_summary_value(
+                        max(planned_total_value - balance_reference_delivered, 0.0),
+                        unit_short,
+                    )
                 elif has_plan_scope:
                     total_txt = "0.0 KM"
                     balance_txt = "\u2014"
@@ -6424,10 +6466,16 @@ def register_callbacks(
             value = "\u2014" if tse_value is None else f"{int(tse_value):,}"
             return [_row("No. of TSE", value)]
 
+        totals_row_label = f"{total_unit} This Month"
+        totals_row_value = totals_display
+        if is_stringing:
+            totals_row_label = "F/S Total Planned / Done / Balance"
+            totals_row_value = totals_focus_display
+
         rows = [
             _row("Prod This Month", _fmt_prod(prod_current_value)),
             _row("Historical Avg", _fmt_prod(prod_overall_value)),
-            _row(f"{total_unit} This Month", totals_display),
+            _row(totals_row_label, totals_row_value),
         ]
 
         po_plan = _optional_number(po_planned_value)
@@ -6731,10 +6779,60 @@ def register_callbacks(
                 range_end = (today + pd.offsets.MonthEnd(0)).normalize()
             current_month_ts = range_end.to_period("M").to_timestamp()
 
+            def _stringing_delivery_stats(
+                source: pd.DataFrame,
+            ) -> tuple[pd.DataFrame, pd.Series, bool]:
+                delivered_series = pd.Series(dtype=float)
+                if not isinstance(source, pd.DataFrame) or source.empty:
+                    return pd.DataFrame(columns=["delivered_km"]), delivered_series, False
+                proj_col = "project_name" if "project_name" in source.columns else (
+                    "project" if "project" in source.columns else None
+                )
+                if proj_col is None:
+                    return pd.DataFrame(columns=["delivered_km"]), delivered_series, True
+                scoped_norm = source.copy()
+                if proj_col != "project_name":
+                    scoped_norm = scoped_norm.rename(columns={proj_col: "project_name"})
+                scoped_norm["project_name"] = scoped_norm["project_name"].astype(str).str.strip()
+                completion_rows = _filter_completion_rows(scoped_norm, completion_column="fs_complete_date")
+                delivered_df = pd.DataFrame(columns=["delivered_km"])
+                if not completion_rows.empty and "length_km" in completion_rows.columns:
+                    delivered_df = (
+                        completion_rows.groupby("project_name")["length_km"]
+                        .sum()
+                        .rename("delivered_km")
+                        .to_frame()
+                    )
+                    completion_rows = completion_rows.copy()
+                    completion_rows["month"] = pd.to_datetime(completion_rows["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                    current_rows = completion_rows[completion_rows["month"] == current_month_ts]
+                    if not current_rows.empty:
+                        delivered_series = current_rows.groupby("project_name")["length_km"].sum()
+                elif "daily_km" in scoped_norm.columns:
+                    delivered_df = (
+                        scoped_norm.groupby("project_name")["daily_km"].sum().rename("delivered_km").to_frame()
+                    )
+                    scoped_month = scoped_norm.copy()
+                    if "month" not in scoped_month.columns and "date" in scoped_month.columns:
+                        scoped_month["date"] = pd.to_datetime(scoped_month["date"], errors="coerce")
+                        scoped_month = scoped_month.dropna(subset=["date"])
+                        scoped_month["month"] = scoped_month["date"].dt.to_period("M").dt.to_timestamp()
+                    elif "month" in scoped_month.columns:
+                        scoped_month["month"] = pd.to_datetime(scoped_month["month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                    if "month" in scoped_month.columns:
+                        scoped_current = scoped_month[scoped_month["month"] == current_month_ts]
+                        if not scoped_current.empty:
+                            delivered_series = (
+                                scoped_current.groupby("project_name")["daily_km"].sum()
+                            )
+                else:
+                    delivered_df = pd.DataFrame(columns=["delivered_km"])
+                return delivered_df, delivered_series, False
+
             # Delivered KM from per-day stringing dataset
             df_day = data_selector.select("stringing")
-            scoped = apply_filters(df_day, project_list, months_ts, [])
-            scoped = _filter_frame_for_deployment(scoped, deployment_scope)
+            scoped_base = apply_filters(df_day, project_list, months_ts, [])
+            scoped = _filter_frame_for_deployment(scoped_base, deployment_scope)
             try:
                 scope_frames, _, _ = _build_scope_frames(
                     "stringing",
@@ -6749,50 +6847,10 @@ def register_callbacks(
                 scope_full = scope_frames.get("full", pd.DataFrame()).copy()
             except Exception:
                 scope_full = pd.DataFrame()
-            delivered_km_current_series = pd.Series(dtype=float)
-            if isinstance(scoped, pd.DataFrame) and not scoped.empty:
-                proj_col = "project_name" if "project_name" in scoped.columns else ("project" if "project" in scoped.columns else None)
-                if proj_col is None:
-                    return _empty_pch_items("Missing project information in the dataset."), None
-                scoped_norm = scoped.copy()
-                if proj_col != "project_name":
-                    scoped_norm = scoped_norm.rename(columns={proj_col: "project_name"})
-                scoped_norm["project_name"] = scoped_norm["project_name"].astype(str).str.strip()
-                completion_rows = _filter_completion_rows(scoped_norm, completion_column="fs_complete_date")
-                if not completion_rows.empty and "length_km" in completion_rows.columns:
-                    delivered_km_by_project = (
-                        completion_rows.groupby("project_name")["length_km"]
-                        .sum()
-                        .rename("delivered_km")
-                        .to_frame()
-                    )
-                    completion_rows = completion_rows.copy()
-                    completion_rows["month"] = pd.to_datetime(completion_rows["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-                    current_rows = completion_rows[completion_rows["month"] == current_month_ts]
-                    if not current_rows.empty:
-                        delivered_km_current_series = current_rows.groupby("project_name")["length_km"].sum()
-                elif "daily_km" in scoped_norm.columns:
-                    delivered_km_by_project = (
-                        scoped_norm.groupby("project_name")["daily_km"].sum().rename("delivered_km").to_frame()
-                    )
-                    scoped_month = scoped_norm.copy()
-                    if "month" not in scoped_month.columns and "date" in scoped_month.columns:
-                        scoped_month["date"] = pd.to_datetime(scoped_month["date"], errors="coerce")
-                        scoped_month = scoped_month.dropna(subset=["date"])
-                        scoped_month["month"] = scoped_month["date"].dt.to_period("M").dt.to_timestamp()
-                    elif "month" in scoped_month.columns:
-                        scoped_month["month"] = pd.to_datetime(scoped_month["month"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-                    if "month" in scoped_month.columns:
-                        scoped_current = scoped_month[scoped_month["month"] == current_month_ts]
-                        if not scoped_current.empty:
-                            delivered_km_current_series = (
-                                scoped_current.groupby("project_name")["daily_km"].sum()
-                            )
-                else:
-                    delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
-            else:
-                delivered_km_by_project = pd.DataFrame(columns=["delivered_km"])
-                delivered_km_current_series = pd.Series(dtype=float)
+            delivered_km_by_project, delivered_km_current_series, missing_project_info = _stringing_delivery_stats(scoped)
+            if missing_project_info:
+                return _empty_pch_items("Missing project information in the dataset."), None
+            _, delivered_km_current_series_all, _ = _stringing_delivery_stats(scoped_base)
 
             plan_union, plan_current_lookup = _stringing_plan_totals_by_project(
                 months_ts,
@@ -6990,6 +7048,8 @@ def register_callbacks(
 
             delivered_current_norm_map: dict[str, float] = {}
             delivered_current_compact_map: dict[str, float] = {}
+            delivered_current_norm_map_all: dict[str, float] = {}
+            delivered_current_compact_map_all: dict[str, float] = {}
             planned_current_norm_map: dict[str, float] = {}
             planned_current_compact_map: dict[str, float] = {}
             prod_current_norm_map: dict[str, float] = {}
@@ -7022,6 +7082,10 @@ def register_callbacks(
 
             if isinstance(delivered_km_current_series, pd.Series) and not delivered_km_current_series.empty:
                 delivered_current_norm_map, delivered_current_compact_map = _build_lookup_maps(delivered_km_current_series.to_dict())
+            if isinstance(delivered_km_current_series_all, pd.Series) and not delivered_km_current_series_all.empty:
+                delivered_current_norm_map_all, delivered_current_compact_map_all = _build_lookup_maps(
+                    delivered_km_current_series_all.to_dict()
+                )
             if isinstance(planned_km_current_series, pd.Series) and not planned_km_current_series.empty:
                 planned_current_norm_map, planned_current_compact_map = _build_lookup_maps(planned_km_current_series.to_dict())
 
@@ -7172,6 +7236,7 @@ def register_callbacks(
                 prod_current_values: list[float] = []
                 prod_overall_values: list[float] = []
                 delivered_month_total = 0.0
+                delivered_month_total_all = 0.0
                 planned_month_total = 0.0
                 planned_value_count = 0
                 gangs_total = 0
@@ -7207,6 +7272,14 @@ def register_callbacks(
                     delivered_month_val = _lookup_with_keys(norm_keys, compact_keys, delivered_current_norm_map, delivered_current_compact_map)
                     if delivered_month_val is not None:
                         delivered_month_total += float(delivered_month_val)
+                    delivered_month_val_all = _lookup_with_keys(
+                        norm_keys,
+                        compact_keys,
+                        delivered_current_norm_map_all,
+                        delivered_current_compact_map_all,
+                    )
+                    if delivered_month_val_all is not None:
+                        delivered_month_total_all += float(delivered_month_val_all)
 
                     planned_month_val = _lookup_with_keys(norm_keys, compact_keys, planned_current_norm_map, planned_current_compact_map)
                     if has_plan and planned_month_val is not None:
@@ -7272,9 +7345,10 @@ def register_callbacks(
                
                 projects_label = f"Projects: {', '.join(project_codes)}" if project_codes else f"Projects: {project_count}"
                 km_delivered_label = round(delivered_month_total, 1)
+                km_delivered_all_label = round(delivered_month_total_all, 1)
                 if planned_value_count:
                     km_planned_value = round(planned_month_total, 1)
-                    km_balance_value = round(max(km_planned_value - km_delivered_label, 0.0), 1)
+                    km_balance_value = round(max(km_planned_value - km_delivered_all_label, 0.0), 1)
                     planned_display = f"{km_planned_value:.1f}"
                     balance_display = f"{km_balance_value:.1f}"
                 else:
