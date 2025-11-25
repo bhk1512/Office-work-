@@ -664,14 +664,73 @@ def build_trace_modal() -> dbc.Modal:
 def build_project_tile_modal() -> dbc.Modal:
     """Large modal that mirrors key home-screen sections for a single project."""
 
-    summary_card = dbc.Card(
-        dbc.CardBody(
+    summary_placeholder = html.Div(
+        [
+            html.Div("Select a project tile to view its detailed view.", className="mb-2"),
             html.Div(
-                "Select a project tile to view its detailed view.",
-                id="project-modal-summary",
-                className="project-empty",
-            )
-        ),
+                [
+                    dbc.Button(
+                        "Show Completed Towers",
+                        id="project-modal-btn-erections",
+                        color="primary",
+                        size="lg",
+                        className="modal-section-btn",
+                        n_clicks=0,
+                    ),
+                    dbc.Button(
+                        "Show Gang Performance",
+                        id="project-modal-btn-performance-erection",
+                        color="primary",
+                        size="lg",
+                        className="modal-section-btn",
+                        n_clicks=0,
+                    ),
+                ],
+                className="d-flex gap-2 flex-wrap",
+                style={"display": "none"},
+            ),
+            html.Div(
+                [
+                    dbc.Button(
+                        "Show Completed Stringing",
+                        id="project-modal-btn-stringing",
+                        color="primary",
+                        size="lg",
+                        className="modal-section-btn",
+                        n_clicks=0,
+                    ),
+                    dbc.Button(
+                        "Show Gang Performance",
+                        id="project-modal-btn-performance-stringing",
+                        color="primary",
+                        size="lg",
+                        className="modal-section-btn",
+                        n_clicks=0,
+                    ),
+                ],
+                className="d-flex gap-2 flex-wrap",
+                style={"display": "none"},
+            ),
+            html.Div(
+                dbc.RadioItems(
+                    id="project-modal-stringing-scope",
+                    options=[
+                        {"label": "All", "value": "all"},
+                        {"label": "Manual", "value": "manual"},
+                        {"label": "TSE", "value": "tse"},
+                        {"label": "Hotline", "value": "hotline"},
+                    ],
+                    value="all",
+                ),
+                style={"display": "none"},
+            ),
+        ],
+        id="project-modal-summary",
+        className="project-empty",
+    )
+
+    summary_card = dbc.Card(
+        dbc.CardBody(summary_placeholder),
         className="shadow-sm mb-4",
     )
 

@@ -3676,20 +3676,46 @@ def register_callbacks(
 
     @app.callback(
         Output("f-month", "options"),
-        Input("store-filtered-scope", "data"),
+        Input("f-project", "value"),
+        Input("f-gang", "value"),
+        Input("f-quick-range", "value"),
+        Input("store-stringing-scope", "data"),
     )
-    def update_month_options(scope_meta: dict[str, Any] | None) -> list[dict[str, str]]:
+    def update_month_options(
+        projects: Sequence[str] | None,
+        gangs: Sequence[str] | None,
+        quick_range: str | None,
+        stringing_scope: str | None,
+    ) -> list[dict[str, str]]:
+        project_list = _normalize_str_list(_ensure_list(projects))
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        kv_values = _default_stringing_kv_values()
+        method_values = _method_filters_for_scope(stringing_scope)
+
         try:
-            scope = _scope_frame_from_store(scope_meta, "project_gang")
+            frames, _, _ = _build_scope_frames(
+                "erection",
+                project_list=project_list,
+                gang_list=gang_list,
+                months_value=[],
+                quick_range=quick_range,
+                kv_values=kv_values,
+                method_values=method_values,
+                deployment_filter=stringing_scope,
+            )
+            scope = frames.get("project_gang", pd.DataFrame())
             if scope.empty or "month" not in scope.columns:
                 return []
-            months = sorted(pd.to_datetime(scope["month"].dropna().unique()))
-            quick_range = ((scope_meta or {}).get("selected") or {}).get("quick_range")
+            months_series = scope["month"].dropna().unique()
+            base_months = pd.to_datetime(months_series, errors="coerce").dropna().tolist()
+            months = sorted(base_months)
             if quick_range:
                 allowed = set(resolve_months(None, quick_range))
                 months = [m for m in months if m in allowed]
             if not months:
-                months = sorted(pd.to_datetime(scope["month"].dropna().unique()))
+                months = sorted(base_months)
+            if not months:
+                return []
             return [{"label": m.strftime("%b %Y"), "value": m.strftime("%Y-%m")} for m in months]
         except Exception as exc:
             LOGGER.exception("Failed to build month options: %s", exc)
@@ -3765,15 +3791,11 @@ def register_callbacks(
         Output("f-quick-range", "value"),
         Input("btn-reset-filters", "n_clicks"),
         Input("link-clear-quick-range", "n_clicks"),
-        Input("f-month", "value"),
-        State("f-quick-range", "value"),
         prevent_initial_call=True,
     )
     def sync_quick_range_value(
         reset_clicks: int | None,
         clear_quick_clicks: int | None,
-        months: Sequence[str] | str | None,
-        quick_range_value: str | None,
     ) -> Any:
         ctx = dash.callback_context
         if not ctx.triggered:
@@ -3782,11 +3804,6 @@ def register_callbacks(
 
         if trigger_id in {"btn-reset-filters", "link-clear-quick-range"}:
             return None
-
-        if trigger_id == "f-month":
-            month_list = _ensure_list(months)
-            if month_list and quick_range_value:
-                return None
         return dash.no_update
 
 
@@ -8839,6 +8856,71 @@ def register_callbacks(
             return payload, True, history_payload
         raise PreventUpdate
 
+    def _project_modal_summary_placeholder() -> html.Div:
+        return html.Div(
+            [
+                html.Div("Select a project tile to view its detailed view.", className="mb-2"),
+                html.Div(
+                    [
+                        dbc.Button(
+                            "Show Completed Towers",
+                            id="project-modal-btn-erections",
+                            color="primary",
+                            size="lg",
+                            className="modal-section-btn",
+                            n_clicks=0,
+                        ),
+                        dbc.Button(
+                            "Show Gang Performance",
+                            id="project-modal-btn-performance-erection",
+                            color="primary",
+                            size="lg",
+                            className="modal-section-btn",
+                            n_clicks=0,
+                        ),
+                    ],
+                    className="d-flex gap-2 flex-wrap",
+                    style={"display": "none"},
+                ),
+                html.Div(
+                    [
+                        dbc.Button(
+                            "Show Completed Stringing",
+                            id="project-modal-btn-stringing",
+                            color="primary",
+                            size="lg",
+                            className="modal-section-btn",
+                            n_clicks=0,
+                        ),
+                        dbc.Button(
+                            "Show Gang Performance",
+                            id="project-modal-btn-performance-stringing",
+                            color="primary",
+                            size="lg",
+                            className="modal-section-btn",
+                            n_clicks=0,
+                        ),
+                    ],
+                    className="d-flex gap-2 flex-wrap",
+                    style={"display": "none"},
+                ),
+                html.Div(
+                    dbc.RadioItems(
+                        id="project-modal-stringing-scope",
+                        options=[
+                            {"label": "All", "value": "all"},
+                            {"label": "Manual", "value": "manual"},
+                            {"label": "TSE", "value": "tse"},
+                            {"label": "Hotline", "value": "hotline"},
+                        ],
+                        value="all",
+                    ),
+                    style={"display": "none"},
+                ),
+            ],
+            className="project-empty",
+        )
+
     @app.callback(
         Output("project-modal-summary", "children"),
         Output("project-modal-title", "children"),
@@ -8856,10 +8938,9 @@ def register_callbacks(
         gangs,
         stringing_scope,
     ):
-        base_message = "Select a project tile to view its detailed view."
         base_title = "Project Deep Dive"
         if not isinstance(focus_data, dict):
-            return base_message, base_title
+            return _project_modal_summary_placeholder(), base_title
 
         project_name = (focus_data.get("project") or "").strip()
         project_display = (focus_data.get("display") or project_name).strip()
@@ -8873,7 +8954,7 @@ def register_callbacks(
             candidate_ids = fallback[:1]
         project_list = _normalize_str_list(candidate_ids)
         if not project_list:
-            return base_message, base_title
+            return _project_modal_summary_placeholder(), base_title
 
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
@@ -9161,6 +9242,44 @@ def register_callbacks(
                     input_class_name="segment-input",
                 ),
             ]
+        else:
+            hidden_controls = html.Div(
+                [
+                    html.Div(
+                        [
+                            dbc.Button(
+                                "Show Completed Stringing",
+                                id="project-modal-btn-stringing",
+                                color="primary",
+                                size="lg",
+                                className="modal-section-btn",
+                                n_clicks=0,
+                            ),
+                            dbc.Button(
+                                "Show Gang Performance",
+                                id="project-modal-btn-performance-stringing",
+                                color="primary",
+                                size="lg",
+                                className="modal-section-btn",
+                                n_clicks=0,
+                            ),
+                        ],
+                        className="d-flex flex-wrap gap-2",
+                    ),
+                    dbc.RadioItems(
+                        id="project-modal-stringing-scope",
+                        options=[
+                            {"label": "All", "value": "all"},
+                            {"label": "Manual", "value": "manual"},
+                            {"label": "TSE", "value": "tse"},
+                            {"label": "Hotline", "value": "hotline"},
+                        ],
+                        value="all",
+                    ),
+                ],
+                style={"display": "none"},
+            )
+            cards.append(hidden_controls)
 
         cards: list[dbc.Col] = [
             _summary_card(
