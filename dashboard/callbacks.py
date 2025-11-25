@@ -3603,22 +3603,13 @@ def register_callbacks(
     @app.callback(
         Output("f-stringing-scope", "value"),
         Output("project-modal-stringing-scope", "value"),
-        Input("store-stringing-scope", "data"),
-        State("f-stringing-scope", "value"),
-        State("project-modal-stringing-scope", "value"),
-        prevent_initial_call=False,
+        Input("btn-reset-filters", "n_clicks"),
+        prevent_initial_call=True,
     )
-    def _broadcast_stringing_scope(
-        scope_value: str | None,
-        home_value: str | None,
-        modal_value: str | None,
-    ) -> tuple[Any, Any]:
-        normalized = _normalize_deployment_filter(scope_value)
-        home_current = _normalize_deployment_filter(home_value)
-        modal_current = _normalize_deployment_filter(modal_value)
-        home_out = normalized if normalized != home_current else dash.no_update
-        modal_out = normalized if normalized != modal_current else dash.no_update
-        return home_out, modal_out
+    def _reset_stringing_scope_controls(reset_clicks: int | None) -> tuple[Any, Any]:
+        if not reset_clicks:
+            raise PreventUpdate
+        return "all", "all"
 
 
     @app.callback(
@@ -5638,7 +5629,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("store-stringing-scope", "data"),
+        Input("project-modal-stringing-scope", "value"),
         Input("store-project-modal-performance-mode", "data"),
         prevent_initial_call=True,
     )
@@ -5697,7 +5688,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("store-stringing-scope", "data"),
+        Input("project-modal-stringing-scope", "value"),
         Input("store-project-modal-performance-mode", "data"),
         prevent_initial_call=True,
     )
@@ -5806,7 +5797,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("store-stringing-scope", "data"),
+        Input("project-modal-stringing-scope", "value"),
         Input("store-project-modal-performance-mode", "data"),
     )
     def _update_project_modal_performance(
@@ -6028,7 +6019,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("store-stringing-scope", "data"),
+        Input("project-modal-stringing-scope", "value"),
     )
     def _update_modal_stringing_table(
         start_date,
@@ -8928,7 +8919,7 @@ def register_callbacks(
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
-        Input("store-stringing-scope", "data"),
+        Input("project-modal-stringing-scope", "value"),
         prevent_initial_call=True,
     )
     def _render_project_modal_summary(
