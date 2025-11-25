@@ -1665,6 +1665,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-project-modal-focus-cache", data=None),
             dcc.Store(id="store-project-modal-section", data="erections"),
             dcc.Store(id="store-project-modal-click-meta", data=None),
+            dcc.Store(id="store-project-modal-scope", data=None),
             dcc.Store(id="project-modal-selected-gang", data=None),
             dcc.Store(id="store-project-modal-performance-mode", data="erection|0"),
             dcc.Store(id="store-project-tile-meta", data={}),

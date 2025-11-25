@@ -91,6 +91,10 @@ def get_stringing_responsibilities_error() -> str | None:
     return DATA_STORE.get_stringing_responsibilities_error()
 
 
+def get_stringing_tse_lookup() -> tuple[dict[str, int], dict[str, str]]:
+    return DATA_STORE.get_stringing_tse_lookup()
+
+
 def set_df_day(df: pd.DataFrame) -> None:
     """Compatibility shim retained for the pipeline runner."""
 
@@ -418,6 +422,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
         duckdb_lock=DATA_STORE.get_duckdb_lock(),
         stringing_data_provider=get_df_stringing_day,
         stringing_compiled_provider=get_df_stringing_compiled,
+        stringing_tse_lookup_provider=get_stringing_tse_lookup,
         project_info_provider=get_df_projinfo,
         project_baseline_provider=get_project_baselines,
         responsibilities_provider=get_responsibilities_df,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, replace
 from threading import RLock
-from typing import Tuple
+from typing import Mapping, Tuple
 
 import duckdb
 import numpy as np
@@ -23,11 +23,16 @@ from .data_loader import (
     load_stringing_daily as _load_stringing_daily,
     load_stringing_compiled_raw as _load_stringing_compiled_raw,
 )
-from .plan_utils import compute_stringing_completion_pairs
+from .plan_utils import (
+    compact_project_key,
+    compute_stringing_completion_pairs,
+    normalize_lower,
+)
 from .services.responsibilities import (
     ResponsibilitiesSnapshot,
     load_responsibilities_snapshot,
 )
+from .stringing import build_tse_lookup_from_df
 
 LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +100,8 @@ class AppDataStore:
         self._stringing_version = 0
         self._duckdb_conn = self._create_duckdb_connection()
         self._duckdb_lock = RLock()
+        self._stringing_tse_canonical: dict[str, int] = {}
+        self._stringing_tse_alias: dict[str, str] = {}
 
     def bootstrap(self, config: AppConfig | None = None) -> Tuple[pd.DataFrame, str]:
         """Hydrate the cache from disk and return (daily_df, last_loaded_text)."""
@@ -204,6 +211,13 @@ class AppDataStore:
         with self._lock:
             return self._stringing_responsibilities.error
 
+    def get_stringing_tse_lookup(self) -> tuple[dict[str, int], dict[str, str]]:
+        with self._lock:
+            return (
+                dict(self._stringing_tse_canonical),
+                dict(self._stringing_tse_alias),
+            )
+
     def get_duckdb_connection(self) -> duckdb.DuckDBPyConnection:
         return self._duckdb_conn
 
@@ -215,6 +229,17 @@ class AppDataStore:
     def _maybe_preload_stringing(self, config: AppConfig) -> None:
         if not config.enable_stringing:
             return
+        compiled_df: pd.DataFrame | None = None
+        try:
+            compiled_df = _load_stringing_compiled_raw(config)
+        except Exception as exc:
+            LOGGER.warning("Stringing compiled preload failed: %s", exc)
+            compiled_df = None
+        canonical_map: dict[str, int] = {}
+        alias_map: dict[str, str] = {}
+        if isinstance(compiled_df, pd.DataFrame):
+            canonical_map, alias_map = build_tse_lookup_from_df(compiled_df)
+        self._update_stringing_tse_lookup(canonical_map, alias_map)
         try:
             stringing_df = _load_stringing_daily(config)
         except Exception as exc:
@@ -234,11 +259,6 @@ class AppDataStore:
         self.set_stringing(stringing_df)
         LOGGER.info("Preloaded stringing daily rows: %d", len(stringing_df))
 
-        try:
-            compiled_df = _load_stringing_compiled_raw(config)
-        except Exception as exc:
-            LOGGER.warning("Stringing compiled preload failed: %s", exc)
-            return
         if isinstance(compiled_df, pd.DataFrame):
             self.set_stringing_compiled(compiled_df)
             LOGGER.info("Preloaded stringing compiled rows: %d", len(compiled_df))
@@ -295,6 +315,7 @@ class AppDataStore:
         if frame.empty:
             frame["line_kv"] = pd.Series(dtype="string")
             frame["method_norm"] = pd.Series(dtype="string")
+            frame["deployment_tse_flag"] = pd.Series(dtype=bool)
             return
         source = None
         if "project_name" in frame.columns:
@@ -315,6 +336,66 @@ class AppDataStore:
             frame["method_norm"] = method_norm.mask(method_norm.isin({"", "nan", "none"})).astype("string")
         else:
             frame["method_norm"] = pd.Series(pd.NA, index=frame.index, dtype="string")
+        frame["deployment_tse_flag"] = self._compute_tse_mask(frame)
+
+    def _compute_tse_mask(self, frame: pd.DataFrame) -> pd.Series:
+        canonical = self._stringing_tse_canonical
+        alias_map = self._stringing_tse_alias
+        if not canonical and not alias_map:
+            mask = pd.Series(False, index=frame.index, dtype=bool)
+        else:
+            norm_keys = set((canonical or {}).keys())
+            alias_keys = set((alias_map or {}).keys())
+            mask = pd.Series(False, index=frame.index, dtype=bool)
+            candidate_columns = (
+                "project_name",
+                "project",
+                "project_name_display",
+                "Project Name",
+                "project_code",
+                "project_key",
+            )
+
+            def _evaluate(series: pd.Series) -> pd.Series:
+                base = series.astype(str).str.strip()
+                result = pd.Series(False, index=series.index, dtype=bool)
+                if norm_keys:
+                    result = result | base.map(normalize_lower).isin(norm_keys)
+                if alias_keys:
+                    result = result | base.map(compact_project_key).isin(alias_keys)
+                if base.str.contains(" : ").any():
+                    parts = base.str.split(" : ", n=1, expand=True)
+                    for idx in range(min(2, parts.shape[1])):
+                        split_series = parts[idx].str.strip()
+                        if norm_keys:
+                            result = result | split_series.map(normalize_lower).isin(norm_keys)
+                        if alias_keys:
+                            result = result | split_series.map(compact_project_key).isin(alias_keys)
+                return result
+
+            for column in candidate_columns:
+                if column not in frame.columns:
+                    continue
+                mask = mask | _evaluate(frame[column])
+
+        method_series = None
+        if "method_norm" in frame.columns:
+            method_series = frame["method_norm"].astype(str).str.strip().str.lower()
+        elif "method" in frame.columns:
+            method_series = frame["method"].astype(str).str.strip().str.lower()
+        if method_series is not None:
+            mask = mask | method_series.eq("tse")
+
+        return mask.fillna(False)
+
+    def _update_stringing_tse_lookup(
+        self,
+        canonical: Mapping[str, int] | None,
+        aliases: Mapping[str, str] | None,
+    ) -> None:
+        with self._lock:
+            self._stringing_tse_canonical = dict(canonical or {})
+            self._stringing_tse_alias = dict(aliases or {})
 
 
 __all__ = ["AppDataStore", "DatasetMetadata", "DUCKDB_TABLE_ERECTION", "DUCKDB_TABLE_STRINGING"]

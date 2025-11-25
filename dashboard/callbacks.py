@@ -66,7 +66,7 @@ from .plan_utils import (
     infer_project_hint as _infer_project_hint,
     prepare_stringing_plan_frame as _prepare_stringing_plan_frame,
 )
-from .stringing import expand_stringing_to_daily_payout
+from .stringing import expand_stringing_to_daily_payout, build_tse_lookup_from_df
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1148,9 +1148,16 @@ def _filter_frame_with_metadata(frame: pd.DataFrame, metadata: dict[str, Any]) -
 
 
 def _filter_frame_for_deployment(frame: pd.DataFrame, selection: str | None) -> pd.DataFrame:
-    metadata = _build_deployment_metadata(frame, selection)
-    filtered = _filter_frame_with_metadata(frame, metadata)
-    return _filter_frame_by_method(filtered, selection)
+    selection_value = _normalize_deployment_filter(selection)
+    if selection_value == "all" or not isinstance(frame, pd.DataFrame):
+        return frame
+    if "deployment_tse_flag" in frame.columns:
+        tse_mask = frame["deployment_tse_flag"].fillna(False).astype(bool)
+        filtered = frame.loc[tse_mask].copy() if selection_value == "tse" else frame.loc[~tse_mask].copy()
+    else:
+        metadata = _build_deployment_metadata(frame, selection_value)
+        filtered = _filter_frame_with_metadata(frame, metadata)
+    return _filter_frame_by_method(filtered, selection_value)
 
 
 def _filter_frame_by_method(frame: pd.DataFrame, selection: str | None) -> pd.DataFrame:
@@ -1235,9 +1242,10 @@ def _build_scope_frames(
         "project_gang": project_gang_scope,
     }
     if eff_mode == "stringing":
-        reference = _reference_frame_for_deployment(frames)
-        metadata = _build_deployment_metadata(reference, deployment_filter)
-        frames = {name: _filter_frame_with_metadata(frame, metadata) for name, frame in frames.items()}
+        frames = {
+            name: _filter_frame_for_deployment(frame, deployment_filter)
+            for name, frame in frames.items()
+        }
 
     return (
         frames,
@@ -1366,6 +1374,7 @@ def register_callbacks(
     duckdb_lock: RLock | None = None,
     stringing_data_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_compiled_provider: Callable[[], pd.DataFrame] | None = None,
+    stringing_tse_lookup_provider: Callable[[], tuple[dict[str, int], dict[str, str]]] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
@@ -1556,52 +1565,6 @@ def register_callbacks(
 
         return None, completion_keys, load_error, None
 
-    def _build_tse_lookup_from_df(df: pd.DataFrame | None) -> tuple[dict[str, int], dict[str, str]]:
-        canonical: dict[str, int] = {}
-        aliases: dict[str, str] = {}
-        if not isinstance(df, pd.DataFrame) or df.empty or "number_of_tse" not in df.columns:
-            return canonical, aliases
-        project_col = None
-        for candidate in ("project_name", "project", "Project Name", "Project"):
-            if candidate in df.columns:
-                project_col = candidate
-                break
-        if project_col is None:
-            return canonical, aliases
-        work = df[[project_col, "number_of_tse"]].copy()
-        work[project_col] = work[project_col].astype(str).str.strip()
-        work["number_of_tse"] = pd.to_numeric(work["number_of_tse"], errors="coerce")
-        work = work.dropna(subset=[project_col, "number_of_tse"])
-        if work.empty:
-            return canonical, aliases
-
-        def _project_code_token(text: str) -> str | None:
-            match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{3,4})\b", str(text).upper())
-            if not match:
-                return None
-            return f"{match.group(1)}{match.group(2)}"
-
-        grouped = work.groupby(work[project_col])["number_of_tse"].max()
-        for project, raw_value in grouped.items():
-            try:
-                value = int(round(float(raw_value)))
-            except (TypeError, ValueError):
-                continue
-            if pd.isna(value):
-                continue
-            canonical_key = _normalize_lower(project)
-            if not canonical_key:
-                continue
-            if canonical_key not in canonical:
-                canonical[canonical_key] = value
-            compact_key = _compact_project_key(project)
-            if compact_key:
-                aliases.setdefault(compact_key, canonical_key)
-            code_token = _project_code_token(project)
-            if code_token:
-                aliases.setdefault(_compact_project_key(code_token), canonical_key)
-        return canonical, aliases
-
     global _get_stringing_tse_lookup
 
     def _get_stringing_tse_lookup() -> tuple[dict[str, int], dict[str, str]]:
@@ -1609,6 +1572,17 @@ def register_callbacks(
             return {}, {}
 
         def _producer() -> tuple[dict[str, int], dict[str, str]]:
+            if callable(stringing_tse_lookup_provider):
+                try:
+                    lookup = stringing_tse_lookup_provider()
+                except Exception:
+                    lookup = None
+                else:
+                    if isinstance(lookup, tuple) and lookup:
+                        canonical_map = dict(lookup[0] or {})
+                        alias_map = dict(lookup[1] or {})
+                        if canonical_map or alias_map:
+                            return canonical_map, alias_map
             df_compiled = pd.DataFrame()
             if callable(stringing_compiled_provider):
                 try:
@@ -1620,7 +1594,7 @@ def register_callbacks(
                     df_compiled = _load_stringing_compiled_raw(config)
                 except Exception:
                     df_compiled = pd.DataFrame()
-            return _build_tse_lookup_from_df(df_compiled)
+            return build_tse_lookup_from_df(df_compiled)
 
         return _cached_global_result(
             "stringing:tse-lookup",
@@ -3576,14 +3550,12 @@ def register_callbacks(
     @app.callback(
         Output("store-stringing-scope", "data"),
         Input("f-stringing-scope", "value"),
-        Input("project-modal-stringing-scope", "value"),
         Input("btn-reset-filters", "n_clicks"),
         State("store-stringing-scope", "data"),
         prevent_initial_call=False,
     )
     def _sync_stringing_scope_store(
         home_value: str | None,
-        modal_value: str | None,
         reset_clicks: int | None,
         current_value: str | None,
     ) -> str:
@@ -3593,8 +3565,6 @@ def register_callbacks(
             trigger = ctx.triggered[0]["prop_id"].split(".")[0]
             if trigger == "btn-reset-filters":
                 next_value = "all"
-            elif trigger == "project-modal-stringing-scope" and modal_value:
-                next_value = modal_value
             elif trigger == "f-stringing-scope" and home_value:
                 next_value = home_value
         return _normalize_deployment_filter(next_value)
@@ -3603,13 +3573,29 @@ def register_callbacks(
     @app.callback(
         Output("f-stringing-scope", "value"),
         Output("project-modal-stringing-scope", "value"),
+        Input("store-stringing-scope", "data"),
         Input("btn-reset-filters", "n_clicks"),
-        prevent_initial_call=True,
+        State("f-stringing-scope", "value"),
+        State("project-modal-stringing-scope", "value"),
+        prevent_initial_call=False,
     )
-    def _reset_stringing_scope_controls(reset_clicks: int | None) -> tuple[Any, Any]:
-        if not reset_clicks:
+    def _sync_stringing_scope_controls(
+        scope_value: str | None,
+        reset_clicks: int | None,
+        home_value: str | None,
+        modal_value: str | None,
+    ) -> tuple[Any, Any]:
+        ctx = dash.callback_context
+        if not ctx.triggered:
             raise PreventUpdate
-        return "all", "all"
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "btn-reset-filters":
+            return "all", "all"
+        normalized = _normalize_deployment_filter(scope_value)
+        modal_norm = _normalize_deployment_filter(modal_value)
+        if normalized == modal_norm:
+            return dash.no_update, dash.no_update
+        return dash.no_update, normalized
 
 
     @app.callback(
@@ -5622,20 +5608,17 @@ def register_callbacks(
         return idle_data, daily_data, idle_data, daily_data
 
     @app.callback(
-        Output("project-modal-trace-gang", "options"),
-        Output("project-modal-trace-gang", "value"),
+        Output("store-project-modal-scope", "data"),
         Input("store-project-tile-focus", "data"),
-        Input("project-modal-selected-gang", "data"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
         Input("project-modal-stringing-scope", "value"),
         Input("store-project-modal-performance-mode", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call=False,
     )
-    def _project_modal_trace_dropdown(
+    def _sync_project_modal_scope_store(
         focus_data: dict[str, Any] | None,
-        selected_gang: str | None,
         months,
         quick_range,
         gangs,
@@ -5644,14 +5627,14 @@ def register_callbacks(
     ):
         project_name = (focus_data or {}).get("project")
         if not project_name:
-            return [], None
+            return None
         project_code = (focus_data or {}).get("code")
         eff_mode = _modal_mode_from_store(performance_mode, "erection")
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
         kv_values = _default_stringing_kv_values()
         method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
-        scope_meta = _build_project_scope_meta(
+        return _build_project_scope_meta(
             project_name,
             project_code,
             eff_mode,
@@ -5662,6 +5645,25 @@ def register_callbacks(
             method_values,
             stringing_scope,
         )
+
+    @app.callback(
+        Output("project-modal-trace-gang", "options"),
+        Output("project-modal-trace-gang", "value"),
+        Input("store-project-modal-scope", "data"),
+        Input("store-project-tile-focus", "data"),
+        Input("project-modal-selected-gang", "data"),
+        prevent_initial_call=True,
+    )
+    def _project_modal_trace_dropdown(
+        scope_meta: dict[str, Any] | None,
+        focus_data: dict[str, Any] | None,
+        selected_gang: str | None,
+    ):
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return [], None
+        if not isinstance(scope_meta, dict):
+            return [], None
         base_scope = _scope_frame_from_store(scope_meta, "project")
         if base_scope.empty or "gang_name" not in base_scope.columns:
             return [], None
@@ -5681,37 +5683,25 @@ def register_callbacks(
     @app.callback(
         Output("project-modal-tbl-idle-intervals", "data"),
         Output("project-modal-tbl-daily-prod", "data"),
+        Input("store-project-modal-scope", "data"),
         Input("store-project-modal-click-meta", "data"),
         Input("project-modal-trace-gang", "value"),
         Input("project-modal-selected-gang", "data"),
         Input("store-project-tile-focus", "data"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-        Input("f-gang", "value"),
-        Input("project-modal-stringing-scope", "value"),
-        Input("store-project-modal-performance-mode", "data"),
         prevent_initial_call=True,
     )
     def _project_modal_trace_tables(
+        scope_meta,
         modal_meta,
         dropdown_value,
         selected_store_gang,
         focus_data: dict[str, Any] | None,
-        months,
-        quick_range,
-        gangs,
-        stringing_scope,
-        performance_mode,
     ):
+        if not isinstance(scope_meta, dict):
+            raise PreventUpdate
         project_name = (focus_data or {}).get("project")
         if not project_name:
             raise PreventUpdate
-        project_code = (focus_data or {}).get("code")
-        eff_mode = _modal_mode_from_store(performance_mode, "erection")
-        if eff_mode == "stringing" and not config.enable_stringing:
-            eff_mode = "erection"
-        kv_values = _default_stringing_kv_values()
-        method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
         ctx = dash.callback_context
         triggered_id = None
         if ctx.triggered:
@@ -5733,17 +5723,6 @@ def register_callbacks(
             gang_focus = dropdown_selection or (meta_gang if meta_is_chart else None)
         if not gang_focus:
             raise PreventUpdate
-        scope_meta = _build_project_scope_meta(
-            project_name,
-            project_code,
-            eff_mode,
-            months,
-            quick_range,
-            gangs,
-            kv_values,
-            method_values,
-            stringing_scope,
-        )
         idle_data, daily_data = _compute_trace_table_payload(scope_meta, gang_focus)
         return idle_data, daily_data
 
@@ -5792,15 +5771,17 @@ def register_callbacks(
         Output("project-modal-actual-vs-bench", "figure"),
         Output("project-modal-top5", "figure"),
         Output("project-modal-bottom5", "figure"),
+        Input("store-project-modal-scope", "data"),
         Input("store-project-tile-focus", "data"),
         Input("project-modal-topbot-metric", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-        Input("f-gang", "value"),
-        Input("project-modal-stringing-scope", "value"),
-        Input("store-project-modal-performance-mode", "data"),
+        State("f-month", "value"),
+        State("f-quick-range", "value"),
+        State("f-gang", "value"),
+        State("project-modal-stringing-scope", "value"),
+        State("store-project-modal-performance-mode", "data"),
     )
     def _update_project_modal_performance(
+        scope_store: dict[str, Any] | None,
         focus_data: dict[str, Any] | None,
         topbot_metric: str | None,
         months,
@@ -5820,23 +5801,28 @@ def register_callbacks(
 
         project_name = focus_data.get("project")
         project_code = focus_data.get("code")
-        eff_mode = _modal_mode_from_store(performance_mode, "erection")
-        if eff_mode == "stringing" and not config.enable_stringing:
-            eff_mode = "erection"
-        kv_values = _default_stringing_kv_values()
-        method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
-
-        scope_meta = _build_project_scope_meta(
-            project_name,
-            project_code,
-            eff_mode,
-            months,
-            quick_range,
-            gangs,
-            kv_values,
-            method_values,
-            stringing_scope,
-        )
+        scope_meta = None
+        if isinstance(scope_store, dict):
+            selected = (scope_store.get("selected") or {}).get("projects") or []
+            if project_name in selected:
+                scope_meta = scope_store
+        if scope_meta is None:
+            eff_mode = _modal_mode_from_store(performance_mode, "erection")
+            if eff_mode == "stringing" and not config.enable_stringing:
+                eff_mode = "erection"
+            kv_values = _default_stringing_kv_values()
+            method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
+            scope_meta = _build_project_scope_meta(
+                project_name,
+                project_code,
+                eff_mode,
+                months,
+                quick_range,
+                gangs,
+                kv_values,
+                method_values,
+                stringing_scope,
+            )
 
         try:
             (
@@ -9539,6 +9525,16 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+    if config.enable_stringing:
+        try:
+            _load_stringing_plan_snapshot(config)
+        except Exception:
+            LOGGER.warning("Stringing plan cache warm-up failed during init.", exc_info=True)
+        try:
+            _get_stringing_tse_lookup()
+        except Exception:
+            LOGGER.warning("Stringing TSE lookup warm-up failed during init.", exc_info=True)
 
 
 def _stringing_plan_month_series(frame: pd.DataFrame, date_columns: Sequence[str]) -> pd.Series:

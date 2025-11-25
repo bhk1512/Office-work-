@@ -7,12 +7,13 @@ report for required inputs.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Mapping
 import re
 import hashlib
 
 import pandas as pd
 import numpy as np
+from .plan_utils import normalize_lower, compact_project_key
 
 
 # Exact headers expected from the source sheet mapped to snake_case names
@@ -175,6 +176,57 @@ def parse_project_code_from_filename(name: str) -> str:
     if m:
         return f"{m.group(1)}{m.group(2)}"
     return re.sub(r"\s+", " ", str(name)).strip()
+
+
+def build_tse_lookup_from_df(df: pd.DataFrame | None) -> tuple[dict[str, int], dict[str, str]]:
+    """Return canonical + alias maps for TSE project detection."""
+
+    canonical: dict[str, int] = {}
+    aliases: dict[str, str] = {}
+    if not isinstance(df, pd.DataFrame) or df.empty or "number_of_tse" not in df.columns:
+        return canonical, aliases
+
+    project_col = None
+    for candidate in ("project_name", "project", "Project Name", "Project"):
+        if candidate in df.columns:
+            project_col = candidate
+            break
+    if project_col is None:
+        return canonical, aliases
+
+    work = df[[project_col, "number_of_tse"]].copy()
+    work[project_col] = work[project_col].astype(str).str.strip()
+    work["number_of_tse"] = pd.to_numeric(work["number_of_tse"], errors="coerce")
+    work = work.dropna(subset=[project_col, "number_of_tse"])
+    if work.empty:
+        return canonical, aliases
+
+    def _project_code_token(text: str) -> str | None:
+        match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{3,4})\b", str(text).upper())
+        if not match:
+            return None
+        return f"{match.group(1)}{match.group(2)}"
+
+    grouped = work.groupby(work[project_col])["number_of_tse"].max()
+    for project, raw_value in grouped.items():
+        try:
+            value = int(round(float(raw_value)))
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(value):
+            continue
+        canonical_key = normalize_lower(project)
+        if not canonical_key:
+            continue
+        if canonical_key not in canonical:
+            canonical[canonical_key] = value
+        compact_key = compact_project_key(project)
+        if compact_key:
+            aliases.setdefault(compact_key, canonical_key)
+        code_token = _project_code_token(project)
+        if code_token:
+            aliases.setdefault(compact_project_key(code_token), canonical_key)
+    return canonical, aliases
 
 
 def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, object]]:
