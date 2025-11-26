@@ -42,10 +42,6 @@ from .charts import (
     build_empty_responsibilities_figure,
 )
 from .config import AppConfig
-from .data_loader import (
-    load_stringing_compiled_raw as _load_stringing_compiled_raw,
-    _resolve_stringing_microplan_root,
-)
 from .filters import apply_filters, resolve_months
 from .metrics import (
     calc_idle_and_loss,
@@ -66,7 +62,7 @@ from .plan_utils import (
     infer_project_hint as _infer_project_hint,
     prepare_stringing_plan_frame as _prepare_stringing_plan_frame,
 )
-from .stringing import expand_stringing_to_daily_payout, build_tse_lookup_from_df
+from .stringing import expand_stringing_to_daily_payout
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1377,6 +1373,8 @@ def register_callbacks(
     stringing_data_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_compiled_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_tse_lookup_provider: Callable[[], tuple[dict[str, int], dict[str, str]]] | None = None,
+    idle_interval_provider: Callable[[], pd.DataFrame] | None = None,
+    stringing_idle_interval_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
@@ -1425,6 +1423,18 @@ def register_callbacks(
         "erection": callable(responsibilities_provider),
         "stringing": callable(stringing_plan_provider),
     }
+
+    def _idle_table_for_mode(mode_value: str) -> pd.DataFrame:
+        provider = idle_interval_provider
+        if mode_value.strip().lower() == "stringing":
+            provider = stringing_idle_interval_provider
+        if callable(provider):
+            try:
+                table = provider()
+            except Exception:
+                return pd.DataFrame()
+            return table if isinstance(table, pd.DataFrame) else pd.DataFrame()
+        return pd.DataFrame()
 
     def _resolve_monthly_plan_workbook_path(cfg: AppConfig, plan_mode: str) -> Path | None:
         normalized = "stringing" if str(plan_mode).strip().lower() == "stringing" else "erection"
@@ -1484,7 +1494,7 @@ def register_callbacks(
         plan_mode: str = "erection",
         *,
         allow_workbook_fallback: bool = False,
-    ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], str | None, pd.ExcelFile | None]:
+    ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], str | None, None]:
         mode_key = "stringing" if str(plan_mode).strip().lower() == "stringing" else "erection"
         accessor = plan_accessors[mode_key]
         payload: ResponsibilitiesPayload = accessor.load()
@@ -1494,78 +1504,7 @@ def register_callbacks(
             return frame, completion_keys, payload.error, None
 
         completion_keys = set(payload.completion_keys or set())
-        if mode_key == "stringing":
-            plan_frame, _plan_keys, _plan_issues, _plan_index = _load_stringing_plan_snapshot(config)
-            if isinstance(plan_frame, pd.DataFrame) and not plan_frame.empty:
-                return plan_frame.copy(), completion_keys, payload.error, None
-        load_error = payload.error
-        if allow_workbook_fallback and not has_plan_provider.get(mode_key, False):
-            cfg = config
-            workbook_path = _resolve_monthly_plan_workbook_path(cfg, mode_key)
-            plan_title = "Stringing plan" if mode_key == "stringing" else "Micro Plan"
-            if workbook_path is None:
-                LOGGER.warning(
-                    "Monthly plan workbook for '%s' not found near data root '%s'.",
-                    mode_key,
-                    cfg.data_path,
-                )
-                return None, completion_keys, f"No {plan_title} data found in the compiled workbook.", None
-            try:
-                workbook = pd.ExcelFile(workbook_path)
-            except FileNotFoundError:
-                LOGGER.warning("Monthly plan workbook not found: %s", workbook_path)
-                return None, completion_keys, "Compiled workbook not found.", None
-            except Exception as exc:
-                LOGGER.exception("Failed to open monthly plan workbook '%s': %s", workbook_path, exc)
-                return None, completion_keys, "Unable to load monthly plan data.", None
-
-            if mode_key == "stringing":
-                preferred_sheet = getattr(cfg, "stringing_sheet_name", "") or "Stringing Compiled"
-                sheet_name = next(
-                    (
-                        name
-                        for name in workbook.sheet_names
-                        if _normalize_col_key(name) == _normalize_col_key(preferred_sheet)
-                    ),
-                    None,
-                )
-                if not sheet_name:
-                    LOGGER.warning("Stringing sheet missing in workbook '%s'; sheets=%s", workbook_path, workbook.sheet_names)
-                    return (
-                        None,
-                        completion_keys,
-                        "No Stringing plan data found in the compiled workbook.",
-                        workbook,
-                    )
-            else:
-                sheet_name = "MicroPlanResponsibilities"
-                if sheet_name not in workbook.sheet_names:
-                    LOGGER.warning("Sheet '%s' missing in workbook '%s'", sheet_name, workbook_path)
-                    return (
-                        None,
-                        completion_keys,
-                        "No Micro Plan data found in the compiled workbook.",
-                        workbook,
-                    )
-
-            try:
-                df_atomic = pd.read_excel(workbook, sheet_name=sheet_name)
-            except Exception as exc:
-                LOGGER.exception("Failed to load sheet '%s' for %s plan: %s", sheet_name, mode_key, exc)
-                message = (
-                    "Unable to load Stringing plan data."
-                    if mode_key == "stringing"
-                    else "Unable to load Micro Plan data."
-                )
-                return None, completion_keys, message, workbook
-            try:
-                setattr(workbook, "_plan_sheet_name", sheet_name)
-                setattr(workbook, "_plan_workbook_path", Path(workbook_path))
-            except Exception:
-                pass
-            return df_atomic, completion_keys, load_error, workbook
-
-        return None, completion_keys, load_error, None
+        return None, completion_keys, payload.error or "Plan data unavailable.", None
 
     global _get_stringing_tse_lookup
 
@@ -1585,18 +1524,7 @@ def register_callbacks(
                         alias_map = dict(lookup[1] or {})
                         if canonical_map or alias_map:
                             return canonical_map, alias_map
-            df_compiled = pd.DataFrame()
-            if callable(stringing_compiled_provider):
-                try:
-                    df_compiled = stringing_compiled_provider()
-                except Exception:
-                    df_compiled = pd.DataFrame()
-            if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
-                try:
-                    df_compiled = _load_stringing_compiled_raw(config)
-                except Exception:
-                    df_compiled = pd.DataFrame()
-            return build_tse_lookup_from_df(df_compiled)
+            return {}, {}
 
         return _cached_global_result(
             "stringing:tse-lookup",
@@ -1959,81 +1887,13 @@ def register_callbacks(
         _fill_completion_from("paying_out_complete")
         return normalized, completion_pairs, issues
 
-    def _stringing_plan_output_path(cfg: AppConfig) -> Path:
-        base = Path(cfg.data_path).expanduser()
-        candidates: list[Path] = []
-
-        def _push_directory(path_like: Path | str | None) -> None:
-            if not path_like:
-                return
-            path_obj = Path(path_like).expanduser()
-            if path_obj.suffix.lower() == ".xlsx":
-                candidates.append(path_obj)
-            else:
-                candidates.append(path_obj / "StringingCompiled_Output.xlsx")
-
-        if base.is_file():
-            _push_directory(base.parent / "Stringing")
-        else:
-            _push_directory(base.parent / "Stringing")
-            _push_directory(base.parent.parent / "Stringing")
-
-        for rel in getattr(cfg, "stringing_parquet_dirs", ()):
-            try:
-                rel_path = (base / Path(rel)).resolve()
-            except Exception:
-                continue
-            _push_directory(rel_path)
-
-        _push_directory(Path("Parquets") / "Stringing")
-        if base.is_file():
-            _push_directory(base.with_name("StringingCompiled_Output.xlsx"))
-        else:
-            _push_directory(base / "Stringing")
-        _push_directory(Path("Parquets"))
-        _push_directory(Path("."))
-
-        for candidate in candidates:
-            try:
-                candidate.parent.mkdir(parents=True, exist_ok=True)
-                return candidate
-            except Exception:
-                continue
-        fallback = Path("Parquets") / "Stringing" / "StringingCompiled_Output.xlsx"
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        return fallback
-
     def _write_stringing_plan_snapshot(
         cfg: AppConfig,
         frame: pd.DataFrame,
         issues: list[dict[str, str]],
         index_rows: list[dict[str, Any]] | None = None,
     ) -> None:
-        output_path = _stringing_plan_output_path(cfg)
-        try:
-            mode = "a" if output_path.exists() else "w"
-            with pd.ExcelWriter(
-                output_path,
-                engine="openpyxl",
-                mode=mode,
-                if_sheet_exists="replace",
-            ) as writer:
-                responsibilities_frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
-                if responsibilities_frame is None or responsibilities_frame.empty:
-                    responsibilities_frame = pd.DataFrame()
-                for sheet in ("Stringing Plan", "MicroPlanResponsibilities"):
-                    responsibilities_frame.to_excel(writer, sheet_name=sheet, index=False)
-                index_frame = pd.DataFrame(index_rows or [])
-                index_frame.to_excel(writer, sheet_name="MicroPlanIndex", index=False)
-                issues_frame = (
-                    pd.DataFrame(issues)
-                    if issues
-                    else pd.DataFrame([{"issue": "No issues detected"}])
-                )
-                for sheet in ("Stringing Plan Issues", "MicroPlanDataIssues"):
-                    issues_frame.to_excel(writer, sheet_name=sheet, index=False)
-        except Exception as exc:
-            LOGGER.warning("Unable to write Stringing plan snapshot to '%s': %s", output_path, exc)
+        LOGGER.debug("Stringing plan snapshot persistence disabled; using in-memory cache only.")
 
     def _maybe_write_stringing_plan_snapshot(
         cfg: AppConfig,
@@ -2041,13 +1901,7 @@ def register_callbacks(
         issues: list[dict[str, str]],
         index_rows: list[dict[str, Any]] | None = None,
     ) -> None:
-        cache = _STRINGING_PLAN_CACHE
-        ts_now = time.time()
-        last_written = cache.get("last_written", 0.0)
-        if ts_now - last_written < _STRINGING_PLAN_CACHE_TTL_SECONDS:
-            return
-        _write_stringing_plan_snapshot(cfg, frame, issues, index_rows or [])
-        cache["last_written"] = ts_now
+        LOGGER.debug("Skipping stringing plan snapshot write (in-memory only).")
 
     def _load_stringing_plan_snapshot(
         cfg: AppConfig,
@@ -2077,165 +1931,13 @@ def register_callbacks(
             cache["last_written"] = ts_now
             return frame, completion_keys, [], []
 
-        root = _resolve_stringing_microplan_root(config.data_path)
-        frames: list[pd.DataFrame] = []
-        completion_keys: set[tuple[str, str]] = set()
-        issues: list[dict[str, str]] = []
-        index_rows: list[dict[str, Any]] = []
-
-        def _append_index_entry(
-            *,
-            workbook: Path | str | None,
-            sheet_name: str | None,
-            project_code: str,
-            project_label: str,
-            rows_cleaned: int,
-            status: str,
-            error: str,
-            issues_logged: int = 0,
-            input_rows: int = 0,
-            plan_month: str = "",
-        ) -> None:
-            index_rows.append(
-                {
-                    "file_path": str(workbook or ""),
-                    "sheet_name": sheet_name or "",
-                    "project_name": project_label or project_code or "",
-                    "project_key": project_code or project_label or "",
-                    "rows_cleaned": rows_cleaned,
-                    "input_rows": input_rows,
-                    "issues_logged": issues_logged,
-                    "plan_month": plan_month,
-                    "status": status,
-                    "error": error or "",
-                }
-            )
-
-        def _infer_plan_month_from_frame(frame: pd.DataFrame) -> str:
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
-                return ""
-            candidate_columns = (
-                "plan_month",
-                "completion_date",
-                "final_sag_complete",
-                "paying_out_complete",
-                "paying_out_start",
-            )
-            for column in candidate_columns:
-                if column not in frame.columns:
-                    continue
-                series = pd.to_datetime(frame[column], errors="coerce")
-                series = series.dropna()
-                if series.empty:
-                    continue
-                ts = pd.Timestamp(series.iloc[0])
-                return ts.to_period("M").to_timestamp().strftime("%Y-%m")
-            return ""
-
-        if not root.exists():
-            message = f"Stringing micro plan root not found: {root}"
-            LOGGER.warning(message)
-            issues.append({"workbook": str(root), "sheet": "", "issue": "ROOT_NOT_FOUND"})
-            _append_index_entry(
-                workbook=root,
-                sheet_name="",
-                project_code="",
-                project_label="",
-                rows_cleaned=0,
-                status="error",
-                error="ROOT_NOT_FOUND",
-            )
-        else:
-            preferred_sheet = getattr(cfg, "stringing_sheet_name", "")
-            for workbook in sorted(root.rglob("*.xlsx")):
-                if workbook.name.startswith("~$"):
-                    continue
-                project_code, project_label = _infer_project_hint(workbook)
-                try:
-                    xls = pd.ExcelFile(workbook)
-                except Exception as exc:
-                    issues.append({"workbook": str(workbook), "sheet": "", "issue": f"OPEN_FAILED: {exc}"})
-                    _append_index_entry(
-                        workbook=workbook,
-                        sheet_name="",
-                        project_code=project_code,
-                        project_label=project_label,
-                        rows_cleaned=0,
-                        status="error",
-                        error=f"OPEN_FAILED: {exc}",
-                    )
-                    continue
-                sheet_name = next(
-                    (
-                        name
-                        for name in xls.sheet_names
-                        if preferred_sheet and _normalize_col_key(name) == _normalize_col_key(preferred_sheet)
-                    ),
-                    None,
-                )
-                if sheet_name is None:
-                    sheet_name = next((name for name in xls.sheet_names if "string" in name.lower()), None)
-                if sheet_name is None:
-                    issues.append({"workbook": str(workbook), "sheet": "", "issue": "NO_STRINGING_SHEET"})
-                    _append_index_entry(
-                        workbook=workbook,
-                        sheet_name="",
-                        project_code=project_code,
-                        project_label=project_label,
-                        rows_cleaned=0,
-                        status="error",
-                        error="NO_STRINGING_SHEET",
-                    )
-                    continue
-                try:
-                    df_raw = pd.read_excel(workbook, sheet_name=sheet_name, header=1)
-                except Exception as exc:
-                    issues.append({"workbook": str(workbook), "sheet": sheet_name, "issue": f"READ_FAILED: {exc}"})
-                    _append_index_entry(
-                        workbook=workbook,
-                        sheet_name=sheet_name,
-                        project_code=project_code,
-                        project_label=project_label,
-                        rows_cleaned=0,
-                        status="error",
-                        error=f"READ_FAILED: {exc}",
-                    )
-                    continue
-                normalized, _plan_keys, local_issues = _prepare_stringing_plan_frame(
-                    df_raw,
-                    project_hint=project_label or project_code,
-                    source_path=workbook,
-                    sheet_name=sheet_name,
-                )
-                if project_code:
-                    normalized["project_key"] = normalized["project_key"].replace("", project_code)
-                if project_label:
-                    normalized["project_name"] = normalized["project_name"].replace("", project_label)
-                frames.append(normalized)
-                issues.extend(local_issues)
-                plan_month_value = _infer_plan_month_from_frame(normalized)
-                _append_index_entry(
-                    workbook=workbook,
-                    sheet_name=sheet_name,
-                    project_code=project_code,
-                    project_label=project_label,
-                    rows_cleaned=int(len(normalized)),
-                    input_rows=int(len(df_raw)),
-                    status="ok",
-                    error="",
-                    issues_logged=len(local_issues),
-                    plan_month=plan_month_value,
-                )
-
-        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        _write_stringing_plan_snapshot(cfg, frame, issues, index_rows)
-        cache["frame"] = frame.copy()
-        cache["completion"] = set(completion_keys)
-        cache["issues"] = list(issues)
-        cache["index"] = list(index_rows)
+        cache["frame"] = pd.DataFrame()
+        cache["completion"] = set()
+        cache["issues"] = []
+        cache["index"] = []
         cache["stored_at"] = ts_now
         cache["last_written"] = ts_now
-        return frame, completion_keys, issues, index_rows
+        return None, set(), [], []
 
     # --- shared: responsibilities figure + KPIs for a single project selection ---
     def _stringing_length_km_series(frame: pd.DataFrame) -> pd.Series:
@@ -2641,6 +2343,9 @@ def register_callbacks(
             loss_scope = scoped_all.copy()
             history_scope = scoped_all.copy()
 
+        allowed_months = set(month_values) if has_selected_months and month_values else None
+        idle_table = _idle_table_for_mode("stringing" if is_stringing else "erection")
+
         if not loss_scope.empty:
             if "gang_name" in loss_scope.columns:
                 loss_scope = loss_scope.dropna(subset=["gang_name"])
@@ -2754,6 +2459,8 @@ def register_callbacks(
                         loss_max_gap_days=config.loss_max_gap_days,
                         baseline_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
+                        idle_intervals=idle_table,
+                        allowed_months=allowed_months,
                     )
                 else:
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
@@ -2761,6 +2468,8 @@ def register_callbacks(
                         loss_max_gap_days=config.loss_max_gap_days,
                         baseline_mt_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
+                        idle_intervals=idle_table,
+                        allowed_months=allowed_months,
                     )
                 rows.append(
                     {
@@ -2896,11 +2605,6 @@ def register_callbacks(
             if callable(stringing_compiled_provider):
                 try:
                     df_compiled = stringing_compiled_provider()
-                except Exception:
-                    df_compiled = pd.DataFrame()
-            if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
-                try:
-                    df_compiled = _load_stringing_compiled_raw(config)
                 except Exception:
                     df_compiled = pd.DataFrame()
             if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
@@ -3354,6 +3058,69 @@ def register_callbacks(
         prevent_initial_call=True,
     )
 
+    # Global modal: charts or AVP rows drive the shared click store
+    app.clientside_callback(
+        """
+        function(lossClick, topClick, bottomClick, rowTs, tipTs){
+        const C  = window.dash_clientside, NO = C.no_update, ctx = C.callback_context;
+        if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+        const prop   = ctx.triggered[0].prop_id || "";
+        const idPart = prop.split(".")[0];
+        try {
+            const pid = JSON.parse(idPart);
+            if (pid && (pid.type === "global-performance-avp-row" || pid.type === "global-performance-avp-tip")) {
+                if (!prop.endsWith(".n_clicks_timestamp")) return NO;
+                const ts = ctx.triggered[0].value;
+                if (!ts || ts <= 0) return NO;
+                const gang = pid.index;
+                if (!gang) return NO;
+                return { source: "global-performance-actual-vs-bench", gang: String(gang), ts: Date.now() };
+            }
+        } catch(e) { /* ignore pattern parse */ }
+
+        let cd = null;
+        if (idPart === "global-performance-actual-vs-bench") cd = lossClick;
+        else if (idPart === "global-performance-top5")       cd = topClick;
+        else if (idPart === "global-performance-bottom5")    cd = bottomClick;
+        else return NO;
+
+        if (!cd || !cd.points || !cd.points.length) return NO;
+        const pt = cd.points[0];
+        let gang = null;
+        if (typeof pt.y === "string")      gang = pt.y;
+        else if (typeof pt.x === "string") gang = pt.x;
+        else if (pt.customdata){
+            if (typeof pt.customdata === "string")      gang = pt.customdata;
+            else if (Array.isArray(pt.customdata))       gang = pt.customdata.find(v => typeof v === "string") || null;
+            else if (typeof pt.customdata === "object")  gang = pt.customdata.gang || pt.customdata.name || null;
+        }
+        if (!gang) return NO;
+        return { source: idPart, gang: String(gang), ts: Date.now() };
+        }
+        """,
+        Output("store-global-performance-click-meta", "data"),
+        [
+            Input("global-performance-actual-vs-bench", "clickData"),
+            Input("global-performance-top5", "clickData"),
+            Input("global-performance-bottom5", "clickData"),
+            Input({"type": "global-performance-avp-row", "index": dash.dependencies.ALL}, "n_clicks_timestamp"),
+            Input({"type": "global-performance-avp-tip", "index": dash.dependencies.ALL}, "n_clicks_timestamp"),
+        ],
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(meta){
+        if (!meta || !meta.gang) return window.dash_clientside.no_update;
+        return meta.gang;
+        }
+        """,
+        Output("global-performance-selected-gang", "data"),
+        Input("store-global-performance-click-meta", "data"),
+        prevent_initial_call=True,
+    )
+
     app.clientside_callback(
         """
         function(lossClick, topClick, bottomClick, rowTs, tipTs){
@@ -3772,6 +3539,130 @@ def register_callbacks(
             LOGGER.exception("Failed to build month options: %s", exc)
             return []
 
+    @app.callback(
+        Output("global-performance-projects", "options"),
+        Input("store-filtered-scope", "data"),
+    )
+    def _populate_global_performance_project_options(_: dict[str, Any] | None) -> list[dict[str, str]]:
+        kv_values = _default_stringing_kv_values()
+        method_values = _default_stringing_method_values()
+        try:
+            frames, _, _ = _build_scope_frames(
+                "erection",
+                project_list=[],
+                gang_list=[],
+                months_value=[],
+                quick_range=None,
+                kv_values=kv_values,
+                method_values=method_values,
+                deployment_filter="all",
+            )
+            scope = frames.get("project_gang", pd.DataFrame())
+            if scope.empty:
+                return []
+            proj_col = "project_name" if "project_name" in scope.columns else ("project" if "project" in scope.columns else None)
+            if not proj_col:
+                return []
+            projects = (
+                scope[proj_col]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .unique()
+                .tolist()
+            )
+            projects = sorted({p for p in projects if p})
+            return [{"label": project, "value": project} for project in projects]
+        except Exception as exc:
+            LOGGER.exception("Failed to populate global performance project options: %s", exc)
+            return []
+
+    @app.callback(
+        Output("global-performance-months", "options"),
+        Input("global-performance-projects", "value"),
+    )
+    def _populate_global_performance_month_options(
+        projects: Sequence[str] | None,
+    ) -> list[dict[str, str]]:
+        project_list = _normalize_str_list(_ensure_list(projects))
+        kv_values = _default_stringing_kv_values()
+        method_values = _default_stringing_method_values()
+        try:
+            frames, _, _ = _build_scope_frames(
+                "erection",
+                project_list=project_list,
+                gang_list=[],
+                months_value=[],
+                quick_range=None,
+                kv_values=kv_values,
+                method_values=method_values,
+                deployment_filter="all",
+            )
+            scope = frames.get("project_gang", pd.DataFrame())
+            if scope.empty or "month" not in scope.columns:
+                return []
+            months_series = pd.to_datetime(scope["month"], errors="coerce").dropna()
+            months = sorted({pd.Period(ts, "M").to_timestamp() for ts in months_series})
+            return [{"label": ts.strftime("%b %Y"), "value": ts.strftime("%Y-%m")} for ts in months]
+        except Exception as exc:
+            LOGGER.exception("Failed to populate global performance month options: %s", exc)
+            return []
+
+    @app.callback(
+        Output("store-global-performance-scope", "data"),
+        Input("global-performance-projects", "value"),
+        Input("global-performance-months", "value"),
+    )
+    def _sync_global_performance_scope_store(
+        projects: Sequence[str] | None,
+        months: Sequence[str] | None,
+    ) -> dict[str, Any]:
+        project_list = _normalize_str_list(_ensure_list(projects))
+        months_list = _normalize_str_list(_ensure_list(months))
+        kv_values = _default_stringing_kv_values()
+        method_values = _default_stringing_method_values()
+        try:
+            return _build_scope_meta_payload(
+                eff_mode="erection",
+                project_list=project_list,
+                gang_list=[],
+                months_list=months_list,
+                quick_range=None,
+                kv_values=kv_values,
+                method_values=method_values,
+                kv_list=_normalize_str_list(kv_values),
+                method_list=_normalize_str_list(method_values, lower=True),
+                deployment_filter="all",
+            )
+        except Exception as exc:
+            LOGGER.exception("Failed to build global performance scope: %s", exc)
+            return dash.no_update
+
+    @app.callback(
+        Output("global-performance-modal", "is_open"),
+        Input("btn-open-global-performance", "n_clicks"),
+        Input("global-performance-modal-close", "n_clicks"),
+        Input("global-performance-modal", "n_dismiss"),
+        State("global-performance-modal", "is_open"),
+    )
+    def _toggle_global_performance_modal(
+        open_clicks: int | None,
+        close_clicks: int | None,
+        dismiss_clicks: int | None,
+        is_open: bool | None,
+    ) -> bool:
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            return bool(is_open)
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "btn-open-global-performance":
+            return True
+        if trigger in {"global-performance-modal-close", "global-performance-modal"}:
+            return False
+        return bool(is_open)
+
     def _resolve_reset_month_value() -> str:
         try:
             df = data_selector.select("erection")
@@ -4182,46 +4073,6 @@ def register_callbacks(
         df_atomic["project_name_lc"] = df_atomic["project_name"].str.lower()
         df_atomic["entity_type_lc"] = df_atomic["entity_type"].str.lower()
         df_atomic["location_no_norm"] = df_atomic["location_no"].map(_normalize_location)
-
-        if (not has_plan_provider.get(plan_key)) and workbook is not None:
-            daily_sheet = None
-            for candidate in ("ProdDailyExpandedSingles",):
-                if candidate in workbook.sheet_names:
-                    daily_sheet = candidate
-                    break
-
-            if daily_sheet:
-                try:
-                    df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
-                except Exception as exc:
-                    LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
-                else:
-                    def _pick_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str:
-                        mapping = {str(col).strip().lower(): col for col in frame.columns}
-                        for candidate in candidates:
-                            key = candidate.strip().lower()
-                            if key in mapping:
-                                return mapping[key]
-                        for key, original in mapping.items():
-                            if any(cand.lower() in key for cand in candidates):
-                                return original
-                        raise KeyError(candidates)
-
-                    try:
-                        col_proj = _pick_column(df_daily, ("project_name", "project"))
-                        col_loc = _pick_column(
-                            df_daily, ("location_no", "location number", "location")
-                        )
-                    except KeyError:
-                        LOGGER.warning(
-                            "Daily sheet missing project/location columns; delivered will rely on realised values only."
-                        )
-                    else:
-                        cleaned_projects = df_daily[col_proj].map(_normalize_lower)
-                        cleaned_locations = df_daily[col_loc].map(_normalize_location)
-                        completed_keys = {
-                            (p, loc) for p, loc in zip(cleaned_projects, cleaned_locations) if p and loc
-                        }
 
         df_project = df_atomic[df_atomic["project_key_lc"] == project_value.lower()].copy()
         if df_project.empty:
@@ -4655,6 +4506,8 @@ def register_callbacks(
                         loss_max_gap_days=config.loss_max_gap_days,
                         baseline_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
+                        idle_intervals=idle_table,
+                        allowed_months=allowed_months,
                     )
                 else:
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
@@ -4662,6 +4515,8 @@ def register_callbacks(
                         loss_max_gap_days=config.loss_max_gap_days,
                         baseline_mt_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
+                        idle_intervals=idle_table,
+                        allowed_months=allowed_months,
                     )
                 rows.append(
                     {
@@ -5302,8 +5157,34 @@ def register_callbacks(
         topbot_metric: str | None,
     ) -> tuple:
         return _compute_dashboard_outputs(scope_meta, topbot_metric)
+
+    @app.callback(
+        Output("global-performance-avp-list", "children"),
+        Output("global-performance-actual-vs-bench", "figure"),
+        Output("global-performance-top5", "figure"),
+        Output("global-performance-bottom5", "figure"),
+        Input("store-global-performance-scope", "data"),
+        Input("global-performance-topbot-metric", "value"),
+    )
+    def _update_global_performance_modal(
+        scope_meta: dict[str, Any] | None,
+        topbot_metric: str | None,
+    ) -> tuple:
+        outputs = _compute_dashboard_outputs(
+            scope_meta,
+            topbot_metric,
+            avp_namespace="global-performance-avp",
+        )
+        if len(outputs) < 14:
+            raise PreventUpdate
+        return outputs[9], outputs[10], outputs[11], outputs[12]
         
     CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
+    GLOBAL_MODAL_CHART_SOURCES = {
+        "global-performance-actual-vs-bench",
+        "global-performance-top5",
+        "global-performance-bottom5",
+    }
 
     def _compute_trace_table_payload(
         scope_meta: dict[str, Any], gang_focus: str
@@ -6304,6 +6185,80 @@ def register_callbacks(
             )
 
         return send_bytes(_writer, "Trace_Calcs.xlsx"), dash.no_update
+
+    @app.callback(
+        Output("global-performance-download-trace", "data"),
+        Input("global-performance-btn-export-trace", "n_clicks"),
+        State("store-global-performance-scope", "data"),
+        State("global-performance-trace-gang", "value"),
+        State("global-performance-selected-gang", "data"),
+        prevent_initial_call=True,
+    )
+    def _export_global_performance_trace(
+        export_clicks: int | None,
+        scope_meta: dict[str, Any] | None,
+        dropdown_value: str | None,
+        selected_store_gang: str | None,
+    ):
+        if not export_clicks or not isinstance(scope_meta, dict):
+            raise PreventUpdate
+        scoped = _scope_frame_from_store(scope_meta, "project_gang").copy()
+        if scoped.empty:
+            raise PreventUpdate
+        selected = scope_meta.get("selected") or {}
+        project_list = selected.get("projects", [])
+        gang_list = selected.get("gangs", [])
+        months_ts = _months_from_meta(scope_meta)
+        gang_for_sheet = dropdown_value or selected_store_gang
+        project_info_df = project_info_provider() if project_info_provider else None
+
+        def _writer(buffer: BytesIO) -> None:
+            buffer.write(
+                make_trace_workbook_bytes(
+                    scoped,
+                    months_ts,
+                    project_list,
+                    gang_list,
+                    BENCHMARK_MT_PER_DAY,
+                    gang_for_sheet=gang_for_sheet,
+                    config=config,
+                    project_info=project_info_df,
+                )
+            )
+
+        return send_bytes(_writer, "Trace_Calcs.xlsx")
+
+    @app.callback(
+        Output("global-performance-tbl-idle-intervals", "data"),
+        Output("global-performance-tbl-daily-prod", "data"),
+        Input("store-global-performance-scope", "data"),
+        Input("store-global-performance-click-meta", "data"),
+        Input("global-performance-trace-gang", "value"),
+        Input("global-performance-selected-gang", "data"),
+        prevent_initial_call=True,
+    )
+    def _update_global_performance_trace_tables(
+        scope_meta: dict[str, Any] | None,
+        meta: dict[str, Any] | None,
+        dropdown_value: str | None,
+        selected_store_gang: str | None,
+    ):
+        if not isinstance(scope_meta, dict):
+            raise PreventUpdate
+        ctx = dash.callback_context
+        triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+        meta_source = meta.get("source") if isinstance(meta, dict) else None
+        meta_gang = meta.get("gang") if isinstance(meta, dict) else None
+        meta_is_chart = meta_source in GLOBAL_MODAL_CHART_SOURCES and bool(meta_gang)
+        if triggered_id == "store-global-performance-click-meta":
+            gang_focus = meta_gang if meta_is_chart else (dropdown_value or selected_store_gang)
+        else:
+            gang_focus = dropdown_value or (meta_gang if meta_is_chart else selected_store_gang)
+        if not gang_focus:
+            raise PreventUpdate
+        idle_data, daily_data = _compute_trace_table_payload(scope_meta, gang_focus)
+        return idle_data, daily_data
+
     @app.callback(
         Output("trace-gang", "options"),
         Output("trace-gang", "value"),
@@ -6346,6 +6301,45 @@ def register_callbacks(
         else:
             value = None
         return options, value, options, value
+
+    @app.callback(
+        Output("global-performance-trace-gang", "options"),
+        Output("global-performance-trace-gang", "value"),
+        Input("store-global-performance-scope", "data"),
+        Input("global-performance-selected-gang", "data"),
+        State("global-performance-trace-gang", "value"),
+    )
+    def _sync_global_performance_trace_dropdown(
+        scope_meta: dict[str, Any] | None,
+        selected_gang: str | None,
+        current_value: str | None,
+    ) -> tuple[list[dict[str, str]], str | None]:
+        if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
+            return [], None
+        base = _scope_frame_from_store(scope_meta, "project")
+        if base.empty or "gang_name" not in base.columns:
+            return [], None
+        gangs = (
+            base["gang_name"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        gangs = sorted({g for g in gangs if g})
+        options = [{"label": gang, "value": gang} for gang in gangs]
+        if not options:
+            return [], None
+        if selected_gang and selected_gang in gangs:
+            value = selected_gang
+        elif current_value and current_value in gangs:
+            value = current_value
+        else:
+            value = gangs[0]
+        return options, value
 
     # --- KPI Details drilldown: populate inline accordion ---
     def _filter_pch_header_pills(
@@ -6520,6 +6514,9 @@ def register_callbacks(
             focus_raw = str(pill_focus).strip().lower()
             if focus_raw in _PCH_PILL_LABELS and focus_raw != "projects":
                 focus_metric = focus_raw
+
+        idle_table_stringing = _idle_table_for_mode("stringing")
+        idle_table_erection = _idle_table_for_mode("erection")
 
         tile_context = "modal" if use_modal_ids else "inline"
         tile_metadata: dict[str, dict[str, Any]] = {}
@@ -6703,6 +6700,12 @@ def register_callbacks(
                     overall_map, monthly_map = compute_project_baseline_maps(work)
             except Exception:
                 overall_map, monthly_map = {}, {}
+            idle_table_local = _idle_table_for_mode(mode)
+            month_filter_local: set[pd.Timestamp] | None = None
+            if "month" in work.columns:
+                months = pd.to_datetime(work["month"], errors="coerce").dropna()
+                if not months.empty:
+                    month_filter_local = set(months.unique().tolist())
             proj_col = _detect_project_column(work) or ("project_name" if "project_name" in work.columns else None)
             if proj_col and proj_col not in work.columns:
                 proj_col = "project_name"
@@ -6734,6 +6737,8 @@ def register_callbacks(
                             loss_max_gap_days=config.loss_max_gap_days,
                             baseline_per_day=baseline_value,
                             baseline_by_month=monthly_lookup,
+                            idle_intervals=idle_table_local,
+                            allowed_months=month_filter_local,
                         )
                     else:
                         _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss(
@@ -6741,6 +6746,8 @@ def register_callbacks(
                             loss_max_gap_days=config.loss_max_gap_days,
                             baseline_mt_per_day=baseline_value,
                             baseline_by_month=monthly_lookup,
+                            idle_intervals=idle_table_local,
+                            allowed_months=month_filter_local,
                         )
                 except Exception:
                     continue
@@ -7315,6 +7322,7 @@ def register_callbacks(
                             )
                         else:
                             gang_project_map = {}
+                        month_filter = _month_filter_for_frame(sub)
                         for gang, gdf in sub.groupby("gang_name"):
                             if gdf.empty:
                                 continue
@@ -7328,6 +7336,8 @@ def register_callbacks(
                                     loss_max_gap_days=config.loss_max_gap_days,
                                     baseline_per_day=ov,
                                     baseline_by_month=mm,
+                                    idle_intervals=idle_table_stringing,
+                                    allowed_months=month_filter,
                                 )
                                 if pd.notna(loss_val):
                                     lost_units_total += float(loss_val)
@@ -8277,6 +8287,7 @@ def register_callbacks(
                         )
                     else:
                         gang_project_map = {}
+                    month_filter = _month_filter_for_frame(sub)
                     for gang, gdf in sub.groupby("gang_name"):
                         if gdf.empty:
                             continue
@@ -8289,6 +8300,8 @@ def register_callbacks(
                                 loss_max_gap_days=config.loss_max_gap_days,
                                 baseline_mt_per_day=ov,
                                 baseline_by_month=mm,
+                                idle_intervals=idle_table_erection,
+                                allowed_months=month_filter,
                             )
                             if pd.notna(loss_val):
                                 lost_units_total += float(loss_val)
@@ -10041,3 +10054,10 @@ def _load_stringing_plan_snapshot(
 
     return None, set(), [], []
 
+        def _month_filter_for_frame(frame: pd.DataFrame | None) -> set[pd.Timestamp] | None:
+            if not isinstance(frame, pd.DataFrame) or frame.empty or "month" not in frame.columns:
+                return None
+            months = pd.to_datetime(frame["month"], errors="coerce").dropna()
+            if months.empty:
+                return None
+            return set(months.unique().tolist())
