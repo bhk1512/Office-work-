@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Tuple
+import time
 
 import pandas as pd
 
@@ -76,8 +77,19 @@ def _pick_column(frame: pd.DataFrame, choices: Iterable[str]) -> str:
     raise KeyError(tuple(choices))
 
 
+_CONFIG = AppConfig()
+_CACHE_TTL_SECONDS = _CONFIG.cache_ttl_seconds
+_RESP_CACHE: dict[Tuple[str, str], tuple[ResponsibilitiesSnapshot, float]] = {}
+
+
 def load_responsibilities_snapshot(config: AppConfig) -> ResponsibilitiesSnapshot:
     """Load Micro Plan responsibilities atomic sheet plus completion metadata."""
+
+    cache_key = _cache_key(config)
+    cached = _RESP_CACHE.get(cache_key)
+    now = time.time()
+    if cached and (now - cached[1]) < _CACHE_TTL_SECONDS:
+        return cached[0].copy()
 
     path = Path(config.data_path)
     df_atomic: pd.DataFrame | None = None
@@ -156,7 +168,15 @@ def load_responsibilities_snapshot(config: AppConfig) -> ResponsibilitiesSnapsho
     else:
         LOGGER.info("Daily expanded data not found; delivered values fall back to realised revenue only.")
 
-    return ResponsibilitiesSnapshot(df_atomic, completion_keys, None)
+    snapshot = ResponsibilitiesSnapshot(df_atomic, completion_keys, None)
+    _RESP_CACHE[cache_key] = (snapshot.copy(), now)
+    return snapshot
+
+
+def _cache_key(config: AppConfig) -> tuple[str, str]:
+    resolved_path = str(Path(config.data_path).expanduser().resolve())
+    preferred = (config.preferred_sheet or "").strip()
+    return resolved_path, preferred
 
 
 __all__ = ["ResponsibilitiesSnapshot", "load_responsibilities_snapshot"]

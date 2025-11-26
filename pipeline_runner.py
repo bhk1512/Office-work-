@@ -133,6 +133,39 @@ def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None
     return target_dir
 
 
+def _coerce_excel_date_series(series: pd.Series) -> pd.Series:
+    """Convert Excel serial dates or textual dates into pandas timestamps."""
+
+    if series is None:
+        return pd.Series([], dtype="datetime64[ns]")
+    work = pd.Series(series)
+    parsed = pd.to_datetime(work, errors="coerce")
+    numeric = pd.to_numeric(work, errors="coerce")
+    use_excel = numeric.notna() & parsed.isna()
+    if use_excel.any():
+        excel = pd.to_datetime(
+            numeric[use_excel],
+            errors="coerce",
+            unit="D",
+            origin="1899-12-30",
+        )
+        parsed.loc[use_excel] = excel
+    return parsed.dt.normalize()
+
+
+def _normalize_stringing_dates_for_parquet(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of *frame* with obvious date/month columns coerced to timestamps."""
+
+    if frame is None or frame.empty:
+        return frame
+    out = frame.copy()
+    for column in out.columns:
+        label = str(column).strip().lower()
+        if "date" in label or "month" in label:
+            out[column] = _coerce_excel_date_series(out[column])
+    return out
+
+
 def _stringing_candidates(input_dir: Optional[Path], files: Optional[List[Path]]) -> List[Path]:
     if files:
         return [
@@ -287,7 +320,8 @@ def _write_stringing_artifacts(output_path: Path, raw_df: pd.DataFrame, sheet_na
         print(f"[pipeline] Warning: failed to clear stringing parquet dir {parquet_dir}: {exc}")
     parquet_dir.mkdir(parents=True, exist_ok=True)
     compiled_parquet = parquet_dir / "StringingCompiled.parquet"
-    _write_parquet(raw_df, compiled_parquet)
+    compiled_ready = _normalize_stringing_dates_for_parquet(raw_df)
+    _write_parquet(compiled_ready, compiled_parquet)
     print(f"[pipeline] Stringing: wrote compiled parquet {compiled_parquet}")
 
     # Precompute daily parquet to mirror erection flow (optional speed-up)
@@ -296,7 +330,8 @@ def _write_stringing_artifacts(output_path: Path, raw_df: pd.DataFrame, sheet_na
         if daily is not None and not daily.empty:
             daily_dir = output_path.parent / "StringingDaily"
             daily_dir.mkdir(parents=True, exist_ok=True)
-            _write_parquet(daily, daily_dir / "stringing_daily.parquet")
+            daily_ready = _normalize_stringing_dates_for_parquet(daily)
+            _write_parquet(daily_ready, daily_dir / "stringing_daily.parquet")
             print(f"[pipeline] Stringing: wrote daily parquet {daily_dir}")
     except Exception as exc:
         print(f"[pipeline] Warning: failed to write stringing daily parquet: {exc}")

@@ -12,7 +12,6 @@ import duckdb
 import pandas as pd
 
 from .config import AppConfig
-from .data_loader import load_stringing_daily as _load_stringing_daily
 from .filters import apply_filters
 from .state import DUCKDB_TABLE_ERECTION, DUCKDB_TABLE_STRINGING
 
@@ -235,21 +234,18 @@ class DataSelector:
     def _load_stringing(self) -> pd.DataFrame:
         if callable(self._stringing_provider):
             try:
-                return self._stringing_provider()
+                frame = self._stringing_provider()
+                if isinstance(frame, pd.DataFrame):
+                    with self._lock:
+                        self._stringing_fallback = frame
+                return frame
             except Exception as exc:  # pragma: no cover - defensive logging
-                self._logger.warning("Stringing provider failed; falling back to loader: %s", exc)
+                self._logger.warning("Stringing provider failed; falling back to cached frame: %s", exc)
         with self._lock:
             fallback = self._stringing_fallback
         if isinstance(fallback, pd.DataFrame):
             return fallback
-        try:
-            fallback = _load_stringing_daily(self._config)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            self._logger.warning("Stringing loader failed: %s", exc)
-            return pd.DataFrame()
-        with self._lock:
-            self._stringing_fallback = fallback
-        return fallback
+        return pd.DataFrame()
 
     def _scopes_via_pandas(
         self,

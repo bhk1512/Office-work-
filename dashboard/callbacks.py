@@ -1,4 +1,4 @@
-"""Dash callbacks for the productivity dashboard."""
+﻿"""Dash callbacks for the productivity dashboard."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import pandas as pd
 from io import BytesIO
 import traceback
 from typing import Any, Callable, Mapping, Sequence, TypeVar, TYPE_CHECKING
+from weakref import WeakSet
 
 import dash
 import duckdb
@@ -42,6 +43,10 @@ from .charts import (
     build_empty_responsibilities_figure,
 )
 from .config import AppConfig
+from .data_loader import (
+    load_stringing_compiled_raw as _load_stringing_compiled_raw,
+    _resolve_stringing_microplan_root,
+)
 from .filters import apply_filters, resolve_months
 from .metrics import (
     calc_idle_and_loss,
@@ -62,7 +67,7 @@ from .plan_utils import (
     infer_project_hint as _infer_project_hint,
     prepare_stringing_plan_frame as _prepare_stringing_plan_frame,
 )
-from .stringing import expand_stringing_to_daily_payout
+from .stringing import expand_stringing_to_daily_payout, build_tse_lookup_from_df
 
 
 LOGGER = logging.getLogger(__name__)
@@ -83,6 +88,17 @@ _STRINGING_METHODS = ("manual", "tse", "hotline")
 BENCHMARK_KM_PER_MONTH = 5.0
 _PROJECT_CODE_PATTERN = re.compile(r"(?i)\b([A-Z]{2,4})\s*[-_/ ]*(\d{2,5})\b")
 _PROJECT_MODAL_QUERY_PARAM = "projectModal"
+CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
+GLOBAL_MODAL_CHART_SOURCES = {
+    "global-performance-actual-vs-bench",
+    "global-performance-top5",
+    "global-performance-bottom5",
+}
+PROJECT_MODAL_CHART_SOURCES = {
+    "project-modal-actual-vs-bench",
+    "project-modal-top5",
+    "project-modal-bottom5",
+}
 
 # App-wide config instance for callback logic
 config = AppConfig()
@@ -114,6 +130,16 @@ _AGGREGATE_CACHE_MAX_ITEMS = 32
 _AGGREGATE_CACHE: "OrderedDict[str, _AggregateCacheEntry]" = OrderedDict()
 DATA_SELECTOR: DataSelector | None = None
 _PROJECT_INFO_PROVIDER: Callable[[], pd.DataFrame] | None = None
+_REGISTERED_DASH_APPS: "WeakSet[Dash]" = WeakSet()
+
+_IDLE_INTERVAL_CACHE_TTL_SECONDS = 300.0
+_IDLE_INTERVAL_CACHE: dict[str, tuple[pd.DataFrame, float]] = {}
+_IDLE_INTERVAL_PROVIDER: Callable[[], pd.DataFrame] | None = None
+_STRINGING_IDLE_INTERVAL_PROVIDER: Callable[[], pd.DataFrame] | None = None
+
+_STRINGING_PLAN_SUMMARY_CACHE_TTL_SECONDS = 300.0
+_STRINGING_PLAN_SUMMARY_CACHE: dict[str, Any] = {"frame": None, "stored_at": 0.0}
+_STRINGING_PLAN_SUMMARY_PROVIDER: Callable[[], pd.DataFrame] | None = None
 
 _STRINGING_PLAN_CACHE_TTL_SECONDS = 600.0
 _STRINGING_PLAN_CACHE: dict[str, Any] = {
@@ -170,6 +196,60 @@ def _extract_project_code(value: object) -> str:
         prefix, digits = match.groups()
         return f"{prefix.upper()} {digits}"
     return text
+
+
+def _idle_table_for_mode(mode: str) -> pd.DataFrame:
+    """Return cached idle interval table for the requested mode."""
+
+    normalized = "stringing" if str(mode).strip().lower() == "stringing" else "erection"
+    cache_entry = _IDLE_INTERVAL_CACHE.get(normalized)
+    ts_now = time.time()
+    if cache_entry is not None:
+        frame, stored_at = cache_entry
+        if ts_now - stored_at < _IDLE_INTERVAL_CACHE_TTL_SECONDS:
+            return frame.copy()
+
+    provider = _STRINGING_IDLE_INTERVAL_PROVIDER if normalized == "stringing" else _IDLE_INTERVAL_PROVIDER
+    if provider is None:
+        return pd.DataFrame()
+    try:
+        table = provider()
+    except Exception:
+        LOGGER.warning("Failed to load idle intervals for mode %s", normalized, exc_info=True)
+        return pd.DataFrame()
+    if not isinstance(table, pd.DataFrame):
+        return pd.DataFrame()
+    _IDLE_INTERVAL_CACHE[normalized] = (table.copy(), ts_now)
+    return table.copy()
+
+
+def _get_stringing_plan_summary_frame() -> pd.DataFrame:
+    """Return the cached stringing plan summary frame supplied by the data store."""
+
+    cache = _STRINGING_PLAN_SUMMARY_CACHE
+    ts_now = time.time()
+    frame = cache.get("frame")
+    stored_at = cache.get("stored_at", 0.0)
+    if isinstance(frame, pd.DataFrame) and (ts_now - stored_at < _STRINGING_PLAN_SUMMARY_CACHE_TTL_SECONDS):
+        return frame.copy()
+
+    provider = _STRINGING_PLAN_SUMMARY_PROVIDER
+    if provider is None:
+        return pd.DataFrame()
+    try:
+        summary = provider()
+    except Exception:
+        LOGGER.warning("Failed to load stringing plan summary frame", exc_info=True)
+        summary = pd.DataFrame()
+
+    if not isinstance(summary, pd.DataFrame):
+        cache["frame"] = pd.DataFrame()
+        cache["stored_at"] = ts_now
+        return pd.DataFrame()
+
+    cache["frame"] = summary.copy()
+    cache["stored_at"] = ts_now
+    return summary.copy()
 
 
 def _normalize_month_value(raw: Any) -> tuple[str | None, str | None]:
@@ -801,6 +881,65 @@ def _normalize_mode(value: str | None) -> str:
     return (value or "erection").strip().lower()
 
 
+def _compose_modal_mode_payload(mode: str, *, ts: float | None = None) -> dict[str, Any]:
+    """Build a consistent payload for the performance mode dcc.Store."""
+
+    normalized = _normalize_mode(mode)
+    return {
+        "mode": normalized,
+        "ts": float(ts if ts is not None else time.time()),
+    }
+
+
+def _modal_mode_from_store(value: Any, default: str = "erection") -> str:
+    """Extract the current performance mode from a store payload."""
+
+    fallback = _normalize_mode(default)
+
+    def _coerce(candidate: Any) -> str | None:
+        if candidate is None:
+            return None
+        try:
+            normalized = _normalize_mode(str(candidate))
+        except Exception:
+            return None
+        return normalized
+
+    if isinstance(value, Mapping):
+        extracted = _coerce(value.get("mode"))
+        if extracted:
+            return extracted
+
+    if isinstance(value, str):
+        extracted = _coerce(value)
+        if extracted:
+            return extracted
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if isinstance(decoded, Mapping):
+            extracted = _coerce(decoded.get("mode"))
+            if extracted:
+                return extracted
+
+    return fallback
+
+
+def _resolve_focus_mode(focus_payload: Any, fallback: str = "erection") -> str:
+    """Determine the effective modal mode from the current tile focus payload."""
+
+    normalized_fallback = _normalize_mode(fallback)
+    if isinstance(focus_payload, Mapping):
+        raw_mode = focus_payload.get("mode") or focus_payload.get("project_mode")
+        normalized = _normalize_mode(str(raw_mode)) if raw_mode else None
+        if normalized in {"erection", "stringing"}:
+            if normalized == "stringing" and not config.enable_stringing:
+                return "erection"
+            return normalized
+    return normalized_fallback
+
+
 def _normalize_deployment_filter(value: str | None) -> str:
     """Normalize deployment radio selection into the canonical scope key."""
     text = (value or "").strip().lower()
@@ -1327,6 +1466,442 @@ def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame
     return scopes
 
 
+def _build_project_scope_meta(
+    project_label: str | None,
+    project_code: str | None,
+    eff_mode: str,
+    months_value,
+    quick_range,
+    gang_values,
+    kv_values: Sequence[str] | None,
+    method_values: Sequence[str] | None,
+    deployment_filter: str | None,
+) -> dict[str, Any]:
+    """
+    Build the cached scope payload used by the project modal. The helper mirrors
+    `_build_scope_meta_payload` but always narrows the project list to variations
+    of the selected tile so callbacks can consistently rehydrate scope frames.
+    """
+
+    mode_normalized = _normalize_mode(eff_mode)
+    project_filters = _project_filter_candidates(project_label, project_code)
+    if not project_filters:
+        fallback = project_label or project_code
+        if fallback:
+            project_filters = [fallback]
+
+    gang_list = _normalize_str_list(_ensure_list(gang_values))
+    months_list = _normalize_str_list(_ensure_list(months_value))
+    kv_list = _normalize_str_list(_ensure_list(kv_values))
+    method_list = _normalize_str_list(_ensure_list(method_values), lower=True)
+
+    return _build_scope_meta_payload(
+        eff_mode=mode_normalized,
+        project_list=project_filters,
+        gang_list=gang_list,
+        months_list=months_list,
+        quick_range=quick_range,
+        kv_values=kv_values,
+        method_values=method_values,
+        kv_list=kv_list,
+        method_list=method_list,
+        deployment_filter=deployment_filter,
+    )
+
+
+def _build_avp_rows(
+    scope_df: pd.DataFrame,
+    *,
+    namespace: str,
+    metric: str,
+    loss_rows: Sequence[Mapping[str, Any]] | None = None,
+    unit_label: str | None = None,
+    rate_label: str = "MT/day",
+) -> list[Any]:
+    """
+    Build the gang-level AVP rows rendered next to the charts so clicks/hover
+    interactions continue to work. Each row exposes pattern-matching IDs used by
+    the existing clientside callbacks.
+    """
+
+    if scope_df.empty or "gang_name" not in scope_df.columns:
+        scope_df = pd.DataFrame(columns=["gang_name"])
+
+    # Build lookup for last project/date per gang to populate tooltips.
+    last_meta: dict[str, dict[str, str]] = {}
+    if not scope_df.empty and {"gang_name", "project_name"}.issubset(scope_df.columns):
+        meta_cols = ["gang_name", "project_name"]
+        if "date" in scope_df.columns:
+            meta_cols.append("date")
+        elif "month" in scope_df.columns:
+            meta_cols.append("month")
+        meta = scope_df[meta_cols].copy()
+        time_col = None
+        if "date" in meta.columns:
+            time_col = "__ts"
+            meta[time_col] = pd.to_datetime(meta["date"], errors="coerce")
+        elif "month" in meta.columns:
+            time_col = "__ts"
+            meta[time_col] = pd.to_datetime(meta["month"], errors="coerce")
+        if time_col is None:
+            meta["__ts"] = pd.Timestamp.now()
+            time_col = "__ts"
+        last_rows = (
+            meta.dropna(subset=["gang_name"])
+            .assign(gang_name=lambda df: df["gang_name"].astype(str).str.strip())
+        )
+        last_rows = last_rows[last_rows["gang_name"] != ""]
+        if not last_rows.empty:
+            last_rows = (
+                last_rows.sort_values(time_col)
+                .groupby("gang_name")
+                .tail(1)[["gang_name", "project_name", time_col]]
+            )
+            for _, record in last_rows.iterrows():
+                gang = record["gang_name"]
+                last_project = str(record.get("project_name") or "-")
+                ts_val = record.get(time_col)
+                if pd.notna(ts_val):
+                    last_date = pd.to_datetime(ts_val).strftime("%d-%b-%Y")
+                else:
+                    last_date = "-"
+                last_meta[gang] = {"project": last_project, "date": last_date}
+
+    unit_total = unit_label or ("KM" if metric == "stringing" else "MT")
+
+    rows: list[Any] = []
+    if loss_rows:
+        df_loss = pd.DataFrame(list(loss_rows))
+        if not df_loss.empty and "gang_name" in df_loss.columns:
+            df_loss = df_loss.dropna(subset=["gang_name"])
+            df_loss["gang_name"] = df_loss["gang_name"].astype(str).str.strip()
+            df_loss = df_loss[df_loss["gang_name"] != ""]
+            for column in ("delivered", "lost", "potential", "baseline", "avg_prod"):
+                if column in df_loss.columns:
+                    df_loss[column] = pd.to_numeric(df_loss[column], errors="coerce").fillna(0.0)
+            if "potential" not in df_loss.columns:
+                df_loss["potential"] = df_loss["delivered"] + df_loss["lost"]
+            df_loss = df_loss.sort_values("potential", ascending=False).head(15)
+            for _, record in df_loss.iterrows():
+                gang_name = record["gang_name"]
+                delivered = float(record.get("delivered") or 0.0)
+                lost = float(record.get("lost") or 0.0)
+                total = float(record.get("potential") or (delivered + lost))
+                avg_prod = float(record.get("avg_prod") or 0.0)
+                baseline = float(record.get("baseline") or 0.0)
+                pct = 0.0 if total <= 0 else (delivered / total) * 100.0
+                meta_info = last_meta.get(gang_name, {})
+                last_project = meta_info.get("project", "-")
+                last_date = meta_info.get("date", "-")
+                rows.append(
+                    _render_avp_row(
+                        gang_name,
+                        delivered,
+                        lost,
+                        total,
+                        pct,
+                        avg_prod=avg_prod,
+                        baseline=baseline,
+                        last_project=last_project,
+                        last_date=last_date,
+                        rate_label=rate_label,
+                        unit_total=unit_total,
+                        namespace=namespace,
+                    )
+                )
+    if rows:
+        return rows
+
+    work = scope_df.copy()
+    work = work.dropna(subset=["gang_name"])
+    work["gang_name"] = work["gang_name"].astype(str).str.strip()
+    work = work[work["gang_name"] != ""]
+    if work.empty:
+        return [html.Div("No gangs available for this selection.", className="text-muted")]
+
+    if metric == "erection":
+        grouped = (
+            work.groupby("gang_name", as_index=False)["daily_prod_mt"]
+            .sum()
+            .rename(columns={"daily_prod_mt": "metric_value"})
+        )
+        metric_label = "Total MT"
+    else:
+        grouped = (
+            work.groupby("gang_name", as_index=False)["daily_prod_mt"]
+            .mean()
+            .rename(columns={"daily_prod_mt": "metric_value"})
+        )
+        metric_label = "Avg MT/day"
+
+    if "date" in work.columns:
+        work["__date"] = pd.to_datetime(work["date"], errors="coerce")
+        last_activity = (
+            work.sort_values("__date")
+            .groupby("gang_name")
+            .tail(1)[["gang_name", "project_name", "__date"]]
+            .rename(columns={"project_name": "last_project", "__date": "last_date"})
+        )
+        grouped = grouped.merge(last_activity, on="gang_name", how="left")
+    else:
+        grouped["last_project"] = ""
+        grouped["last_date"] = pd.NaT
+
+    grouped = grouped.sort_values("metric_value", ascending=False).head(10)
+
+    rows = []
+    for _, row in grouped.iterrows():
+        gang_name = row["gang_name"]
+        project_name = row.get("last_project") or "-"
+        last_date = row.get("last_date")
+        if pd.notna(last_date):
+            last_date_label = pd.to_datetime(last_date).strftime("%d-%b-%Y")
+        else:
+            last_date_label = "-"
+        metric_value = row["metric_value"]
+        row_id = {"type": f"{namespace}-row", "index": gang_name}
+        tip_id = {"type": f"{namespace}-tip", "index": gang_name}
+        rows.append(
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(gang_name, className="avp-gang"),
+                            html.Div(f"{metric_value:.2f} {metric_label}", className="avp-metric"),
+                            html.Div(f"Last project: {project_name}", className="avp-meta"),
+                            html.Div(f"Last worked: {last_date_label}", className="avp-meta"),
+                        ],
+                        className="avp-row-body",
+                    ),
+                    html.Div(
+                        html.Span(className="avp-tip-fill"),
+                        id=tip_id,
+                        className="avp-tip-overlay",
+                        n_clicks=0,
+                        n_clicks_timestamp=0,
+                    ),
+                ],
+                id=row_id,
+                className="avp-row",
+                n_clicks=0,
+                n_clicks_timestamp=0,
+            )
+        )
+
+    return rows
+
+
+def _build_loss_vs_potential_figure(
+    loss_rows: Sequence[Mapping[str, Any]] | None,
+    *,
+    unit_label: str,
+) -> go.Figure:
+    """Return the delivered vs lost stacked bar chart for gang performance."""
+
+    base_layout = dict(
+        height=260,
+        margin=dict(l=36, r=16, t=10, b=50),
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        hovermode="x unified",
+    )
+
+    df = pd.DataFrame(loss_rows or [])
+    required_cols = {"gang_name", "delivered", "lost"}
+    if df.empty or not required_cols.issubset(df.columns):
+        fig = go.Figure()
+        fig.update_layout(**base_layout)
+        fig.add_annotation(
+            text="No gang performance data for this selection.",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(color="#6b7280"),
+        )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        return fig
+
+    df = df.copy()
+    df["gang_name"] = df["gang_name"].astype(str).str.strip()
+    df = df[df["gang_name"] != ""]
+    for column in ("delivered", "lost", "potential", "baseline", "avg_prod"):
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    if "potential" not in df.columns:
+        df["potential"] = df["delivered"] + df["lost"]
+
+    df = df.sort_values("potential", ascending=False).head(10)
+    if df.empty:
+        fig = go.Figure()
+        fig.update_layout(**base_layout)
+        fig.add_annotation(
+            text="No gang performance data for this selection.",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(color="#6b7280"),
+        )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        return fig
+
+    hover_fields = [
+        df.get("potential", pd.Series([0.0] * len(df), index=df.index)),
+        df.get("baseline", pd.Series([0.0] * len(df), index=df.index)),
+        df.get("avg_prod", pd.Series([0.0] * len(df), index=df.index)),
+    ]
+    customdata = np.stack([series.to_numpy(dtype=float) for series in hover_fields], axis=-1)
+
+    delivered_color = "#22C55E"
+    lost_color = "#EF4444"
+    unit_text = unit_label or "MT"
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=df["gang_name"],
+        y=df["delivered"],
+        name="Delivered Output",
+        marker_color=delivered_color,
+        customdata=customdata,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            + f"Delivered: %{{y:,.1f}} {unit_text}<br>"
+            + f"Lost: %{{customdata[0]-y:,.1f}} {unit_text}<br>"
+            + "Baseline: %{customdata[1]:,.2f}<br>"
+            + "Avg Output: %{customdata[2]:,.2f}<extra></extra>"
+        ),
+    )
+    fig.add_bar(
+        x=df["gang_name"],
+        y=df["lost"],
+        name="Lost Potential",
+        marker_color=lost_color,
+        customdata=customdata,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            + f"Lost: %{{y:,.1f}} {unit_text}<br>"
+            + f"Delivered: %{{customdata[0]-y:,.1f}} {unit_text}<extra></extra>"
+        ),
+    )
+
+    fig.update_layout(
+        **base_layout,
+        barmode="stack",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+    )
+    fig.update_xaxes(tickangle=-15, automargin=True, showspikes=False)
+    fig.update_yaxes(title=f"{unit_text}", gridcolor="#e5e7eb", zeroline=False, showspikes=False)
+    return fig
+
+
+def _compute_dashboard_outputs(
+    scope_meta: dict[str, Any] | None,
+    metric: str | None,
+    *,
+    avp_namespace: str = "avp-row",
+    summarizer: Callable[[dict[str, Any] | None], dict[str, str] | None] | None = None,
+    summary_factory: Callable[[bool], dict[str, str]] | None = None,
+) -> tuple[Any, ...]:
+    """
+    Compute the tuple consumed by the project modal performance block.
+    The helper returns KPI text plus the AVP rows and three Plotly figures.
+    """
+
+    if not isinstance(scope_meta, dict):
+        raise PreventUpdate
+
+    def _fallback_summary_payload(is_stringing: bool) -> dict[str, str]:
+        payload = {
+            "projects": "-",
+            "totals": "-",
+            "gangs": "-",
+            "productivity": "-",
+            "lost_units": "-",
+        }
+        if is_stringing:
+            payload["po_completion"] = "-"
+            payload["tse"] = "-"
+        payload["_meta"] = {
+            "loss_rows": [],
+            "unit_label": "KM" if is_stringing else "MT",
+            "mode": "stringing" if is_stringing else "erection",
+            "is_stringing": is_stringing,
+        }
+        return payload
+
+    summary_fn = summarizer or globals().get("_summarize_scope_for_cards")
+
+    if not callable(summary_fn):
+        def _empty_summarizer(_: dict[str, Any] | None) -> dict[str, str] | None:
+            return None
+
+        summary_fn = _empty_summarizer
+
+    summary_factory_fn = summary_factory or globals().get("_empty_summary_payload") or _fallback_summary_payload
+    if not callable(summary_factory_fn):
+        summary_factory_fn = _fallback_summary_payload
+
+    mode_normalized = _normalize_mode((scope_meta or {}).get("mode"))
+    summary = summary_fn(scope_meta) or summary_factory_fn(mode_normalized == "stringing")
+    summary_meta = summary.get("_meta", {}) if isinstance(summary, dict) else {}
+    loss_rows = summary_meta.get("loss_rows") or []
+    unit_label = summary_meta.get("unit_label") or ("KM" if mode_normalized == "stringing" else "MT")
+    is_stringing_mode = bool(summary_meta.get("is_stringing", mode_normalized == "stringing"))
+    rate_label = "KM/month" if is_stringing_mode else "MT/day"
+    fig_loss = _build_loss_vs_potential_figure(loss_rows, unit_label=unit_label)
+    project_scope = _scope_frame_from_store(scope_meta, "project").copy()
+    if project_scope.empty or "gang_name" not in project_scope.columns:
+        raise PreventUpdate
+
+    metric_key = (metric or "prod").strip().lower()
+    if metric_key not in {"prod", "erection"}:
+        metric_key = "prod"
+
+    # Ensure months are datetime for project lines chart
+    if "month" in project_scope.columns:
+        project_scope["month"] = pd.to_datetime(project_scope["month"], errors="coerce")
+
+    fig_top, fig_bottom = create_top_bottom_gangs_charts(project_scope, metric=metric_key)
+
+    selected_projects = (scope_meta.get("selected") or {}).get("projects") or []
+    monthly_scope = project_scope[["month", "project_name", "daily_prod_mt"]].dropna(subset=["month", "project_name"])
+    avg_line = None
+    if not monthly_scope.empty:
+        avg_line = float(pd.to_numeric(monthly_scope["daily_prod_mt"], errors="coerce").dropna().mean())
+    fig_lines = create_project_lines_chart(
+        monthly_scope,
+        selected_projects=selected_projects,
+        avg_line=avg_line,
+    )
+
+    avp_children = _build_avp_rows(
+        project_scope,
+        namespace=avp_namespace,
+        metric=metric_key,
+        loss_rows=loss_rows,
+        unit_label=unit_label,
+        rate_label=rate_label,
+    )
+
+    # Returning KPIs keeps tuple compatibility even though modal path ignores them.
+    return (
+        summary.get("projects", "-"),
+        summary.get("totals", "-"),
+        summary.get("gangs", "-"),
+        summary.get("productivity", "-"),
+        avp_children,
+        fig_loss,
+        fig_top,
+        fig_bottom,
+        fig_lines,
+    )
+
+
 def _scope_frame_from_store(meta: dict[str, Any] | None, scope_name: str) -> pd.DataFrame:
     if not isinstance(meta, dict):
         return pd.DataFrame()
@@ -1375,6 +1950,7 @@ def register_callbacks(
     stringing_tse_lookup_provider: Callable[[], tuple[dict[str, int], dict[str, str]]] | None = None,
     idle_interval_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_idle_interval_provider: Callable[[], pd.DataFrame] | None = None,
+    stringing_plan_summary_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
@@ -1383,12 +1959,19 @@ def register_callbacks(
     stringing_plan_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_plan_completion_provider: Callable[[], set[tuple[str, str]]] | None = None,
     stringing_plan_error_provider: Callable[[], str | None] | None = None,
+    responsibility_slice_provider: Callable[[str, Sequence[str], str], pd.DataFrame] | None = None,
+    responsibility_completion_lookup_provider: Callable[[str], set[tuple[str, str]]] | None = None,
 ) -> None:
 
     LOGGER.debug("Registering callbacks")
 
     if config.enable_stringing and stringing_data_provider is None:
         raise RuntimeError("Stringing data provider must be supplied when stringing support is enabled.")
+
+    if app in _REGISTERED_DASH_APPS:
+        LOGGER.warning("register_callbacks invoked multiple times for the same Dash app; skipping duplicate registration.")
+        return
+    _REGISTERED_DASH_APPS.add(app)
 
     data_selector = DataSelector(
         config=config,
@@ -1399,8 +1982,15 @@ def register_callbacks(
         logger=LOGGER,
     )
     global DATA_SELECTOR, _PROJECT_INFO_PROVIDER
+    global _IDLE_INTERVAL_PROVIDER, _STRINGING_IDLE_INTERVAL_PROVIDER, _STRINGING_PLAN_SUMMARY_PROVIDER
     DATA_SELECTOR = data_selector
     _PROJECT_INFO_PROVIDER = project_info_provider
+    _IDLE_INTERVAL_PROVIDER = idle_interval_provider
+    _STRINGING_IDLE_INTERVAL_PROVIDER = stringing_idle_interval_provider
+    _STRINGING_PLAN_SUMMARY_PROVIDER = stringing_plan_summary_provider
+    _IDLE_INTERVAL_CACHE.clear()
+    _STRINGING_PLAN_SUMMARY_CACHE["frame"] = None
+    _STRINGING_PLAN_SUMMARY_CACHE["stored_at"] = 0.0
     responsibilities_accessor = ResponsibilitiesAccessor(
         data_provider=responsibilities_provider,
         completion_provider=responsibilities_completion_provider,
@@ -1423,18 +2013,6 @@ def register_callbacks(
         "erection": callable(responsibilities_provider),
         "stringing": callable(stringing_plan_provider),
     }
-
-    def _idle_table_for_mode(mode_value: str) -> pd.DataFrame:
-        provider = idle_interval_provider
-        if mode_value.strip().lower() == "stringing":
-            provider = stringing_idle_interval_provider
-        if callable(provider):
-            try:
-                table = provider()
-            except Exception:
-                return pd.DataFrame()
-            return table if isinstance(table, pd.DataFrame) else pd.DataFrame()
-        return pd.DataFrame()
 
     def _resolve_monthly_plan_workbook_path(cfg: AppConfig, plan_mode: str) -> Path | None:
         normalized = "stringing" if str(plan_mode).strip().lower() == "stringing" else "erection"
@@ -1494,7 +2072,7 @@ def register_callbacks(
         plan_mode: str = "erection",
         *,
         allow_workbook_fallback: bool = False,
-    ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], str | None, None]:
+    ) -> tuple[pd.DataFrame | None, set[tuple[str, str]], str | None, pd.ExcelFile | None]:
         mode_key = "stringing" if str(plan_mode).strip().lower() == "stringing" else "erection"
         accessor = plan_accessors[mode_key]
         payload: ResponsibilitiesPayload = accessor.load()
@@ -1504,7 +2082,105 @@ def register_callbacks(
             return frame, completion_keys, payload.error, None
 
         completion_keys = set(payload.completion_keys or set())
-        return None, completion_keys, payload.error or "Plan data unavailable.", None
+        if mode_key == "stringing":
+            plan_frame, _plan_keys, _plan_issues, _plan_index = _load_stringing_plan_snapshot(config)
+            if isinstance(plan_frame, pd.DataFrame) and not plan_frame.empty:
+                return plan_frame.copy(), completion_keys, payload.error, None
+        load_error = payload.error
+        if allow_workbook_fallback and not has_plan_provider.get(mode_key, False):
+            cfg = config
+            workbook_path = _resolve_monthly_plan_workbook_path(cfg, mode_key)
+            plan_title = "Stringing plan" if mode_key == "stringing" else "Micro Plan"
+            if workbook_path is None:
+                LOGGER.warning(
+                    "Monthly plan workbook for '%s' not found near data root '%s'.",
+                    mode_key,
+                    cfg.data_path,
+                )
+                return None, completion_keys, f"No {plan_title} data found in the compiled workbook.", None
+            try:
+                workbook = pd.ExcelFile(workbook_path)
+            except FileNotFoundError:
+                LOGGER.warning("Monthly plan workbook not found: %s", workbook_path)
+                return None, completion_keys, "Compiled workbook not found.", None
+            except Exception as exc:
+                LOGGER.exception("Failed to open monthly plan workbook '%s': %s", workbook_path, exc)
+                return None, completion_keys, "Unable to load monthly plan data.", None
+
+            if mode_key == "stringing":
+                preferred_sheet = getattr(cfg, "stringing_sheet_name", "") or "Stringing Compiled"
+                sheet_name = next(
+                    (
+                        name
+                        for name in workbook.sheet_names
+                        if _normalize_col_key(name) == _normalize_col_key(preferred_sheet)
+                    ),
+                    None,
+                )
+                if not sheet_name:
+                    LOGGER.warning("Stringing sheet missing in workbook '%s'; sheets=%s", workbook_path, workbook.sheet_names)
+                    return (
+                        None,
+                        completion_keys,
+                        "No Stringing plan data found in the compiled workbook.",
+                        workbook,
+                    )
+            else:
+                sheet_name = "MicroPlanResponsibilities"
+                if sheet_name not in workbook.sheet_names:
+                    LOGGER.warning("Sheet '%s' missing in workbook '%s'", sheet_name, workbook_path)
+                    return (
+                        None,
+                        completion_keys,
+                        "No Micro Plan data found in the compiled workbook.",
+                        workbook,
+                    )
+
+            try:
+                df_atomic = pd.read_excel(workbook, sheet_name=sheet_name)
+            except Exception as exc:
+                LOGGER.exception("Failed to load sheet '%s' for %s plan: %s", sheet_name, mode_key, exc)
+                message = (
+                    "Unable to load Stringing plan data."
+                    if mode_key == "stringing"
+                    else "Unable to load Micro Plan data."
+                )
+                return None, completion_keys, message, workbook
+            try:
+                setattr(workbook, "_plan_sheet_name", sheet_name)
+                setattr(workbook, "_plan_workbook_path", Path(workbook_path))
+            except Exception:
+                pass
+            return df_atomic, completion_keys, load_error, workbook
+
+        return None, completion_keys, load_error, None
+
+    def _load_responsibility_slice(
+        plan_mode: str,
+        project_candidates: Sequence[str],
+        entity_norm: str,
+    ) -> pd.DataFrame:
+        if not callable(responsibility_slice_provider):
+            return pd.DataFrame()
+        try:
+            return responsibility_slice_provider(plan_mode, project_candidates, entity_norm)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning("Unable to access responsibility slice for mode '%s': %s", plan_mode, exc)
+            return pd.DataFrame()
+
+    def _load_responsibility_completion_lookup(plan_mode: str) -> set[tuple[str, str]]:
+        if not callable(responsibility_completion_lookup_provider):
+            return set()
+        try:
+            lookup = responsibility_completion_lookup_provider(plan_mode)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning(
+                "Unable to access responsibility completion lookup for mode '%s': %s",
+                plan_mode,
+                exc,
+            )
+            return set()
+        return set(lookup or set())
 
     global _get_stringing_tse_lookup
 
@@ -1524,7 +2200,18 @@ def register_callbacks(
                         alias_map = dict(lookup[1] or {})
                         if canonical_map or alias_map:
                             return canonical_map, alias_map
-            return {}, {}
+            df_compiled = pd.DataFrame()
+            if callable(stringing_compiled_provider):
+                try:
+                    df_compiled = stringing_compiled_provider()
+                except Exception:
+                    df_compiled = pd.DataFrame()
+            if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
+                try:
+                    df_compiled = _load_stringing_compiled_raw(config)
+                except Exception:
+                    df_compiled = pd.DataFrame()
+            return build_tse_lookup_from_df(df_compiled)
 
         return _cached_global_result(
             "stringing:tse-lookup",
@@ -1887,13 +2574,81 @@ def register_callbacks(
         _fill_completion_from("paying_out_complete")
         return normalized, completion_pairs, issues
 
+    def _stringing_plan_output_path(cfg: AppConfig) -> Path:
+        base = Path(cfg.data_path).expanduser()
+        candidates: list[Path] = []
+
+        def _push_directory(path_like: Path | str | None) -> None:
+            if not path_like:
+                return
+            path_obj = Path(path_like).expanduser()
+            if path_obj.suffix.lower() == ".xlsx":
+                candidates.append(path_obj)
+            else:
+                candidates.append(path_obj / "StringingCompiled_Output.xlsx")
+
+        if base.is_file():
+            _push_directory(base.parent / "Stringing")
+        else:
+            _push_directory(base.parent / "Stringing")
+            _push_directory(base.parent.parent / "Stringing")
+
+        for rel in getattr(cfg, "stringing_parquet_dirs", ()):
+            try:
+                rel_path = (base / Path(rel)).resolve()
+            except Exception:
+                continue
+            _push_directory(rel_path)
+
+        _push_directory(Path("Parquets") / "Stringing")
+        if base.is_file():
+            _push_directory(base.with_name("StringingCompiled_Output.xlsx"))
+        else:
+            _push_directory(base / "Stringing")
+        _push_directory(Path("Parquets"))
+        _push_directory(Path("."))
+
+        for candidate in candidates:
+            try:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except Exception:
+                continue
+        fallback = Path("Parquets") / "Stringing" / "StringingCompiled_Output.xlsx"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return fallback
+
     def _write_stringing_plan_snapshot(
         cfg: AppConfig,
         frame: pd.DataFrame,
         issues: list[dict[str, str]],
         index_rows: list[dict[str, Any]] | None = None,
     ) -> None:
-        LOGGER.debug("Stringing plan snapshot persistence disabled; using in-memory cache only.")
+        output_path = _stringing_plan_output_path(cfg)
+        try:
+            mode = "a" if output_path.exists() else "w"
+            with pd.ExcelWriter(
+                output_path,
+                engine="openpyxl",
+                mode=mode,
+                if_sheet_exists="replace",
+            ) as writer:
+                responsibilities_frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+                if responsibilities_frame is None or responsibilities_frame.empty:
+                    responsibilities_frame = pd.DataFrame()
+                for sheet in ("Stringing Plan", "MicroPlanResponsibilities"):
+                    responsibilities_frame.to_excel(writer, sheet_name=sheet, index=False)
+                index_frame = pd.DataFrame(index_rows or [])
+                index_frame.to_excel(writer, sheet_name="MicroPlanIndex", index=False)
+                issues_frame = (
+                    pd.DataFrame(issues)
+                    if issues
+                    else pd.DataFrame([{"issue": "No issues detected"}])
+                )
+                for sheet in ("Stringing Plan Issues", "MicroPlanDataIssues"):
+                    issues_frame.to_excel(writer, sheet_name=sheet, index=False)
+        except Exception as exc:
+            LOGGER.warning("Unable to write Stringing plan snapshot to '%s': %s", output_path, exc)
 
     def _maybe_write_stringing_plan_snapshot(
         cfg: AppConfig,
@@ -1901,7 +2656,13 @@ def register_callbacks(
         issues: list[dict[str, str]],
         index_rows: list[dict[str, Any]] | None = None,
     ) -> None:
-        LOGGER.debug("Skipping stringing plan snapshot write (in-memory only).")
+        cache = _STRINGING_PLAN_CACHE
+        ts_now = time.time()
+        last_written = cache.get("last_written", 0.0)
+        if ts_now - last_written < _STRINGING_PLAN_CACHE_TTL_SECONDS:
+            return
+        _write_stringing_plan_snapshot(cfg, frame, issues, index_rows or [])
+        cache["last_written"] = ts_now
 
     def _load_stringing_plan_snapshot(
         cfg: AppConfig,
@@ -1931,13 +2692,165 @@ def register_callbacks(
             cache["last_written"] = ts_now
             return frame, completion_keys, [], []
 
-        cache["frame"] = pd.DataFrame()
-        cache["completion"] = set()
-        cache["issues"] = []
-        cache["index"] = []
+        root = _resolve_stringing_microplan_root(config.data_path)
+        frames: list[pd.DataFrame] = []
+        completion_keys: set[tuple[str, str]] = set()
+        issues: list[dict[str, str]] = []
+        index_rows: list[dict[str, Any]] = []
+
+        def _append_index_entry(
+            *,
+            workbook: Path | str | None,
+            sheet_name: str | None,
+            project_code: str,
+            project_label: str,
+            rows_cleaned: int,
+            status: str,
+            error: str,
+            issues_logged: int = 0,
+            input_rows: int = 0,
+            plan_month: str = "",
+        ) -> None:
+            index_rows.append(
+                {
+                    "file_path": str(workbook or ""),
+                    "sheet_name": sheet_name or "",
+                    "project_name": project_label or project_code or "",
+                    "project_key": project_code or project_label or "",
+                    "rows_cleaned": rows_cleaned,
+                    "input_rows": input_rows,
+                    "issues_logged": issues_logged,
+                    "plan_month": plan_month,
+                    "status": status,
+                    "error": error or "",
+                }
+            )
+
+        def _infer_plan_month_from_frame(frame: pd.DataFrame) -> str:
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return ""
+            candidate_columns = (
+                "plan_month",
+                "completion_date",
+                "final_sag_complete",
+                "paying_out_complete",
+                "paying_out_start",
+            )
+            for column in candidate_columns:
+                if column not in frame.columns:
+                    continue
+                series = pd.to_datetime(frame[column], errors="coerce")
+                series = series.dropna()
+                if series.empty:
+                    continue
+                ts = pd.Timestamp(series.iloc[0])
+                return ts.to_period("M").to_timestamp().strftime("%Y-%m")
+            return ""
+
+        if not root.exists():
+            message = f"Stringing micro plan root not found: {root}"
+            LOGGER.warning(message)
+            issues.append({"workbook": str(root), "sheet": "", "issue": "ROOT_NOT_FOUND"})
+            _append_index_entry(
+                workbook=root,
+                sheet_name="",
+                project_code="",
+                project_label="",
+                rows_cleaned=0,
+                status="error",
+                error="ROOT_NOT_FOUND",
+            )
+        else:
+            preferred_sheet = getattr(cfg, "stringing_sheet_name", "")
+            for workbook in sorted(root.rglob("*.xlsx")):
+                if workbook.name.startswith("~$"):
+                    continue
+                project_code, project_label = _infer_project_hint(workbook)
+                try:
+                    xls = pd.ExcelFile(workbook)
+                except Exception as exc:
+                    issues.append({"workbook": str(workbook), "sheet": "", "issue": f"OPEN_FAILED: {exc}"})
+                    _append_index_entry(
+                        workbook=workbook,
+                        sheet_name="",
+                        project_code=project_code,
+                        project_label=project_label,
+                        rows_cleaned=0,
+                        status="error",
+                        error=f"OPEN_FAILED: {exc}",
+                    )
+                    continue
+                sheet_name = next(
+                    (
+                        name
+                        for name in xls.sheet_names
+                        if preferred_sheet and _normalize_col_key(name) == _normalize_col_key(preferred_sheet)
+                    ),
+                    None,
+                )
+                if sheet_name is None:
+                    sheet_name = next((name for name in xls.sheet_names if "string" in name.lower()), None)
+                if sheet_name is None:
+                    issues.append({"workbook": str(workbook), "sheet": "", "issue": "NO_STRINGING_SHEET"})
+                    _append_index_entry(
+                        workbook=workbook,
+                        sheet_name="",
+                        project_code=project_code,
+                        project_label=project_label,
+                        rows_cleaned=0,
+                        status="error",
+                        error="NO_STRINGING_SHEET",
+                    )
+                    continue
+                try:
+                    df_raw = pd.read_excel(workbook, sheet_name=sheet_name, header=1)
+                except Exception as exc:
+                    issues.append({"workbook": str(workbook), "sheet": sheet_name, "issue": f"READ_FAILED: {exc}"})
+                    _append_index_entry(
+                        workbook=workbook,
+                        sheet_name=sheet_name,
+                        project_code=project_code,
+                        project_label=project_label,
+                        rows_cleaned=0,
+                        status="error",
+                        error=f"READ_FAILED: {exc}",
+                    )
+                    continue
+                normalized, _plan_keys, local_issues = _prepare_stringing_plan_frame(
+                    df_raw,
+                    project_hint=project_label or project_code,
+                    source_path=workbook,
+                    sheet_name=sheet_name,
+                )
+                if project_code:
+                    normalized["project_key"] = normalized["project_key"].replace("", project_code)
+                if project_label:
+                    normalized["project_name"] = normalized["project_name"].replace("", project_label)
+                frames.append(normalized)
+                issues.extend(local_issues)
+                plan_month_value = _infer_plan_month_from_frame(normalized)
+                _append_index_entry(
+                    workbook=workbook,
+                    sheet_name=sheet_name,
+                    project_code=project_code,
+                    project_label=project_label,
+                    rows_cleaned=int(len(normalized)),
+                    input_rows=int(len(df_raw)),
+                    status="ok",
+                    error="",
+                    issues_logged=len(local_issues),
+                    plan_month=plan_month_value,
+                )
+
+        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        _write_stringing_plan_snapshot(cfg, frame, issues, index_rows)
+        cache["frame"] = frame.copy()
+        cache["completion"] = set(completion_keys)
+        cache["issues"] = list(issues)
+        cache["index"] = list(index_rows)
         cache["stored_at"] = ts_now
         cache["last_written"] = ts_now
-        return None, set(), [], []
+        return frame, completion_keys, issues, index_rows
 
     # --- shared: responsibilities figure + KPIs for a single project selection ---
     def _stringing_length_km_series(frame: pd.DataFrame) -> pd.Series:
@@ -2027,108 +2940,6 @@ def register_callbacks(
         stringing_length_label = plan_key == "stringing" and metric == "tower_weight"
         stringing_length_label = plan_key == "stringing" and metric == "tower_weight"
 
-        df_atomic, completed_keys, load_error_msg, workbook = _fetch_monthly_plan(
-            plan_key,
-            allow_workbook_fallback=True,
-        )
-        if df_atomic is None or df_atomic.empty:
-            message = load_error_msg or f"No {plan_title} data found in the compiled workbook."
-            return _empty_response(message)
-
-        completion_keys = set(completed_keys or set())
-        df_atomic = df_atomic.copy()
-        plan_source_path = None
-        plan_sheet_name = None
-        if workbook is not None:
-            plan_source_path = getattr(workbook, "_plan_workbook_path", None)
-            plan_sheet_name = getattr(workbook, "_plan_sheet_name", None)
-            if plan_source_path is None:
-                plan_source_path = getattr(workbook, "io", None)
-        plan_issues: list[dict[str, str]] = []
-        if plan_key == "stringing":
-            if workbook is not None and "stringing_span_completed" not in df_atomic.columns:
-                df_atomic, _plan_completion_keys, plan_issues = _prepare_stringing_plan_frame(
-                    df_atomic,
-                    source_path=plan_source_path,
-                    sheet_name=plan_sheet_name,
-                )
-            elif "stringing_span_completed" in df_atomic.columns:
-                df_atomic["stringing_span_completed"] = df_atomic["stringing_span_completed"].fillna(False)
-            if workbook is not None:
-                _maybe_write_stringing_plan_snapshot(config, df_atomic, plan_issues, [])
-
-        month_list = _ensure_list(months_value)
-        months_ts = resolve_months(month_list, quick_range_value)
-        active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
-
-        if "plan_month" in df_atomic.columns:
-            df_atomic["plan_month"] = pd.to_datetime(
-                df_atomic["plan_month"], errors="coerce"
-            ).dt.to_period("M").dt.to_timestamp()
-            df_atomic["completion_month"] = df_atomic["plan_month"]
-        elif "completion_date" in df_atomic.columns:
-            df_atomic["completion_month"] = pd.to_datetime(
-                df_atomic["completion_date"], errors="coerce"
-            ).dt.to_period("M").dt.to_timestamp()
-        else:
-            df_atomic["completion_month"] = pd.NaT
-
-        # text normalizers (copy from local scope to avoid shadowing)
-        def _norm_text(v: object) -> str:
-            s = str(v).replace("\u00a0", " ").strip()
-            low = s.lower()
-            if low in {"", "nan", "none", "null"}:
-                return ""
-            return s
-
-        def _norm_lc(v: object) -> str:
-            return _norm_text(v).lower()
-
-        def _norm_loc(v: object) -> str:
-            t = _norm_text(v)
-            if not t:
-                return ""
-            if t.endswith(".0") and t.replace(".", "", 1).isdigit():
-                t = t.split(".", 1)[0]
-            return t
-
-        for c in ("project_key", "project_name", "entity_type", "entity_name", "location_no"):
-            if c not in df_atomic.columns:
-                df_atomic[c] = ""
-        df_atomic["project_name_lc"] = df_atomic["project_name"].map(_norm_lc)
-        df_atomic["project_key_lc"] = df_atomic["project_key"].astype(str).map(_norm_lc)
-        df_atomic["location_no_norm"] = df_atomic["location_no"].map(_norm_loc)
-
-        # Filter to selected months
-        if active_months:
-            df_atomic = df_atomic[df_atomic["completion_month"].isin(active_months)].copy()
-
-        # Filter by project (supports name or code; robust compact match)
-        df_entity = pd.DataFrame()
-        for candidate in project_candidates:
-            sel = _norm_lc(candidate)
-            mask_name_or_key = (
-                (df_atomic["project_name_lc"] == sel) | (df_atomic["project_key_lc"] == sel)
-            )
-            if not mask_name_or_key.any():
-                import re as _re
-                sel_compact = _re.sub(r"[^a-z0-9]", "", sel)
-                project_name_compact = df_atomic["project_name_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
-                project_key_compact = df_atomic["project_key_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
-                mask_name_or_key = (
-                    (project_name_compact == sel_compact) | (project_key_compact == sel_compact)
-                )
-            if mask_name_or_key.any():
-                df_entity = df_atomic[mask_name_or_key].copy()
-                break
-
-        if df_entity.empty:
-            return _empty_response("No plan entries found for the selected project.")
-
-        if stringing_length_label:
-            df_entity["__stringing_length_km"] = _stringing_length_km_series(df_entity)
-
-        # Entity filter (Supervisor / Section Incharge / Gang)
         ent_map = {
             "supervisor": "supervisor",
             "supervisors": "supervisor",
@@ -2139,16 +2950,142 @@ def register_callbacks(
             "gangs": "gang",
         }
         entity_norm = ent_map.get(entity.lower(), entity.lower())
-        df_entity["entity_type_lc"] = df_entity["entity_type"].map(_norm_lc)
-        df_entity = df_entity[df_entity["entity_type_lc"] == entity_norm].copy()
+
+        month_list = _ensure_list(months_value)
+        months_ts = resolve_months(month_list, quick_range_value)
+        active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
+
+        completion_keys: set[tuple[str, str]] = set()
+        df_entity = pd.DataFrame()
+        slice_candidates = project_candidates or []
+        if slice_candidates:
+            slice_frame = _load_responsibility_slice(plan_key, slice_candidates, entity_norm)
+            if not slice_frame.empty:
+                df_entity = slice_frame.copy()
+                completion_keys = _load_responsibility_completion_lookup(plan_key)
+                if active_months and "completion_month" in df_entity.columns:
+                    df_entity = df_entity[df_entity["completion_month"].isin(active_months)].copy()
 
         if df_entity.empty:
-            return _empty_response("No plan entries found for the selected filters.")
+            df_atomic, completed_keys, load_error_msg, workbook = _fetch_monthly_plan(
+                plan_key,
+                allow_workbook_fallback=True,
+            )
+            if df_atomic is None or df_atomic.empty:
+                message = load_error_msg or f"No {plan_title} data found in the compiled workbook."
+                return _empty_response(message)
 
-        df_entity["is_completed"] = [
-            (proj, loc) in completed_keys
-            for proj, loc in zip(df_entity["project_name_lc"], df_entity["location_no_norm"])
-        ]
+            completion_keys = {
+                (_compact_project_key(project), _normalize_location(location))
+                for project, location in (completed_keys or set())
+            }
+            completion_keys = {(proj, loc) for proj, loc in completion_keys if proj and loc}
+            df_atomic = df_atomic.copy()
+            plan_source_path = None
+            plan_sheet_name = None
+            if workbook is not None:
+                plan_source_path = getattr(workbook, "_plan_workbook_path", None)
+                plan_sheet_name = getattr(workbook, "_plan_sheet_name", None)
+                if plan_source_path is None:
+                    plan_source_path = getattr(workbook, "io", None)
+            plan_issues: list[dict[str, str]] = []
+            if plan_key == "stringing":
+                if workbook is not None and "stringing_span_completed" not in df_atomic.columns:
+                    df_atomic, _plan_completion_keys, plan_issues = _prepare_stringing_plan_frame(
+                        df_atomic,
+                        source_path=plan_source_path,
+                        sheet_name=plan_sheet_name,
+                    )
+                    completion_keys.update(
+                        {
+                            (_compact_project_key(project), _normalize_location(location))
+                            for project, location in _plan_completion_keys
+                        }
+                    )
+                    completion_keys = {(proj, loc) for proj, loc in completion_keys if proj and loc}
+                elif "stringing_span_completed" in df_atomic.columns:
+                    df_atomic["stringing_span_completed"] = df_atomic["stringing_span_completed"].fillna(False)
+                if workbook is not None:
+                    _maybe_write_stringing_plan_snapshot(config, df_atomic, plan_issues, [])
+
+            if "plan_month" in df_atomic.columns:
+                df_atomic["plan_month"] = pd.to_datetime(
+                    df_atomic["plan_month"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+                df_atomic["completion_month"] = df_atomic["plan_month"]
+            elif "completion_date" in df_atomic.columns:
+                df_atomic["completion_month"] = pd.to_datetime(
+                    df_atomic["completion_date"], errors="coerce"
+                ).dt.to_period("M").dt.to_timestamp()
+            else:
+                df_atomic["completion_month"] = pd.NaT
+
+            def _norm_text(v: object) -> str:
+                s = str(v).replace("\u00a0", " ").strip()
+                low = s.lower()
+                if low in {"", "nan", "none", "null"}:
+                    return ""
+                return s
+
+            def _norm_lc(v: object) -> str:
+                return _norm_text(v).lower()
+
+            def _norm_loc(v: object) -> str:
+                t = _norm_text(v)
+                if not t:
+                    return ""
+                if t.endswith(".0") and t.replace(".", "", 1).isdigit():
+                    t = t.split(".", 1)[0]
+                return t
+
+            for c in ("project_key", "project_name", "entity_type", "entity_name", "location_no"):
+                if c not in df_atomic.columns:
+                    df_atomic[c] = ""
+            df_atomic["project_name_lc"] = df_atomic["project_name"].map(_norm_lc)
+            df_atomic["project_key_lc"] = df_atomic["project_key"].astype(str).map(_norm_lc)
+            df_atomic["project_key_norm"] = df_atomic["project_key_lc"].map(_compact_project_key)
+            df_atomic["project_key_norm"] = df_atomic["project_key_norm"].where(
+                df_atomic["project_key_norm"].astype(bool),
+                df_atomic["project_name_lc"].map(_compact_project_key),
+            )
+            df_atomic["location_no_norm"] = df_atomic["location_no"].map(_norm_loc)
+
+            if active_months:
+                df_atomic = df_atomic[df_atomic["completion_month"].isin(active_months)].copy()
+
+            for candidate in project_candidates:
+                sel = _norm_lc(candidate)
+                mask_name_or_key = (
+                    (df_atomic["project_name_lc"] == sel) | (df_atomic["project_key_lc"] == sel)
+                )
+                if not mask_name_or_key.any():
+                    import re as _re
+
+                    sel_compact = _re.sub(r"[^a-z0-9]", "", sel)
+                    project_name_compact = df_atomic["project_name_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+                    project_key_compact = df_atomic["project_key_lc"].str.replace(r"[^a-z0-9]", "", regex=True)
+
+                    mask_name_or_key = (
+                        (project_name_compact == sel_compact) | (project_key_compact == sel_compact)
+                    )
+                if mask_name_or_key.any():
+                    df_entity = df_atomic[mask_name_or_key].copy()
+                    break
+
+            if df_entity.empty:
+                return _empty_response("No plan entries found for the selected project.")
+
+            if stringing_length_label:
+                df_entity["__stringing_length_km"] = _stringing_length_km_series(df_entity)
+
+            df_entity["entity_type_lc"] = df_entity["entity_type"].map(_norm_lc)
+            df_entity = df_entity[df_entity["entity_type_lc"] == entity_norm].copy()
+
+            if df_entity.empty:
+                return _empty_response("No plan entries found for the selected filters.")
+
+        if stringing_length_label and "__stringing_length_km" not in df_entity.columns:
+            df_entity["__stringing_length_km"] = _stringing_length_km_series(df_entity)
 
         df_entity["revenue_planned"] = pd.to_numeric(df_entity.get("revenue_planned", 0.0), errors="coerce").fillna(0.0)
         df_entity["revenue_realised"] = pd.to_numeric(df_entity.get("revenue_realised", 0.0), errors="coerce").fillna(0.0)
@@ -2158,6 +3095,49 @@ def register_callbacks(
                 df_entity.get("__stringing_length_km"), errors="coerce"
             ).fillna(0.0)
             df_entity["tower_weight"] = length_series
+
+        if "is_completed" not in df_entity.columns:
+            def _project_norm_series(frame: pd.DataFrame) -> pd.Series:
+                if "project_key_norm" in frame.columns:
+                    base = frame["project_key_norm"]
+                else:
+                    base = None
+                    for column in (
+                        "project_key",
+                        "project_code",
+                        "project",
+                        "project_name",
+                        "project_name_display",
+                    ):
+                        if column in frame.columns:
+                            base = frame[column]
+                            break
+                    if base is None:
+                        base = pd.Series([""] * len(frame), index=frame.index)
+                return base.astype(str).map(lambda value: _compact_project_key(value) or _normalize_lower(value))
+
+            def _location_norm_series(frame: pd.DataFrame) -> pd.Series:
+                if "location_no_norm" in frame.columns:
+                    base = frame["location_no_norm"]
+                else:
+                    base = None
+                    for column in ("location_no", "location", "location_name"):
+                        if column in frame.columns:
+                            base = frame[column]
+                            break
+                    if base is None:
+                        base = pd.Series([""] * len(frame), index=frame.index)
+                return base.astype(str).map(_normalize_location)
+
+            project_norm = _project_norm_series(df_entity)
+            location_norm = _location_norm_series(df_entity)
+            if completion_keys:
+                completion_mask = [
+                    (proj, loc) in completion_keys for proj, loc in zip(project_norm.tolist(), location_norm.tolist())
+                ]
+            else:
+                completion_mask = [False] * len(df_entity)
+            df_entity["is_completed"] = completion_mask
 
         df_entity["delivered_revenue"] = np.where(
             df_entity["revenue_realised"] > 0,
@@ -2255,11 +3235,15 @@ def register_callbacks(
 
         return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
     
-    def _get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    def _get_project_baselines(
+        mode: str = "erection",
+    ) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
         if project_baseline_provider is None:
             return {}, {}
         try:
-            overall_map, monthly_map = project_baseline_provider()
+            overall_map, monthly_map = project_baseline_provider(mode)  # type: ignore[misc]
+        except TypeError:
+            overall_map, monthly_map = project_baseline_provider()  # type: ignore[call-arg]
         except Exception as exc:
             LOGGER.warning("Failed to retrieve project baselines: %s", exc)
             return {}, {}
@@ -2303,6 +3287,12 @@ def register_callbacks(
         if is_stringing:
             payload["po_completion"] = "-"
             payload["tse"] = "-"
+        payload["_meta"] = {
+            "loss_rows": [],
+            "unit_label": "KM" if is_stringing else "MT",
+            "mode": "stringing" if is_stringing else "erection",
+            "is_stringing": is_stringing,
+        }
         return payload
 
     def _compute_mode_summary_components(
@@ -2327,6 +3317,7 @@ def register_callbacks(
             "total_lost": 0.0,
             "total_potential": 0.0,
             "balance_value": 0.0,
+            "loss_rows": [],
         }
         if not result["has_rows"]:
             return result
@@ -2362,8 +3353,10 @@ def register_callbacks(
             value = producer()
             return clone(value) if clone else value
 
-        precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = (not is_stringing) and bool(precomputed_overall)
+        precomputed_overall, precomputed_monthly = _get_project_baselines(
+            "stringing" if is_stringing else "erection"
+        )
+        use_precomputed = bool(precomputed_overall)
         proj_overall_all: dict[str, float] = {}
         proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
 
@@ -2488,6 +3481,7 @@ def register_callbacks(
             _compute_loss_rows,
             clone=_clone_loss_rows,
         )
+        result["loss_rows"] = loss_rows
 
         loss_df = pd.DataFrame(loss_rows)
         if is_stringing and not loss_df.empty:
@@ -2702,6 +3696,11 @@ def register_callbacks(
     def _summarize_scope_for_cards(scope_meta: dict[str, Any] | None) -> dict[str, str]:
         mode = _normalize_mode((scope_meta or {}).get("mode"))
         summary = _empty_summary_payload(mode == "stringing")
+        meta_info = summary.setdefault("_meta", {})
+        meta_info.setdefault("loss_rows", [])
+        meta_info.setdefault("mode", mode)
+        meta_info.setdefault("is_stringing", mode == "stringing")
+        meta_info.setdefault("unit_label", "KM" if mode == "stringing" else "MT")
         if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
             return summary
         try:
@@ -2713,6 +3712,8 @@ def register_callbacks(
             prod_unit = "KM/month" if is_stringing else "MT/day"
             meta_signature = scope_meta.get("signature") or "nosig"
             selected = scope_meta.get("selected") or {}
+            meta_info["unit_label"] = unit_short
+            meta_info["is_stringing"] = is_stringing
 
             scoped_full = _scope_frame_from_store(scope_meta, "full").copy()
             scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
@@ -2741,6 +3742,7 @@ def register_callbacks(
             total_lost = components["total_lost"]
             total_potential = components["total_potential"]
             balance_value = components["balance_value"]
+            meta_info["loss_rows"] = components.get("loss_rows") or []
             balance_reference_delivered = total_delivered
             if is_stringing:
                 deployment_scope = _normalize_deployment_filter(selected.get("stringing_scope"))
@@ -2912,78 +3914,6 @@ def register_callbacks(
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.exception("Failed to compute %s summary card: %s", mode, exc)
             return summary
-
-    @app.callback(
-        Output("erection-card-projects", "children"),
-        Output("erection-card-totals", "children"),
-        Output("erection-card-gangs", "children"),
-        Output("erection-card-productivity", "children"),
-        Output("erection-card-loss", "children"),
-        Output("stringing-card-projects", "children"),
-        Output("stringing-card-totals", "children"),
-        Output("stringing-card-gangs", "children"),
-        Output("stringing-card-productivity", "children"),
-        Output("stringing-card-loss", "children"),
-        Output("stringing-card-tse", "children"),
-        Input("store-filtered-scope", "data"),
-    )
-    def _update_mode_summary_cards(scope_meta: dict[str, Any] | None) -> tuple[str, ...]:
-        selected = (scope_meta or {}).get("selected") or {}
-
-        def _extract_list(key: str, *, lower: bool = False) -> list[str]:
-            values = selected.get(key) or []
-            return _normalize_str_list(values, lower=lower)
-
-        projects = _extract_list("projects")
-        months = _extract_list("months")
-        gangs = _extract_list("gangs")
-        kv_values = _extract_list("kv")
-        method_values = _extract_list("methods", lower=True)
-        quick_range = selected.get("quick_range")
-        stringing_scope = selected.get("stringing_scope")
-
-        current_mode = _normalize_mode((scope_meta or {}).get("mode"))
-
-        def _meta_for(mode_name: str) -> dict[str, Any] | None:
-            if current_mode == mode_name and isinstance(scope_meta, dict):
-                return scope_meta
-            try:
-                return _build_scope_meta_payload(
-                    eff_mode=mode_name,
-                    project_list=projects,
-                    gang_list=gangs,
-                    months_list=months,
-                    quick_range=quick_range,
-                    kv_values=kv_values,
-                    method_values=method_values,
-                    kv_list=kv_values,
-                    method_list=method_values,
-                    deployment_filter=stringing_scope if mode_name == "stringing" else "all",
-                )
-            except Exception:
-                LOGGER.exception("Unable to build %s scope for summary cards", mode_name)
-                return None
-
-        erection_summary = _summarize_scope_for_cards(_meta_for("erection"))
-        if config.enable_stringing:
-            stringing_summary = _summarize_scope_for_cards(_meta_for("stringing"))
-        else:
-            stringing_summary = _empty_summary_payload(True)
-
-        return (
-            erection_summary["projects"],
-            erection_summary["totals"],
-            erection_summary["gangs"],
-            erection_summary["productivity"],
-            erection_summary["lost_units"],
-            stringing_summary["projects"],
-            stringing_summary["totals"],
-            stringing_summary["gangs"],
-            stringing_summary["productivity"],
-            stringing_summary["lost_units"],
-            stringing_summary.get("tse", "-"),
-        )
-
 
     # Charts OR AVP rows -> store-click-meta (robust & single source of truth)
     app.clientside_callback(
@@ -3293,15 +4223,16 @@ def register_callbacks(
     @app.callback(
         Output("f-project", "value"),
         Output("f-gang", "value"),
+        Output("f-stringing-scope", "value"),
         Input("btn-reset-filters", "n_clicks"),
         prevent_initial_call=True,
     )
     def handle_filter_reset(
         reset_clicks: int | None,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[Any, Any, str]:
         if not reset_clicks:
             raise PreventUpdate
-        return None, None
+        return None, None, "all"
     @app.callback(
         Output("store-filtered-scope", "data"),
         Input("f-project", "value"),
@@ -3412,31 +4343,20 @@ def register_callbacks(
 
 
     @app.callback(
-        Output("f-stringing-scope", "value"),
         Output("project-modal-stringing-scope", "value"),
         Input("store-stringing-scope", "data"),
-        Input("btn-reset-filters", "n_clicks"),
-        State("f-stringing-scope", "value"),
         State("project-modal-stringing-scope", "value"),
         prevent_initial_call=False,
     )
-    def _sync_stringing_scope_controls(
+    def _sync_stringing_scope_modal(
         scope_value: str | None,
-        reset_clicks: int | None,
-        home_value: str | None,
         modal_value: str | None,
-    ) -> tuple[Any, Any]:
-        ctx = dash.callback_context
-        if not ctx.triggered:
-            raise PreventUpdate
-        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger == "btn-reset-filters":
-            return "all", "all"
+    ) -> Any:
         normalized = _normalize_deployment_filter(scope_value)
         modal_norm = _normalize_deployment_filter(modal_value)
         if normalized == modal_norm:
-            return dash.no_update, dash.no_update
-        return dash.no_update, normalized
+            return dash.no_update
+        return normalized
 
 
     @app.callback(
@@ -3644,13 +4564,11 @@ def register_callbacks(
         Output("global-performance-modal", "is_open"),
         Input("btn-open-global-performance", "n_clicks"),
         Input("global-performance-modal-close", "n_clicks"),
-        Input("global-performance-modal", "n_dismiss"),
         State("global-performance-modal", "is_open"),
     )
     def _toggle_global_performance_modal(
         open_clicks: int | None,
         close_clicks: int | None,
-        dismiss_clicks: int | None,
         is_open: bool | None,
     ) -> bool:
         ctx = dash.callback_context
@@ -3659,9 +4577,55 @@ def register_callbacks(
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
         if trigger == "btn-open-global-performance":
             return True
-        if trigger in {"global-performance-modal-close", "global-performance-modal"}:
+        if trigger == "global-performance-modal-close":
             return False
         return bool(is_open)
+
+    @app.callback(
+        Output("global-performance-avp-list", "children"),
+        Output("global-performance-actual-vs-bench", "figure"),
+        Output("global-performance-top5", "figure"),
+        Output("global-performance-bottom5", "figure"),
+        Input("store-global-performance-scope", "data"),
+        Input("global-performance-topbot-metric", "value"),
+    )
+    def _update_global_performance_modal(
+        scope_meta: dict[str, Any] | None,
+        topbot_metric: str | None,
+    ):
+        empty_fig = go.Figure()
+        if not isinstance(scope_meta, dict):
+            return (
+                html.Div("Select at least one project/month to view gang performance.", className="text-muted"),
+                empty_fig,
+                empty_fig,
+                empty_fig,
+            )
+        try:
+            (
+                *_kpi,
+                avp_children,
+                fig_loss,
+                fig_top,
+                fig_bottom,
+                _fig_project,
+            ) = _compute_dashboard_outputs(
+                scope_meta,
+                topbot_metric,
+                avp_namespace="global-performance-avp",
+                summarizer=_summarize_scope_for_cards,
+                summary_factory=_empty_summary_payload,
+            )
+        except PreventUpdate:
+            return (
+                html.Div("No data available for the selected scope.", className="text-muted"),
+                empty_fig,
+                empty_fig,
+                empty_fig,
+            )
+
+        avp_children = avp_children or html.Div("No gangs available for this selection.", className="text-muted")
+        return avp_children, fig_loss, fig_top, fig_bottom
 
     def _resolve_reset_month_value() -> str:
         try:
@@ -3964,7 +4928,7 @@ def register_callbacks(
     # --- NEW: responsibilities chart callback ---
     # --- NEW: responsibilities chart callback ---
 
-        # Responsibilities: grouped bars + three KPIs
+    # Responsibilities: grouped bars + three KPIs
     def _render_monthly_plan_card(
         *,
         plan_mode: str,
@@ -3974,303 +4938,8 @@ def register_callbacks(
         months_value: Sequence[str] | None,
         quick_range_value: str | None,
     ):
-        plan_key = "stringing" if str(plan_mode).strip().lower() == "stringing" else "erection"
-        plan_title = "Monthly Plan (Stringing)" if plan_key == "stringing" else "Monthly Plan (Erection)"
-        plan_noun = "Stringing plan" if plan_key == "stringing" else "Monthly Plan"
-
-        def _empty_response(message: str):
-            empty_fig = build_empty_responsibilities_figure(message)
-            return empty_fig, "\u2014", "\u2014", "\u2014"
-
-        if not project_value:
-            return _empty_response("Select a single project to view its details.")
-
-        if isinstance(project_value, (list, tuple)):
-            cleaned_projects = [str(p).strip() for p in project_value if p]
-            if len(cleaned_projects) != 1:
-                return _empty_response("Select a single project to view its details.")
-            project_value = cleaned_projects[0]
-
-        entity_value = (entity_value or "Supervisor").strip()
-        metric_value = (metric_value or "tower_weight").strip()
-        metric_value = metric_value if metric_value in {"revenue", "tower_weight"} else "tower_weight"
-        stringing_length_label = plan_key == "stringing" and metric_value == "tower_weight"
-
-        df_atomic, completed_keys, load_error_msg, workbook = _fetch_monthly_plan(
-            plan_key,
-            allow_workbook_fallback=True,
-        )
-        if df_atomic is None or df_atomic.empty:
-            message = load_error_msg or f"No {plan_title} data found in the compiled workbook."
-            return _empty_response(message)
-
-        df_atomic = df_atomic.copy()
-
-        month_list = _ensure_list(months_value)
-        months_ts = resolve_months(month_list, quick_range_value)
-        active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
-
-        if "plan_month" in df_atomic.columns:
-            df_atomic["plan_month"] = pd.to_datetime(
-                df_atomic["plan_month"], errors="coerce"
-            ).dt.to_period("M").dt.to_timestamp()
-            df_atomic["completion_month"] = df_atomic["plan_month"]
-        elif "completion_date" in df_atomic.columns:
-            df_atomic["completion_month"] = pd.to_datetime(
-                df_atomic["completion_date"], errors="coerce"
-            ).dt.to_period("M").dt.to_timestamp()
-        else:
-            df_atomic["completion_month"] = pd.NaT
-
-        def _normalize_text(value: object) -> str:
-            text = str(value).replace("\u00a0", " ").strip()
-            lowered = text.lower()
-            if lowered in {"", "nan", "none", "null"}:
-                return ""
-            return text
-
-        def _normalize_lower(value: object) -> str:
-            return _normalize_text(value).lower()
-
-        def _normalize_location(value: object) -> str:
-            txt = _normalize_text(value)
-            if not txt or txt.lower() in {"nan", "none"}:
-                return ""
-            if txt.endswith(".0") and txt.replace(".", "", 1).isdigit():
-                txt = txt.split(".", 1)[0]
-            return txt
-
-        text_columns = ("project_key", "project_name", "entity_type", "entity_name", "location_no")
-        for col in text_columns:
-            if col not in df_atomic.columns:
-                df_atomic[col] = ""
-            df_atomic[col] = df_atomic[col].map(_normalize_text)
-
-        standard_entity_labels = {
-            "gangs": "Gang",
-            "gang": "Gang",
-            "section incharges": "Section Incharge",
-            "section incharge": "Section Incharge",
-            "section in-charge": "Section Incharge",
-            "supervisors": "Supervisor",
-            "supervisor": "Supervisor",
-        }
-        df_atomic["entity_type"] = df_atomic["entity_type"].map(
-            lambda val: standard_entity_labels.get(val.lower(), val) if val else val
-        )
-
-        numeric_columns = {
-            "revenue_planned": 0.0,
-            "revenue_realised": 0.0,
-            "tower_weight": 0.0,
-        }
-        for col, default in numeric_columns.items():
-            if col not in df_atomic.columns:
-                df_atomic[col] = default
-            df_atomic[col] = pd.to_numeric(df_atomic[col], errors="coerce").fillna(default)
-
-        df_atomic["project_key_lc"] = df_atomic["project_key"].str.lower()
-        df_atomic["project_name_lc"] = df_atomic["project_name"].str.lower()
-        df_atomic["entity_type_lc"] = df_atomic["entity_type"].str.lower()
-        df_atomic["location_no_norm"] = df_atomic["location_no"].map(_normalize_location)
-
-        df_project = df_atomic[df_atomic["project_key_lc"] == project_value.lower()].copy()
-        if df_project.empty:
-            df_project = df_atomic[df_atomic["project_name_lc"] == project_value.lower()].copy()
-        if df_project.empty:
-            return _empty_response(f"Selected project not found in {plan_noun} data.")
-
-        if stringing_length_label:
-            df_project["__stringing_length_km"] = _stringing_length_km_series(df_project)
-
-        if not active_months:
-            return _empty_response(f"Select a month to view the {plan_noun.lower()}.")
-
-        if active_months:
-            month_mask = df_project["completion_month"].isin(active_months)
-            if not month_mask.any():
-                label = _format_period_label(active_months)
-                label_clean = label.strip("()") if label else "selected month"
-                return _empty_response(f"{plan_noun} for {label_clean} is not available.")
-            df_project = df_project.loc[month_mask].copy()
-
-        entity_lc = entity_value.lower()
-        df_entity = df_project[df_project["entity_type_lc"] == entity_lc].copy()
-
-        if df_entity.empty:
-            return _empty_response("No plan entries found for the selected filters.")
-
-        df_entity["is_completed"] = [
-            (proj, loc) in completed_keys
-            for proj, loc in zip(df_entity["project_name_lc"], df_entity["location_no_norm"])
-        ]
-
-        df_entity["delivered_revenue"] = np.where(
-            df_entity["revenue_realised"] > 0,
-            df_entity["revenue_realised"],
-            np.where(df_entity["is_completed"], df_entity["revenue_planned"], 0.0),
-        )
-        if stringing_length_label:
-            length_series = pd.to_numeric(
-                df_entity.get("__stringing_length_km"), errors="coerce"
-            ).fillna(0.0)
-            df_entity["tower_weight"] = length_series
-            df_entity["delivered_tower_weight"] = np.where(
-                df_entity["is_completed"], length_series, 0.0
-            )
-        else:
-            df_entity["delivered_tower_weight"] = np.where(
-                df_entity["is_completed"], df_entity["tower_weight"], 0.0
-            )
-        if stringing_length_label:
-            df_entity["tower_weight"] = (
-                pd.to_numeric(df_entity["tower_weight"], errors="coerce").fillna(0.0) / 1000.0
-            )
-            df_entity["delivered_tower_weight"] = (
-                pd.to_numeric(df_entity["delivered_tower_weight"], errors="coerce").fillna(0.0) / 1000.0
-            )
-        if stringing_length_label:
-            df_entity["tower_weight"] = (
-                pd.to_numeric(df_entity["tower_weight"], errors="coerce").fillna(0.0) / 1000.0
-            )
-            df_entity["delivered_tower_weight"] = (
-                pd.to_numeric(df_entity["delivered_tower_weight"], errors="coerce").fillna(0.0) / 1000.0
-            )
-        df_entity = df_entity[df_entity["entity_name"].astype(bool)].copy()
-        if df_entity.empty:
-            return _empty_response("No plan entries found for the selected filters.")
-
-        aggregated = (
-            df_entity.groupby("entity_name", as_index=False)[
-                [
-                    "revenue_planned",
-                    "delivered_revenue",
-                    "tower_weight",
-                    "delivered_tower_weight",
-                ]
-            ]
-            .sum()
-        )
-        aggregated = aggregated.rename(columns={"revenue_planned": "revenue"})
-        target_metric_col = "revenue_planned" if metric_value == "revenue" else "tower_weight"
-        delivered_metric_col = "delivered_revenue" if metric_value == "revenue" else "delivered_tower_weight"
-
-        def _collect_locations(values: pd.Series) -> list[str]:
-            seen: set[str] = set()
-            ordered: list[str] = []
-            for raw in values:
-                if pd.isna(raw):
-                    continue
-                text = str(raw).strip()
-                if not text or text.lower() in {"nan", "none"}:
-                    continue
-                if text not in seen:
-                    seen.add(text)
-                    ordered.append(text)
-            return ordered
-
-        def _ensure_location_list(value: object) -> list[str]:
-            if isinstance(value, list):
-                return [str(item).strip() for item in value if str(item).strip()]
-            if isinstance(value, (tuple, set)):
-                return [str(item).strip() for item in value if str(item).strip()]
-            if isinstance(value, str):
-                parts = [part.strip() for part in value.split(",") if part.strip()]
-                return parts
-            return []
-
-        filtered_target = df_entity[df_entity[target_metric_col] > 0]
-        if filtered_target.empty:
-            filtered_target = df_entity
-
-        target_locations = (
-            filtered_target.groupby("entity_name")["location_no"]
-            .agg(_collect_locations)
-        )
-        filtered_delivered = df_entity[df_entity[delivered_metric_col] > 0]
-
-        delivered_locations = (
-            filtered_delivered.groupby("entity_name")["location_no"]
-            .agg(_collect_locations)
-        )
-
-        aggregated = aggregated.merge(
-            target_locations.rename("target_locations"),
-            on="entity_name",
-            how="left",
-        )
-        aggregated = aggregated.merge(
-            delivered_locations.rename("delivered_locations"),
-            on="entity_name",
-            how="left",
-        )
-
-        aggregated["target_locations"] = aggregated["target_locations"].apply(_ensure_location_list)
-        aggregated["delivered_locations"] = aggregated["delivered_locations"].apply(_ensure_location_list)
-
-        if aggregated.empty:
-            return _empty_response("No plan entries found for the selected filters.")
-
-        aggregated["delivered_value"] = np.where(
-            metric_value == "revenue",
-            aggregated["delivered_revenue"],
-            aggregated["delivered_tower_weight"],
-        )
-
-        axis_override = "Length (KM)" if stringing_length_label else None
-        unit_override = "KM" if stringing_length_label else None
-
-        fig = build_responsibilities_chart(
-            aggregated,
-            entity_label=entity_value,
-            metric=metric_value,
-            axis_title_override=axis_override,
-            unit_label_override=unit_override,
-            title=None,
-            top_n=20,
-        )
-
-        if metric_value == "revenue":
-            total_target = float(aggregated["revenue"].sum())
-            total_delivered = float(aggregated["delivered_revenue"].sum())
-        else:
-            total_target = float(aggregated["tower_weight"].sum())
-            total_delivered = float(aggregated["delivered_tower_weight"].sum())
-
-        achievement = 0.0 if total_target == 0 else (total_delivered / total_target) * 100.0
-
-        def fmt_num(value: float) -> str:
-            if metric_value == "revenue":
-                return f"\u20b9{value:,.0f}"
-            unit = "KM" if stringing_length_label else "MT"
-            precision = 1 if stringing_length_label else 0
-            return f"{value:,.{precision}f} {unit}"
-
-        kpi_target_txt = fmt_num(total_target)
-        kpi_deliv_txt = fmt_num(total_delivered)
-        kpi_ach_txt = f"{achievement:.0f}%"
-
-        return fig, kpi_target_txt, kpi_deliv_txt, kpi_ach_txt
-    @app.callback(
-        Output("g-responsibilities", "figure"),
-        Output("kpi-resp-target-value", "children"),
-        Output("kpi-resp-delivered-value", "children"),
-        Output("kpi-resp-ach-value", "children"),
-        Input("f-project", "value"),
-        Input("f-resp-entity", "value"),
-        Input("f-resp-metric", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-    )
-    def update_monthly_plan_erection(
-        project_value: str | None,
-        entity_value: str | None,
-        metric_value: str | None,
-        months_value: Sequence[str] | None,
-        quick_range_value: str | None,
-    ):
-        return _render_monthly_plan_card(
-            plan_mode="erection",
+        return _build_monthly_plan_for_project(
+            plan_mode=plan_mode,
             project_value=project_value,
             entity_value=entity_value,
             metric_value=metric_value,
@@ -4278,112 +4947,98 @@ def register_callbacks(
             quick_range_value=quick_range_value,
         )
 
-    @app.callback(
-        Output("g-stringing-plan", "figure"),
-        Output("kpi-stringing-plan-target", "children"),
-        Output("kpi-stringing-plan-delivered", "children"),
-        Output("kpi-stringing-plan-ach", "children"),
-        Input("f-project", "value"),
-        Input("f-stringing-plan-entity", "value"),
-        Input("f-stringing-plan-metric", "value"),
-        Input("f-month", "value"),
-        Input("f-quick-range", "value"),
-    )
-    def update_monthly_plan_stringing(
-        project_value: str | None,
-        entity_value: str | None,
-        metric_value: str | None,
-        months_value: Sequence[str] | None,
-        quick_range_value: str | None,
-    ):
-        return _render_monthly_plan_card(
-            plan_mode="stringing",
-            project_value=project_value,
-            entity_value=entity_value,
-            metric_value=metric_value,
-            months_value=months_value,
-            quick_range_value=quick_range_value,
-        )
+    
+    def _get_project_baselines(
+        mode: str = "erection",
+    ) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+        if project_baseline_provider is None:
+            return {}, {}
+        try:
+            overall_map, monthly_map = project_baseline_provider(mode)  # type: ignore[misc]
+        except TypeError:
+            overall_map, monthly_map = project_baseline_provider()  # type: ignore[call-arg]
+        except Exception as exc:
+            LOGGER.warning("Failed to retrieve project baselines: %s", exc)
+            return {}, {}
+        return overall_map or {}, monthly_map or {}
 
+    def _format_summary_value(value: float | None, unit_label: str | None = None, *, precision: int = 1) -> str:
+        if value is None or pd.isna(value):
+            return "-"
+        try:
+            numeric = float(value)
+        except Exception:
+            return "-"
+        formatted = f"{numeric:,.{precision}f}"
+        return f"{formatted} {unit_label}" if unit_label else formatted
 
-
-    def _compute_dashboard_outputs(
-        scope_meta: dict[str, Any] | None,
-        topbot_metric: str | None,
-        *,
-        avp_namespace: str = "avp",
-    ) -> tuple:
-        if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
-            raise PreventUpdate
-
-        selected = scope_meta.get("selected") or {}
-        project_list = selected.get("projects", [])
-        gang_list = selected.get("gangs", [])
-        months_ts = _months_from_meta(scope_meta)
-        days_factor = float(scope_meta.get("days_factor") or 30.0)
-        eff_mode = _normalize_mode(scope_meta.get("mode"))
-        meta_signature = scope_meta.get("signature") or "nosig"
-
-        scoped = _scope_frame_from_store(scope_meta, "full").copy()
-        scoped_top_bottom = _scope_frame_from_store(scope_meta, "project").copy()
-        scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
-        scope_keys = scope_meta.get("scopes") or {}
-        project_gang_key = scope_keys.get("project_gang")
-        empty_loss_columns = [
-            "gang_name",
-            "delivered",
-            "lost",
-            "potential",
-            "avg_prod",
-            "baseline",
-            "efficiency_pct",
-            "total_mt",
-        ]
-        loss_df = pd.DataFrame(columns=empty_loss_columns)
-
-        is_stringing = eff_mode == "stringing"
-        metric_col = "daily_km" if is_stringing else "daily_prod_mt"
-        unit_short = "KM" if is_stringing else "MT"
-
+    def _avg_metric_value(df: pd.DataFrame, metric_col: str, is_stringing: bool) -> float:
+        if not isinstance(df, pd.DataFrame) or df.empty or metric_col not in df.columns:
+            return 0.0
         if is_stringing:
-            benchmark = BENCHMARK_KM_PER_MONTH
-            if not scoped.empty and metric_col in scoped.columns:
-                monthly_totals = (
-                    scoped.groupby(["gang_name", "month"], dropna=True)[metric_col]
-                    .sum()
-                    .reset_index(name="monthly_value")
-                )
-                avg_prod = float(monthly_totals["monthly_value"].mean()) if not monthly_totals.empty else 0.0
-            else:
-                avg_prod = 0.0
-            delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
-            kpi_avg = f"{avg_prod:.2f} KM/month"
-            kpi_delta = "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} KM/month)"
-            project_bench = BENCHMARK_KM_PER_MONTH
-            avg_line_for_project = (
-                scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
+            required_cols = {"gang_name", "month"}
+            if not required_cols.issubset(df.columns):
+                return 0.0
+            monthly_totals = (
+                df.groupby(["gang_name", "month"], dropna=True)[metric_col]
+                .sum()
+                .reset_index(name="monthly_value")
             )
-        else:
-            benchmark = BENCHMARK_MT_PER_DAY
-            avg_prod = scoped[metric_col].mean() if len(scoped) and (metric_col in scoped.columns) else 0.0
-            delta_pct = (avg_prod - benchmark) / benchmark * 100 if benchmark else None
-            kpi_avg = f"{avg_prod:.2f} {unit_short}"
-            kpi_delta = "(n/a)" if delta_pct is None else f"({delta_pct:+.0f}% vs {benchmark:.1f} {unit_short})"
-            project_bench = benchmark
-            avg_line_for_project = avg_prod
+            if monthly_totals.empty:
+                return 0.0
+            return float(monthly_totals["monthly_value"].mean())
+        return float(pd.to_numeric(df[metric_col], errors="coerce").dropna().mean())
+
+    def _empty_summary_payload(is_stringing: bool) -> dict[str, str]:
+        payload = {
+            "projects": "-",
+            "totals": "-",
+            "gangs": "-",
+            "productivity": "-",
+            "lost_units": "-",
+        }
+        if is_stringing:
+            payload["po_completion"] = "-"
+            payload["tse"] = "-"
+        payload["_meta"] = {
+            "loss_rows": [],
+            "unit_label": "KM" if is_stringing else "MT",
+            "mode": "stringing" if is_stringing else "erection",
+            "is_stringing": is_stringing,
+        }
+        return payload
+
+    def _compute_mode_summary_components(
+        *,
+        scoped_full: pd.DataFrame,
+        scoped_all: pd.DataFrame,
+        months_ts: list[pd.Timestamp],
+        days_factor: float,
+        metric_col: str,
+        is_stringing: bool,
+        meta_signature: str,
+        cache_key: str | None,
+        scope_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "has_rows": not (scoped_full.empty and scoped_all.empty),
+            "loss_scope": pd.DataFrame(),
+            "history_scope": pd.DataFrame(),
+            "projects_count": 0,
+            "gangs_count": 0,
+            "total_delivered": 0.0,
+            "total_lost": 0.0,
+            "total_potential": 0.0,
+            "balance_value": 0.0,
+            "loss_rows": [],
+        }
+        if not result["has_rows"]:
+            return result
 
         has_selected_months = bool(months_ts)
-        baseline_map: dict[str, float] = {}
-        baseline_monthly_map: dict[str, dict[pd.Timestamp, float]] = {}
-
-        if "gang_name" not in scoped_all.columns:
-            scoped_all["gang_name"] = pd.Series(dtype=str)
-        if "project_name" not in scoped_all.columns:
-            scoped_all["project_name"] = pd.Series(dtype=str)
-
         earliest_month = None
         if has_selected_months and not scoped_all.empty and "month" in scoped_all.columns:
-            month_values = sorted(set(months_ts))
+            month_values = sorted({ts for ts in months_ts if pd.notna(ts)})
             period_mask = scoped_all["month"].isin(month_values)
             loss_scope = scoped_all.loc[period_mask].copy()
             earliest_month = month_values[0] if month_values else None
@@ -4391,7 +5046,10 @@ def register_callbacks(
         else:
             loss_scope = scoped_all.copy()
             history_scope = scoped_all.copy()
-        loss_scope = loss_scope.copy()
+
+        allowed_months = set(month_values) if has_selected_months and month_values else None
+        idle_table = _idle_table_for_mode("stringing" if is_stringing else "erection")
+
         if not loss_scope.empty:
             if "gang_name" in loss_scope.columns:
                 loss_scope = loss_scope.dropna(subset=["gang_name"])
@@ -4399,9 +5057,19 @@ def register_callbacks(
             if "project_name" in loss_scope.columns:
                 loss_scope["project_name"] = loss_scope["project_name"].astype(str).str.strip()
 
-        # --- PROJECT-level baselines, then map them onto gangs ---
-        precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = (not is_stringing) and bool(precomputed_overall)
+        result["loss_scope"] = loss_scope
+        result["history_scope"] = history_scope
+
+        def _maybe_cached(token: str, producer: Callable[[], T], *, clone: Callable[[T], T] | None = None) -> T:
+            if cache_key:
+                return _cached_scope_result(cache_key, token, producer, clone=clone)
+            value = producer()
+            return clone(value) if clone else value
+
+        precomputed_overall, precomputed_monthly = _get_project_baselines(
+            "stringing" if is_stringing else "erection"
+        )
+        use_precomputed = bool(precomputed_overall)
         proj_overall_all: dict[str, float] = {}
         proj_monthly: dict[str, dict[pd.Timestamp, float]] = {}
 
@@ -4447,37 +5115,27 @@ def register_callbacks(
                     return compute_project_baseline_maps_for(scoped_all, metric_col)
                 return compute_project_baseline_maps(scoped_all)
 
-            proj_overall_all, proj_monthly_all = _cached_scope_result(
-                project_gang_key,
+            proj_overall_all, proj_monthly_all = _maybe_cached(
                 baseline_token_all,
                 _compute_baseline_all,
                 clone=_clone_baseline_result,
             )
 
-            history_key = (
-                f"{baseline_token_all}::history::{earliest_month.isoformat()}"
-                if earliest_month is not None
-                else f"{baseline_token_all}::history::all"
-            )
+            if has_selected_months and earliest_month is not None:
+                proj_overall_all = {
+                    project: value
+                    for project, value in proj_overall_all.items()
+                    if value is not None
+                }
+                filtered: dict[str, dict[pd.Timestamp, float]] = {}
+                for project, month_map in proj_monthly_all.items():
+                    subset = {month: value for month, value in month_map.items() if month < earliest_month}
+                    if subset:
+                        filtered[project] = subset
+                proj_monthly = filtered
+            else:
+                proj_monthly = proj_monthly_all
 
-            def _compute_baseline_hist() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
-                if history_scope.empty:
-                    return {}, {}
-                if is_stringing:
-                    return compute_project_baseline_maps_for(history_scope, metric_col)
-                return compute_project_baseline_maps(history_scope)
-
-            proj_overall_hist, proj_monthly_hist = _cached_scope_result(
-                project_gang_key,
-                history_key,
-                _compute_baseline_hist,
-                clone=_clone_baseline_result,
-            )
-            if proj_overall_hist:
-                proj_overall_all.update(proj_overall_hist)
-            proj_monthly = proj_monthly_hist
-
-        # Gang <-> Project bridge
         gang_to_project = (
             scoped_all[["gang_name", "project_name"]]
             .dropna()
@@ -4489,12 +5147,13 @@ def register_callbacks(
 
         baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
         baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
-        baseline_map = baseline_overall_map or {}
 
         loss_token = f"loss::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}"
 
-        def _compute_loss_rows() -> list[dict[str, float]]:
-            rows: list[dict[str, float]] = []
+        def _compute_loss_rows() -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            if loss_scope.empty:
+                return rows
             for gang_name, gang_df in loss_scope.groupby("gang_name"):
                 if gang_df.empty:
                     continue
@@ -4530,665 +5189,533 @@ def register_callbacks(
                 )
             return rows
 
-        loss_rows = _cached_scope_result(
-            project_gang_key,
+        loss_rows = _maybe_cached(
             loss_token,
             _compute_loss_rows,
             clone=_clone_loss_rows,
         )
+        result["loss_rows"] = loss_rows
 
-        if loss_rows:
-            loss_df = pd.DataFrame(loss_rows)
-            if is_stringing and not loss_df.empty:
-                loss_df["avg_prod"] = loss_df["avg_prod"].astype(float) * days_factor
-                loss_df["baseline"] = loss_df["baseline"].astype(float) * days_factor
+        loss_df = pd.DataFrame(loss_rows)
+        if is_stringing and not loss_df.empty:
+            loss_df["avg_prod"] = loss_df["avg_prod"].astype(float) * days_factor
+            loss_df["baseline"] = loss_df["baseline"].astype(float) * days_factor
 
-            deliv = loss_df["delivered"].astype(float)
-            lost = loss_df["lost"].astype(float)
-            potential = loss_df["potential"].astype(float)
-            sum_series = deliv.add(lost)
-            use_sum = deliv.notna() & lost.notna()
-            potential_fallback = potential.where(potential.notna(), sum_series)
-            total_series = pd.Series(
-                np.where(use_sum, sum_series, potential_fallback),
-                index=loss_df.index,
-            ).fillna(0.0)
-            efficiency_series = np.where(
-                total_series > 0.0,
-                (deliv.fillna(0.0) / total_series) * 100.0,
-                0.0,
-            )
-            loss_df = (
-                loss_df.assign(
-                    efficiency_pct=efficiency_series,
-                    total_mt=total_series,
-                )
-                .sort_values("efficiency_pct", ascending=True)
-                .reset_index(drop=True)
-            )
-        else:
-            loss_df = loss_df.copy()
-        # --- meta for hover: last project & last worked date per gang (within current filters)
-        meta_ready = {"gang_name", "project_name", "date"}.issubset(scoped_all.columns) and not scoped_all.empty
-
-        if meta_ready:
-            idx_last = (
-                scoped_all.sort_values("date")
-                .groupby("gang_name", observed=True)["date"]
-                .idxmax()
-            )
-            base_cols = ["gang_name", "project_name", "date"]
-            meta = (
-                scoped_all.loc[idx_last, base_cols]
-                .rename(columns={"project_name": "last_project", "date": "last_date"})
-            )
-            # Attach stringing meta if present at the last row per gang
-            extra_cols = ["from_ap", "to_ap", "method", "po_id", "status"]
-            present_extras = [c for c in extra_cols if c in scoped_all.columns]
-            if present_extras:
-                extras = scoped_all.loc[idx_last, ["gang_name", *present_extras]].copy()
-                meta = meta.merge(extras, on="gang_name", how="left")
-            loss_df = loss_df.merge(meta, on="gang_name", how="left")
-        else:
-            # guarantee columns exist even when we couldn't compute meta
-            loss_df = loss_df.assign(last_project=np.nan, last_date=pd.NaT)
-        
-
-        # pretty, null-safe strings for hover (NO KeyError even if meta missing)
-        last_date_series = pd.to_datetime(loss_df.get("last_date"), errors="coerce")
-        loss_df["last_date_str"] = last_date_series.dt.strftime("%d-%b-%Y").fillna("")
-        loss_df["last_project"]  = loss_df.get("last_project").fillna("")
-
-        # Build left-card HTML list from loss_df (now that meta is attached)
-
-        avp_children = []
-
-        if not loss_df.empty:
-
-            for _, r in loss_df.iterrows():
-
-                total = float(r.get("total_mt", 0.0))
-
-                if total == 0.0:
-
-                    base_total = (
-
-                        r["delivered"] + r["lost"]
-
-                        if pd.notna(r["delivered"]) and pd.notna(r["lost"])
-
-                        else r["potential"]
-
-                    )
-
-                    total = float(base_total) if pd.notna(base_total) else 0.0
-
-                pct = r.get("efficiency_pct", np.nan)
-
-                pct = float(pct) if pd.notna(pct) else 0.0
-
-                if total > 0.0 and pct == 0.0:
-
-                    pct = (100.0 * float(r["delivered"]) / total)
-                rate_label = "KM/month" if is_stringing else f"{unit_short}/day"
-                unit_total = "KM" if is_stringing else unit_short
-                avp_children.append(
-
-                    _render_avp_row(
-
-                        r["gang_name"], float(r["delivered"]), float(r["lost"]),
-
-                        total, pct,
-
-                        avg_prod=float(r.get("avg_prod", 0.0)),
-
-                        baseline=float(r.get("baseline", 0.0)),
-
-                        last_project=str(r.get("last_project", "\uFFFD")),
-
-                        last_date=str(r.get("last_date_str", "\uFFFD")),
-                        rate_label=rate_label,
-                        unit_total=unit_total,
-                        namespace=avp_namespace,
-                    )
-
-                )
-        else:
-            avp_children.append(
-                html.Div(
-                    "No gang performance data for the current filters.",
-                    className="text-muted small px-2 py-3",
-                )
-            )
-
-        row_px = 56
-        topbot_margin = 120
-        fig_height = int(row_px * max(1, len(loss_df)) + topbot_margin)
-
-        active_gangs = loss_scope["gang_name"].nunique()
-        # totals and units by mode
-        total_metric = float(loss_scope[metric_col].sum()) if (not loss_scope.empty and metric_col in loss_scope.columns) else 0.0
+        metric_scope = loss_scope if not loss_scope.empty else scoped_full
+        total_metric = (
+            float(metric_scope[metric_col].sum())
+            if not metric_scope.empty and metric_col in metric_scope.columns
+            else 0.0
+        )
         total_delivered = float(loss_df["delivered"].sum()) if not loss_df.empty else 0.0
         total_lost = float(loss_df["lost"].sum()) if not loss_df.empty else 0.0
-        total_potential = total_delivered + total_lost
-        lost_pct = (total_lost / total_potential * 100) if total_potential > 0 else 0.0
+        total_potential = total_delivered + total_lost if (total_delivered or total_lost) else total_metric
+        balance_value = max(total_potential - total_delivered, 0.0)
 
-        kpi_active = f"{active_gangs}"
-        kpi_total = f"{total_metric:.1f} {unit_short}"
-        # Secondary planned layer from Micro Plan (erection mode only)
-        kpi_total_planned = ""
-        kpi_total_nos_planned = ""
-        if not is_stringing:
-            try:
-                active_months = sorted({ts for ts in months_ts if pd.notna(ts)})
-                if active_months and has_plan_provider.get("erection"):
-                    resp_df, _, _, _ = _fetch_monthly_plan("erection")
-                    if isinstance(resp_df, pd.DataFrame) and not resp_df.empty:
-                        df_mp = resp_df.copy()
-                        # completion month (use folder-derived plan_month when available)
-                        if "plan_month" in df_mp.columns:
-                            df_mp["plan_month"] = pd.to_datetime(
-                                df_mp["plan_month"], errors="coerce"
-                            ).dt.to_period("M").dt.to_timestamp()
-                            df_mp["completion_month"] = df_mp["plan_month"]
-                        elif 'completion_date' in df_mp.columns:
-                            df_mp['completion_month'] = pd.to_datetime(df_mp['completion_date'], errors='coerce').dt.to_period('M').dt.to_timestamp()
-                        else:
-                            df_mp['completion_month'] = pd.NaT
-                        # normalize project + location
-                        def _norm_txt(x):
-                            s = "" if x is None else str(x).replace("\u00a0", " ").strip()
-                            return "" if s.lower() in {"", "nan", "none", "null"} else s
-                        def _norm_lc(x):
-                            return _norm_txt(x).lower()
-                        def _norm_loc(x):
-                            t = _norm_txt(x)
-                            if not t:
-                                return ""
-                            if t.endswith('.0') and t.replace('.', '', 1).isdigit():
-                                t = t.split('.', 1)[0]
-                            return t
-                        for c in ("project_name", "project_key", "location_no"):
-                            if c not in df_mp.columns:
-                                df_mp[c] = ""
-                            df_mp[c] = df_mp[c].map(_norm_txt)
-                        df_mp['project_name_lc'] = df_mp['project_name'].map(_norm_lc)
-                        df_mp['project_key_lc'] = df_mp['project_key'].map(_norm_lc)
-                        df_mp['location_no_norm'] = df_mp['location_no'].map(_norm_loc)
-                        # filter by selected projects present in current scope
-                        if "project_name" in scoped_all.columns and not scoped_all.empty:
-                            sel_projects = set(scoped_all["project_name"].dropna().astype(str).str.strip().str.lower())
-                        else:
-                            sel_projects = set()
-                        if sel_projects:
-                            mask_project = df_mp['project_name_lc'].isin(sel_projects) | df_mp['project_key_lc'].isin(sel_projects)
-                            df_mp = df_mp.loc[mask_project].copy()
-                        # filter by selected months
-                        df_mp = df_mp[df_mp['completion_month'].isin(active_months)].copy()
-                        if not df_mp.empty:
-                            dedup_cols = ["project_name_lc", "location_no_norm"]
-                            valid_locations = df_mp.dropna(subset=dedup_cols).copy()
-                            if "tower_weight" in valid_locations.columns:
-                                valid_locations["tower_weight"] = (
-                                    pd.to_numeric(valid_locations["tower_weight"], errors="coerce").fillna(0.0)
-                                )
-                            dedup_locations = (
-                                valid_locations.sort_values(dedup_cols)
-                                .drop_duplicates(subset=dedup_cols, keep="first")
-                            )
-                            if "tower_weight" in df_mp.columns:
-                                planned_mt = float(dedup_locations.get("tower_weight", 0.0).sum())
-                            else:
-                                planned_mt = 0.0
-                            planned_tower_count = int(dedup_locations.shape[0])
-                            kpi_total_planned = f"Planned: {planned_mt:.1f} MT"
-                            kpi_total_nos_planned = f"Planned: {planned_tower_count}"
-            except Exception:
-                # leave planned KPIs blank on any failure
-                kpi_total_planned = ""
-                kpi_total_nos_planned = ""
-        # Compute number of towers erected matching the current scope
-        # If no months are selected, include the full available range in scope
-        try:
-            if not is_stringing:
-                if months_ts:
-                    range_start = pd.Timestamp(min(months_ts)).normalize()
-                    range_end = (pd.Timestamp(max(months_ts)) + pd.offsets.MonthEnd(0)).normalize()
-                else:
-                    # Derive an all-time window from the scoped data
-                    if isinstance(loss_scope, pd.DataFrame) and not loss_scope.empty:
-                        comp_series = pd.to_datetime(loss_scope.get("completion_date"), errors="coerce")
-                        comp_series = comp_series[comp_series.notna()]
-                        if len(comp_series):
-                            range_start = pd.Timestamp(comp_series.min()).normalize()
-                            range_end = pd.Timestamp(comp_series.max()).normalize()
-                        else:
-                            date_series = pd.to_datetime(loss_scope.get("date"), errors="coerce")
-                            date_series = date_series[date_series.notna()]
-                            if len(date_series):
-                                range_start = pd.Timestamp(date_series.min()).normalize()
-                                range_end = pd.Timestamp(date_series.max()).normalize()
-                            else:
-                                # Fallback to current month if no dates are available
-                                today = pd.Timestamp.today().normalize()
-                                range_start = today.to_period("M").start_time.normalize()
-                                range_end = (today + pd.offsets.MonthEnd(0)).normalize()
-                    else:
-                        today = pd.Timestamp.today().normalize()
-                        range_start = today.to_period("M").start_time.normalize()
-                        range_end = (today + pd.offsets.MonthEnd(0)).normalize()
-
-                export_df, _ = _prepare_erections_completed(
-                    loss_scope,
-                    range_start=range_start,
-                    range_end=range_end,
-                    responsibilities_provider=None,
-                    search_text=None,
-                )
-                tower_count = int(len(export_df)) if isinstance(export_df, pd.DataFrame) else 0
-                kpi_total_nos = f"{tower_count}"
-            else:
-                kpi_total_nos = ""
-        except Exception:
-            kpi_total_nos = ""
-        kpi_loss = f"{total_lost:.1f} {unit_short}"
-        kpi_loss_delta = f"{lost_pct:.1f}%"
-
-
-
-
-        fig_loss = go.Figure()
-        if not loss_df.empty:
-            # Determine if stringing extra fields are available for hover
-            has_stringing_meta = all(c in loss_df.columns for c in ["from_ap", "to_ap", "method", "po_id", "status"]) if is_stringing else False
-            hover_extra = (
-                "From AP: %{customdata[4]}<br>"
-                "To AP: %{customdata[5]}<br>"
-                "Method: %{customdata[6]}<br>"
-                "PO: %{customdata[7]}<br>"
-                "Status: %{customdata[8]}<br>"
-            ) if has_stringing_meta else ""
-            # --- Delivered bar (replace the existing fig_loss.add_bar block) ---
-            fig_loss.add_bar(
-                x=loss_df["delivered"],
-                y=loss_df["gang_name"],
-                orientation="h",
-                marker_color="green",
-                text=loss_df["delivered"].round(1),
-                textposition="inside",
-                name="Delivered",
-                width=0.95,
-                # match Top/Bottom customdata shape: [last_project, last_date_str, current_metric, baseline_metric]
-                customdata=(
-                    np.stack(
-                        [
-                            loss_df["last_project"].fillna(" "),
-                            loss_df["last_date_str"].fillna(" "),
-                            loss_df["avg_prod"].fillna(0.0),      # current metric
-                            loss_df["baseline"].fillna(0.0),      # baseline
-                            *(
-                                [
-                                    loss_df.get("from_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("to_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("method", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("po_id", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("status", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                ] if has_stringing_meta else []
-                            ),
-                        ],
-                        axis=-1,
-                    )
-                ),
-                hovertemplate=(
-                    "%{y}<br>"
-                    "Project: %{customdata[0]}<br>"
-                    "Last worked at: %{customdata[1]}<br>"
-                    f"Current {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[2]:.2f}}<br>"
-                    f"Baseline {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[3]:.2f}}<br>"
-
-                    + hover_extra + "<extra></extra>"
-                ),
-                hoverlabel=dict(
-                    bgcolor="rgba(255,255,255,0.95)",
-                    font=dict(color="#111827", size=13),
-                    bordercolor="rgba(17,24,39,0.15)",
-                    align="left",
-                    namelength=0,
-                ),
+        completion_override: float | None = None
+        if is_stringing:
+            completion_override = _sum_completion_totals(
+                scoped_full,
+                value_column="length_km",
+                completion_column="fs_complete_date",
+                fallback_columns=[
+                    ("span (m)", 0.001),
+                    ("span_m", 0.001),
+                    ("length", 0.001),
+                    ("length_m", 0.001),
+                    ("tower_weight", 0.001),
+                ],
             )
-
-            # --- Loss bar (replace the existing fig_loss.add_bar block) ---
-            fig_loss.add_bar(
-                x=loss_df["lost"],
-                y=loss_df["gang_name"],
-                orientation="h",
-                marker_color="red",
-                text=loss_df["lost"].round(1),
-                textposition="inside",
-                name="Loss",
-                base=loss_df["delivered"],
-                width=0.95,
-                customdata=(
-                    np.stack(
-                        [
-                            loss_df["last_project"].fillna(" "),
-                            loss_df["last_date_str"].fillna(" "),
-                            loss_df["avg_prod"].fillna(0.0),
-                            loss_df["baseline"].fillna(0.0),
-                            *(
-                                [
-                                    loss_df.get("from_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("to_ap", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("method", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("po_id", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                    loss_df.get("status", pd.Series([" "] * len(loss_df))).fillna(" "),
-                                ] if has_stringing_meta else []
-                            ),
-                        ],
-                        axis=-1,
-                    )
-                ),
-                hovertemplate=(
-                    "%{y}<br>"
-                    "Project: %{customdata[0]}<br>"
-                    "Last worked at: %{customdata[1]}<br>"
-                    f"Current {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[2]:.2f}}<br>"
-                    f"Baseline {('KM/month' if is_stringing else unit_short + '/day')}: %{{customdata[3]:.2f}}<br>"
-
-                    + hover_extra + "<extra></extra>"
-                ),
-                hoverlabel=dict(
-                    bgcolor="rgba(255,255,255,0.95)",
-                    font=dict(color="#111827", size=13),
-                    bordercolor="rgba(17,24,39,0.15)",
-                    align="left",
-                    namelength=0,
-                ),
-            )
-
-            for _, row in loss_df.iterrows():
-                fig_loss.add_annotation(
-                    x=row["potential"],
-                    y=row["gang_name"],
-                    text=(
-                        f"{row['avg_prod']:.2f} "
-                        f"{'KM/month' if is_stringing else unit_short + '/day'} "
-                        f"(Baseline: {row['baseline']:.2f} "
-                        f"{'KM/month' if is_stringing else unit_short + '/day'})"
-                    ),
-                    showarrow=False,
-                    xanchor="left",
-                    yanchor="middle",
-                    font=dict(size=10, color="black"),
-                )
-        fig_loss.update_layout(
-            barmode="stack",
-            bargap=0.02,
-            height=fig_height,
-            margin=dict(l=140, r=120, t=30, b=30),
-            xaxis_title=f"Potential ({unit_short})",
-            yaxis_title="Gang",
-            plot_bgcolor="#fafafa",
-            paper_bgcolor="#ffffff",
-            dragmode=False,
-        )
-        fig_loss.update_layout(hovermode="closest", clickmode="event+select")
-        fig_loss.update_xaxes(showspikes=False, fixedrange=True)
-        fig_loss.update_yaxes(showspikes=False, fixedrange=True, type="category")
-        
-        # fig_monthly = create_monthly_line_chart(scoped, bench=benchmark)
-        charts_scope = scoped_top_bottom.copy()
-        if not charts_scope.empty and "gang_name" in charts_scope.columns:
-            charts_scope = charts_scope.dropna(subset=["gang_name"])
-            charts_scope["gang_name"] = charts_scope["gang_name"].astype(str).str.strip()
-        projects_scope = data_selector.select(eff_mode)
-        if isinstance(projects_scope, pd.DataFrame):
-            projects_scope = projects_scope.copy()
-            if is_stringing:
-                projects_scope = _stringing_scope(
-                    projects_scope,
-                    selected.get("kv"),
-                    selected.get("methods"),
-                )
         else:
-            projects_scope = pd.DataFrame()
-        if is_stringing:
-            if "daily_km" in charts_scope.columns:
-                charts_scope["daily_prod_mt"] = charts_scope["daily_km"]
-            if "daily_km" in projects_scope.columns:
-                projects_scope["daily_prod_mt"] = projects_scope["daily_km"]
+            completion_override = _sum_completion_totals(
+                scoped_full,
+                value_column="tower_weight",
+                completion_column="completion_date",
+            )
+        if completion_override is not None:
+            total_delivered = completion_override
+            total_metric = completion_override if not total_lost else completion_override + total_lost
+            total_potential = total_delivered + total_lost if total_lost else total_delivered
+            balance_value = max(total_potential - total_delivered, 0.0)
 
-            # Convert Top/Bottom input to per-month values (KM/month)
+        def _nunique(frame: pd.DataFrame, column: str) -> int:
+            if column not in frame.columns or frame.empty:
+                return 0
+            return (
+                frame[column]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
+
+        projects_count = _nunique(loss_scope, "project_name") or _nunique(scoped_full, "project_name")
+        if is_stringing:
             try:
-                monthly_cur = (
-                    charts_scope.groupby(["gang_name", "month"], dropna=True)["daily_prod_mt"].sum().reset_index()
+                plan_df, _ = _stringing_plan_totals_by_project(
+                    months_ts,
+                    current_month=months_ts[-1] if months_ts else None,
                 )
-                monthly_cur = monthly_cur.groupby("gang_name")["daily_prod_mt"].mean().reset_index()
-                monthly_cur = monthly_cur.rename(columns={"daily_prod_mt": "monthly_value"})
-                charts_scope = monthly_cur.rename(columns={"monthly_value": "daily_prod_mt"})
             except Exception:
-                pass
+                plan_df = pd.DataFrame()
+            if isinstance(plan_df, pd.DataFrame) and not plan_df.empty:
+                plan_keys = set(plan_df.index.astype(str))
+                selected = (scope_meta or {}).get("selected") or {}
+                project_filters = _normalize_str_list(selected.get("projects"))
+                if project_filters:
+                    filter_keys = {
+                        _compact_project_key(value) or _normalize_lower(value)
+                        for value in project_filters
+                        if str(value).strip()
+                    }
+                    filter_keys = {key for key in filter_keys if key}
+                    if filter_keys:
+                        plan_keys = {key for key in plan_keys if key in filter_keys}
+                delivered_keys: set[str] = set()
+                for frame in (loss_scope, scoped_full):
+                    if not isinstance(frame, pd.DataFrame) or frame.empty or "project_name" not in frame.columns:
+                        continue
+                    delivered_keys.update(
+                        frame["project_name"]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .map(lambda value: _compact_project_key(value) or _normalize_lower(value))
+                    )
+                delivered_keys = {key for key in delivered_keys if key}
+                total_project_keys = plan_keys | delivered_keys
+                total_project_keys = {key for key in total_project_keys if key}
+                if total_project_keys:
+                    projects_count = len(total_project_keys)
+        gangs_count = _nunique(loss_scope, "gang_name") or _nunique(scoped_full, "gang_name")
 
-            # Scale baseline map to KM/month using average days in selected months (fallback 30)
-            if baseline_map:
-                baseline_map = {g: (float(v) * days_factor if v is not None and not pd.isna(v) else 0.0) for g, v in baseline_map.items()}
-
-        fig_top5, fig_bottom5 = create_top_bottom_gangs_charts(
-            charts_scope, metric=(topbot_metric or "prod"), baseline_map=baseline_map
+        result.update(
+            {
+                "projects_count": projects_count,
+                "gangs_count": gangs_count,
+                "total_delivered": total_delivered,
+                "total_lost": total_lost,
+                "total_potential": total_potential,
+                "balance_value": balance_value,
+            }
         )
-        fig_project = create_project_lines_chart(
-            projects_scope,
-            selected_projects=project_list or None,
-            bench=project_bench,
-            avg_line=avg_line_for_project,   # Average line remains per-day for project chart
+        return result
+
+    def _get_stringing_po_daily_frame() -> pd.DataFrame:
+        if not config.enable_stringing:
+            return pd.DataFrame()
+
+        def _producer() -> pd.DataFrame:
+            df_compiled = pd.DataFrame()
+            if callable(stringing_compiled_provider):
+                try:
+                    df_compiled = stringing_compiled_provider()
+                except Exception:
+                    df_compiled = pd.DataFrame()
+            if not isinstance(df_compiled, pd.DataFrame) or df_compiled.empty:
+                return pd.DataFrame()
+            payout_source = df_compiled.copy()
+            po_col = None
+            for cand in ("paying_out_complete", "po_completion_date", "po_completion"):
+                if cand in payout_source.columns:
+                    po_col = cand
+                    break
+            if po_col is None:
+                return pd.DataFrame()
+            payout_source["po_completion_date"] = pd.to_datetime(payout_source[po_col], errors="coerce")
+            payout_source = payout_source.dropna(subset=["po_completion_date"])
+            if payout_source.empty:
+                return pd.DataFrame()
+            payout_source["po_start_date"] = payout_source["po_completion_date"]
+            try:
+                payout = expand_stringing_to_daily_payout(payout_source)
+            except Exception:
+                LOGGER.exception("Failed to expand P/O completion daily rows")
+                return pd.DataFrame()
+            if payout.empty:
+                return payout
+            if "project_name" not in payout.columns and "project" in payout.columns:
+                payout["project_name"] = payout["project"]
+            if "project" not in payout.columns and "project_name" in payout.columns:
+                payout["project"] = payout["project_name"]
+            if "month" not in payout.columns and "date" in payout.columns:
+                payout["date"] = pd.to_datetime(payout["date"], errors="coerce")
+                payout = payout.dropna(subset=["date"])
+                payout["month"] = payout["date"].dt.to_period("M").to_timestamp()
+            return payout
+
+        return _cached_global_result(
+            "stringing:po_completion_daily",
+            _producer,
+            clone=_clone_dataframe,
         )
 
-        # If in stringing mode, adapt figure labels/annotations to KM/month units
-        if is_stringing:
-            # Top/Bottom charts: replace MT/day -> KM/month and MT -> KM in hover and y-axis title
-            # Build extras map from last activity rows per gang if available
-            extras_map: dict[str, tuple[str, str, str, str, str]] = {}
-            try:
-                if meta_ready:
-                    # meta_ready computed earlier for loss chart on scoped_all
-                    # reuse scoped_all last-row index and columns if present
-                    idx_last_tb = charts_scope.sort_values("date").groupby("gang_name")["date"].idxmax()
-                    needed = ["gang_name", "from_ap", "to_ap", "method", "po_id", "status"]
-                    if all(c in charts_scope.columns for c in needed):
-                        subset = charts_scope.loc[idx_last_tb, needed].copy()
-                        for _, row in subset.iterrows():
-                            extras_map[str(row["gang_name"])]=(
-                                str(row.get("from_ap", " ") or " "),
-                                str(row.get("to_ap", " ") or " "),
-                                str(row.get("method", " ") or " "),
-                                str(row.get("po_id", " ") or " "),
-                                str(row.get("status", " ") or " "),
-                            )
-            except Exception:
-                extras_map = {}
+    def _compute_po_completion_totals(
+        scope_meta: dict[str, Any] | None,
+        months_ts: list[pd.Timestamp],
+        days_factor: float,
+    ) -> str:
+        plan_total = _stringing_planned_total_for_dates(
+            scope_meta,
+            months_ts,
+            date_columns=_STRINGING_PO_DATE_COLUMNS,
+        )
+        has_plan_scope = _stringing_scope_has_plan(
+            scope_meta,
+            months_ts,
+            date_columns=_STRINGING_PO_DATE_COLUMNS,
+        )
+        frame = _get_stringing_po_daily_frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            if plan_total <= 0 and not has_plan_scope:
+                return "-"
+            total_txt = f"{plan_total:.1f} KM" if plan_total > 0 else "0.0 KM"
+            done_txt = _format_summary_value(0.0, "KM")
+            balance_txt = _format_summary_value(plan_total, "KM") if plan_total > 0 else "\u2014"
+            return f"{total_txt} / {done_txt} / {balance_txt}"
 
-            for fig in (fig_top5, fig_bottom5):
-                try:
-                    ytitle = fig.layout.yaxis.title.text or ""
-                    if ytitle:
-                        fig.update_yaxes(title_text=ytitle.replace("MT/day", "KM/month").replace("MT", "KM"))
-                except Exception:
-                    pass
-                try:
-                    for tr in fig.data:
-                        # augment hovertemplate and customdata with extras if available
-                        if extras_map and hasattr(tr, "customdata") and isinstance(tr.customdata, (list, tuple, np.ndarray)):
-                            xcats = list(tr.x) if hasattr(tr, "x") else []
-                            if xcats:
-                                new_cd = []
-                                for i, gname in enumerate(xcats):
-                                    base = list(tr.customdata[i]) if isinstance(tr.customdata, (list, tuple, np.ndarray)) else []
-                                    extra = list(extras_map.get(str(gname), (" ", " ", " ", " ", " ")))
-                                    new_cd.append(base + extra)
-                                tr.customdata = np.array(new_cd)
-                            # extend hovertemplate
-                        if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
-                            extra_ht = ("<br>From AP: %{customdata[4]}<br>To AP: %{customdata[5]}<br>Method: %{customdata[6]}<br>PO: %{customdata[7]}<br>Status: %{customdata[8]}")
-                            if extra_ht not in tr.hovertemplate:
-                                tr.hovertemplate = tr.hovertemplate.replace("<extra>", f"{extra_ht}<extra>")
-                        if hasattr(tr, "hovertemplate") and isinstance(tr.hovertemplate, str):
-                            tr.hovertemplate = tr.hovertemplate.replace(" MT/day", " KM/month").replace(" MT", " KM")
-                except Exception:
-                    pass
-            # Projects-over-months chart: replace MT labels in axis + annotations
+        selected = (scope_meta or {}).get("selected") or {}
+        projects = selected.get("projects") or []
+        gangs = selected.get("gangs") or []
+        kv_values = selected.get("kv") or []
+        method_values = selected.get("methods") or []
+
+        scoped_base = _stringing_scope(frame, kv_values, method_values)
+        scoped_full = apply_filters(scoped_base, projects, months_ts, gangs)
+
+        done_total = _sum_completion_totals(
+            scoped_full,
+            value_column="po_km",
+            completion_column="po_completion_date",
+            fallback_columns=[("po", 0.001)],
+        ) or 0.0
+        if done_total == 0.0 and isinstance(scoped_full, pd.DataFrame) and not scoped_full.empty and "daily_km" in scoped_full.columns:
+            done_total = float(pd.to_numeric(scoped_full["daily_km"], errors="coerce").dropna().sum())
+
+        done_txt = _format_summary_value(done_total, "KM")
+        if plan_total > 0:
+            total_txt = f"{plan_total:.1f} KM"
+            balance_txt = _format_summary_value(max(plan_total - done_total, 0.0), "KM")
+        elif has_plan_scope:
+            total_txt = "0.0 KM"
+            balance_txt = "\u2014"
+        else:
+            total_txt = "No Plan"
+            balance_txt = "\u2014"
+        return f"{total_txt} / {done_txt} / {balance_txt}"
+
+    def _summarize_scope_for_cards(scope_meta: dict[str, Any] | None) -> dict[str, str]:
+        mode = _normalize_mode((scope_meta or {}).get("mode"))
+        summary = _empty_summary_payload(mode == "stringing")
+        meta_info = summary.setdefault("_meta", {})
+        meta_info.setdefault("loss_rows", [])
+        meta_info.setdefault("mode", mode)
+        meta_info.setdefault("is_stringing", mode == "stringing")
+        meta_info.setdefault("unit_label", "KM" if mode == "stringing" else "MT")
+        if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
+            return summary
+        try:
+            months_ts = _months_from_meta(scope_meta)
+            days_factor = float(scope_meta.get("days_factor") or 30.0)
+            is_stringing = mode == "stringing"
+            metric_col = "daily_km" if is_stringing else "daily_prod_mt"
+            unit_short = "KM" if is_stringing else "MT"
+            prod_unit = "KM/month" if is_stringing else "MT/day"
+            meta_signature = scope_meta.get("signature") or "nosig"
+            selected = scope_meta.get("selected") or {}
+            meta_info["unit_label"] = unit_short
+            meta_info["is_stringing"] = is_stringing
+
+            scoped_full = _scope_frame_from_store(scope_meta, "full").copy()
+            scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
+            if scoped_full.empty and scoped_all.empty:
+                return summary
+
+            scope_keys = scope_meta.get("scopes") or {}
+            project_gang_key = scope_keys.get("project_gang")
+            components = _compute_mode_summary_components(
+                scoped_full=scoped_full,
+                scoped_all=scoped_all,
+                months_ts=months_ts,
+                days_factor=days_factor,
+                metric_col=metric_col,
+                is_stringing=is_stringing,
+                meta_signature=meta_signature,
+                cache_key=project_gang_key,
+                scope_meta=scope_meta,
+            )
+
+            loss_scope = components["loss_scope"]
+            history_scope = components["history_scope"]
+            projects_count = components["projects_count"]
+            gangs_count = components["gangs_count"]
+            total_delivered = components["total_delivered"]
+            total_lost = components["total_lost"]
+            total_potential = components["total_potential"]
+            balance_value = components["balance_value"]
+            meta_info["loss_rows"] = components.get("loss_rows") or []
+            balance_reference_delivered = total_delivered
+            if is_stringing:
+                deployment_scope = _normalize_deployment_filter(selected.get("stringing_scope"))
+                if deployment_scope != "all":
+                    try:
+                        frames_all, _, _ = _build_scope_frames(
+                            "stringing",
+                            project_list=selected.get("projects", []),
+                            gang_list=selected.get("gangs", []),
+                            months_value=selected.get("months", []),
+                            quick_range=selected.get("quick_range"),
+                            kv_values=selected.get("kv", []),
+                            method_values=selected.get("methods", []),
+                            deployment_filter="all",
+                        )
+                        scoped_full_all = frames_all.get("full", pd.DataFrame()).copy()
+                        scoped_all_all = frames_all.get("project_gang", pd.DataFrame()).copy()
+                    except Exception:
+                        scoped_full_all = pd.DataFrame()
+                        scoped_all_all = pd.DataFrame()
+                    if not (scoped_full_all.empty and scoped_all_all.empty):
+                        scope_meta_all = dict(scope_meta)
+                        scope_meta_all["selected"] = dict(selected)
+                        scope_meta_all["selected"]["stringing_scope"] = "all"
+                        all_components = _compute_mode_summary_components(
+                            scoped_full=scoped_full_all,
+                            scoped_all=scoped_all_all,
+                            months_ts=months_ts,
+                            days_factor=days_factor,
+                            metric_col=metric_col,
+                            is_stringing=True,
+                            meta_signature=f"{meta_signature}::all-deployments",
+                            cache_key=None,
+                            scope_meta=scope_meta_all,
+                        )
+                        balance_reference_delivered = all_components["total_delivered"]
+
+            def _collect_project_labels(frame: pd.DataFrame | None) -> list[str]:
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    return []
+                labels: list[str] = []
+                seen: set[str] = set()
+                for column in (
+                    "project_name",
+                    "project",
+                    "project_name_display",
+                    "Project Name",
+                    "project_code",
+                ):
+                    if column not in frame.columns:
+                        continue
+                    values = (
+                        frame[column]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .replace("", pd.NA)
+                        .dropna()
+                    )
+                    for value in values:
+                        if value not in seen:
+                            seen.add(value)
+                            labels.append(value)
+                return labels
+
+            def _project_label_keys(text: object) -> tuple[list[str], list[str]]:
+                base = str(text or "").strip()
+                if not base:
+                    return [], []
+                parts = [base]
+                if " : " in base:
+                    left, right = base.split(" : ", 1)
+                    parts.extend([left.strip(), right.strip()])
+                norm_keys: list[str] = []
+                compact_keys: list[str] = []
+                for part in parts:
+                    norm = _normalize_lower(part)
+                    if norm and norm not in norm_keys:
+                        norm_keys.append(norm)
+                    compact = _compact_project_key(part)
+                    if compact and compact not in compact_keys:
+                        compact_keys.append(compact)
+                match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{3,4})\b", base.upper())
+                if match:
+                    compact = _compact_project_key(f"{match.group(1)}{match.group(2)}")
+                    if compact and compact not in compact_keys:
+                        compact_keys.append(compact)
+                return norm_keys, compact_keys
+
+            tse_count: int | None = None
+            if is_stringing:
+                tse_norm_map, tse_alias_map = _get_stringing_tse_lookup()
+                label_source = loss_scope if not loss_scope.empty else scoped_full
+                labels = _collect_project_labels(label_source)
+                matched_total = 0
+                matched_any = False
+                used_projects: set[str] = set()
+                if labels and (tse_norm_map or tse_alias_map):
+                    for label in labels:
+                        norm_keys, compact_keys = _project_label_keys(label)
+                        value, canonical_id = _resolve_tse_value(norm_keys, compact_keys, tse_norm_map, tse_alias_map)
+                        if canonical_id and canonical_id not in used_projects and value is not None:
+                            used_projects.add(canonical_id)
+                            matched_total += int(value)
+                            matched_any = True
+                if matched_any:
+                    tse_count = matched_total
+                else:
+                    fallback_scope = loss_scope if not loss_scope.empty else scoped_full
+                    tse_count = 0
+                    if {"method", "gang_name"}.issubset(fallback_scope.columns) and not fallback_scope.empty:
+                        tse_mask = fallback_scope["method"].astype(str).str.strip().str.lower() == "tse"
+                        tse_count = int(
+                            fallback_scope.loc[tse_mask, "gang_name"]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                            .nunique()
+                        )
+
+            prod_current = _avg_metric_value(scoped_full, metric_col, is_stringing)
+            prod_history = _avg_metric_value(history_scope, metric_col, is_stringing)
+            if prod_history == 0.0:
+                prod_history = prod_current
+
+            summary["projects"] = f"{projects_count:,}" if projects_count else "-"
+            summary["gangs"] = f"{gangs_count:,}" if gangs_count else "-"
+            if is_stringing:
+                planned_total_value = _stringing_planned_total_for_dates(
+                    scope_meta,
+                    months_ts,
+                    date_columns=_STRINGING_FS_DATE_COLUMNS,
+                )
+                has_plan_scope = _stringing_scope_has_plan(
+                    scope_meta,
+                    months_ts,
+                    date_columns=_STRINGING_FS_DATE_COLUMNS,
+                )
+                done_txt = _format_summary_value(total_delivered, unit_short)
+                if planned_total_value > 0:
+                    total_txt = f"{planned_total_value:.1f} {unit_short}"
+                    balance_txt = _format_summary_value(
+                        max(planned_total_value - balance_reference_delivered, 0.0),
+                        unit_short,
+                    )
+                elif has_plan_scope:
+                    total_txt = "0.0 KM"
+                    balance_txt = "\u2014"
+                else:
+                    total_txt = "No Plan"
+                    balance_txt = "\u2014"
+            else:
+                tower_done = _count_completed_towers(loss_scope, months_ts)
+                planned_towers, _ = _compute_planned_tower_layers(scoped_all, months_ts)
+                total_towers = planned_towers or tower_done
+                balance_towers = max(total_towers - tower_done, 0)
+                total_txt = f"{total_towers:,}"
+                done_txt = f"{tower_done:,}"
+                balance_txt = f"{balance_towers:,}"
+            summary["totals"] = f"{total_txt} / {done_txt} / {balance_txt}"
+            prod_txt = _format_summary_value(prod_current, prod_unit, precision=2)
+            hist_txt = _format_summary_value(prod_history, prod_unit, precision=2)
+            summary["productivity"] = f"{prod_txt} / {hist_txt}"
+            summary["lost_units"] = _format_summary_value(total_lost, unit_short)
+            if is_stringing:
+                summary["po_completion"] = _compute_po_completion_totals(scope_meta, months_ts, days_factor)
+                summary["tse"] = "-" if tse_count is None else f"{tse_count:,}"
+            return summary
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.exception("Failed to compute %s summary card: %s", mode, exc)
+            return summary
+
+    @app.callback(
+        Output("erection-card-projects", "children"),
+        Output("erection-card-totals", "children"),
+        Output("erection-card-gangs", "children"),
+        Output("erection-card-productivity", "children"),
+        Output("erection-card-loss", "children"),
+        Output("stringing-card-projects", "children"),
+        Output("stringing-card-totals", "children"),
+        Output("stringing-card-gangs", "children"),
+        Output("stringing-card-productivity", "children"),
+        Output("stringing-card-loss", "children"),
+        Output("stringing-card-tse", "children"),
+        Input("store-filtered-scope", "data"),
+    )
+    def _update_mode_summary_cards(scope_meta: dict[str, Any] | None) -> tuple[str, ...]:
+        selected = (scope_meta or {}).get("selected") or {}
+
+        def _extract_list(key: str, *, lower: bool = False) -> list[str]:
+            values = selected.get(key) or []
+            return _normalize_str_list(values, lower=lower)
+
+        projects = _extract_list("projects")
+        months = _extract_list("months")
+        gangs = _extract_list("gangs")
+        kv_values = _extract_list("kv")
+        method_values = _extract_list("methods", lower=True)
+        quick_range = selected.get("quick_range")
+        stringing_scope = selected.get("stringing_scope")
+
+        current_mode = _normalize_mode((scope_meta or {}).get("mode"))
+
+        def _meta_for(mode_name: str) -> dict[str, Any] | None:
+            if current_mode == mode_name and isinstance(scope_meta, dict):
+                return scope_meta
             try:
-                ytitle = fig_project.layout.yaxis.title.text or ""
-                if ytitle:
-                    fig_project.update_yaxes(title_text=ytitle.replace("(MT)", "(KM)"))
-                annots = list(getattr(fig_project.layout, "annotations", []) or [])
-                if annots:
-                    for a in annots:
-                        if hasattr(a, "text") and isinstance(a.text, str):
-                            a.text = a.text.replace(" MT/day", " KM/month")
-                    fig_project.update_layout(annotations=annots)
+                return _build_scope_meta_payload(
+                    eff_mode=mode_name,
+                    project_list=projects,
+                    gang_list=gangs,
+                    months_list=months,
+                    quick_range=quick_range,
+                    kv_values=kv_values,
+                    method_values=method_values,
+                    kv_list=kv_values,
+                    method_list=method_values,
+                    deployment_filter=stringing_scope if mode_name == "stringing" else "all",
+                )
             except Exception:
-                pass
+                LOGGER.exception("Unable to build %s scope for summary cards", mode_name)
+                return None
+
+        erection_summary = _summarize_scope_for_cards(_meta_for("erection"))
+        if config.enable_stringing:
+            stringing_summary = _summarize_scope_for_cards(_meta_for("stringing"))
+        else:
+            stringing_summary = _empty_summary_payload(True)
 
         return (
-            kpi_avg,
-            kpi_delta,
-            kpi_active,
-            kpi_total,
-            kpi_total_planned,
-            kpi_total_nos,
-            kpi_total_nos_planned,
-            kpi_loss,
-            kpi_loss_delta,
-            avp_children,
-            fig_loss,   # kept but hidden in layout to preserve clickData wiring
-            # fig_monthly,
-            fig_top5,
-            fig_bottom5,
-            fig_project,
+            erection_summary["projects"],
+            erection_summary["totals"],
+            erection_summary["gangs"],
+            erection_summary["productivity"],
+            erection_summary["lost_units"],
+            stringing_summary["projects"],
+            stringing_summary["totals"],
+            stringing_summary["gangs"],
+            stringing_summary["productivity"],
+            stringing_summary["lost_units"],
+            stringing_summary.get("tse", "-"),
         )
 
-    def _resolve_focus_mode(
-        focus_payload: dict[str, Any] | None,
-        fallback_mode: str | None,
-    ) -> str:
-        """
-        Prefer the project tile's mode (erection/stringing) when building modal scopes,
-        but gracefully fall back to the global mode store when the tile payload lacks it.
-        """
-        if isinstance(focus_payload, dict):
-            focus_mode = focus_payload.get("mode")
-            if isinstance(focus_mode, str) and focus_mode.strip():
-                return _normalize_mode(focus_mode)
-        return _normalize_mode(fallback_mode)
 
-    def _modal_mode_from_store(payload: Any, fallback: str | None = None) -> str:
-        raw: str | None
-        if isinstance(payload, dict):
-            raw = payload.get("mode")
-        else:
-            raw = payload
-        text = ""
-        if isinstance(raw, str):
-            text = raw.strip()
-        elif raw is not None:
-            text = str(raw).strip()
-        if "|" in text:
-            text = text.split("|", 1)[0]
-        if text:
-            return _normalize_mode(text)
-        return _normalize_mode(fallback)
-
-    def _compose_modal_mode_payload(mode_value: str) -> str:
-        mode_text = _normalize_mode(mode_value)
-        millis = int(time.time() * 1000)
-        return f"{mode_text}|{millis}"
-
-    def _build_project_scope_meta(
-        project_name: str,
-        project_code: str | None,
-        mode_value: str,
-        months,
-        quick_range,
-        gangs,
-        kv_values,
-        method_values,
-        stringing_scope: str | None = None,
-    ) -> dict[str, Any]:
-        project_candidates = _project_filter_candidates(project_name, project_code)
-        project_list = _normalize_str_list(project_candidates)
-        gang_list = _normalize_str_list(_ensure_list(gangs))
-        months_list = _normalize_str_list(_ensure_list(months))
-        kv_list = _ensure_list(kv_values)
-        method_list = _ensure_list(method_values)
-        eff_mode = _normalize_mode(mode_value)
-        return _build_scope_meta_payload(
-            eff_mode=eff_mode,
-            project_list=project_list,
-            gang_list=gang_list,
-            months_list=months_list,
-            quick_range=quick_range,
-            kv_values=kv_list,
-            method_values=method_list,
-            kv_list=_normalize_str_list(kv_list),
-            method_list=_normalize_str_list(method_list, lower=True),
-            deployment_filter=stringing_scope if eff_mode == "stringing" else "all",
-        )
-
-    @app.callback(
-        Output("kpi-avg", "children"),
-        Output("kpi-delta", "children"),
-        Output("kpi-active", "children"),
-        Output("kpi-total", "children"),
-        Output("kpi-total-planned", "children"),
-        Output("kpi-total-nos", "children"),
-        Output("kpi-total-nos-planned", "children"),
-        Output("kpi-loss", "children"),
-        Output("kpi-loss-delta", "children"),
-        Output("avp-list", "children"),
-        Output("g-actual-vs-bench", "figure"),
-        Output("g-top5", "figure"),
-        Output("g-bottom5", "figure"),
-        Output("g-projects-over-months", "figure"),
-        Input("store-filtered-scope", "data"),
-        Input("f-topbot-metric", "value"),
-    )
-    def update_dashboard(
-        scope_meta: dict[str, Any] | None,
-        topbot_metric: str | None,
-    ) -> tuple:
-        return _compute_dashboard_outputs(scope_meta, topbot_metric)
-
-    @app.callback(
-        Output("global-performance-avp-list", "children"),
-        Output("global-performance-actual-vs-bench", "figure"),
-        Output("global-performance-top5", "figure"),
-        Output("global-performance-bottom5", "figure"),
-        Input("store-global-performance-scope", "data"),
-        Input("global-performance-topbot-metric", "value"),
-    )
-    def _update_global_performance_modal(
-        scope_meta: dict[str, Any] | None,
-        topbot_metric: str | None,
-    ) -> tuple:
-        outputs = _compute_dashboard_outputs(
-            scope_meta,
-            topbot_metric,
-            avp_namespace="global-performance-avp",
-        )
-        if len(outputs) < 14:
-            raise PreventUpdate
-        return outputs[9], outputs[10], outputs[11], outputs[12]
-        
-    CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
+        CHART_SOURCES = {"g-actual-vs-bench", "g-top5", "g-bottom5"}
     GLOBAL_MODAL_CHART_SOURCES = {
         "global-performance-actual-vs-bench",
         "global-performance-top5",
         "global-performance-bottom5",
     }
 
-    def _compute_trace_table_payload(
-        scope_meta: dict[str, Any], gang_focus: str
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _prepare_trace_dataframes(
+        scope_meta: dict[str, Any],
+        gang_focus: str | None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Return (idle_df, daily_df) for the requested gang, formatted for display/export."""
+
+        if not isinstance(scope_meta, dict):
+            return pd.DataFrame(), pd.DataFrame()
+
         selected = scope_meta.get("selected") or {}
         months_ts = _months_from_meta(scope_meta)
         meta_signature = scope_meta.get("signature") or "nosig"
@@ -5214,215 +5741,10 @@ def register_callbacks(
             return fb
 
         baseline_source = scoped_all.copy()
-        precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = (not is_stringing) and bool(precomputed_overall)
-        if use_precomputed:
-            if "project_name" in baseline_source.columns:
-                candidate_projects = (
-                    baseline_source["project_name"].dropna().astype(str).str.strip().unique().tolist()
-                )
-            else:
-                candidate_projects = []
-            if candidate_projects:
-                proj_overall = {
-                    project: precomputed_overall.get(project)
-                    for project in candidate_projects
-                    if precomputed_overall.get(project) is not None
-                }
-                monthly_candidates = {
-                    project: precomputed_monthly.get(project, {})
-                    for project in candidate_projects
-                }
-            else:
-                proj_overall = dict(precomputed_overall)
-                monthly_candidates = dict(precomputed_monthly)
-            if months_ts:
-                cutoff_month = min(months_ts)
-                proj_monthly = {
-                    project: {
-                        month: value
-                        for month, value in month_map.items()
-                        if month < cutoff_month
-                    }
-                    for project, month_map in monthly_candidates.items()
-                    if any(month < cutoff_month for month in month_map)
-                }
-            else:
-                proj_monthly = monthly_candidates
-        else:
-            baseline_token = f"trace-project-baseline::{metric_col}::{is_stringing}::{meta_signature}"
-
-            def _compute_trace_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
-                if baseline_source.empty:
-                    return {}, {}
-                if is_stringing:
-                    return compute_project_baseline_maps_for(baseline_source, metric_col)
-                return compute_project_baseline_maps(baseline_source)
-
-            proj_overall, proj_monthly = _cached_scope_result(
-                project_gang_key,
-                baseline_token,
-                _compute_trace_baselines,
-                clone=_clone_baseline_result,
-            )
-
-        if use_precomputed:
-            project_overall = proj_overall
-            project_monthly = proj_monthly
-        else:
-            project_overall = proj_overall
-            project_monthly = proj_monthly
-
-        if {"gang_name", "project_name"}.issubset(baseline_source.columns):
-            g2p = (
-                baseline_source[["gang_name", "project_name"]]
-                .dropna()
-                .drop_duplicates()
-                .set_index("gang_name")["project_name"]
-                .astype(str)
-                .to_dict()
-            )
-        else:
-            g2p = {}
-
-        overall_baseline_map = {g: project_overall.get(p) for g, p in g2p.items()}
-        monthly_baseline_map = {g: project_monthly.get(p, {}) for g, p in g2p.items()}
-
-        idle_source = pick_gang_scope(gang_focus)
-        if idle_source.empty:
-            idle_source = scoped if not scoped.empty else base_scope
-
-        idle_token = f"idle::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}::{gang_focus or '*'}"
-
-        def _compute_idle_df() -> pd.DataFrame:
-            if idle_source.empty:
-                return pd.DataFrame()
-            return compute_idle_intervals_per_gang(
-                idle_source,
-                loss_max_gap_days=config.loss_max_gap_days,
-                baseline_month_lookup=monthly_baseline_map,
-                baseline_fallback_map=overall_baseline_map,
-            )
-
-        idle_df = _cached_scope_result(
-            project_gang_key,
-            idle_token,
-            _compute_idle_df,
-            clone=_clone_dataframe,
+        precomputed_overall, precomputed_monthly = _get_project_baselines(
+            "stringing" if is_stringing else "erection"
         )
-        if not idle_df.empty:
-            idle_df["interval_loss_mt"] = (
-                idle_df["baseline"].astype(float)
-                * idle_df["idle_days_capped"].astype(float)
-            )
-            idle_df["cumulative_loss"] = idle_df.groupby("gang_name")[
-                "interval_loss_mt"
-            ].cumsum()
-
-            def _fmt_metric(value):
-                if pd.isna(value):
-                    return ""
-                formatted = f"{value:.2f}"
-                return formatted.rstrip("0").rstrip(".")
-
-            idle_df = (
-                idle_df.assign(
-                    interval_start=idle_df["interval_start"].dt.strftime("%d-%m-%Y"),
-                    interval_end=idle_df["interval_end"].dt.strftime("%d-%m-%Y"),
-                    baseline=idle_df["baseline"].apply(_fmt_metric),
-                    cumulative_loss=idle_df["cumulative_loss"].apply(_fmt_metric),
-                )
-                .drop(columns=["interval_loss_mt"])
-            )
-        idle_data = idle_df.to_dict("records")
-
-        daily_source = pick_gang_scope(gang_focus)
-        if daily_source.empty:
-            daily_source = scoped if not scoped.empty else base_scope
-        sort_cols = ["gang_name", "date"]
-        daily_source = daily_source.sort_values(sort_cols)
-        _cols = ["date", "gang_name", metric_col]
-        if "project_name" in daily_source.columns:
-            _cols.insert(2, "project_name")
-        daily_source = daily_source[_cols]
-        if not daily_source.empty:
-            daily_source = daily_source.assign(
-                date=daily_source["date"].dt.strftime("%d-%m-%Y"),
-                daily_prod_mt=(
-                    pd.to_numeric(daily_source[metric_col], errors="coerce").round(2).map(
-                        lambda v: "" if pd.isna(v) else f"{v:.2f}".rstrip("0").rstrip(".")
-                    )
-                ),
-            )
-            if metric_col != "daily_prod_mt":
-                daily_source = daily_source.drop(columns=[metric_col])
-        daily_data = daily_source.to_dict("records")
-        return idle_data, daily_data
-
-    @app.callback(
-        Output("tbl-idle-intervals", "data"),
-        Output("tbl-daily-prod", "data"),
-        Output("modal-tbl-idle-intervals", "data"),
-        Output("modal-tbl-daily-prod", "data"),
-        Input("store-click-meta", "data"),
-        Input("trace-gang", "value"),
-        Input("modal-trace-gang", "value"),
-        Input("store-filtered-scope", "data"),
-        prevent_initial_call=True,
-    )
-    def update_trace_tables(
-        meta,
-        trace_gang_value,
-        modal_trace_gang_value,
-        scope_meta: dict[str, Any] | None,
-    ):
-        ctx = dash.callback_context
-        if not ctx.triggered:
-            raise PreventUpdate
-
-        triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        dropdown_selection = trace_gang_value or modal_trace_gang_value
-        meta_source = meta.get("source") if isinstance(meta, dict) else None
-        meta_gang = meta.get("gang") if isinstance(meta, dict) else None
-        meta_is_chart = meta_source in CHART_SOURCES and bool(meta_gang)
-
-        if triggered_id == "store-click-meta":
-            gang_focus = meta_gang if meta_is_chart else dropdown_selection
-        else:
-            gang_focus = dropdown_selection or (meta_gang if meta_is_chart else None)
-
-        if not gang_focus or not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
-            raise PreventUpdate
-
-        selected = scope_meta.get("selected") or {}
-        project_list = selected.get("projects", [])
-        gang_list = selected.get("gangs", [])
-        months_ts = _months_from_meta(scope_meta)
-        meta_signature = scope_meta.get("signature") or "nosig"
-        scope_keys = scope_meta.get("scopes") or {}
-        project_gang_key = scope_keys.get("project_gang")
-
-        base_scope = _scope_frame_from_store(scope_meta, "project").copy()
-        scoped = _scope_frame_from_store(scope_meta, "full").copy()
-        scoped_all = _scope_frame_from_store(scope_meta, "project_gang").copy()
-
-        is_stringing = _normalize_mode(scope_meta.get("mode")) == "stringing"
-        metric_col = "daily_km" if is_stringing else "daily_prod_mt"
-
-        def pick_gang_scope(target_gang: str | None) -> pd.DataFrame:
-            if not target_gang:
-                return pd.DataFrame()
-            subset = base_scope[base_scope["gang_name"] == target_gang]
-            if not subset.empty:
-                return subset
-            fb = scoped_all[scoped_all["gang_name"] == target_gang].copy()
-            if months_ts and "month" in fb.columns:
-                fb = fb[fb["month"].isin(months_ts)]
-            return fb
-
-        baseline_source = scoped_all.copy()
-        precomputed_overall, precomputed_monthly = _get_project_baselines()
-        use_precomputed = (not is_stringing) and bool(precomputed_overall)
+        use_precomputed = bool(precomputed_overall)
         if use_precomputed:
             if "project_name" in baseline_source.columns:
                 candidate_projects = (
@@ -5537,17 +5859,16 @@ def register_callbacks(
                 )
                 .drop(columns=["interval_loss_mt"])
             )
-        idle_data = idle_df.to_dict("records")
 
         daily_source = pick_gang_scope(gang_focus)
         if daily_source.empty:
             daily_source = scoped if not scoped.empty else base_scope
-        sort_cols = ["gang_name", "date"]
+        sort_cols = [ "gang_name", "date"]
         daily_source = daily_source.sort_values(sort_cols)
-        _cols = ["date", "gang_name", metric_col]
+        columns = ["date", "gang_name", metric_col]
         if "project_name" in daily_source.columns:
-            _cols.insert(2, "project_name")
-        daily_source = daily_source[_cols]
+            columns.insert(2, "project_name")
+        daily_source = daily_source[columns]
         if not daily_source.empty:
             daily_source = daily_source.assign(
                 date=daily_source["date"].dt.strftime("%d-%m-%Y"),
@@ -5559,8 +5880,54 @@ def register_callbacks(
             )
             if metric_col != "daily_prod_mt":
                 daily_source = daily_source.drop(columns=[metric_col])
-        daily_data = daily_source.to_dict("records")
-        return idle_data, daily_data, idle_data, daily_data
+
+        return idle_df, daily_source
+
+    def _compute_trace_table_payload(
+        scope_meta: dict[str, Any], gang_focus: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        idle_df, daily_df = _prepare_trace_dataframes(scope_meta, gang_focus)
+        return idle_df.to_dict("records"), daily_df.to_dict("records")
+
+    @app.callback(
+        Output("tbl-idle-intervals", "data"),
+        Output("tbl-daily-prod", "data"),
+        Output("modal-tbl-idle-intervals", "data"),
+        Output("modal-tbl-daily-prod", "data"),
+        Input("store-click-meta", "data"),
+        Input("trace-gang", "value"),
+        Input("modal-trace-gang", "value"),
+        Input("store-filtered-scope", "data"),
+        prevent_initial_call=True,
+    )
+    def update_trace_tables(
+        meta,
+        trace_gang_value,
+        modal_trace_gang_value,
+        scope_meta: dict[str, Any] | None,
+    ):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+
+        triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        dropdown_selection = trace_gang_value or modal_trace_gang_value
+        meta_source = meta.get("source") if isinstance(meta, dict) else None
+        meta_gang = meta.get("gang") if isinstance(meta, dict) else None
+        meta_is_chart = meta_source in CHART_SOURCES and bool(meta_gang)
+
+        if triggered_id == "store-click-meta":
+            gang_focus = meta_gang if meta_is_chart else dropdown_selection
+        else:
+            gang_focus = dropdown_selection or (meta_gang if meta_is_chart else None)
+
+        if not gang_focus or not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
+            raise PreventUpdate
+
+        idle_df, daily_df = _prepare_trace_dataframes(scope_meta, gang_focus)
+        idle_records = idle_df.to_dict("records")
+        daily_records = daily_df.to_dict("records")
+        return idle_records, daily_records, idle_records, daily_records
 
     @app.callback(
         Output("store-project-modal-scope", "data"),
@@ -5791,6 +6158,8 @@ def register_callbacks(
                 scope_meta,
                 topbot_metric,
                 avp_namespace="project-modal-avp",
+                summarizer=_summarize_scope_for_cards,
+                summary_factory=_empty_summary_payload,
             )
         except PreventUpdate:
             return (
@@ -6256,8 +6625,8 @@ def register_callbacks(
             gang_focus = dropdown_value or (meta_gang if meta_is_chart else selected_store_gang)
         if not gang_focus:
             raise PreventUpdate
-        idle_data, daily_data = _compute_trace_table_payload(scope_meta, gang_focus)
-        return idle_data, daily_data
+        idle_df, daily_df = _prepare_trace_dataframes(scope_meta, gang_focus)
+        return idle_df.to_dict("records"), daily_df.to_dict("records")
 
     @app.callback(
         Output("trace-gang", "options"),
@@ -6896,24 +7265,23 @@ def register_callbacks(
                     pd.Index([], name="project_key_norm")
                 )
 
-            projects_df = (
+            combined_projects = (
                 plan_union.join(delivered_union, how="outer")
                 .fillna({"planned_km": 0.0, "delivered_km": 0.0})
-                .reset_index()
-                .rename(columns={"index": "project_key_norm"})
             )
-            delivered_names = projects_df["project_name_delivered"].fillna("").astype(str)
-            plan_names = projects_df["project_name_plan"].fillna("").astype(str)
-            projects_df["project_name"] = delivered_names.where(
-                delivered_names.str.strip() != "",
-                plan_names,
+            combined_projects.index.name = "__project_key_norm_idx__"
+            projects_df = (
+                combined_projects.reset_index()
+                .rename(columns={"__project_key_norm_idx__": "project_key_norm"})
             )
-            projects_df["project_name"] = projects_df["project_name"].fillna("")
-            projects_df["project_name"] = projects_df["project_name"].where(
-                projects_df["project_name"].str.strip() != "",
-                projects_df["project_key_norm"],
-            )
-            projects_df["project_name"] = projects_df["project_name"].astype(str).map(_format_stringing_project_label)
+            delivered_names = projects_df.pop("project_name_delivered").fillna("").astype(str)
+            plan_names = projects_df.pop("project_name_plan").fillna("").astype(str)
+            base_name = delivered_names.where(delivered_names.str.strip() != "", plan_names)
+            base_name = base_name.fillna("")
+            fallback_mask = base_name.str.strip() == ""
+            if fallback_mask.any():
+                base_name = base_name.mask(fallback_mask, projects_df.loc[fallback_mask, "project_key_norm"])
+            projects_df["project_name"] = base_name.astype(str).map(_format_stringing_project_label)
             project_label_by_key = (
                 projects_df.set_index("project_key_norm")["project_name"].to_dict()
                 if not projects_df.empty
@@ -9709,25 +10077,23 @@ def _load_stringing_plan_month_map(
     *,
     date_columns: Sequence[str] = _STRINGING_FS_DATE_COLUMNS,
 ) -> dict[str, set[pd.Timestamp]]:
-    try:
-        plan_snapshot, _, _, _ = _load_stringing_plan_snapshot(config)
-    except Exception:
-        plan_snapshot = None
+    summary = _get_stringing_plan_summary_frame()
     plan_map: dict[str, set[pd.Timestamp]] = {}
-    if not isinstance(plan_snapshot, pd.DataFrame) or plan_snapshot.empty:
+    if summary.empty:
         return plan_map
-    plan = plan_snapshot.copy()
-    plan_months = _stringing_plan_month_series(plan, date_columns)
-    plan["__plan_month"] = plan_months
-    plan = plan.dropna(subset=["__plan_month"])
+    plan = summary.copy()
+    plan["plan_month"] = pd.to_datetime(plan["plan_month"], errors="coerce")
+    plan = plan.dropna(subset=["plan_month"])
     if plan.empty:
         return plan_map
-    plan["__name_norm"] = plan.get("project_name", pd.Series([], dtype=str)).astype(str).map(_normalize_lower)
-    plan["__code_norm"] = plan.get("project_key", pd.Series([], dtype=str)).astype(str).map(_normalize_lower)
-    plan["__name_compact"] = plan.get("project_name", pd.Series([], dtype=str)).astype(str).map(_compact_project_key)
-    plan["__code_compact"] = plan.get("project_key", pd.Series([], dtype=str)).astype(str).map(_compact_project_key)
+    name_series = plan.get("project_name_display", plan["project_key_norm"].astype(str))
+    code_series = plan.get("project_key", plan["project_key_norm"].astype(str))
+    plan["__name_norm"] = name_series.astype(str).map(_normalize_lower)
+    plan["__code_norm"] = code_series.astype(str).map(_normalize_lower)
+    plan["__name_compact"] = name_series.astype(str).map(_compact_project_key)
+    plan["__code_compact"] = code_series.astype(str).map(_compact_project_key)
     for _, row in plan.iterrows():
-        month_value = row.get("__plan_month")
+        month_value = row.get("plan_month")
         if pd.isna(month_value):
             continue
         ts = pd.Timestamp(month_value)
@@ -9736,9 +10102,10 @@ def _load_stringing_plan_month_map(
             row.get("__code_norm"),
             row.get("__name_compact"),
             row.get("__code_compact"),
+            row.get("project_key_norm"),
         ):
             if key:
-                plan_map.setdefault(key, set()).add(ts)
+                plan_map.setdefault(str(key), set()).add(ts)
     return plan_map
 
 def _stringing_plan_keys(name: str | None, code: str | None) -> list[str]:
@@ -10054,10 +10421,4 @@ def _load_stringing_plan_snapshot(
 
     return None, set(), [], []
 
-        def _month_filter_for_frame(frame: pd.DataFrame | None) -> set[pd.Timestamp] | None:
-            if not isinstance(frame, pd.DataFrame) or frame.empty or "month" not in frame.columns:
-                return None
-            months = pd.to_datetime(frame["month"], errors="coerce").dropna()
-            if months.empty:
-                return None
-            return set(months.unique().tolist())
+

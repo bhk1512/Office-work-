@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import pandas as pd
 import psutil
@@ -20,12 +20,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from dashboard.callbacks import register_callbacks
 from dashboard.config import AppConfig, configure_logging
-from dashboard.data_loader import (
-    load_daily as _load_daily,
-    get_project_baseline_maps,
-    load_stringing_compiled_raw as _load_stringing_compiled_raw,
-    load_stringing_daily as _load_stringing_daily,
-)
+from dashboard.data_loader import load_daily as _load_daily
 from dashboard.layout import build_layout
 from dashboard.stringing import (
     normalize_stringing_columns,
@@ -64,7 +59,14 @@ def get_df_projinfo() -> pd.DataFrame:
 
 def get_project_baselines() -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
     """Return cached project productivity baselines."""
-    return get_project_baseline_maps()
+    return DATA_STORE.get_project_baselines("erection")
+
+
+def get_project_baselines_for_mode(
+    mode: str,
+) -> tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]:
+    """Expose per-mode project baseline maps for callbacks."""
+    return DATA_STORE.get_project_baselines(mode)
 
 
 def get_responsibilities_df() -> pd.DataFrame:
@@ -81,6 +83,22 @@ def get_responsibilities_error() -> str | None:
 
 def get_stringing_responsibilities_df() -> pd.DataFrame:
     return DATA_STORE.get_stringing_responsibilities_frame()
+
+
+def get_responsibility_slice(
+    mode: str,
+    projects: Sequence[str],
+    entity_type: str,
+) -> pd.DataFrame:
+    return DATA_STORE.get_responsibilities_slice(
+        mode=mode,
+        project_candidates=projects,
+        entity_type=entity_type,
+    )
+
+
+def get_responsibility_completion_lookup(mode: str) -> set[tuple[str, str]]:
+    return DATA_STORE.get_responsibility_completion_lookup(mode)
 
 
 def get_stringing_responsibilities_completion_keys() -> set[tuple[str, str]]:
@@ -273,14 +291,6 @@ def create_app(config: AppConfig | None = None) -> Dash:
             stringing_df = get_df_stringing_compiled()
         except Exception:
             stringing_df = pd.DataFrame()
-        if stringing_df.empty:
-            try:
-                stringing_df = _load_stringing_compiled_raw(CONFIG)
-                if not stringing_df.empty:
-                    set_df_stringing_compiled(stringing_df)
-            except Exception:
-                # Keep health lightweight and resilient; treat as not found on errors
-                stringing_df = pd.DataFrame()
         stringing_found = not stringing_df.empty
         stringing_rows = int(len(stringing_df.index)) if stringing_found else 0
 
@@ -325,9 +335,9 @@ def create_app(config: AppConfig | None = None) -> Dash:
                     "min_length_km": 0.0,
                     "max_length_km": 0.0,
                 }
-            # Expanded per-day stringing row count (parquet-first, Excel fallback)
+            # Expanded per-day stringing row count using cached AppDataStore state
             try:
-                daily_df = _load_stringing_daily(CONFIG)
+                daily_df = get_df_stringing_day()
                 stringing_daily_rows = int(len(daily_df.index))
             except Exception:
                 stringing_daily_rows = 0
@@ -423,14 +433,19 @@ def create_app(config: AppConfig | None = None) -> Dash:
         stringing_data_provider=get_df_stringing_day,
         stringing_compiled_provider=get_df_stringing_compiled,
         stringing_tse_lookup_provider=get_stringing_tse_lookup,
+        idle_interval_provider=lambda: DATA_STORE.get_idle_intervals("erection"),
+        stringing_idle_interval_provider=lambda: DATA_STORE.get_idle_intervals("stringing"),
+        stringing_plan_summary_provider=lambda: DATA_STORE.get_stringing_plan_summary(),
         project_info_provider=get_df_projinfo,
-        project_baseline_provider=get_project_baselines,
+        project_baseline_provider=get_project_baselines_for_mode,
         responsibilities_provider=get_responsibilities_df,
         responsibilities_completion_provider=get_responsibilities_completion_keys,
         responsibilities_error_provider=get_responsibilities_error,
         stringing_plan_provider=get_stringing_responsibilities_df,
         stringing_plan_completion_provider=get_stringing_responsibilities_completion_keys,
         stringing_plan_error_provider=get_stringing_responsibilities_error,
+        responsibility_slice_provider=get_responsibility_slice,
+        responsibility_completion_lookup_provider=get_responsibility_completion_lookup,
     )
     return app_instance
 

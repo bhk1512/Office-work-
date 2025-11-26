@@ -76,6 +76,42 @@ def _iter_idle_segments(
     return segments
 
 
+def _segments_for_gang(
+    gang_name: str,
+    gang_df: pd.DataFrame,
+    *,
+    loss_max_gap_days: int,
+    idle_intervals: pd.DataFrame | None,
+    allowed_months: set[pd.Timestamp] | None,
+) -> list[dict[str, object]]:
+    """Return idle segments sourced from precomputed intervals when available."""
+
+    if idle_intervals is None or idle_intervals.empty:
+        return _iter_idle_segments(gang_name, gang_df, loss_max_gap_days)
+
+    segments_df = idle_intervals
+    if "gang_name" in segments_df.columns and gang_name:
+        segments_df = segments_df[segments_df["gang_name"].astype(str) == gang_name]
+    if segments_df.empty:
+        return []
+
+    if allowed_months and "interval_month" in segments_df.columns:
+        segments_df = segments_df[segments_df["interval_month"].isin(allowed_months)]
+    if segments_df.empty:
+        return []
+
+    if not gang_df.empty and "date" in gang_df.columns:
+        date_series = pd.to_datetime(gang_df["date"], errors="coerce").dropna()
+        if not date_series.empty and {"interval_start", "interval_end"}.issubset(segments_df.columns):
+            start_date = date_series.min()
+            end_date = date_series.max()
+            segments_df = segments_df[
+                (pd.to_datetime(segments_df["interval_start"], errors="coerce") >= start_date)
+                & (pd.to_datetime(segments_df["interval_end"], errors="coerce") <= end_date)
+            ]
+    return segments_df.to_dict("records")
+
+
 def _resolve_month_series(df: pd.DataFrame) -> pd.Series:
     """Return a Timestamp series representing the month for each row."""
     if "month" in df.columns:
@@ -156,6 +192,9 @@ def calc_idle_and_loss(
     loss_max_gap_days: int = DEFAULT_LOSS_MAX_GAP_DAYS,
     baseline_mt_per_day: float | None = None,
     baseline_by_month: Mapping[pd.Timestamp, float] | None = None,
+    *,
+    idle_intervals: pd.DataFrame | None = None,
+    allowed_months: set[pd.Timestamp] | None = None,
 ) -> Tuple[int, float, float, float, float]:
     """Return idle days, baseline, lost MT, delivered MT, and potential MT for a gang."""
 
@@ -165,7 +204,13 @@ def calc_idle_and_loss(
         if not non_null.empty:
             gang_name = str(non_null.iloc[0])
 
-    segments = _iter_idle_segments(gang_name, group_df, loss_max_gap_days)
+    segments = _segments_for_gang(
+        gang_name,
+        group_df,
+        loss_max_gap_days=loss_max_gap_days,
+        idle_intervals=idle_intervals,
+        allowed_months=allowed_months,
+    )
     idle_days = int(sum(seg["idle_days_capped"] for seg in segments))
 
     fallback_baseline: float | None = None
@@ -224,6 +269,8 @@ def calc_idle_and_loss_for_column(
     loss_max_gap_days: int = DEFAULT_LOSS_MAX_GAP_DAYS,
     baseline_per_day: float | None = None,
     baseline_by_month: Mapping[pd.Timestamp, float] | None = None,
+    idle_intervals: pd.DataFrame | None = None,
+    allowed_months: set[pd.Timestamp] | None = None,
 ) -> Tuple[int, float, float, float, float]:
     """Generic variant of idle/loss computation for an arbitrary metric column.
 
@@ -241,7 +288,13 @@ def calc_idle_and_loss_for_column(
         if not non_null.empty:
             gang_name = str(non_null.iloc[0])
 
-    segments = _iter_idle_segments(gang_name, group_df, loss_max_gap_days)
+    segments = _segments_for_gang(
+        gang_name,
+        group_df,
+        loss_max_gap_days=loss_max_gap_days,
+        idle_intervals=idle_intervals,
+        allowed_months=allowed_months,
+    )
     idle_days = int(sum(seg["idle_days_capped"] for seg in segments))
 
     metric_series = pd.to_numeric(group_df[metric_column], errors="coerce")
@@ -359,7 +412,8 @@ def compute_idle_intervals_per_gang(
             baseline_value = monthly_map.get(month_key, baseline_default)
             row = dict(seg)
             row["baseline"] = float(baseline_value)
-            row.pop("interval_month", None)
+            if "interval_month" not in row and isinstance(seg.get("interval_start"), pd.Timestamp):
+                row["interval_month"] = pd.Timestamp(seg["interval_start"]).to_period("M").to_timestamp()
             rows.append(row)
 
     LOGGER.debug("Identified %d idle interval segments", len(rows))

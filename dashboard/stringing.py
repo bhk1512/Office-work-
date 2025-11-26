@@ -288,7 +288,28 @@ def _to_datetime_normalize(value: object) -> pd.Timestamp | None:
     """
     if value is None:
         return None
-    parsed = pd.to_datetime(value, errors="coerce")
+
+    parsed = None
+    # Excel serials often arrive as numbers (or numeric strings). Convert those
+    # via the Excel epoch; fall back to pandas' default otherwise.
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        if pd.isna(value):
+            parsed = pd.NaT
+        else:
+            parsed = pd.to_datetime(value, errors="coerce", unit="D", origin="1899-12-30")
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            parsed = pd.NaT
+        else:
+            parsed = pd.to_datetime(text, errors="coerce")
+            if pd.isna(parsed):
+                numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+                if pd.notna(numeric):
+                    parsed = pd.to_datetime(numeric, errors="coerce", unit="D", origin="1899-12-30")
+    else:
+        parsed = pd.to_datetime(value, errors="coerce")
+
     if pd.isna(parsed):
         return None
     return parsed.normalize()

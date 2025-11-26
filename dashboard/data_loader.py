@@ -720,6 +720,69 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
 
 
+# --- Cached artifact readers -------------------------------------------------
+def _read_prebuilt_stringing_artifacts(
+    raw_root: Path,
+    sheet_name: str,
+    probe_dirs: tuple[str, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame, Path] | None:
+    """
+    Attempt to reuse cached Parquets/Stringing outputs before rebuilding from RAW inputs.
+
+    Returns (compiled_df, daily_df, artifact_root) or None if no cached dataset exists.
+    """
+
+    def _candidate_roots() -> list[Path]:
+        roots: list[Path] = []
+        canonical = _stringing_root(raw_root)
+        roots.append(canonical)
+        search_root = _resolve_search_root(raw_root)
+        for rel in probe_dirs:
+            if not rel:
+                continue
+            try:
+                candidate = (search_root / Path(rel)).resolve()
+            except Exception:
+                continue
+            if candidate not in roots:
+                roots.append(candidate)
+        return roots
+
+    for root in _candidate_roots():
+        workbook_path = root / "StringingCompiled_Output.xlsx"
+        compiled_df: pd.DataFrame | None = None
+        daily_df: pd.DataFrame | None = None
+
+        compiled_source = _find_parquet_source(root, "StringingCompiled") or _find_parquet_source(root, sheet_name)
+        if compiled_source:
+            try:
+                compiled_df = _read_parquet(compiled_source)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning("Stringing: failed reading compiled parquet '%s': %s", compiled_source, exc)
+
+        if compiled_df is None and workbook_path.exists():
+            compiled_df = _try_read_excel_sheet(workbook_path, sheet_name)
+
+        daily_source = _find_parquet_source(root, "StringingDaily")
+        if daily_source:
+            try:
+                daily_df = _read_parquet(daily_source)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning("Stringing: failed reading daily parquet '%s': %s", daily_source, exc)
+
+        if daily_df is None and workbook_path.exists():
+            try:
+                daily_df = pd.read_excel(workbook_path, sheet_name="Daily")
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning("Stringing: failed reading 'Daily' sheet from '%s': %s", workbook_path, exc)
+                daily_df = pd.DataFrame()
+
+        if compiled_df is not None and daily_df is not None:
+            LOGGER.info("Stringing: loaded cached artifacts from %s", root)
+            return compiled_df, daily_df, root
+    return None
+
+
 # --- NEW: ensure project_name is present on a stringing frame ---
 def _ensure_stringing_project_name(df: pd.DataFrame, base_path: Path) -> pd.DataFrame:
     """
@@ -1155,7 +1218,12 @@ def _load_stringing_artifacts_cached(
     """Shared cached builder so compiled + daily reads reuse the same scan."""
 
     raw_root = _resolve_stringing_raw_root(Path(data_path))
-    compiled_all, daily_all, out_root = build_stringing_artifacts_every_run(raw_root, sheet_name)
+    prebuilt = _read_prebuilt_stringing_artifacts(raw_root, sheet_name, probe_dirs)
+    if prebuilt is not None:
+        compiled_all, daily_all, out_root = prebuilt
+    else:
+        LOGGER.info("Stringing: cached artifacts not found; rebuilding from RAW under '%s'", raw_root)
+        compiled_all, daily_all, out_root = build_stringing_artifacts_every_run(raw_root, sheet_name)
     return compiled_all, daily_all, out_root
 
 
@@ -1749,7 +1817,6 @@ def load_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
         ) from exc
 
     result = cached_df.copy()
-    _refresh_project_baselines(Path(config.data_path), result)
     return result
 
 

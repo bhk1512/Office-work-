@@ -213,13 +213,24 @@ def build_controls() -> dbc.Card:
                     [
                         # Left: Reset button
                         dbc.Col(
-                            dbc.Button(
-                                "Reset Filters",
-                                id="btn-reset-filters",
-                                color="secondary",
-                                outline=True,
-                                size="sm",
-                                className="filter-reset-btn",
+                            html.Div(
+                                [
+                                    dbc.Button(
+                                        "Show Gang Performance",
+                                        id="btn-open-global-performance",
+                                        color="primary",
+                                        size="sm",
+                                    ),
+                                    dbc.Button(
+                                        "Reset Filters",
+                                        id="btn-reset-filters",
+                                        color="secondary",
+                                        outline=True,
+                                        size="sm",
+                                        className="filter-reset-btn",
+                                    ),
+                                ],
+                                className="d-flex align-items-center gap-2 flex-wrap",
                             ),
                             md=6,
                             className="d-flex align-items-center",
@@ -1016,6 +1027,214 @@ def build_project_tile_modal() -> dbc.Modal:
         scrollable=True,
         backdrop="static",
     )
+
+
+def build_global_performance_modal() -> dbc.Modal:
+    """Modal that surfaces the global gang performance views with dedicated filters."""
+
+    filter_controls = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Label("Project(s)", className="fw-semibold mb-1"),
+                                            dcc.Dropdown(
+                                                id="global-performance-projects",
+                                                multi=True,
+                                                placeholder="Select project(s)",
+                                                className="filter-select",
+                                                persistence=True,
+                                                persistence_type="session",
+                                            ),
+                                        ],
+                                        className="filter-field",
+                                    ),
+                                    md=6,
+                                ),
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Label("Month(s)", className="fw-semibold mb-1"),
+                                            dcc.Dropdown(
+                                                id="global-performance-months",
+                                                multi=True,
+                                                placeholder="Select month(s)",
+                                                className="filter-select",
+                                                persistence=True,
+                                                persistence_type="session",
+                                            ),
+                                        ],
+                                        className="filter-field",
+                                    ),
+                                    md=6,
+                                ),
+                            ],
+                            className="g-3",
+                        ),
+                    ]
+                )
+            ]
+        ),
+        className="shadow-sm mb-4",
+    )
+
+    performance_cards = dbc.Row(
+        [
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div(
+                                className="section-header",
+                                children=[
+                                    html.Div(
+                                        [
+                                            html.Div("Gang Performance", className="section-title"),
+                                            html.Div(
+                                                "Delivered vs Lost (selected scope)",
+                                                className="section-sub",
+                                            ),
+                                        ],
+                                        className="d-flex flex-column gap-1",
+                                    ),
+                                    html.Div(
+                                        className="legend",
+                                        children=[
+                                            html.Div(
+                                                [
+                                                    html.Span(className="legend__dot dot--delivered"),
+                                                    "Delivered Output",
+                                                ],
+                                                className="legend__item",
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Span(className="legend__dot dot--lost"),
+                                                    "Lost Potential",
+                                                ],
+                                                className="legend__item",
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            html.Hr(style={"borderColor": "var(--border)", "margin": "8px 0 10px"}),
+                            html.Div(id="global-performance-avp-list", className="avp-wrap"),
+                            dcc.Graph(
+                                id="global-performance-actual-vs-bench",
+                                config=CLICK_GRAPH_CONFIG,
+                                style={"display": "none"},
+                            ),
+                        ]
+                    ),
+                    className="viz-card shadow-sm",
+                ),
+                md=6,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    [
+                        dbc.CardHeader(
+                            dbc.Row(
+                                [
+                                    dbc.Col(
+                                        html.Div(
+                                            [
+                                                html.Div("Performance Rankings", className="section-title"),
+                                                html.Div(
+                                                    "Top and bottom gangs (selected scope)",
+                                                    className="section-sub",
+                                                ),
+                                            ]
+                                        )
+                                    ),
+                                    dbc.Col(
+                                        dbc.RadioItems(
+                                            id="global-performance-topbot-metric",
+                                            options=[
+                                                {"label": "Productivity", "value": "prod"},
+                                                {"label": "Erection", "value": "erection"},
+                                            ],
+                                            value="prod",
+                                            inline=True,
+                                            class_name="segment",
+                                            label_class_name="segment-label",
+                                            label_checked_class_name="segment-label--active",
+                                            input_class_name="segment-input",
+                                        ),
+                                        width="auto",
+                                        align="center",
+                                    ),
+                                ],
+                                justify="between",
+                                align="center",
+                            )
+                        ),
+                        dbc.CardBody(
+                            [
+                                html.Div("Top 5 Performers", className="text-success fw-semibold mb-2"),
+                                dcc.Graph(
+                                    id="global-performance-top5",
+                                    config=CLICK_GRAPH_CONFIG,
+                                    style={"cursor": "pointer"},
+                                ),
+                                html.Hr(className="my-3"),
+                                html.Div("Bottom 5 Performers", className="text-danger fw-semibold mb-2"),
+                                dcc.Graph(
+                                    id="global-performance-bottom5",
+                                    config=CLICK_GRAPH_CONFIG,
+                                    style={"cursor": "pointer"},
+                                ),
+                            ]
+                        ),
+                    ],
+                    className="viz-card shadow-sm",
+                ),
+                md=6,
+            ),
+        ],
+        className="mb-4",
+    )
+
+    trace_contents = [
+        html.Div(id="global-performance-trace-anchor"),
+        *_build_trace_contents(
+            "global-performance-trace-gang",
+            "global-performance-btn-export-trace",
+            "global-performance-tbl-idle-intervals",
+            "global-performance-tbl-daily-prod",
+        ),
+    ]
+    trace_block = dbc.Card(
+        dbc.CardBody(trace_contents + [Download(id="global-performance-download-trace")]),
+        className="shadow-sm",
+    )
+
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Gang Performance (All Projects)")),
+            dbc.ModalBody([filter_controls, performance_cards, trace_block]),
+            dbc.ModalFooter(
+                dbc.Button(
+                    "Close",
+                    id="global-performance-modal-close",
+                    className="ms-auto",
+                    n_clicks=0,
+                )
+            ),
+        ],
+        id="global-performance-modal",
+        is_open=False,
+        size="xl",
+        fullscreen=True,
+        scrollable=True,
+        backdrop="static",
+    )
 def build_kpi_pch_modal() -> dbc.Modal:
     """Modal variant of the PCH-wise drilldown used when summary pills are clicked."""
 
@@ -1230,6 +1449,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     trace_modal = build_trace_modal()
     pch_modal = build_kpi_pch_modal()
     project_modal = build_project_tile_modal()
+    global_performance_modal = build_global_performance_modal()
     layout = dbc.Container(
         [
             dcc.Location(id="project-modal-location", refresh=False),
@@ -1562,14 +1782,10 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                                     ),
                                     html.Hr(style={"borderColor": "var(--border)", "margin": "8px 0 10px"}),
                                     html.Div(id="avp-list", className="avp-wrap"),
-                                    # Keep the original figure hidden so existing clientside callbacks keep working
-                                    # dcc.Graph(id="g-actual-vs-bench", config=CLICK_GRAPH_CONFIG, style={"display": "none"}),
                                     dcc.Graph(
                                         id="g-actual-vs-bench",
                                         config=CLICK_GRAPH_CONFIG,
-                                        style={
-                                            "display": "none",
-                                        },
+                                        style={"display": "none"},
                                     ),
                                 ]
                             ),
@@ -1655,9 +1871,13 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-selected-gang", data=None),
             dcc.Store(id="store-filtered-scope", data=None),
             dcc.Store(id="store-stringing-scope", data="all"),
+            dcc.Store(id="store-global-performance-scope", data=None),
+            dcc.Store(id="store-global-performance-click-meta", data=None),
+            dcc.Store(id="global-performance-selected-gang", data=None),
             dcc.Store(id="store-pch-modal-focus", data=None),
             html.Div(id="scroll-wire", style={"display": "none"}),   # <- add this
             trace_modal,
+            global_performance_modal,
             build_project_responsibilities_modal(),
             pch_modal,
             project_modal,
