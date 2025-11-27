@@ -163,17 +163,25 @@ def to_number_mt(x):
         return np.nan
 
 
+def _coerce_excel_serial(value: object) -> pd.Timestamp | None:
+    """Return timestamp if *value* looks like an Excel serial date."""
+    try:
+        numeric = float(str(value).strip())
+    except Exception:
+        return None
+    if not np.isfinite(numeric):
+        return None
+    if 20000 <= numeric <= 80000:
+        return pd.to_datetime("1899-12-30") + pd.to_timedelta(numeric, unit="D")
+    return None
+
+
 def to_date(x):
     """Parse text dates (DD/MM/YYYY, etc.) and Excel serials."""
-    d = pd.to_datetime(x, errors="coerce", dayfirst=True)
-    if (hasattr(d, "all") and pd.isna(d).all()) or (not hasattr(d, "all") and pd.isna(d)):
-        try:
-            v = pd.to_numeric(pd.Series([x]), errors="coerce").iloc[0]
-            if pd.notna(v):
-                return pd.to_datetime("1899-12-30") + pd.to_timedelta(v, unit="D")
-        except Exception:
-            pass
-    return d
+    excel_ts = _coerce_excel_serial(x)
+    if excel_ts is not None:
+        return excel_ts
+    return pd.to_datetime(x, errors="coerce", dayfirst=True)
 
 
 def parse_project_from_filename(name: str) -> str:
@@ -913,4 +921,3 @@ def run_pipeline(input_path=None, output_path=None, files=None, extra_args=None)
 
 if __name__ == "__main__":
     main()
-

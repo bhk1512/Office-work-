@@ -1618,6 +1618,27 @@ def load_project_baselines(
     return get_project_baseline_maps()
 
 
+def _coerce_mixed_excel_dates(values: Any) -> pd.Series:
+    """Return datetime series parsed from Excel date serials or textual dates."""
+
+    series = pd.Series(values)
+    parsed = pd.to_datetime(series, errors="coerce")
+    numeric = pd.to_numeric(series, errors="coerce")
+    if isinstance(numeric, pd.Series):
+        excel_mask = numeric.notna()
+        if excel_mask.any():
+            excel_mask &= numeric.between(20000, 80000)
+            if excel_mask.any():
+                excel_converted = pd.to_datetime(
+                    numeric,
+                    errors="coerce",
+                    unit="D",
+                    origin="1899-12-30",
+                )
+                parsed = parsed.where(~excel_mask, excel_converted)
+    return parsed
+
+
 def load_daily_from_proddailyexpanded(
     source: pd.DataFrame | pd.ExcelFile,
     sheet: str = "ProdDailyExpanded",
@@ -1656,7 +1677,7 @@ def load_daily_from_proddailyexpanded(
         return text
 
     data: dict[str, Any] = {
-        "date": pd.to_datetime(df[col_date], errors="coerce").dt.normalize(),
+        "date": _coerce_mixed_excel_dates(df[col_date]).dt.normalize(),
         "daily_prod_mt": pd.to_numeric(df[col_prod], errors="coerce"),
         "project_name": df[col_proj].astype(str).str.strip(),
         "gang_name": df[col_gang].astype(str).str.strip(),
@@ -1672,11 +1693,11 @@ def load_daily_from_proddailyexpanded(
 
     col_start = _pick_optional(df, ("Start Date", "starting date"))
     if col_start:
-        data["start_date"] = pd.to_datetime(df[col_start], errors="coerce")
+        data["start_date"] = _coerce_mixed_excel_dates(df[col_start])
 
     col_complete = _pick_optional(df, ("Complete Date", "completion date"))
     if col_complete:
-        data["completion_date"] = pd.to_datetime(df[col_complete], errors="coerce")
+        data["completion_date"] = _coerce_mixed_excel_dates(df[col_complete])
 
     col_status = _pick_optional(df, ("Status",))
     if col_status:
@@ -1703,8 +1724,8 @@ def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "R
 
     base = pd.DataFrame(
         {
-            "start": pd.to_datetime(df[start_col], errors="coerce"),
-            "end": pd.to_datetime(df[end_col], errors="coerce"),
+            "start": _coerce_mixed_excel_dates(df[start_col]).dt.normalize(),
+            "end": _coerce_mixed_excel_dates(df[end_col]).dt.normalize(),
             "daily_prod_mt": pd.to_numeric(df[prod_col], errors="coerce"),
             "project_name": df[project_col].astype(str).str.strip(),
             "gang_name": df[gang_col].astype(str).str.strip(),

@@ -14,7 +14,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 from io import BytesIO
 import traceback
-from typing import Any, Callable, Mapping, Sequence, TypeVar, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar, TYPE_CHECKING
 from weakref import WeakSet
 
 import dash
@@ -3319,6 +3319,73 @@ def register_callbacks(
             "balance_value": 0.0,
             "loss_rows": [],
         }
+        selected = (scope_meta or {}).get("selected") or {}
+        project_filters = _normalize_str_list(selected.get("projects"))
+
+        _project_label_columns = (
+            "project_name",
+            "project",
+            "project_name_display",
+            "Project Name",
+            "project_key",
+            "project_code",
+            "project_key_norm",
+        )
+        _project_file_pattern = re.compile(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{2,4})\b", re.IGNORECASE)
+
+        def _collect_project_key_tokens(frame: pd.DataFrame) -> set[str]:
+            tokens: set[str] = set()
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return tokens
+            for column in _project_label_columns:
+                if column not in frame.columns:
+                    continue
+                values = (
+                    frame[column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .replace("", pd.NA)
+                    .dropna()
+                )
+                for value in values:
+                    compact = _compact_project_key(value)
+                    normalized = _normalize_lower(value)
+                    if compact:
+                        tokens.add(compact)
+                    elif normalized:
+                        tokens.add(normalized)
+            if "source_file" in frame.columns:
+                file_values = (
+                    frame["source_file"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .replace("", pd.NA)
+                    .dropna()
+                )
+                for value in file_values:
+                    match = _project_file_pattern.search(value)
+                    if not match:
+                        continue
+                    compact = _compact_project_key(f"{match.group(1)}{match.group(2)}")
+                    if compact:
+                        tokens.add(compact)
+            return tokens
+
+        def _normalize_project_token_set(values: Iterable[object] | None) -> set[str]:
+            tokens: set[str] = set()
+            if values is None:
+                return tokens
+            for value in values:
+                compact = _compact_project_key(value)
+                normalized = _normalize_lower(value)
+                if compact:
+                    tokens.add(compact)
+                elif normalized:
+                    tokens.add(normalized)
+            return {token for token in tokens if token}
+
         if not result["has_rows"]:
             return result
 
@@ -3538,7 +3605,44 @@ def register_callbacks(
                 .nunique()
             )
 
-        projects_count = _nunique(loss_scope, "project_name") or _nunique(scoped_full, "project_name")
+        project_keys = set()
+        for frame in (loss_scope, scoped_full):
+            project_keys.update(_collect_project_key_tokens(frame))
+        if is_stringing and callable(stringing_compiled_provider):
+            try:
+                compiled_df = stringing_compiled_provider() or pd.DataFrame()
+            except Exception:
+                compiled_df = pd.DataFrame()
+            if isinstance(compiled_df, pd.DataFrame) and not compiled_df.empty:
+                filtered_compiled = compiled_df
+                if allowed_months:
+                    mask = pd.Series(False, index=filtered_compiled.index)
+                    for column in (
+                        "month",
+                        "date",
+                        "fs_complete_date",
+                        "fs_start_date",
+                        "fs_starting_date",
+                        "completion date",
+                        "starting date",
+                        "completion month",
+                    ):
+                        if column not in filtered_compiled.columns:
+                            continue
+                        series = pd.to_datetime(filtered_compiled[column], errors="coerce")
+                        if series.isna().all():
+                            continue
+                        normalized = series.dt.to_period("M").dt.to_timestamp()
+                        mask = mask | normalized.isin(allowed_months)
+                    if mask.any():
+                        filtered_compiled = filtered_compiled.loc[mask].copy()
+                compiled_tokens = _collect_project_key_tokens(filtered_compiled)
+                if project_filters:
+                    filter_keys = _normalize_project_token_set(project_filters)
+                    if filter_keys:
+                        compiled_tokens = {token for token in compiled_tokens if token in filter_keys}
+                project_keys.update(compiled_tokens)
+        projects_count = len(project_keys)
         if is_stringing:
             try:
                 plan_df, _ = _stringing_plan_totals_by_project(
@@ -3548,34 +3652,15 @@ def register_callbacks(
             except Exception:
                 plan_df = pd.DataFrame()
             if isinstance(plan_df, pd.DataFrame) and not plan_df.empty:
-                plan_keys = set(plan_df.index.astype(str))
-                selected = (scope_meta or {}).get("selected") or {}
+                plan_keys = _normalize_project_token_set(plan_df.index.astype(str).tolist())
                 project_filters = _normalize_str_list(selected.get("projects"))
                 if project_filters:
-                    filter_keys = {
-                        _compact_project_key(value) or _normalize_lower(value)
-                        for value in project_filters
-                        if str(value).strip()
-                    }
-                    filter_keys = {key for key in filter_keys if key}
+                    filter_keys = _normalize_project_token_set(project_filters)
                     if filter_keys:
                         plan_keys = {key for key in plan_keys if key in filter_keys}
-                delivered_keys: set[str] = set()
-                for frame in (loss_scope, scoped_full):
-                    if not isinstance(frame, pd.DataFrame) or frame.empty or "project_name" not in frame.columns:
-                        continue
-                    delivered_keys.update(
-                        frame["project_name"]
-                        .dropna()
-                        .astype(str)
-                        .str.strip()
-                        .map(lambda value: _compact_project_key(value) or _normalize_lower(value))
-                    )
-                delivered_keys = {key for key in delivered_keys if key}
-                total_project_keys = plan_keys | delivered_keys
-                total_project_keys = {key for key in total_project_keys if key}
-                if total_project_keys:
-                    projects_count = len(total_project_keys)
+                combined_keys = {key for key in project_keys | plan_keys if key}
+                if combined_keys:
+                    projects_count = len(combined_keys)
         gangs_count = _nunique(loss_scope, "gang_name") or _nunique(scoped_full, "gang_name")
 
         result.update(
