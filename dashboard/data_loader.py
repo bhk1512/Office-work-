@@ -392,6 +392,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     plan_frames: list[pd.DataFrame] = []
     plan_index_rows: list[dict[str, Any]] = []
     plan_issue_rows: list[dict[str, str]] = []
+    dpr_issue_rows: list[dict[str, Any]] = []
 
     def _append_plan_index_entry(
         *,
@@ -426,6 +427,27 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     if not candidates:
         LOGGER.warning("Stringing: no Excel files found under '%s'", raw_root)
 
+    def _log_dpr_diag(workbook: Path | str, project: str, rows: int, daily_rows: int, status: str) -> None:
+        diag_rows.append(
+            {
+                "Workbook": Path(workbook).name if workbook else "",
+                "Project": project,
+                "Rows": int(rows),
+                "DailyRows": int(daily_rows),
+                "Status": status,
+            }
+        )
+        if status != "OK":
+            dpr_issue_rows.append(
+                {
+                    "Workbook": Path(workbook).name if workbook else "",
+                    "Project": project,
+                    "Issue": status,
+                    "Rows": int(rows),
+                    "DailyRows": int(daily_rows),
+                }
+            )
+
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
 
@@ -436,13 +458,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             contains_keyword="stringing",
         )
         if not actual_sheet:
-            diag_rows.append({
-                "Workbook": wb.name,
-                "Project": proj,
-                "Rows": 0,
-                "DailyRows": 0,
-                "Status": "NO_TARGET_SHEET"
-            })
+            _log_dpr_diag(wb, proj, 0, 0, "NO_TARGET_SHEET")
             continue
 
         # Try robust parse of the desired sheet
@@ -456,23 +472,11 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 actual_sheet,
                 exc,
             )
-            diag_rows.append({
-                "Workbook": wb.name,
-                "Project": proj,
-                "Rows": 0,
-                "DailyRows": 0,
-                "Status": f"READ_FAIL: {type(exc).__name__}"
-            })
+            _log_dpr_diag(wb, proj, 0, 0, f"READ_FAIL: {type(exc).__name__}")
             continue
 
         if df_raw is None or df_raw.empty:
-            diag_rows.append({
-                "Workbook": wb.name,
-                "Project": proj,
-                "Rows": 0,
-                "DailyRows": 0,
-                "Status": "EMPTY_SHEET"
-            })
+            _log_dpr_diag(wb, proj, 0, 0, "EMPTY_SHEET")
             continue
 
         tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
@@ -534,21 +538,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             if "source_file" not in daily.columns:
                 daily["source_file"] = wb.name
             daily_frames.append(daily)
-            diag_rows.append({
-                "Workbook": wb.name,
-                "Project": proj,
-                "Rows": int(len(compiled_norm)),
-                "DailyRows": int(len(daily)),
-                "Status": "OK"
-            })
+            _log_dpr_diag(wb, proj, int(len(compiled_norm)), int(len(daily)), "OK")
         else:
-            diag_rows.append({
-                "Workbook": wb.name,
-                "Project": proj,
-                "Rows": int(len(compiled_norm)),
-                "DailyRows": 0,
-                "Status": "NO_DAILY"
-            })
+            _log_dpr_diag(wb, proj, int(len(compiled_norm)), 0, "NO_DAILY")
 
     precompiled_plan = _load_precompiled_stringing_microplan(out_root)
     plan_responsibilities: pd.DataFrame | None = None
@@ -696,6 +688,11 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     except Exception as exc:
         LOGGER.warning("Stringing: failed writing master daily parquet: %s", exc)
 
+    diag_df = pd.DataFrame(diag_rows)
+    dpr_issues_df = pd.DataFrame(dpr_issue_rows)
+    if dpr_issues_df.empty:
+        dpr_issues_df = pd.DataFrame(columns=["Workbook", "Project", "Issue", "Rows", "DailyRows"])
+
     # Combined Excel (fallback/log) — always write; Diagnostics includes *all* files scanned
     try:
         with pd.ExcelWriter(out_root / "StringingCompiled_Output.xlsx", engine="openpyxl", mode="w") as xw:
@@ -704,7 +701,16 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             )
             if not daily_all.empty:
                 daily_all.to_excel(xw, sheet_name="Daily", index=False)
-            pd.DataFrame(diag_rows).to_excel(xw, sheet_name="Diagnostics", index=False)
+            # Erection-style sheets for consistency
+            (daily_all if not daily_all.empty else pd.DataFrame()).to_excel(
+                xw, sheet_name="ProdDailyExpanded", index=False
+            )
+            (compiled_all if not compiled_all.empty else pd.DataFrame()).to_excel(
+                xw, sheet_name="RawData", index=False
+            )
+            dpr_issues_df.to_excel(xw, sheet_name="Data Issues", index=False)
+            plan_issue_sheet.to_excel(xw, sheet_name="Issues", index=False)
+            diag_df.to_excel(xw, sheet_name="Diagnostics", index=False)
             plan_responsibilities.to_excel(xw, sheet_name="MicroPlanResponsibilities", index=False)
             plan_index_df.to_excel(xw, sheet_name="MicroPlanIndex", index=False)
             plan_issue_sheet.to_excel(xw, sheet_name="MicroPlanDataIssues", index=False)
@@ -778,6 +784,22 @@ def _read_prebuilt_stringing_artifacts(
                 daily_df = pd.DataFrame()
 
         if compiled_df is not None and daily_df is not None:
+            missing_parts: list[str] = []
+            if isinstance(compiled_df, pd.DataFrame) and not compiled_df.empty:
+                if not _stringing_frame_has_project_metadata(compiled_df):
+                    missing_parts.append("compiled")
+            if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                if not _stringing_frame_has_project_metadata(daily_df):
+                    missing_parts.append("daily")
+
+            if missing_parts:
+                LOGGER.warning(
+                    "Stringing: cached dataset in %s missing project metadata (%s); forcing rebuild",
+                    root,
+                    ", ".join(missing_parts),
+                )
+                continue
+
             LOGGER.info("Stringing: loaded cached artifacts from %s", root)
             return compiled_df, daily_df, root
     return None
@@ -827,6 +849,28 @@ def _ensure_stringing_project_name(df: pd.DataFrame, base_path: Path) -> pd.Data
         df["project"] = s.mask(s.eq("") | s.eq("nan") | s.eq("None"), df["project_name"])
 
     return df
+
+
+def _stringing_frame_has_project_metadata(df: pd.DataFrame) -> bool:
+    """Return True when a stringing frame has at least one non-empty project field."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+
+    def _has_values(column: str) -> bool:
+        if column not in df.columns:
+            return False
+        series = df[column]
+        if series.empty:
+            return False
+        try:
+            normalized = series.astype("string").fillna("").str.strip().str.lower()
+        except Exception:
+            normalized = series.astype(str).str.strip().str.lower()
+        mask = ~normalized.isin({"", "nan", "none", "null"})
+        return bool(mask.any())
+
+    return _has_values("project_name") or _has_values("project")
 
 
 def _ttl_lru_cache(maxsize: int, ttl_seconds: int):
@@ -1253,6 +1297,7 @@ def load_stringing_compiled_raw(config_or_path: AppConfig | Path | str) -> pd.Da
     )
     return df.copy()
 
+load_stringing_compiled_raw.cache_clear = _load_stringing_artifacts_cached.cache_clear  # type: ignore[attr-defined]
 
 # -----------------------------
 # Stringing daily (expanded)
@@ -1302,6 +1347,8 @@ def load_stringing_daily(config_or_path: AppConfig | Path | str) -> pd.DataFrame
     )
     return df.copy()
 
+load_stringing_daily.cache_clear = _load_stringing_artifacts_cached.cache_clear  # type: ignore[attr-defined]
+
 
 def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
     """Persist *df* to *destination* using DuckDB for consistent parquet writes."""
@@ -1309,12 +1356,32 @@ def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         destination.unlink()
-    with duckdb.connect(database=":memory:") as con:
-        con.register("df_to_write", df)
-        con.execute(
-            "COPY df_to_write TO ? (FORMAT 'parquet', COMPRESSION 'zstd')",
-            [str(destination)],
-        )
+    try:
+        with duckdb.connect(database=":memory:") as con:
+            con.register("df_to_write", df)
+            con.execute(
+                "COPY df_to_write TO ? (FORMAT 'parquet', COMPRESSION 'zstd')",
+                [str(destination)],
+            )
+            return
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        LOGGER.warning("DuckDB parquet write failed (%s); falling back to pandas writer.", exc)
+    try:
+        df.to_parquet(destination, compression="zstd", index=False)
+        return
+    except Exception as exc:  # pragma: no cover - attempt with string-cast
+        LOGGER.warning("Pandas parquet write failed (%s); retrying with string columns.", exc)
+        safe = df.copy()
+        object_columns = safe.select_dtypes(include="object").columns
+        for column in object_columns:
+            safe[column] = safe[column].astype(str)
+        try:
+            safe.to_parquet(destination, compression="zstd", index=False)
+            return
+        except Exception as exc2:  # pragma: no cover - last-resort fallback
+            LOGGER.warning("String-coerced parquet write failed (%s); writing CSV instead.", exc2)
+            csv_path = destination.with_suffix(".csv")
+            safe.to_csv(csv_path, index=False)
 
 
 def _pick_column(df: pd.DataFrame, options: Iterable[str]) -> str:

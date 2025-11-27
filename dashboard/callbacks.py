@@ -81,7 +81,6 @@ LOGGER.setLevel(logging.INFO)
 LOGGER.info("dashboard.callbacks module loaded")
 
 BENCHMARK_MT_PER_DAY = 9.0
-_STRINGING_KV_RANGE = {"400", "765"}
 _STRINGING_FS_DATE_COLUMNS = ("final_sag_complete", "fs_complete_date", "fs_completed_date", "fs_completion_date")
 _STRINGING_PO_DATE_COLUMNS = ("paying_out_complete", "po_completion_date", "po_completion")
 _STRINGING_METHODS = ("manual", "tse", "hotline")
@@ -160,10 +159,6 @@ if TYPE_CHECKING:
 def _get_stringing_tse_lookup() -> tuple[dict[str, int], dict[str, str]]:
     """Fallback stub replaced inside register_callbacks."""
     return {}, {}
-
-
-def _default_stringing_kv_values() -> list[str]:
-    return sorted(_STRINGING_KV_RANGE)
 
 
 def _default_stringing_method_values() -> list[str]:
@@ -459,16 +454,6 @@ def _format_decimal(value: float | int | None) -> str:
     if pd.isna(value):
         return ""
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
-
-def _infer_kv_from_text(name: object) -> str | None:
-    """Return '765' or '400' if found in a project name, else None."""
-    s = "" if name is None else str(name).lower()
-    if "765" in s:
-        return "765"
-    if "400" in s:
-        return "400"
-    return None
-
 
 # --- helper: average days across selected months (fallback 30) ---
 def _avg_days_in_selected_months(months_ts) -> float:
@@ -1086,75 +1071,8 @@ def _hash_cache_payload(payload: Mapping[str, Any]) -> str:
     return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
-def _attach_line_kv(work: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds __line_kv__ ('765'|'400'|NA) inferred from Project Details.
-    Tries BOTH mappings: project name and project code.
-    If mapping fails, falls back to the row's own project text.
-    """
-    try:
-        provider = _PROJECT_INFO_PROVIDER
-        if work is None or work.empty:
-            return work
-
-        proj_col = "project_name" if "project_name" in work.columns else ("project" if "project" in work.columns else None)
-        if not proj_col:
-            return work
-
-        out = work.copy()
-        out["__kv_source__"] = out[proj_col].astype(str).str.strip()
-
-        dfpi = provider() if callable(provider) else None
-        if dfpi is not None and not dfpi.empty:
-            dpi = dfpi.copy()
-
-            def _norm_key(x: object) -> str:
-                return re.sub(r"\s+", " ", ("" if x is None else str(x)).strip().lower())
-
-            # Build normalized keys on both name and code
-            if "project_name" in dpi.columns:
-                dpi["__name_key__"] = dpi["project_name"].astype(str).map(_norm_key)
-            else:
-                dpi["__name_key__"] = ""
-
-            if "project_code" in dpi.columns:
-                dpi["__code_key__"] = dpi["project_code"].astype(str).map(_norm_key)
-            else:
-                dpi["__code_key__"] = ""
-
-            # Which column is the descriptive text? Prefer "Project Name"
-            desc_col = "Project Name" if "Project Name" in dpi.columns else ("project_name" if "project_name" in dpi.columns else None)
-
-            if desc_col:
-                name_map = dict(zip(dpi["__name_key__"], dpi[desc_col].astype(str)))
-                code_map = dict(zip(dpi["__code_key__"], dpi[desc_col].astype(str)))
-
-                row_key = out[proj_col].astype(str).map(_norm_key)
-                mapped_name = row_key.map(name_map)
-                mapped_code = row_key.map(code_map)
-                # Prefer name-map, fall back to code-map, then original project text
-                desc_series = mapped_name.where(mapped_name.notna(), mapped_code)
-                out["__kv_source__"] = desc_series.where(desc_series.notna(), out[proj_col].astype(str))
-
-        src = out["__kv_source__"].astype(str).str.lower()
-        out["__line_kv__"] = np.where(
-            src.str.contains("765"),
-            "765",
-            np.where(src.str.contains("400"), "400", pd.NA),
-        )
-        return out
-    except Exception:
-        return work
-
-
-def _stringing_scope(work: pd.DataFrame, kv_values, method_values) -> pd.DataFrame:
+def _stringing_scope(work: pd.DataFrame, method_values) -> pd.DataFrame:
     work = work.copy()
-    work = _attach_line_kv(work)
-
-    kv_set = set(_normalize_str_list(kv_values))
-    if kv_set and kv_set != {"400", "765"}:
-        work = work[work["__line_kv__"].isin(kv_set)]
-
     method_series = None
     if "method" in work.columns:
         method_series = work["method"].astype(str).str.strip().str.lower()
@@ -1325,7 +1243,6 @@ def _build_scope_frames(
     gang_list: Sequence[str],
     months_value: Sequence[str],
     quick_range: str | None,
-    kv_values: Sequence[str] | None,
     method_values: Sequence[str] | None,
     deployment_filter: str | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[pd.Timestamp], float]:
@@ -1334,7 +1251,6 @@ def _build_scope_frames(
         raise RuntimeError("Data selector not initialized.")
     eff_mode = _normalize_mode(mode_value)
     normalized_months = resolve_months(months_value, quick_range)
-    kv_set = {value.strip() for value in _normalize_str_list(kv_values) if value and str(value).strip()}
     method_set = {value.strip().lower() for value in _normalize_str_list(method_values)}
 
     scoped_frames = selector.scopes_for(
@@ -1342,7 +1258,6 @@ def _build_scope_frames(
         months=normalized_months,
         projects=project_list,
         gangs=gang_list,
-        kv_filter=kv_set if eff_mode == "stringing" else None,
         method_filter=method_set if eff_mode == "stringing" else None,
     )
 
@@ -1358,7 +1273,7 @@ def _build_scope_frames(
 
         work = df_day.copy()
         if eff_mode == "stringing":
-            work = _stringing_scope(work, kv_values, method_values)
+            work = _stringing_scope(work, method_values)
 
         month_scope = apply_filters(work, [], normalized_months, [])
         project_scope = apply_filters(work, project_list, normalized_months, [])
@@ -1396,9 +1311,7 @@ def _build_scope_meta_payload(
     gang_list: list[str],
     months_list: list[str],
     quick_range: str | None,
-    kv_values: Sequence[str] | None,
     method_values: Sequence[str] | None,
-    kv_list: list[str],
     method_list: list[str],
     deployment_filter: str | None = None,
 ) -> dict[str, Any]:
@@ -1409,7 +1322,6 @@ def _build_scope_meta_payload(
         gang_list=gang_list,
         months_value=months_list,
         quick_range=quick_range,
-        kv_values=kv_values,
         method_values=method_values,
         deployment_filter=normalized_scope,
     )
@@ -1421,7 +1333,6 @@ def _build_scope_meta_payload(
         "gangs": gang_list,
         "months": months_list,
         "quick_range": quick_range,
-        "kv": kv_list,
         "methods": method_list,
         "stringing_scope": normalized_scope,
     }
@@ -1439,7 +1350,6 @@ def _build_scope_meta_payload(
             "gangs": gang_list,
             "months": months_list,
             "quick_range": quick_range,
-            "kv": kv_list,
             "methods": method_list,
             "stringing_scope": normalized_scope,
         },
@@ -1455,7 +1365,6 @@ def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame
         gang_list=selected.get("gangs", []),
         months_value=selected.get("months", []),
         quick_range=selected.get("quick_range"),
-        kv_values=selected.get("kv", []),
         method_values=selected.get("methods", []),
         deployment_filter=normalized_scope,
     )
@@ -1473,7 +1382,6 @@ def _build_project_scope_meta(
     months_value,
     quick_range,
     gang_values,
-    kv_values: Sequence[str] | None,
     method_values: Sequence[str] | None,
     deployment_filter: str | None,
 ) -> dict[str, Any]:
@@ -1492,7 +1400,6 @@ def _build_project_scope_meta(
 
     gang_list = _normalize_str_list(_ensure_list(gang_values))
     months_list = _normalize_str_list(_ensure_list(months_value))
-    kv_list = _normalize_str_list(_ensure_list(kv_values))
     method_list = _normalize_str_list(_ensure_list(method_values), lower=True)
 
     return _build_scope_meta_payload(
@@ -1501,9 +1408,7 @@ def _build_project_scope_meta(
         gang_list=gang_list,
         months_list=months_list,
         quick_range=quick_range,
-        kv_values=kv_values,
         method_values=method_values,
-        kv_list=kv_list,
         method_list=method_list,
         deployment_filter=deployment_filter,
     )
@@ -3751,10 +3656,9 @@ def register_callbacks(
         selected = (scope_meta or {}).get("selected") or {}
         projects = selected.get("projects") or []
         gangs = selected.get("gangs") or []
-        kv_values = selected.get("kv") or []
         method_values = selected.get("methods") or []
 
-        scoped_base = _stringing_scope(frame, kv_values, method_values)
+        scoped_base = _stringing_scope(frame, method_values)
         scoped_full = apply_filters(scoped_base, projects, months_ts, gangs)
 
         done_total = _sum_completion_totals(
@@ -3839,7 +3743,6 @@ def register_callbacks(
                             gang_list=selected.get("gangs", []),
                             months_value=selected.get("months", []),
                             quick_range=selected.get("quick_range"),
-                            kv_values=selected.get("kv", []),
                             method_values=selected.get("methods", []),
                             deployment_filter="all",
                         )
@@ -4338,11 +4241,9 @@ def register_callbacks(
         project_list = _normalize_str_list(_ensure_list(projects))
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
-        kv_values = _default_stringing_kv_values()
         method_values = _method_filters_for_scope(stringing_scope)
         if not method_values:
             method_values = list(_STRINGING_METHODS)
-        kv_list = _normalize_str_list(kv_values)
         method_list = _normalize_str_list(method_values, lower=True)
 
         frames, months_ts, days_factor = _build_scope_frames(
@@ -4351,7 +4252,6 @@ def register_callbacks(
             gang_list=gang_list,
             months_value=months_list,
             quick_range=quick_range,
-            kv_values=kv_values,
             method_values=method_values,
             deployment_filter=stringing_scope,
         )
@@ -4364,7 +4264,6 @@ def register_callbacks(
             "gangs": gang_list,
             "months": months_list,
             "quick_range": quick_range,
-            "kv": kv_list,
             "methods": method_list,
             "stringing_scope": _normalize_deployment_filter(stringing_scope),
         }
@@ -4378,14 +4277,13 @@ def register_callbacks(
             "days_factor": days_factor,
             "months_iso": [ts.isoformat() for ts in months_ts],
             "selected": {
-                "projects": project_list,
-                "gangs": gang_list,
-                "months": months_list,
-                "quick_range": quick_range,
-                "kv": kv_list,
-                "methods": method_list,
-                "stringing_scope": _normalize_deployment_filter(stringing_scope),
-            },
+            "projects": project_list,
+            "gangs": gang_list,
+            "months": months_list,
+            "quick_range": quick_range,
+            "methods": method_list,
+            "stringing_scope": _normalize_deployment_filter(stringing_scope),
+        },
         }
 
 
@@ -4512,7 +4410,6 @@ def register_callbacks(
     ) -> list[dict[str, str]]:
         project_list = _normalize_str_list(_ensure_list(projects))
         gang_list = _normalize_str_list(_ensure_list(gangs))
-        kv_values = _default_stringing_kv_values()
         method_values = _method_filters_for_scope(stringing_scope)
 
         try:
@@ -4522,7 +4419,6 @@ def register_callbacks(
                 gang_list=gang_list,
                 months_value=[],
                 quick_range=quick_range,
-                kv_values=kv_values,
                 method_values=method_values,
                 deployment_filter=stringing_scope,
             )
@@ -4549,7 +4445,6 @@ def register_callbacks(
         Input("store-filtered-scope", "data"),
     )
     def _populate_global_performance_project_options(_: dict[str, Any] | None) -> list[dict[str, str]]:
-        kv_values = _default_stringing_kv_values()
         method_values = _default_stringing_method_values()
         try:
             frames, _, _ = _build_scope_frames(
@@ -4558,7 +4453,6 @@ def register_callbacks(
                 gang_list=[],
                 months_value=[],
                 quick_range=None,
-                kv_values=kv_values,
                 method_values=method_values,
                 deployment_filter="all",
             )
@@ -4592,7 +4486,6 @@ def register_callbacks(
         projects: Sequence[str] | None,
     ) -> list[dict[str, str]]:
         project_list = _normalize_str_list(_ensure_list(projects))
-        kv_values = _default_stringing_kv_values()
         method_values = _default_stringing_method_values()
         try:
             frames, _, _ = _build_scope_frames(
@@ -4601,7 +4494,6 @@ def register_callbacks(
                 gang_list=[],
                 months_value=[],
                 quick_range=None,
-                kv_values=kv_values,
                 method_values=method_values,
                 deployment_filter="all",
             )
@@ -4619,27 +4511,36 @@ def register_callbacks(
         Output("store-global-performance-scope", "data"),
         Input("global-performance-projects", "value"),
         Input("global-performance-months", "value"),
+        Input("store-global-performance-mode", "data"),
+        Input("store-stringing-scope", "data"),
     )
     def _sync_global_performance_scope_store(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
+        mode_value: Any,
+        stringing_scope: str | None,
     ) -> dict[str, Any]:
         project_list = _normalize_str_list(_ensure_list(projects))
         months_list = _normalize_str_list(_ensure_list(months))
-        kv_values = _default_stringing_kv_values()
-        method_values = _default_stringing_method_values()
+        eff_mode = _normalize_mode(mode_value) or "erection"
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        deployment_filter = stringing_scope if eff_mode == "stringing" else None
+        method_values = (
+            _method_filters_for_scope(deployment_filter)
+            if eff_mode == "stringing"
+            else _default_stringing_method_values()
+        )
         try:
             return _build_scope_meta_payload(
-                eff_mode="erection",
+                eff_mode=eff_mode,
                 project_list=project_list,
                 gang_list=[],
                 months_list=months_list,
                 quick_range=None,
-                kv_values=kv_values,
                 method_values=method_values,
-                kv_list=_normalize_str_list(kv_values),
                 method_list=_normalize_str_list(method_values, lower=True),
-                deployment_filter="all",
+                deployment_filter=deployment_filter,
             )
         except Exception as exc:
             LOGGER.exception("Failed to build global performance scope: %s", exc)
@@ -4647,24 +4548,211 @@ def register_callbacks(
 
     @app.callback(
         Output("global-performance-modal", "is_open"),
-        Input("btn-open-global-performance", "n_clicks"),
+        Output("store-global-performance-mode", "data"),
+        Input("btn-open-global-performance-erection", "n_clicks"),
+        Input("btn-open-global-performance-stringing", "n_clicks"),
         Input("global-performance-modal-close", "n_clicks"),
         State("global-performance-modal", "is_open"),
+        State("store-global-performance-mode", "data"),
     )
     def _toggle_global_performance_modal(
-        open_clicks: int | None,
+        open_erection: int | None,
+        open_stringing: int | None,
         close_clicks: int | None,
         is_open: bool | None,
-    ) -> bool:
+        mode_value: Any,
+    ) -> tuple[bool, str]:
         ctx = dash.callback_context
-        if not ctx.triggered:
-            return bool(is_open)
-        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger == "btn-open-global-performance":
-            return True
+        current_mode = _normalize_mode(mode_value) or "erection"
+        if ctx.triggered:
+            trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        else:
+            trigger = None
+
         if trigger == "global-performance-modal-close":
-            return False
-        return bool(is_open)
+            return False, current_mode
+        if trigger == "btn-open-global-performance-erection":
+            return True, "erection"
+        if trigger == "btn-open-global-performance-stringing":
+            target_mode = "stringing" if config.enable_stringing else "erection"
+            return True, target_mode
+        return bool(is_open), current_mode
+
+    @app.callback(
+        Output("global-performance-topbot-mode-label", "children"),
+        Output("global-performance-tbl-idle-intervals", "columns"),
+        Output("global-performance-tbl-daily-prod", "columns"),
+        Input("store-global-performance-mode", "data"),
+    )
+    def _sync_global_performance_ui(mode_value):
+        eff_mode = _normalize_mode(mode_value) or "erection"
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        is_stringing = eff_mode == "stringing"
+        idle_columns = [
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Interval Start", "id": "interval_start"},
+            {"name": "Interval End", "id": "interval_end"},
+            {"name": "Raw Gap (days)", "id": "raw_gap_days"},
+            {"name": "Idle Counted (days)", "id": "idle_days_capped"},
+            {
+                "name": "Baseline (KM/Month)" if is_stringing else "Baseline (MT/day)",
+                "id": "baseline",
+            },
+            {
+                "name": "Cumulative Loss (KM)" if is_stringing else "Cumulative Loss (MT)",
+                "id": "cumulative_loss",
+            },
+        ]
+        daily_columns = [
+            {"name": "Gang", "id": "gang_name"},
+            {"name": "Project", "id": "project_name"},
+            {"name": "Date", "id": "date"},
+            {
+                "name": "KM/Month" if is_stringing else "MT/day",
+                "id": "daily_prod_mt",
+            },
+        ]
+        label = "Stringing" if is_stringing else "Erection"
+        return label, idle_columns, daily_columns
+
+    @app.callback(
+        Output("global-performance-benchmark-label", "children"),
+        Input("store-global-performance-mode", "data"),
+    )
+    def _sync_global_performance_benchmark_label(mode_value):
+        eff_mode = _normalize_mode(mode_value) or "erection"
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        unit = "KM/day" if eff_mode == "stringing" else "MT/day"
+        return f"Benchmark ({unit})"
+
+    @app.callback(
+        Output("global-performance-benchmark-table", "data"),
+        Output("global-performance-benchmark-status", "children"),
+        Input("store-global-performance-scope", "data"),
+        Input("global-performance-benchmark", "value"),
+    )
+    def _populate_global_performance_benchmark_table(
+        scope_meta: dict[str, Any] | None,
+        benchmark_value: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        eff_mode = _normalize_mode((scope_meta or {}).get("mode"))
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        unit_label = "KM/day" if eff_mode == "stringing" else "MT/day"
+        if not isinstance(scope_meta, dict):
+            return [], "Select filters to populate the benchmark view."
+
+        benchmark: float | None = None
+        if isinstance(benchmark_value, (int, float)):
+            benchmark = float(benchmark_value)
+        elif isinstance(benchmark_value, str) and benchmark_value.strip():
+            try:
+                benchmark = float(benchmark_value.strip())
+            except ValueError:
+                benchmark = None
+        if benchmark is None:
+            return [], f"Enter a benchmark in {unit_label} to view the leading gangs."
+
+        project_df = _scope_frame_from_store(scope_meta, "project").copy()
+        if project_df.empty or "gang_name" not in project_df.columns:
+            return [], "No gang activity found for the selected scope."
+
+        metric_series = pd.to_numeric(project_df.get("daily_prod_mt"), errors="coerce")
+        project_df = project_df.assign(
+            gang_name=project_df["gang_name"].astype(str).str.strip(),
+            daily_prod_mt=metric_series,
+        ).dropna(subset=["gang_name", "daily_prod_mt"])
+        if project_df.empty:
+            return [], "No valid productivity records available for this scope."
+
+        date_column = None
+        for candidate in ("date", "completion_date", "interval_end"):
+            if candidate in project_df.columns:
+                date_column = candidate
+                break
+        if date_column:
+            project_df["_gp_date"] = pd.to_datetime(project_df[date_column], errors="coerce")
+        else:
+            project_df["_gp_date"] = pd.NaT
+
+        avg_series = (
+            project_df.groupby("gang_name")["daily_prod_mt"]
+            .mean()
+            .rename("current_metric")
+        )
+        if "location_no" in project_df.columns:
+            count_series = (
+                project_df.groupby("gang_name")["location_no"]
+                .nunique(dropna=True)
+                .rename("erections")
+            )
+        else:
+            count_series = project_df.groupby("gang_name").size().rename("erections")
+
+        latest_rows = (
+            project_df.sort_values("_gp_date")
+            .groupby("gang_name", as_index=False)
+            .tail(1)
+        )
+        if "project_name" in latest_rows.columns:
+            project_map = latest_rows.set_index("gang_name")["project_name"]
+        else:
+            project_map = pd.Series(dtype=str)
+        date_map = latest_rows.set_index("gang_name")["_gp_date"]
+
+        baseline_mode = "stringing" if eff_mode == "stringing" else "erection"
+        project_baselines, _ = _get_project_baselines(baseline_mode)
+
+        summary = (
+            avg_series.to_frame()
+            .join(count_series, how="left")
+            .reset_index()
+            .rename(columns={"gang_name": "name"})
+        )
+        summary["project"] = summary["name"].map(project_map).fillna("\u2014")
+        summary["last_worked_at"] = summary["name"].map(date_map)
+        summary["baseline_metric"] = summary["project"].map(project_baselines or {})
+        summary["erections"] = summary["erections"].fillna(0).astype(int)
+
+        qualifying = summary[summary["current_metric"] >= benchmark].copy()
+        if qualifying.empty:
+            return [], f"No gangs exceed {benchmark:.2f} {unit_label} for this selection."
+
+        def _fmt_rate(value: Any) -> str:
+            if value is None or pd.isna(value):
+                return "\u2014"
+            try:
+                return f"{float(value):.2f}"
+            except Exception:
+                return "\u2014"
+
+        def _fmt_date(value: Any) -> str:
+            if isinstance(value, str):
+                try:
+                    parsed = pd.to_datetime(value)
+                except Exception:
+                    return value or "\u2014"
+                return parsed.strftime("%d-%b-%Y") if not pd.isna(parsed) else "\u2014"
+            if pd.isna(value):
+                return "\u2014"
+            try:
+                return pd.to_datetime(value).strftime("%d-%b-%Y")
+            except Exception:
+                return "\u2014"
+
+        qualifying = qualifying.sort_values("current_metric", ascending=False)
+        qualifying["last_worked_at"] = qualifying["last_worked_at"].map(_fmt_date)
+        qualifying["current_rate"] = qualifying["current_metric"].map(_fmt_rate)
+        qualifying["baseline_rate"] = qualifying["baseline_metric"].map(_fmt_rate)
+        qualifying["erections"] = qualifying["erections"].astype(int)
+
+        data = qualifying[
+            ["name", "project", "last_worked_at", "erections", "current_rate", "baseline_rate"]
+        ].to_dict("records")
+        status = f"{len(qualifying)} gang(s) above {benchmark:.2f} {unit_label}."
+        return data, status
 
     @app.callback(
         Output("global-performance-avp-list", "children"),
@@ -5464,10 +5552,9 @@ def register_callbacks(
         selected = (scope_meta or {}).get("selected") or {}
         projects = selected.get("projects") or []
         gangs = selected.get("gangs") or []
-        kv_values = selected.get("kv") or []
         method_values = selected.get("methods") or []
 
-        scoped_base = _stringing_scope(frame, kv_values, method_values)
+        scoped_base = _stringing_scope(frame, method_values)
         scoped_full = apply_filters(scoped_base, projects, months_ts, gangs)
 
         done_total = _sum_completion_totals(
@@ -5552,7 +5639,6 @@ def register_callbacks(
                             gang_list=selected.get("gangs", []),
                             months_value=selected.get("months", []),
                             quick_range=selected.get("quick_range"),
-                            kv_values=selected.get("kv", []),
                             method_values=selected.get("methods", []),
                             deployment_filter="all",
                         )
@@ -5737,7 +5823,6 @@ def register_callbacks(
         projects = _extract_list("projects")
         months = _extract_list("months")
         gangs = _extract_list("gangs")
-        kv_values = _extract_list("kv")
         method_values = _extract_list("methods", lower=True)
         quick_range = selected.get("quick_range")
         stringing_scope = selected.get("stringing_scope")
@@ -5754,9 +5839,7 @@ def register_callbacks(
                     gang_list=gangs,
                     months_list=months,
                     quick_range=quick_range,
-                    kv_values=kv_values,
                     method_values=method_values,
-                    kv_list=kv_values,
                     method_list=method_values,
                     deployment_filter=stringing_scope if mode_name == "stringing" else "all",
                 )
@@ -6039,7 +6122,6 @@ def register_callbacks(
         eff_mode = _modal_mode_from_store(performance_mode, "erection")
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
-        kv_values = _default_stringing_kv_values()
         method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
         return _build_project_scope_meta(
             project_name,
@@ -6048,7 +6130,6 @@ def register_callbacks(
             months,
             quick_range,
             gangs,
-            kv_values,
             method_values,
             stringing_scope,
         )
@@ -6217,7 +6298,6 @@ def register_callbacks(
             eff_mode = _modal_mode_from_store(performance_mode, "erection")
             if eff_mode == "stringing" and not config.enable_stringing:
                 eff_mode = "erection"
-            kv_values = _default_stringing_kv_values()
             method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
             scope_meta = _build_project_scope_meta(
                 project_name,
@@ -6226,7 +6306,6 @@ def register_callbacks(
                 months,
                 quick_range,
                 gangs,
-                kv_values,
                 method_values,
                 stringing_scope,
             )
@@ -6392,7 +6471,6 @@ def register_callbacks(
             gang_list=gang_list,
             months_value=months_list,
             quick_range=quick_range,
-            kv_values=[],
             method_values=[],
         )
         scoped = frames.get("project_gang", pd.DataFrame()).copy()
@@ -6447,7 +6525,6 @@ def register_callbacks(
         project_list = _normalize_str_list(candidate_ids)
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
-        kv_list = _default_stringing_kv_values()
         method_list = _method_filters_for_scope(stringing_scope)
 
         months_ts = resolve_months(months_list, quick_range)
@@ -6458,7 +6535,6 @@ def register_callbacks(
             gang_list=gang_list,
             months_value=months_list,
             quick_range=quick_range,
-            kv_values=kv_list,
             method_values=method_list,
             deployment_filter=stringing_scope,
         )
@@ -6468,7 +6544,7 @@ def register_callbacks(
             df_fallback = selector.select("stringing") if selector is not None else pd.DataFrame()
             if isinstance(df_fallback, pd.DataFrame) and not df_fallback.empty:
                 scoped = apply_filters(
-                    _stringing_scope(df_fallback, kv_list, method_list),
+                    _stringing_scope(df_fallback, method_list),
                     project_list,
                     months_ts,
                     gang_list,
@@ -6950,7 +7026,6 @@ def register_callbacks(
         months,
         quick_range,
         mode_value: str | None,
-        kv_filter,
         method_filter,
         stringing_scope,
         *,
@@ -7209,7 +7284,6 @@ def register_callbacks(
                     total_loss += float(loss_val)
             return total_loss
 
-        kv_list = _ensure_list(kv_filter)
         method_list = _normalize_str_list(method_filter, lower=True)
         deployment_scope = _normalize_deployment_filter(stringing_scope)
         pch_sections: list[dbc.AccordionItem] = []
@@ -7301,7 +7375,6 @@ def register_callbacks(
                     gang_list=[],
                     months_value=month_list,
                     quick_range=quick_range,
-                    kv_values=kv_list,
                     method_values=method_list,
                     deployment_filter=deployment_scope,
                 )
@@ -7589,7 +7662,7 @@ def register_callbacks(
             po_done_compact_map: dict[str, float] = {}
             po_frame = _get_stringing_po_daily_frame()
             if isinstance(po_frame, pd.DataFrame) and not po_frame.empty:
-                po_scoped = _stringing_scope(po_frame, kv_list, method_list)
+                po_scoped = _stringing_scope(po_frame, method_list)
                 po_filtered = apply_filters(po_scoped, project_list, months_ts, [])
                 po_filtered = _filter_frame_for_deployment(po_filtered, deployment_scope)
                 if isinstance(po_filtered, pd.DataFrame) and not po_filtered.empty:
@@ -8064,7 +8137,6 @@ def register_callbacks(
                 gang_list=[],
                 months_value=month_list,
                 quick_range=quick_range,
-                kv_values=None,
                 method_values=None,
             )
             scope_full = scope_frames.get("full", pd.DataFrame()).copy()
@@ -9256,14 +9328,12 @@ def register_callbacks(
             mode_value = "erection"
         if mode_value == "stringing" and not config.enable_stringing:
             raise PreventUpdate
-        kv_filter = _default_stringing_kv_values()
         method_filter = _method_filters_for_scope(stringing_scope) if mode_value == "stringing" else []
         sections, active_item, tile_meta = _populate_kpi_pch(
             projects,
             months,
             quick_range,
             mode_value,
-            kv_filter,
             method_filter,
             stringing_scope,
             use_modal_ids=True,
@@ -9507,12 +9577,10 @@ def register_callbacks(
 
         gang_list = _normalize_str_list(_ensure_list(gangs))
         months_list = _normalize_str_list(_ensure_list(months))
-        kv_list = _normalize_str_list(_default_stringing_kv_values())
         deployment_scope = _normalize_deployment_filter(stringing_scope)
         method_list = _normalize_str_list(_method_filters_for_scope(deployment_scope), lower=True)
 
         def _project_summary_for_mode(mode_value: str, *, is_stringing: bool) -> dict[str, str]:
-            kv_payload = kv_list if is_stringing else []
             method_payload = method_list if is_stringing else []
             try:
                 scope_meta = _build_scope_meta_payload(
@@ -9521,9 +9589,7 @@ def register_callbacks(
                     gang_list=gang_list,
                     months_list=months_list,
                     quick_range=quick_range,
-                    kv_values=kv_payload,
                     method_values=method_payload,
-                    kv_list=kv_payload,
                     method_list=method_payload,
                     deployment_filter=deployment_scope if is_stringing else "all",
                 )

@@ -131,6 +131,43 @@ def extract_project_code(text: str) -> str | None:
             return f"{prefix} {num}"
     return None
 
+def derive_project_code(mail, attachment=None) -> str | None:
+    """
+    Try multiple sources (current attachment, subject, all attachment names)
+    to determine the TA/TB style project identifier.
+    """
+    candidates: list[str] = []
+
+    def push(value):
+        if not value:
+            return
+        text = str(value).strip()
+        if text:
+            candidates.append(text)
+
+    if attachment is not None:
+        push(getattr(attachment, "FileName", None))
+        push(getattr(attachment, "DisplayName", None))
+
+    push(getattr(mail, "Subject", None))
+
+    atts = getattr(mail, "Attachments", None)
+    if atts:
+        try:
+            for i in range(1, atts.Count + 1):
+                other = atts.Item(i)
+                # Include other attachment names as fallbacks
+                push(getattr(other, "FileName", None))
+                push(getattr(other, "DisplayName", None))
+        except Exception:
+            pass
+
+    for text in candidates:
+        code = extract_project_code(text)
+        if code:
+            return code
+    return None
+
 # --- Date extraction ---
 # Supports 2025-10-24, 24-10-2025, 24/10/2025, 24.10.2025, 20251024, 24 Oct 2025, Oct 24 2025, etc.
 MONTHS = {m.lower(): i for i, m in enumerate(
@@ -249,8 +286,8 @@ def save_latest_for_mail(mail) -> list[str]:
         if not all(re.search(pat, norm(name), flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN):
             continue
 
-        # project code from this attachment; fallback to subject if not found
-        project = extract_project_code(name) or extract_project_code(getattr(mail, "Subject", "") or "")
+        # project code from attachment/subject/other attachments
+        project = derive_project_code(mail, att)
         if not project:
             # If no project code, skip (or save with original name if you prefer)
             continue

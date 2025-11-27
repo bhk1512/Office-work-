@@ -147,18 +147,15 @@ class DataSelector:
         months: Sequence[pd.Timestamp],
         projects: Sequence[str],
         gangs: Sequence[str],
-        kv_filter: set[str] | None = None,
         method_filter: set[str] | None = None,
     ) -> dict[str, pd.DataFrame] | None:
         mode = (mode_value or self._DEFAULT_MODE).strip().lower() or self._DEFAULT_MODE
         months_list = list(months or [])
         project_list = list(projects or [])
         gang_list = list(gangs or [])
-        kv_set = set(kv_filter or set())
         method_set = {m.strip().lower() for m in (method_filter or set()) if m}
 
         if mode != "stringing":
-            kv_set.clear()
             method_set.clear()
 
         conn = self._duckdb_connection
@@ -168,7 +165,6 @@ class DataSelector:
                 months_list,
                 project_list,
                 gang_list,
-                kv_set,
                 method_set,
             )
 
@@ -180,7 +176,6 @@ class DataSelector:
                         months_list,
                         project_list,
                         gang_list,
-                        kv_set,
                         method_set,
                         connection=conn,
                     )
@@ -190,7 +185,6 @@ class DataSelector:
                     months_list,
                     project_list,
                     gang_list,
-                    kv_set,
                     method_set,
                     connection=conn,
                 )
@@ -205,7 +199,6 @@ class DataSelector:
                 months_list,
                 project_list,
                 gang_list,
-                kv_set,
                 method_set,
             )
         return scopes
@@ -253,7 +246,6 @@ class DataSelector:
         months: Sequence[pd.Timestamp],
         projects: Sequence[str],
         gangs: Sequence[str],
-        kv_filter: set[str],
         method_filter: set[str],
     ) -> dict[str, pd.DataFrame]:
         df_day = self.select(mode)
@@ -263,7 +255,7 @@ class DataSelector:
 
         working = df_day
         if mode == "stringing":
-            working = self._apply_stringing_filters(working, kv_filter, method_filter)
+            working = self._apply_stringing_filters(working, method_filter)
 
         return {
             "month": apply_filters(working, [], months, []),
@@ -278,7 +270,6 @@ class DataSelector:
         months: Sequence[pd.Timestamp],
         projects: Sequence[str],
         gangs: Sequence[str],
-        kv_filter: set[str],
         method_filter: set[str],
         *,
         connection: duckdb.DuckDBPyConnection,
@@ -287,7 +278,6 @@ class DataSelector:
         if not table_name:
             return None
 
-        kv_norm = self._normalize_kv_filter(kv_filter)
         method_norm = method_filter
 
         month_scope = self._query_duckdb_scope(
@@ -297,7 +287,6 @@ class DataSelector:
             months=months,
             projects=[],
             gangs=[],
-            kv_filter=kv_norm,
             method_filter=method_norm,
         )
         project_scope = self._query_duckdb_scope(
@@ -307,7 +296,6 @@ class DataSelector:
             months=months,
             projects=projects,
             gangs=[],
-            kv_filter=kv_norm,
             method_filter=method_norm,
         )
         full_scope = self._query_duckdb_scope(
@@ -317,7 +305,6 @@ class DataSelector:
             months=months,
             projects=projects,
             gangs=gangs,
-            kv_filter=kv_norm,
             method_filter=method_norm,
         )
         project_gang_scope = self._query_duckdb_scope(
@@ -327,7 +314,6 @@ class DataSelector:
             months=[],
             projects=projects,
             gangs=gangs,
-            kv_filter=kv_norm,
             method_filter=method_norm,
         )
 
@@ -353,7 +339,6 @@ class DataSelector:
         months: Sequence[pd.Timestamp],
         projects: Sequence[str],
         gangs: Sequence[str],
-        kv_filter: set[str],
         method_filter: set[str],
     ) -> pd.DataFrame | None:
         columns = self._duckdb_columns(connection, table_name)
@@ -380,27 +365,23 @@ class DataSelector:
 
         _append_column_clause("month", months, transform=lambda ts: self._timestamp_to_py(ts))
         project_values = [p for p in projects if p and str(p).strip()]
-        _append_column_clause("project_name", project_values)
-        _append_column_clause("project", project_values)
-        normalized_tokens = [
-            token
-            for token in {self._normalize_project_token(p) for p in project_values}
-            if token
-        ]
-        if normalized_tokens:
-            project_norm_expr = "regexp_replace(lower(coalesce(project_name, project, '')), '[^a-z0-9]', '')"
-            _append_in_clause(project_norm_expr, normalized_tokens)
+        if project_values:
+            normalized_tokens = [
+                token
+                for token in {self._normalize_project_token(p) for p in project_values}
+                if token
+            ]
+            if normalized_tokens:
+                project_norm_expr = "regexp_replace(lower(coalesce(project_name, project, '')), '[^a-z0-9]', '')"
+                where_clauses.append(
+                    f"{project_norm_expr} IN ({', '.join('?' for _ in normalized_tokens)})"
+                )
+                params.extend(normalized_tokens)
         _append_column_clause("gang_name", gangs)
 
-        leftover_kv: set[str] = set()
         leftover_method: set[str] = set()
 
         if mode == "stringing":
-            if kv_filter and kv_filter != {"400", "765"}:
-                if "line_kv" in columns:
-                    _append_in_clause("COALESCE(line_kv, '')", sorted(kv_filter))
-                else:
-                    leftover_kv = set(kv_filter)
             if method_filter and method_filter != {"manual", "tse"}:
                 sorted_methods = sorted(method_filter)
                 if "method_norm" in columns:
@@ -416,8 +397,8 @@ class DataSelector:
 
         result = connection.execute(query, params).df()
 
-        if mode == "stringing" and (leftover_kv or leftover_method):
-            result = self._apply_stringing_filters(result, leftover_kv, leftover_method)
+        if mode == "stringing" and leftover_method:
+            result = self._apply_stringing_filters(result, leftover_method)
 
         return result
 
@@ -430,20 +411,9 @@ class DataSelector:
             return value.to_pydatetime()
         return pd.Timestamp(value).to_pydatetime()
 
-    def _normalize_kv_filter(self, values: set[str]) -> set[str]:
-        normalized: set[str] = set()
-        for raw in values:
-            if not raw:
-                continue
-            text = str(raw).strip().lower()
-            digits = "".join(ch for ch in text if ch.isdigit())
-            normalized.add(digits or text.upper())
-        return {val for val in normalized if val}
-
     def _apply_stringing_filters(
         self,
         frame: pd.DataFrame,
-        kv_filter: set[str],
         method_filter: set[str],
     ) -> pd.DataFrame:
         working = frame
@@ -451,10 +421,6 @@ class DataSelector:
             return working
         result = working
 
-        if kv_filter and kv_filter != {"400", "765"}:
-            if "line_kv" in result.columns:
-                mask = result["line_kv"].astype(str).str.lower().isin({v.lower() for v in kv_filter})
-                result = result.loc[mask]
         if method_filter and method_filter != {"manual", "tse"}:
             if "method_norm" in result.columns:
                 mask = result["method_norm"].astype(str).str.lower().isin(method_filter)

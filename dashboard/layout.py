@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Any
 
 from dash import dcc, html
 import dash_bootstrap_components as dbc
@@ -212,29 +213,23 @@ def build_controls() -> dbc.Card:
                 dbc.Row(
                     [
                         # Left: Reset button
-                        dbc.Col(
-                            html.Div(
-                                [
-                                    dbc.Button(
-                                        "Show Gang Performance",
-                                        id="btn-open-global-performance",
-                                        color="primary",
-                                        size="sm",
-                                    ),
-                                    dbc.Button(
-                                        "Reset Filters",
-                                        id="btn-reset-filters",
-                                        color="secondary",
-                                        outline=True,
-                                        size="sm",
-                                        className="filter-reset-btn",
-                                    ),
-                                ],
-                                className="d-flex align-items-center gap-2 flex-wrap",
+                dbc.Col(
+                    html.Div(
+                        [
+                            dbc.Button(
+                                "Reset Filters",
+                                id="btn-reset-filters",
+                                color="secondary",
+                                outline=True,
+                                size="sm",
+                                className="filter-reset-btn",
                             ),
-                            md=6,
-                            className="d-flex align-items-center",
-                        ),
+                        ],
+                        className="d-flex align-items-center gap-2 flex-wrap",
+                    ),
+                    md=6,
+                    className="d-flex align-items-center",
+                ),
 
                         # Right: Quick-range radios + Clear link, under Months
                         dbc.Col(
@@ -313,35 +308,45 @@ def build_mode_summary_cards() -> dbc.Row:
                 className="stringing-scope-control d-flex flex-wrap align-items-center gap-2",
             )
 
+        button = dbc.Button(
+            "Show Overall Gang Performance",
+            id=f"btn-open-global-performance-{mode_key}",
+            color="primary",
+            size="sm",
+            className="summary-card__cta",
+        )
+
+        def _header_block() -> html.Div:
+            left_children: list[Any] = [html.Div(title, className="fw-semibold")]
+            if header_controls:
+                left_children.append(header_controls)
+            return html.Div(
+                left_children,
+                className="d-flex flex-wrap align-items-center gap-2",
+            )
+
         return dbc.Col(
             dbc.Card(
                 dbc.CardBody(
                     [
                         html.Div(
-                            [
-                                html.Div(title, className="fw-semibold"),
-                                header_controls,
-                            ],
-                            className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3"
-                            if header_controls
-                            else None,
-                        )
-                        if header_controls
-                        else html.Div(title, className="fw-semibold mb-3"),
-                    ]
-                    + [
-                        html.Div(
-                            [
-                                html.Span(label, className="summary-pill__label"),
-                                html.Span(id=value_id, children="-", className="summary-pill__value"),
-                            ],
-                            className="summary-pill",
-                            role="button",
-                            tabIndex=0,
-                            id={"type": "summary-pill-trigger", "mode": mode_key, "metric": metric_key},
-                            n_clicks=0,
-                        )
-                        for label, value_id, metric_key in rows
+                            [_header_block(), button],
+                            className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3",
+                        ),
+                        *[
+                            html.Div(
+                                [
+                                    html.Span(label, className="summary-pill__label"),
+                                    html.Span(id=value_id, children="-", className="summary-pill__value"),
+                                ],
+                                className="summary-pill",
+                                role="button",
+                                tabIndex=0,
+                                id={"type": "summary-pill-trigger", "mode": mode_key, "metric": metric_key},
+                                n_clicks=0,
+                            )
+                            for label, value_id, metric_key in rows
+                        ],
                     ],
                     className="d-flex flex-column gap-2",
                 ),
@@ -1054,7 +1059,7 @@ def build_global_performance_modal() -> dbc.Modal:
                                         ],
                                         className="filter-field",
                                     ),
-                                    md=6,
+                                    md=4,
                                 ),
                                 dbc.Col(
                                     html.Div(
@@ -1071,13 +1076,83 @@ def build_global_performance_modal() -> dbc.Modal:
                                         ],
                                         className="filter-field",
                                     ),
-                                    md=6,
+                                    md=4,
+                                ),
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Label(
+                                                "Benchmark (MT/day)",
+                                                className="fw-semibold mb-1",
+                                                id="global-performance-benchmark-label",
+                                            ),
+                                            dcc.Input(
+                                                id="global-performance-benchmark",
+                                                type="number",
+                                                placeholder="Enter benchmark",
+                                                min=0,
+                                                step=0.1,
+                                                debounce=True,
+                                                className="filter-input",
+                                            ),
+                                            html.Div(
+                                                "Only gangs beating this benchmark will be listed below.",
+                                                className="form-text text-muted small mt-1",
+                                            ),
+                                        ],
+                                        className="filter-field",
+                                    ),
+                                    md=4,
                                 ),
                             ],
                             className="g-3",
                         ),
                     ]
                 )
+            ]
+        ),
+        className="shadow-sm mb-4",
+    )
+
+    benchmark_table = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div("Benchmark Highlights", className="section-title"),
+                        html.Div(
+                            "Gangs exceeding the entered benchmark.",
+                            className="section-sub",
+                        ),
+                    ],
+                    className="mb-2",
+                ),
+                html.Div(
+                    id="global-performance-benchmark-status",
+                    className="text-muted small mb-2",
+                    children="Enter a benchmark to view the leading gangs.",
+                ),
+                dash_table.DataTable(
+                    id="global-performance-benchmark-table",
+                    columns=[
+                        {"name": "Gang", "id": "name"},
+                        {"name": "Project", "id": "project"},
+                        {"name": "Last Worked At", "id": "last_worked_at"},
+                        {"name": "Erections", "id": "erections"},
+                        {"name": "Current MT/day", "id": "current_rate"},
+                        {"name": "Baseline MT/day", "id": "baseline_rate"},
+                    ],
+                    data=[],
+                    page_size=8,
+                    style_table={"overflowX": "auto"},
+                    style_cell={
+                        "fontFamily": "Inter, system-ui",
+                        "fontSize": 13,
+                        "border": "1px solid var(--border, #e6e9f0)",
+                        "padding": "6px 8px",
+                    },
+                    style_header={"backgroundColor": "#f8fafc", "fontWeight": "600"},
+                ),
             ]
         ),
         className="shadow-sm mb-4",
@@ -1158,7 +1233,13 @@ def build_global_performance_modal() -> dbc.Modal:
                                             id="global-performance-topbot-metric",
                                             options=[
                                                 {"label": "Productivity", "value": "prod"},
-                                                {"label": "Erection", "value": "erection"},
+                                                {
+                                                    "label": html.Span(
+                                                        "Erection",
+                                                        id="global-performance-topbot-mode-label",
+                                                    ),
+                                                    "value": "erection",
+                                                },
                                             ],
                                             value="prod",
                                             inline=True,
@@ -1218,7 +1299,7 @@ def build_global_performance_modal() -> dbc.Modal:
     return dbc.Modal(
         [
             dbc.ModalHeader(dbc.ModalTitle("Gang Performance (All Projects)")),
-            dbc.ModalBody([filter_controls, performance_cards, trace_block]),
+            dbc.ModalBody([filter_controls, benchmark_table, performance_cards, trace_block]),
             dbc.ModalFooter(
                 dbc.Button(
                     "Close",
@@ -1871,6 +1952,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-selected-gang", data=None),
             dcc.Store(id="store-filtered-scope", data=None),
             dcc.Store(id="store-stringing-scope", data="all"),
+            dcc.Store(id="store-global-performance-mode", data="erection"),
             dcc.Store(id="store-global-performance-scope", data=None),
             dcc.Store(id="store-global-performance-click-meta", data=None),
             dcc.Store(id="global-performance-selected-gang", data=None),

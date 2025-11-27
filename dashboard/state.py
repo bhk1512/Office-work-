@@ -999,24 +999,9 @@ class AppDataStore:
 
     def _augment_stringing_frame(self, frame: pd.DataFrame) -> None:
         if frame.empty:
-            frame["line_kv"] = pd.Series(dtype="string")
             frame["method_norm"] = pd.Series(dtype="string")
             frame["deployment_tse_flag"] = pd.Series(dtype=bool)
             return
-        source = None
-        if "project_name" in frame.columns:
-            source = frame["project_name"].astype(str)
-        elif "project" in frame.columns:
-            source = frame["project"].astype(str)
-        else:
-            source = pd.Series("", index=frame.index)
-        norm = source.str.lower()
-        line_kv = np.where(
-            norm.str.contains("765", na=False),
-            "765",
-            np.where(norm.str.contains("400", na=False), "400", pd.NA),
-        )
-        frame["line_kv"] = pd.Series(line_kv, index=frame.index).astype("string")
         if "method" in frame.columns:
             method_norm = frame["method"].astype(str).str.strip().str.lower()
             frame["method_norm"] = method_norm.mask(method_norm.isin({"", "nan", "none"})).astype("string")
