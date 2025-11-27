@@ -4306,23 +4306,31 @@ def register_callbacks(
         Output("store-stringing-scope", "data"),
         Input("f-stringing-scope", "value"),
         Input("btn-reset-filters", "n_clicks"),
+        Input("project-modal-stringing-scope", "value"),
         State("store-stringing-scope", "data"),
         prevent_initial_call=False,
     )
     def _sync_stringing_scope_store(
         home_value: str | None,
         reset_clicks: int | None,
+        modal_value: str | None,
         current_value: str | None,
-    ) -> str:
+    ) -> Any:
         ctx = dash.callback_context
-        next_value = current_value or "all"
+        current_normalized = _normalize_deployment_filter(current_value)
+        next_value = current_normalized or "all"
         if ctx.triggered:
             trigger = ctx.triggered[0]["prop_id"].split(".")[0]
             if trigger == "btn-reset-filters":
                 next_value = "all"
             elif trigger == "f-stringing-scope" and home_value:
                 next_value = home_value
-        return _normalize_deployment_filter(next_value)
+            elif trigger == "project-modal-stringing-scope" and modal_value:
+                next_value = modal_value
+        normalized = _normalize_deployment_filter(next_value)
+        if normalized == current_normalized:
+            return dash.no_update
+        return normalized
 
 
     @app.callback(

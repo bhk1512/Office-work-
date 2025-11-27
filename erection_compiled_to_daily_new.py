@@ -29,7 +29,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -150,6 +150,68 @@ def find_project_details_sheet(sheet_names: List[str]) -> Optional[str]:
     return None
 
 
+PROJECT_DETAILS_COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "project_code": ("Project Code", "project_code", "code"),
+    "project_name": ("Project Name", "project_name", "name"),
+    "client_name": ("Client Name", "client", "client_name"),
+    "noa_start": ("NOA Start Date", "noa start", "start date"),
+    "loa_end": ("LOA End Date", "loa end", "end date"),
+    "project_mgr": ("Project Manager", "project manger", "pm"),
+    "regional_mgr": ("Regional Manager", "regional_manager"),
+    "planning_eng": ("Planning Engineer", "planning_engineer"),
+    "pch": ("PCH",),
+    "section_inch": ("Section Incharge", "section_incharge"),
+    "supervisor": ("Supervisor", "supervisor"),
+}
+
+PROJECT_DETAILS_HEADER_KEYS = {
+    canonical_header_key(alias)
+    for opts in PROJECT_DETAILS_COLUMN_ALIASES.values()
+    for alias in opts
+}
+
+
+def find_project_details_header(
+    df_raw: pd.DataFrame,
+    *,
+    search_rows: int = 10,
+    search_cols: int = 10,
+    min_matches: int = 3,
+) -> Tuple[Optional[int], int]:
+    """
+    Search the top-left grid (rows/columns limited) for a row that looks like the header.
+    Returns (row_index, left_trim_columns). If no candidate found, row_index is None.
+    """
+    if df_raw is None or df_raw.empty:
+        return None, 0
+
+    max_rows = min(search_rows, df_raw.shape[0])
+    max_cols = min(search_cols, df_raw.shape[1])
+
+    best_row = None
+    best_score = -1
+    best_first_idx = 0
+
+    for r in range(max_rows):
+        row_slice = list(df_raw.iloc[r, :max_cols].values)
+        row_keys = [canonical_header_key(val) for val in row_slice]
+
+        hits = [idx for idx, key in enumerate(row_keys) if key and key in PROJECT_DETAILS_HEADER_KEYS]
+        score = len(hits)
+        if score == 0:
+            continue
+
+        first_idx = hits[0]
+        if score > best_score or (score == best_score and first_idx < best_first_idx):
+            best_row = r
+            best_score = score
+            best_first_idx = first_idx
+
+    if best_row is None or best_score < min_matches:
+        return None, 0
+    return best_row, best_first_idx
+
+
 def to_number_mt(x):
     """Parse weight values like '5.5 MT', '7 t', '3,200' â†’ float (MT)."""
     if pd.isna(x):
@@ -220,6 +282,17 @@ def load_project_details_from_source(dfp: pd.DataFrame, source_file: Path) -> pd
     if dfp is None or dfp.empty:
         return pd.DataFrame()
 
+    header_row, trim_left = find_project_details_header(dfp, search_rows=10, search_cols=10)
+    if header_row is None:
+        return pd.DataFrame()
+
+    trim_left = max(0, trim_left or 0)
+    header_values = list(dfp.iloc[header_row, trim_left:])
+    dfp = dfp.iloc[header_row + 1 :, trim_left:].copy()
+    if dfp.empty or not header_values:
+        return pd.DataFrame()
+    dfp.columns = header_values
+
     # tolerant column picks (allow minor header variations)
     def pick(df, *opts):
         cols = {str(c).strip().lower(): c for c in df.columns}
@@ -233,18 +306,21 @@ def load_project_details_from_source(dfp: pd.DataFrame, source_file: Path) -> pd
                 return c
         raise KeyError(f"Missing one of {opts} in {list(df.columns)}")
 
+    def pick_field(df, field_key: str):
+        return pick(df, *PROJECT_DETAILS_COLUMN_ALIASES[field_key])
+
     try:
-        c_code = pick(dfp, "Project Code", "project_code", "code")
-        c_name = pick(dfp, "Project Name", "project_name", "name")
-        c_client = pick(dfp, "Client Name", "client", "client_name")
-        c_noa = pick(dfp, "NOA Start Date", "noa start", "start date")
-        c_loa = pick(dfp, "LOA End Date", "loa end", "end date")
-        c_pm = pick(dfp, "Project Manager", "project manger", "pm")
-        c_rm = pick(dfp, "Regional Manager", "regional_manager")
-        c_pe = pick(dfp, "Planning Engineer", "planning_engineer")
-        c_pch = pick(dfp, "PCH")
-        c_si = pick(dfp, "Section Incharge", "section_incharge")
-        c_sup = pick(dfp, "Supervisor", "supervisor")
+        c_code = pick_field(dfp, "project_code")
+        c_name = pick_field(dfp, "project_name")
+        c_client = pick_field(dfp, "client_name")
+        c_noa = pick_field(dfp, "noa_start")
+        c_loa = pick_field(dfp, "loa_end")
+        c_pm = pick_field(dfp, "project_mgr")
+        c_rm = pick_field(dfp, "regional_mgr")
+        c_pe = pick_field(dfp, "planning_eng")
+        c_pch = pick_field(dfp, "pch")
+        c_si = pick_field(dfp, "section_inch")
+        c_sup = pick_field(dfp, "supervisor")
     except KeyError:
         # If the sheet is weirdly formatted, skip gracefully
         return pd.DataFrame()
@@ -762,8 +838,8 @@ def main(argv=None):
             raw_pd, _pd_sheet, pd_note = load_sheet_with_csv_fallback(
                 p,
                 find_project_details_sheet,
-                read_excel_kwargs={},
-                read_csv_kwargs={},
+                read_excel_kwargs={"header": None},
+                read_csv_kwargs={"header": None},
             )
             if raw_pd is not None and not raw_pd.empty:
                 dfp = load_project_details_from_source(raw_pd, p)
