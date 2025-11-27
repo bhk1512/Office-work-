@@ -61,6 +61,8 @@ def create_top_bottom_gangs_charts(
     data: pd.DataFrame,
     metric: str = "prod",
     baseline_map: dict[str, float] | None = None,
+    *,
+    is_stringing: bool = False,
 ) -> Tuple[go.Figure, go.Figure]:
     """Build top and bottom five gang bar charts."""
 
@@ -70,18 +72,21 @@ def create_top_bottom_gangs_charts(
         return empty, empty
 
     # pick aggregator and labels
+    volume_unit = "KM" if is_stringing else "MT"
+    rate_unit = "KM/month" if is_stringing else "MT/day"
+
     if metric == "erection":
-        # total MT in scope (sum of daily MT)
+        # total MT/KM in scope (sum of daily MT/KM)
         per_gang = (data.groupby("gang_name", as_index=False)["daily_prod_mt"].sum())
-        ytitle = "MT"
-        textfmt = lambda s: s.round(1)
-        hoverline = "Total: %{y:.2f} MT"
+        ytitle = volume_unit
+        textfmt = lambda s: s.round(2)
+        hoverline = f"Total: %{{y:.2f}} {volume_unit}"
     else:
         # average daily productivity (default)
         per_gang = (data.groupby("gang_name", as_index=False)["daily_prod_mt"].mean())
-        ytitle = "MT/day"
+        ytitle = rate_unit
         textfmt = lambda s: s.round(2)
-        hoverline = "Avg: %{y:.2f} MT/day"
+        hoverline = f"Avg: %{{y:.2f}} {rate_unit}"
 
     per_gang = per_gang.sort_values("daily_prod_mt", ascending=False)
     # Copy slices so later assignments (hover metadata) don't operate on views.

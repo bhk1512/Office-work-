@@ -1763,6 +1763,19 @@ def _compute_dashboard_outputs(
     if project_scope.empty or "gang_name" not in project_scope.columns:
         raise PreventUpdate
 
+    if "daily_prod_mt" not in project_scope.columns:
+        alt_series = None
+        if is_stringing_mode and "daily_km" in project_scope.columns:
+            alt_series = project_scope["daily_km"]
+        elif "daily_prod_value" in project_scope.columns:
+            alt_series = project_scope["daily_prod_value"]
+        if alt_series is not None:
+            project_scope["daily_prod_mt"] = pd.to_numeric(alt_series, errors="coerce")
+        else:
+            project_scope["daily_prod_mt"] = np.nan
+    else:
+        project_scope["daily_prod_mt"] = pd.to_numeric(project_scope["daily_prod_mt"], errors="coerce")
+
     metric_key = (metric or "prod").strip().lower()
     if metric_key not in {"prod", "erection"}:
         metric_key = "prod"
@@ -1771,7 +1784,12 @@ def _compute_dashboard_outputs(
     if "month" in project_scope.columns:
         project_scope["month"] = pd.to_datetime(project_scope["month"], errors="coerce")
 
-    fig_top, fig_bottom = create_top_bottom_gangs_charts(project_scope, metric=metric_key)
+    fig_top, fig_bottom = create_top_bottom_gangs_charts(
+        project_scope,
+        metric=metric_key,
+        baseline_map=None,
+        is_stringing=is_stringing_mode,
+    )
 
     selected_projects = (scope_meta.get("selected") or {}).get("projects") or []
     monthly_scope = project_scope[["month", "project_name", "daily_prod_mt"]].dropna(subset=["month", "project_name"])
@@ -4590,6 +4608,7 @@ def register_callbacks(
         Output("global-performance-topbot-mode-label", "children"),
         Output("global-performance-tbl-idle-intervals", "columns"),
         Output("global-performance-tbl-daily-prod", "columns"),
+        Output("global-performance-benchmark-table", "columns"),
         Input("store-global-performance-mode", "data"),
     )
     def _sync_global_performance_ui(mode_value):
@@ -4622,7 +4641,24 @@ def register_callbacks(
             },
         ]
         label = "Stringing" if is_stringing else "Erection"
-        return label, idle_columns, daily_columns
+        benchmark_columns = [
+            {"name": "Gang", "id": "name"},
+            {"name": "Project", "id": "project"},
+            {"name": "Last Worked At", "id": "last_worked_at"},
+            {
+                "name": "Spans Completed" if is_stringing else "Erections",
+                "id": "erections",
+            },
+            {
+                "name": "Current KM/month" if is_stringing else "Current MT/day",
+                "id": "current_rate",
+            },
+            {
+                "name": "Baseline KM/month" if is_stringing else "Baseline MT/day",
+                "id": "baseline_rate",
+            },
+        ]
+        return label, idle_columns, daily_columns, benchmark_columns
 
     @app.callback(
         Output("global-performance-benchmark-label", "children"),
@@ -4632,7 +4668,7 @@ def register_callbacks(
         eff_mode = _normalize_mode(mode_value) or "erection"
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
-        unit = "KM/day" if eff_mode == "stringing" else "MT/day"
+        unit = "KM/month" if eff_mode == "stringing" else "MT/day"
         return f"Benchmark ({unit})"
 
     @app.callback(
@@ -4648,7 +4684,8 @@ def register_callbacks(
         eff_mode = _normalize_mode((scope_meta or {}).get("mode"))
         if eff_mode == "stringing" and not config.enable_stringing:
             eff_mode = "erection"
-        unit_label = "KM/day" if eff_mode == "stringing" else "MT/day"
+        is_stringing = eff_mode == "stringing"
+        unit_label = "KM/month" if is_stringing else "MT/day"
         if not isinstance(scope_meta, dict):
             return [], "Select filters to populate the benchmark view."
 
@@ -4667,7 +4704,20 @@ def register_callbacks(
         if project_df.empty or "gang_name" not in project_df.columns:
             return [], "No gang activity found for the selected scope."
 
-        metric_series = pd.to_numeric(project_df.get("daily_prod_mt"), errors="coerce")
+        if "daily_prod_mt" not in project_df.columns:
+            alt_series = None
+            if is_stringing and "daily_km" in project_df.columns:
+                alt_series = project_df["daily_km"]
+            elif "daily_prod_value" in project_df.columns:
+                alt_series = project_df["daily_prod_value"]
+            if alt_series is not None:
+                project_df["daily_prod_mt"] = pd.to_numeric(alt_series, errors="coerce")
+            else:
+                project_df["daily_prod_mt"] = np.nan
+        else:
+            project_df["daily_prod_mt"] = pd.to_numeric(project_df["daily_prod_mt"], errors="coerce")
+
+        metric_series = project_df["daily_prod_mt"]
         project_df = project_df.assign(
             gang_name=project_df["gang_name"].astype(str).str.strip(),
             daily_prod_mt=metric_series,
