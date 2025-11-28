@@ -4,14 +4,40 @@ from __future__ import annotations
 import logging
 import re
 from io import BytesIO
-from typing import Sequence
+from pathlib import Path
+from math import ceil
+from typing import Sequence, TYPE_CHECKING
 
 import pandas as pd
 
 from .config import AppConfig
-from .metrics import calc_idle_and_loss, compute_idle_intervals_per_gang, compute_gang_baseline_maps
+from .metrics import (
+    calc_idle_and_loss,
+    compute_gang_baseline_maps,
+    compute_idle_intervals_per_gang,
+    compute_project_baseline_maps_for,
+)
+from .pch_normalizer import CANONICAL_PCH_PRIMARY, normalize_pch
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from .state import AppDataStore
 
 LOGGER = logging.getLogger(__name__)
+
+AVG_PRODUCTIVITY_COLUMN = "Avg Productivity (MTD)"
+TOTAL_MT_COLUMN = "Total MT (For this month) (MTD)"
+TOTAL_COUNT_COLUMN = "Total No. of Erections (For this month) (MTD)"
+_DEFAULT_SHEET_NAME = "Erection Summary"
+_PCH_SORT_ORDER = {name: idx for idx, name in enumerate(CANONICAL_PCH_PRIMARY)}
+
+# TODO: Align the week bucket helper below with the dashboard's official week mapping
+# once that logic is exposed outside the callbacks module.
+
+
+def _generate_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) -> list[str]:
+    days = max(1, int((month_end - month_start).days) + 1)
+    week_count = max(1, ceil(days / 7))
+    return [f"Week {idx}" for idx in range(1, week_count + 1)]
 
 
 def _sanitize_sheet_name(value: str) -> str:
@@ -259,5 +285,404 @@ def make_trace_workbook_bytes(
 
 
 
+def _project_lookup_series(project_info: pd.DataFrame | None, column: str) -> pd.Series:
+    if project_info is None or project_info.empty:
+        return pd.Series(dtype="object")
+    if "key_name" not in project_info.columns or column not in project_info.columns:
+        return pd.Series(dtype="object")
+    lookup = (
+        project_info[["key_name", column]]
+        .dropna(subset=["key_name"])
+        .drop_duplicates("key_name")
+        .set_index("key_name")[column]
+    )
+    return lookup
+
+
+def _compact_project_key(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
+
+
+def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, dict[str, str]]:
+    if project_info is None or project_info.empty:
+        return {}
+    info = project_info.copy()
+    info["project_code_value"] = (
+        info.get("project_code", info.get("Project Code", ""))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    info["project_display_value"] = (
+        info.get("Project Name", info.get("project_name", info["project_code_value"]))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    pch_col = None
+    for candidate in ("pch", "PCH", "PCH Name", "pch_name"):
+        if candidate in info.columns:
+            pch_col = candidate
+            break
+    if pch_col is None:
+        info["pch_value"] = ""
+    else:
+        info["pch_value"] = info[pch_col]
+
+    lookup: dict[str, dict[str, str]] = {}
+    for _, row in info.iterrows():
+        entry = {
+            "project_code": str(row.get("project_code_value", "")).strip(),
+            "project_display": str(row.get("project_display_value", "")).strip(),
+            "pch": normalize_pch(row.get("pch_value", "")),
+        }
+        keys = {
+            _compact_project_key(row.get("project_code_value")),
+            _compact_project_key(row.get("project_display_value")),
+            _compact_project_key(row.get("key_name", "")),
+        }
+        for key in keys:
+            if key and key not in lookup:
+                lookup[key] = entry
+    return lookup
+
+
+def _assign_week_bucket(dates: pd.Series, month_start: pd.Timestamp, week_labels: Sequence[str]) -> pd.Series:
+    offsets = (dates - month_start).dt.days
+    buckets = ((offsets // 7) + 1).clip(lower=1, upper=len(week_labels))
+    return buckets.fillna(0).astype(int)
+
+
+def _prepare_month_scope(
+    daily_df: pd.DataFrame | None,
+    project_info: pd.DataFrame | None,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    week_labels: Sequence[str],
+) -> pd.DataFrame:
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame()
+
+    working = daily_df.copy()
+    working["date"] = pd.to_datetime(working["date"], errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"])
+    scope = working[(working["date"] >= month_start) & (working["date"] <= month_end)].copy()
+    if scope.empty:
+        return scope
+
+    scope["daily_prod_mt"] = pd.to_numeric(scope.get("daily_prod_mt"), errors="coerce").fillna(0.0)
+
+    scope["project_name"] = scope.get("project_name", "").fillna("").astype(str).str.strip()
+    meta_lookup = _build_project_meta_lookup(project_info)
+    scope["project_code"] = scope.get("project_code", "").fillna("").astype(str).str.strip()
+    scope["project_display"] = scope["project_code"].where(scope["project_code"].astype(bool), scope["project_name"])
+    scope["project_display"] = scope["project_display"].fillna("").astype(str).str.strip()
+    scope["project_display"] = scope["project_display"].where(scope["project_display"].astype(bool), scope["project_name"])
+    scope["project_display"] = scope["project_display"].where(
+        scope["project_display"].astype(bool), "(Unlabeled Project)"
+    )
+    scope["project_name"] = scope["project_name"].where(scope["project_name"].astype(bool), scope["project_display"])
+
+    def _lookup_meta(value: object) -> dict[str, str] | None:
+        if not meta_lookup:
+            return None
+        key = _compact_project_key(value)
+        return meta_lookup.get(key)
+
+    if meta_lookup:
+        meta_from_code = scope["project_code"].map(_lookup_meta)
+        meta_from_name = scope["project_name"].map(_lookup_meta)
+        meta_series = meta_from_code.where(meta_from_code.notna(), meta_from_name)
+
+        scope["project_code"] = scope["project_code"].where(
+            scope["project_code"].astype(bool),
+            meta_series.map(lambda rec: rec.get("project_code", "") if isinstance(rec, dict) else ""),
+        )
+        scope["project_display"] = scope["project_display"].where(
+            scope["project_display"].astype(bool),
+            meta_series.map(lambda rec: rec.get("project_display", "") if isinstance(rec, dict) else ""),
+        )
+        scope["project_display"] = scope["project_display"].fillna("").astype(str).str.strip()
+        scope["project_display"] = scope["project_display"].where(scope["project_display"].astype(bool), scope["project_name"])
+        scope["project_display"] = scope["project_display"].where(
+            scope["project_display"].astype(bool), "(Unlabeled Project)"
+        )
+        scope["pch_display"] = meta_series.map(lambda rec: rec.get("pch", "") if isinstance(rec, dict) else "")
+    else:
+        scope["pch_display"] = ""
+
+    scope["pch_display"] = scope["pch_display"].where(scope["pch_display"].astype(bool), scope.get("pch", ""))
+    scope["pch_display"] = scope["pch_display"].fillna("").astype(str)
+    scope["pch_display"] = scope["pch_display"].map(normalize_pch)
+    scope["pch_display"] = scope["pch_display"].where(scope["pch_display"].astype(bool), "Unassigned")
+
+    scope["location_no"] = scope.get("location_no", "").fillna("").astype(str).str.strip()
+    scope["completion_date"] = pd.to_datetime(scope.get("completion_date"), errors="coerce").dt.normalize()
+    scope["week_index"] = _assign_week_bucket(scope["date"], month_start, week_labels)
+
+    return scope
+
+
+def _prepare_completion_scope(
+    scope: pd.DataFrame,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    week_labels: Sequence[str],
+) -> pd.DataFrame:
+    if scope.empty:
+        return pd.DataFrame()
+    completion_mask = (
+        scope["completion_date"].notna()
+        & scope["date"].eq(scope["completion_date"])
+        & (scope["completion_date"] >= month_start)
+        & (scope["completion_date"] <= month_end)
+    )
+    completed = scope[completion_mask].copy()
+    if completed.empty:
+        return completed
+    dedup_cols = [col for col in ("project_name_key", "location_no", "completion_date") if col in completed.columns]
+    if dedup_cols:
+        completed = completed.drop_duplicates(subset=dedup_cols)
+    completed["completion_week_index"] = _assign_week_bucket(completed["completion_date"], month_start, week_labels)
+    return completed
+
+
+def _safe_average(values: list[object]) -> float:
+    filtered = [float(v) for v in values if v is not None and not pd.isna(v)]
+    return round(sum(filtered) / len(filtered), 2) if filtered else 0.0
+
+
+def _compute_weekly_productivity_maps(scope: pd.DataFrame, week_labels: Sequence[str]) -> dict[str, dict[str, float]]:
+    maps = {label: {} for label in week_labels}
+    if scope.empty:
+        return maps
+    for week_idx, label in enumerate(week_labels, start=1):
+        week_scope = scope[scope.get("week_index") == week_idx]
+        if week_scope.empty:
+            continue
+        project_map, _ = compute_project_baseline_maps_for(week_scope, "daily_prod_mt")
+        if project_map:
+            maps[label] = project_map
+    return maps
+
+
+def _build_productivity_tables(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    week_labels: Sequence[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    pch_columns = ["PCH", *week_labels, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN]
+    project_columns = ["PCH", "Project", *week_labels, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN]
+
+    if scope.empty:
+        empty_pch = pd.DataFrame(columns=pch_columns)
+        empty_project = pd.DataFrame(columns=project_columns)
+        return empty_pch, empty_project
+
+    project_meta = (
+        scope[["pch_display", "project_name", "project_display"]]
+        .dropna(subset=["project_name"])
+        .drop_duplicates(subset=["pch_display", "project_name"])
+        .reset_index(drop=True)
+    )
+    week_maps = _compute_weekly_productivity_maps(scope, week_labels)
+
+    project_avg_map = (
+        scope.groupby("project_name")["daily_prod_mt"].mean().to_dict()
+        if not scope.empty
+        else {}
+    )
+    pch_avg_map = (
+        scope.groupby("pch_display")["daily_prod_mt"].mean().to_dict()
+        if not scope.empty
+        else {}
+    )
+
+    mt_totals_by_project = (
+        scope.groupby(["pch_display", "project_name"])["daily_prod_mt"].sum(min_count=1).to_dict()
+        if not scope.empty
+        else {}
+    )
+    mt_totals_by_pch = (
+        scope.groupby("pch_display")["daily_prod_mt"].sum(min_count=1).to_dict()
+        if not scope.empty
+        else {}
+    )
+
+    counts_by_project: dict[tuple[str, str], int] = {}
+    counts_by_pch: dict[str, int] = {}
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        counts_by_project = completions.groupby(["pch_display", "project_name"]).size().to_dict()
+        counts_by_pch = completions.groupby("pch_display").size().to_dict()
+
+    pch_rows: list[dict[str, object]] = []
+    if not project_meta.empty:
+        for pch_name in sorted(project_meta["pch_display"].unique(), key=lambda name: _pch_sort_components(name)):
+            projects_in_pch = project_meta[project_meta["pch_display"] == pch_name]["project_name"].tolist()
+            row = {"PCH": pch_name}
+            for label in week_labels:
+                project_values = [week_maps.get(label, {}).get(name) for name in projects_in_pch]
+                row[label] = _safe_average(project_values)
+            avg_value = pch_avg_map.get(pch_name)
+            row[AVG_PRODUCTIVITY_COLUMN] = round(float(avg_value), 2) if avg_value is not None and not pd.isna(avg_value) else 0.0
+            row[TOTAL_MT_COLUMN] = round(float(mt_totals_by_pch.get(pch_name, 0.0)), 2)
+            row[TOTAL_COUNT_COLUMN] = int(counts_by_pch.get(pch_name, 0))
+            pch_rows.append(row)
+
+    if pch_rows:
+        pch_summary = pd.DataFrame(pch_rows).reindex(columns=pch_columns).fillna(0.0)
+        pch_summary = _sort_pch_frame(pch_summary, column="PCH")
+    else:
+        pch_summary = pd.DataFrame(columns=pch_columns)
+
+    project_rows: list[dict[str, object]] = []
+    for _, meta_row in project_meta.sort_values(["pch_display", "project_display"], key=lambda col: col.astype(str)).iterrows():
+        pch_value = meta_row["pch_display"]
+        project_name = meta_row["project_name"]
+        display_name = meta_row["project_display"]
+        row = {"PCH": pch_value, "Project": display_name}
+        for label in week_labels:
+            value = week_maps.get(label, {}).get(project_name)
+            row[label] = round(float(value), 2) if value is not None and not pd.isna(value) else 0.0
+        avg_value = project_avg_map.get(project_name)
+        row[AVG_PRODUCTIVITY_COLUMN] = round(float(avg_value), 2) if avg_value is not None and not pd.isna(avg_value) else 0.0
+        row[TOTAL_MT_COLUMN] = round(float(mt_totals_by_project.get((pch_value, project_name), 0.0)), 2)
+        row[TOTAL_COUNT_COLUMN] = int(counts_by_project.get((pch_value, project_name), 0))
+        project_rows.append(row)
+
+    if project_rows:
+        project_summary = pd.DataFrame(project_rows).reindex(columns=project_columns).fillna(0.0)
+        order_components = project_summary["PCH"].map(_pch_sort_components)
+        project_summary = project_summary.assign(
+            _pch_order_bucket=order_components.map(lambda pair: pair[0]),
+            _pch_order_value=order_components.map(lambda pair: pair[1]),
+            _project_order=project_summary["Project"].astype(str).str.lower(),
+        )
+        project_summary = (
+            project_summary.sort_values(by=["_pch_order_bucket", "_pch_order_value", "_project_order"])
+            .drop(columns=["_pch_order_bucket", "_pch_order_value", "_project_order"])
+            .reset_index(drop=True)
+        )
+    else:
+        project_summary = pd.DataFrame(columns=project_columns)
+
+    return pch_summary, project_summary
+
+
+def _pch_sort_components(value: object) -> tuple[int, str]:
+    label = str(value or "").strip()
+    if label in _PCH_SORT_ORDER:
+        return (0, f"{_PCH_SORT_ORDER[label]:03d}")
+    lowered = label.lower()
+    if not lowered or lowered == "unassigned":
+        return (2, lowered)
+    return (1, lowered)
+
+
+def _sort_pch_frame(df: pd.DataFrame, column: str = "PCH") -> pd.DataFrame:
+    if df.empty or column not in df.columns:
+        return df
+    order_components = df[column].map(_pch_sort_components)
+    df = df.assign(
+        _pch_order_bucket=order_components.map(lambda pair: pair[0]),
+        _pch_order_value=order_components.map(lambda pair: pair[1]),
+    )
+    df = df.sort_values(by=["_pch_order_bucket", "_pch_order_value"]).drop(columns=["_pch_order_bucket", "_pch_order_value"])
+    return df.reset_index(drop=True)
+
+
+def _suppress_repeated_pch(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "PCH" not in df.columns:
+        return df
+    rows: list[pd.Series] = []
+    current = None
+    for _, row in df.iterrows():
+        row_copy = row.copy()
+        if current == row_copy["PCH"]:
+            row_copy["PCH"] = ""
+        else:
+            current = row_copy["PCH"]
+        rows.append(row_copy)
+    return pd.DataFrame(rows, columns=df.columns)
+
+
+def export_erection_productivity_summary(
+    output_path: str | Path,
+    *,
+    data_store: AppDataStore | None = None,
+    daily_df: pd.DataFrame | None = None,
+    project_info: pd.DataFrame | None = None,
+    as_of_date: pd.Timestamp | str | None = None,
+    sheet_name: str = _DEFAULT_SHEET_NAME,
+    blank_rows_between_tables: int = 3,
+) -> Path:
+    """
+    Uses existing dashboard data to build and save the PCH and project-wise erection
+    productivity summary Excel. Returns the path to the saved file.
+    """
+
+    source_daily = daily_df
+    source_project_info = project_info
+    candidate_date = pd.Timestamp(as_of_date) if as_of_date is not None else None
+
+    if data_store is not None:
+        if source_daily is None:
+            source_daily = data_store.get_daily()
+        if source_project_info is None:
+            source_project_info = data_store.get_project_info()
+        if candidate_date is None or pd.isna(candidate_date):
+            candidate_date = data_store.metadata.last_data_date
+
+    if source_daily is None or source_daily.empty:
+        raise ValueError("No erection daily dataframe is available to export.")
+
+    if candidate_date is None or pd.isna(candidate_date):
+        date_series = pd.to_datetime(source_daily.get("date"), errors="coerce").dropna()
+        if date_series.empty:
+            raise ValueError("Unable to determine the current month for the erection summary export.")
+        candidate_date = date_series.max()
+    active_date = pd.Timestamp(candidate_date).normalize()
+    month_start = active_date.to_period("M").to_timestamp()
+    month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+
+    week_labels = _generate_week_labels(month_start, month_end)
+    offset_days = max(0, (active_date - month_start).days)
+    week_count = len(week_labels) or 1
+    current_week_idx = min(week_count, max(1, (offset_days // 7) + 1))
+    current_week_label = week_labels[current_week_idx - 1]
+
+    project_info_frame = source_project_info.copy() if isinstance(source_project_info, pd.DataFrame) else pd.DataFrame()
+
+    scope = _prepare_month_scope(source_daily, project_info_frame, month_start, month_end, week_labels)
+    completions = _prepare_completion_scope(scope, month_start, month_end, week_labels)
+
+    pch_summary, project_summary = _build_productivity_tables(
+        scope,
+        completions,
+        week_labels=week_labels,
+    )
+
+    sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_SHEET_NAME) or _DEFAULT_SHEET_NAME
+    target_path = Path(output_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    LOGGER.info(
+        "Exporting erection productivity summary for %s (current week: %s) to %s",
+        active_date.strftime("%Y-%m"),
+        current_week_label,
+        target_path,
+    )
+
+    gap_rows = max(2, int(blank_rows_between_tables))
+    first_table_height = len(pch_summary) + 1  # header + rows
+    second_table_start = first_table_height + gap_rows
+
+    with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
+        pch_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=0)
+        project_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=second_table_start)
+
+    return target_path
 
 
