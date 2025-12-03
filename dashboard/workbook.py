@@ -500,14 +500,20 @@ def _build_productivity_tables(
         else {}
     )
 
+    tower_weights = pd.to_numeric(completions.get("tower_weight"), errors="coerce") if isinstance(completions, pd.DataFrame) else pd.Series(dtype=float)
+    if isinstance(completions, pd.DataFrame):
+        completions = completions.assign(_tower_weight=tower_weights.fillna(0.0))
+    else:
+        completions = pd.DataFrame(columns=["pch_display", "project_name", "_tower_weight"])
+
     mt_totals_by_project = (
-        scope.groupby(["pch_display", "project_name"])["daily_prod_mt"].sum(min_count=1).to_dict()
-        if not scope.empty
+        completions.groupby(["pch_display", "project_name"])["_tower_weight"].sum().to_dict()
+        if not completions.empty
         else {}
     )
     mt_totals_by_pch = (
-        scope.groupby("pch_display")["daily_prod_mt"].sum(min_count=1).to_dict()
-        if not scope.empty
+        completions.groupby("pch_display")["_tower_weight"].sum().to_dict()
+        if not completions.empty
         else {}
     )
 

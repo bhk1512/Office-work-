@@ -117,8 +117,8 @@ def should_process(mail) -> bool:
 
 # --- Project code extraction ---
 PROJECT_CODE_REGEXES = [
-    r"\b(T[A-Z])\s*[-_ ]?\s*(\d{3,4})\b",   # TA 415, TB-416, TA415, TC 1023
-    r"\b(T[A-Z])[_-]?0?(\d{3})\b",          # TA_0415 -> TA 415 (leading 0 tolerant for 3-4 digits)
+    r"\b(T[A-Z])\s*[-_. ]?\s*(\d{3,4})\b",   # TA 415, TB-416, TA415, TA.415, TC 1023
+    r"\b(T[A-Z])[-_. ]?0?(\d{3})\b",          # TA_0415 / TA.0415 -> TA 415 (leading 0 tolerant for 3-4 digits)
 ]
 
 def extract_project_code(text: str) -> str | None:
