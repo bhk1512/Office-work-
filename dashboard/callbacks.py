@@ -1356,6 +1356,101 @@ def _build_scope_meta_payload(
     }
 
 
+def _normalize_min_erections(value: Any) -> int | None:
+    """
+    Convert the UI value for the minimum erections filter into a non-negative integer.
+    Returns None when the filter should be ignored.
+    """
+
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        candidate = int(value)
+    elif isinstance(value, str):
+        candidate_str = value.strip()
+        if not candidate_str:
+            return None
+        try:
+            candidate = int(float(candidate_str))
+        except Exception:
+            return None
+    else:
+        return None
+    if candidate < 0:
+        return None
+    return candidate
+
+
+def _min_erections_from_meta(meta: Mapping[str, Any] | None) -> int | None:
+    """Extract the normalized minimum erections filter value from the scope metadata."""
+
+    if not isinstance(meta, Mapping):
+        return None
+    if "min_erections" in meta:
+        return _normalize_min_erections(meta.get("min_erections"))
+    selected = meta.get("selected")
+    if isinstance(selected, Mapping) and "min_erections" in selected:
+        return _normalize_min_erections(selected.get("min_erections"))
+    return None
+
+
+def _filter_frame_for_min_erections(frame: pd.DataFrame, min_erections: Any) -> pd.DataFrame:
+    """
+    Limit the provided frame to gangs whose completed erections exceed the threshold.
+
+    The helper gracefully returns the original frame when the filter is inactive or the
+    frame lacks gang level information.
+    """
+
+    threshold = _normalize_min_erections(min_erections)
+    if threshold is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    if "gang_name" not in frame.columns:
+        return frame
+    work = frame.copy()
+    if "location_no" in work.columns:
+        counts = (
+            work.groupby("gang_name")["location_no"]
+            .nunique(dropna=True)
+            .rename("erections")
+        )
+    else:
+        counts = work.groupby("gang_name").size()
+    keep_gangs = counts[counts > threshold].index
+    if len(keep_gangs) == 0:
+        return work.iloc[0:0].copy()
+    return work[work["gang_name"].isin(keep_gangs)].copy()
+
+
+def _scope_meta_with_min_erections(
+    scope_meta: dict[str, Any] | None,
+    min_erections: Any,
+) -> dict[str, Any]:
+    """
+    Return a shallow copy of *scope_meta* whose scope frames honor the min erections filter.
+    """
+
+    threshold = _normalize_min_erections(min_erections)
+    if threshold is None or not isinstance(scope_meta, dict):
+        return scope_meta
+    scopes = scope_meta.get("scopes")
+    if not isinstance(scopes, Mapping):
+        return scope_meta
+    filtered_scope_keys: dict[str, str] = {}
+    filtered_rows = dict(scope_meta.get("rows", {}))
+    for name in scopes:
+        frame = _scope_frame_from_store(scope_meta, name).copy()
+        filtered_frame = _filter_frame_for_min_erections(frame, threshold)
+        filtered_scope_keys[name] = _remember_scope_frame(filtered_frame)
+        filtered_rows[name] = int(len(filtered_frame.index))
+    meta_copy = dict(scope_meta)
+    meta_copy["scopes"] = filtered_scope_keys
+    meta_copy["rows"] = filtered_rows
+    meta_copy["min_erections"] = threshold
+    selected = dict(meta_copy.get("selected") or {})
+    selected["min_erections"] = threshold
+    meta_copy["selected"] = selected
+    return meta_copy
+
+
 def _repopulate_scopes_from_meta(meta: dict[str, Any]) -> dict[str, pd.DataFrame]:
     selected = meta.get("selected") or {}
     normalized_scope = _normalize_deployment_filter(selected.get("stringing_scope"))
@@ -1711,6 +1806,7 @@ def _compute_dashboard_outputs(
     avp_namespace: str = "avp-row",
     summarizer: Callable[[dict[str, Any] | None], dict[str, str] | None] | None = None,
     summary_factory: Callable[[bool], dict[str, str]] | None = None,
+    min_erections: int | None = None,
 ) -> tuple[Any, ...]:
     """
     Compute the tuple consumed by the project modal performance block.
@@ -1719,6 +1815,9 @@ def _compute_dashboard_outputs(
 
     if not isinstance(scope_meta, dict):
         raise PreventUpdate
+    min_erections_value = _normalize_min_erections(min_erections)
+    if min_erections_value is not None:
+        scope_meta = _scope_meta_with_min_erections(scope_meta, min_erections_value)
 
     def _fallback_summary_payload(is_stringing: bool) -> dict[str, str]:
         payload = {
@@ -4537,12 +4636,14 @@ def register_callbacks(
         Output("store-global-performance-scope", "data"),
         Input("global-performance-projects", "value"),
         Input("global-performance-months", "value"),
+        Input("global-performance-min-erections", "value"),
         Input("store-global-performance-mode", "data"),
         Input("store-stringing-scope", "data"),
     )
     def _sync_global_performance_scope_store(
         projects: Sequence[str] | None,
         months: Sequence[str] | None,
+        min_erections_value: Any,
         mode_value: Any,
         stringing_scope: str | None,
     ) -> dict[str, Any]:
@@ -4558,7 +4659,7 @@ def register_callbacks(
             else _default_stringing_method_values()
         )
         try:
-            return _build_scope_meta_payload(
+            payload = _build_scope_meta_payload(
                 eff_mode=eff_mode,
                 project_list=project_list,
                 gang_list=[],
@@ -4568,6 +4669,10 @@ def register_callbacks(
                 method_list=_normalize_str_list(method_values, lower=True),
                 deployment_filter=deployment_filter,
             )
+            payload["min_erections"] = _normalize_min_erections(min_erections_value)
+            if isinstance(payload.get("selected"), dict):
+                payload["selected"]["min_erections"] = payload["min_erections"]
+            return payload
         except Exception as exc:
             LOGGER.exception("Failed to build global performance scope: %s", exc)
             return dash.no_update
@@ -4672,6 +4777,16 @@ def register_callbacks(
         return f"Benchmark ({unit})"
 
     @app.callback(
+        Output("global-performance-erections-threshold-label", "children"),
+        Input("store-global-performance-mode", "data"),
+    )
+    def _sync_global_performance_min_erections_label(mode_value):
+        eff_mode = _normalize_mode(mode_value) or "erection"
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        return "Min Spans Completed" if eff_mode == "stringing" else "Min Erections"
+
+    @app.callback(
         Output("global-performance-benchmark-table", "data"),
         Output("global-performance-benchmark-status", "children"),
         Input("store-global-performance-scope", "data"),
@@ -4686,6 +4801,7 @@ def register_callbacks(
             eff_mode = "erection"
         is_stringing = eff_mode == "stringing"
         unit_label = "KM/month" if is_stringing else "MT/day"
+        min_erections = _min_erections_from_meta(scope_meta)
         if not isinstance(scope_meta, dict):
             return [], "Select filters to populate the benchmark view."
 
@@ -4702,6 +4818,12 @@ def register_callbacks(
 
         project_df = _scope_frame_from_store(scope_meta, "project").copy()
         if project_df.empty or "gang_name" not in project_df.columns:
+            return [], "No gang activity found for the selected scope."
+        project_df = _filter_frame_for_min_erections(project_df, min_erections)
+        if project_df.empty:
+            if min_erections is not None:
+                noun = "spans" if is_stringing else "erections"
+                return [], f"No gangs have more than {min_erections} completed {noun} for this selection."
             return [], "No gang activity found for the selected scope."
 
         if "daily_prod_mt" not in project_df.columns:
@@ -4832,6 +4954,11 @@ def register_callbacks(
                 empty_fig,
                 empty_fig,
             )
+        min_erections_filter = _min_erections_from_meta(scope_meta)
+        eff_mode = _normalize_mode(scope_meta.get("mode"))
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        is_stringing_mode = eff_mode == "stringing"
         try:
             (
                 *_kpi,
@@ -4846,10 +4973,16 @@ def register_callbacks(
                 avp_namespace="global-performance-avp",
                 summarizer=_summarize_scope_for_cards,
                 summary_factory=_empty_summary_payload,
+                min_erections=min_erections_filter,
             )
         except PreventUpdate:
+            if min_erections_filter is not None:
+                noun = "spans" if is_stringing_mode else "erections"
+                message = f"No gangs have more than {min_erections_filter} completed {noun} for this selection."
+            else:
+                message = "No data available for the selected scope."
             return (
-                html.Div("No data available for the selected scope.", className="text-muted"),
+                html.Div(message, className="text-muted"),
                 empty_fig,
                 empty_fig,
                 empty_fig,
@@ -6790,7 +6923,9 @@ def register_callbacks(
     ):
         if not export_clicks or not isinstance(scope_meta, dict):
             raise PreventUpdate
+        min_erections_filter = _min_erections_from_meta(scope_meta)
         scoped = _scope_frame_from_store(scope_meta, "project_gang").copy()
+        scoped = _filter_frame_for_min_erections(scoped, min_erections_filter)
         if scoped.empty:
             raise PreventUpdate
         selected = scope_meta.get("selected") or {}
@@ -6833,6 +6968,12 @@ def register_callbacks(
     ):
         if not isinstance(scope_meta, dict):
             raise PreventUpdate
+        min_erections_filter = _min_erections_from_meta(scope_meta)
+        scope_for_tables = (
+            scope_meta
+            if min_erections_filter is None
+            else _scope_meta_with_min_erections(scope_meta, min_erections_filter)
+        )
         ctx = dash.callback_context
         triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
         meta_source = meta.get("source") if isinstance(meta, dict) else None
@@ -6844,7 +6985,7 @@ def register_callbacks(
             gang_focus = dropdown_value or (meta_gang if meta_is_chart else selected_store_gang)
         if not gang_focus:
             raise PreventUpdate
-        idle_df, daily_df = _prepare_trace_dataframes(scope_meta, gang_focus)
+        idle_df, daily_df = _prepare_trace_dataframes(scope_for_tables, gang_focus)
         return idle_df.to_dict("records"), daily_df.to_dict("records")
 
     @app.callback(
@@ -6904,7 +7045,9 @@ def register_callbacks(
     ) -> tuple[list[dict[str, str]], str | None]:
         if not isinstance(scope_meta, dict) or "scopes" not in scope_meta:
             return [], None
+        min_erections_filter = _min_erections_from_meta(scope_meta)
         base = _scope_frame_from_store(scope_meta, "project")
+        base = _filter_frame_for_min_erections(base, min_erections_filter)
         if base.empty or "gang_name" not in base.columns:
             return [], None
         gangs = (

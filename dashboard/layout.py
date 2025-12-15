@@ -1059,7 +1059,7 @@ def build_global_performance_modal() -> dbc.Modal:
                                         ],
                                         className="filter-field",
                                     ),
-                                    md=4,
+                                    md=3,
                                 ),
                                 dbc.Col(
                                     html.Div(
@@ -1076,7 +1076,7 @@ def build_global_performance_modal() -> dbc.Modal:
                                         ],
                                         className="filter-field",
                                     ),
-                                    md=4,
+                                    md=3,
                                 ),
                                 dbc.Col(
                                     html.Div(
@@ -1102,7 +1102,33 @@ def build_global_performance_modal() -> dbc.Modal:
                                         ],
                                         className="filter-field",
                                     ),
-                                    md=4,
+                                    md=3,
+                                ),
+                                dbc.Col(
+                                    html.Div(
+                                        [
+                                            html.Label(
+                                                "Min Erections",
+                                                className="fw-semibold mb-1",
+                                                id="global-performance-erections-threshold-label",
+                                            ),
+                                            dcc.Input(
+                                                id="global-performance-min-erections",
+                                                type="number",
+                                                placeholder="Enter minimum",
+                                                min=0,
+                                                step=1,
+                                                debounce=True,
+                                                className="filter-input",
+                                            ),
+                                            html.Div(
+                                                "Only gangs with more than this number of erections are considered.",
+                                                className="form-text text-muted small mt-1",
+                                            ),
+                                        ],
+                                        className="filter-field",
+                                    ),
+                                    md=3,
                                 ),
                             ],
                             className="g-3",
