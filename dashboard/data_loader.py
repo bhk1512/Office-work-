@@ -1735,14 +1735,6 @@ def load_daily_from_proddailyexpanded(
             return ""
         return text
 
-    def _normalize_location(value: object) -> str:
-        text = _normalize_text(value)
-        if not text:
-            return ""
-        if text.endswith(".0") and text.replace(".", "", 1).isdigit():
-            text = text.split(".", 1)[0]
-        return text
-
     data: dict[str, Any] = {
         "date": _coerce_mixed_excel_dates(df[col_date]).dt.normalize(),
         "daily_prod_mt": pd.to_numeric(df[col_prod], errors="coerce"),
@@ -1757,6 +1749,10 @@ def load_daily_from_proddailyexpanded(
     col_tower = _pick_optional(df, ("Tower Weight", "tower weight", "tower_weight", "tower wt", "tower mt"))
     if col_tower:
         data["tower_weight"] = pd.to_numeric(df[col_tower], errors="coerce")
+
+    col_tower_type = _pick_optional(df, ("Tower Type", "Type of Tower", "tower type", "type of tower", "type"))
+    if col_tower_type:
+        data["tower_type"] = df[col_tower_type].map(_normalize_tower_type)
 
     col_start = _pick_optional(df, ("Start Date", "starting date"))
     if col_start:
@@ -1798,17 +1794,28 @@ def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "R
             "gang_name": df[gang_col].astype(str).str.strip(),
         }
     ).dropna(subset=["start", "end", "daily_prod_mt"])
+
+    tower_type_col = None
+    for candidate in ("Tower Type", "Type of Tower", "tower type", "type of tower", "type"):
+        if candidate in df.columns:
+            tower_type_col = candidate
+            break
+    if tower_type_col:
+        base["tower_type"] = df[tower_type_col].map(_normalize_tower_type)
+    else:
+        base["tower_type"] = ""
     rows: list[dict[str, object]] = []
     for _, record in base.iterrows():
         for date in pd.date_range(record["start"], record["end"], freq="D"):
-            rows.append(
-                {
-                    "date": date.normalize(),
-                    "daily_prod_mt": record["daily_prod_mt"],
-                    "project_name": record["project_name"],
-                    "gang_name": record["gang_name"],
-                }
-            )
+                rows.append(
+                    {
+                        "date": date.normalize(),
+                        "daily_prod_mt": record["daily_prod_mt"],
+                        "project_name": record["project_name"],
+                        "gang_name": record["gang_name"],
+                        "tower_type": record.get("tower_type", ""),
+                    }
+                )
     LOGGER.debug("Expanded raw data into %d daily rows", len(rows))
     return pd.DataFrame(rows)
 
@@ -2021,3 +2028,34 @@ def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFr
 
 
 load_project_details.cache_clear = _load_project_details_cached.cache_clear  # type: ignore[attr-defined]
+
+
+def _normalize_location(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\u00a0", " ").strip()
+    lowered = text.lower()
+    if lowered in {"", "nan", "none", "null"}:
+        return ""
+    if text.endswith(".0") and text.replace(".", "", 1).isdigit():
+        text = text.split(".", 1)[0]
+    return text
+
+
+def _normalize_tower_type(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().upper().replace("\u00a0", " ")
+    if not text or text in {"NAN", "NA", "NONE"}:
+        return ""
+    compact = re.sub(r"\s+", "", text)
+    base_match = re.search(r"(DA|DB|DC|DD)", compact)
+    if base_match:
+        compact = compact[base_match.start():]
+    match = re.match(r"^(DA|DB|DC|DD)(?:\+?(\d+))?$", compact)
+    if match:
+        base = match.group(1)
+        ext = match.group(2)
+        ext_value = str(int(ext)) if ext is not None else "0"
+        return f"{base}+{ext_value}"
+    return compact

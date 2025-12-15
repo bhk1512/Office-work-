@@ -28,6 +28,7 @@ AVG_PRODUCTIVITY_COLUMN = "Avg Productivity (MTD)"
 TOTAL_MT_COLUMN = "Total MT (For this month) (MTD)"
 TOTAL_COUNT_COLUMN = "Total No. of Erections (For this month) (MTD)"
 _DEFAULT_SHEET_NAME = "Erection Summary"
+_DEFAULT_KV_SHEET_NAME = "KV Productivity"
 _PCH_SORT_ORDER = {name: idx for idx, name in enumerate(CANONICAL_PCH_PRIMARY)}
 
 # TODO: Align the week bucket helper below with the dashboard's official week mapping
@@ -36,7 +37,7 @@ _PCH_SORT_ORDER = {name: idx for idx, name in enumerate(CANONICAL_PCH_PRIMARY)}
 
 def _generate_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) -> list[str]:
     days = max(1, int((month_end - month_start).days) + 1)
-    week_count = max(1, ceil(days / 7))
+    week_count = min(4, max(1, ceil(days / 7)))  # cap at 4 to avoid super-short trailing week
     return [f"Week {idx}" for idx in range(1, week_count + 1)]
 
 
@@ -303,6 +304,73 @@ def _compact_project_key(value: object) -> str:
     if value is None:
         return ""
     return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
+
+
+def _prepare_project_voltage_lookup(project_kv: pd.DataFrame | None) -> dict[str, str]:
+    if project_kv is None or project_kv.empty:
+        return {}
+
+    working = project_kv.copy()
+
+    def _pick_col(options: Sequence[str]) -> str:
+        lowered = {str(col).strip().lower(): col for col in working.columns}
+        for option in options:
+            normalized = option.strip().lower()
+            if normalized in lowered:
+                return lowered[normalized]
+        for option in options:
+            normalized = option.strip().lower()
+            for candidate, original in lowered.items():
+                if normalized and normalized in candidate:
+                    return original
+        raise KeyError
+
+    try:
+        project_col = _pick_col(["project", "project_code", "project name"])
+        voltage_col = _pick_col(["voltage", "kv", "kv level"])
+    except KeyError:
+        LOGGER.warning("Projects_KV workbook missing required columns; voltage lookup disabled.")
+        return {}
+
+    lookup: dict[str, str] = {}
+    for _, row in working.iterrows():
+        project_value = row.get(project_col)
+        voltage_value = row.get(voltage_col)
+        key = _compact_project_key(project_value)
+        if not key:
+            continue
+        if voltage_value is None or (isinstance(voltage_value, float) and pd.isna(voltage_value)):
+            continue
+        voltage_text = str(voltage_value).strip()
+        if not voltage_text:
+            continue
+        lookup[key] = voltage_text
+    return lookup
+
+
+def _annotate_scope_with_voltage(scope: pd.DataFrame, voltage_lookup: dict[str, str]) -> pd.DataFrame:
+    if scope is None or scope.empty:
+        return pd.DataFrame()
+
+    working = scope.copy()
+    tower_series = working.get("tower_type")
+    if tower_series is None:
+        working["tower_type"] = "Unknown"
+    else:
+        normalized = tower_series.fillna(" ").astype(str).str.strip().str.upper()
+        working["tower_type"] = normalized.where(normalized.astype(bool), "Unknown")
+    family = working["tower_type"].str.extract(r"^(DA|DB|DC|DD)", expand=False)
+    working["tower_family"] = family.fillna("Unknown")
+
+    code_series = working.get("project_code")
+    code_keys = code_series.fillna("" ).map(_compact_project_key) if code_series is not None else pd.Series("", index=working.index)
+    name_series = working.get("project_name")
+    fallback_keys = name_series.fillna("" ).map(_compact_project_key) if name_series is not None else pd.Series("", index=working.index)
+    key_series = code_keys.where(code_keys.astype(bool), fallback_keys)
+    working["voltage_label"] = key_series.map(voltage_lookup)
+    working["voltage_label"] = working["voltage_label"].fillna("Unmapped")
+
+    return working
 
 
 def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, dict[str, str]]:
@@ -599,6 +667,79 @@ def _sort_pch_frame(df: pd.DataFrame, column: str = "PCH") -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _build_group_productivity_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    week_labels: Sequence[str],
+    *,
+    group_columns: Sequence[str],
+    column_labels: dict[str, str],
+) -> pd.DataFrame:
+    labeled_columns = [column_labels.get(col, col) for col in group_columns]
+    ordered_columns = [*labeled_columns, *week_labels, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN]
+
+    if scope is None or scope.empty:
+        return pd.DataFrame(columns=ordered_columns)
+
+    grouping = list(group_columns)
+    summary = (
+        scope.groupby(grouping, dropna=False)["daily_prod_mt"]
+        .mean()
+        .reset_index()
+        .rename(columns={"daily_prod_mt": AVG_PRODUCTIVITY_COLUMN})
+    )
+
+    for idx, label in enumerate(week_labels, start=1):
+        week_scope = scope[scope.get("week_index") == idx]
+        if week_scope.empty:
+            summary[label] = 0.0
+            continue
+        week_avg = (
+            week_scope.groupby(grouping, dropna=False)["daily_prod_mt"]
+            .mean()
+            .reset_index()
+            .rename(columns={"daily_prod_mt": label})
+        )
+        summary = summary.merge(week_avg, on=grouping, how="left")
+        summary[label] = summary[label].fillna(0.0)
+
+    weights = None
+    counts = None
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        tower_series = pd.to_numeric(completions.get("_tower_weight"), errors="coerce")
+        weights = (
+            completions.assign(_tower_weight=tower_series.fillna(0.0))
+            .groupby(grouping, dropna=False)["_tower_weight"]
+            .sum()
+            .reset_index()
+            .rename(columns={"_tower_weight": TOTAL_MT_COLUMN})
+        )
+        counts = (
+            completions.groupby(grouping, dropna=False)
+            .size()
+            .reset_index(name=TOTAL_COUNT_COLUMN)
+        )
+
+    if weights is not None:
+        summary = summary.merge(weights, on=grouping, how="left")
+    else:
+        summary[TOTAL_MT_COLUMN] = 0.0
+    if counts is not None:
+        summary = summary.merge(counts, on=grouping, how="left")
+    else:
+        summary[TOTAL_COUNT_COLUMN] = 0
+
+    summary[TOTAL_MT_COLUMN] = summary[TOTAL_MT_COLUMN].fillna(0.0)
+    summary[TOTAL_COUNT_COLUMN] = summary[TOTAL_COUNT_COLUMN].fillna(0).astype(int)
+
+    for column in [AVG_PRODUCTIVITY_COLUMN, *week_labels, TOTAL_MT_COLUMN]:
+        summary[column] = summary[column].fillna(0.0).round(2)
+
+    summary = summary.rename(columns=column_labels)
+    summary = summary.sort_values(labeled_columns).reset_index(drop=True)
+    return summary.reindex(columns=ordered_columns)
+
+
 def _suppress_repeated_pch(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "PCH" not in df.columns:
         return df
@@ -688,6 +829,118 @@ def export_erection_productivity_summary(
     with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
         pch_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=0)
         project_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=second_table_start)
+
+    return target_path
+
+
+def export_voltage_tower_productivity_summary(
+    output_path: str | Path,
+    *,
+    data_store: AppDataStore | None = None,
+    daily_df: pd.DataFrame | None = None,
+    project_info: pd.DataFrame | None = None,
+    project_voltage_df: pd.DataFrame | None = None,
+    project_voltage_path: Path | None = None,
+    as_of_date: pd.Timestamp | str | None = None,
+    sheet_name: str = _DEFAULT_KV_SHEET_NAME,
+    blank_rows_between_tables: int = 3,
+) -> Path:
+    """Export productivity grouped by KV level and tower type."""
+
+    source_daily = daily_df
+    source_project_info = project_info
+    candidate_date = pd.Timestamp(as_of_date) if as_of_date is not None else None
+    voltage_frame = project_voltage_df
+
+    if project_voltage_df is None and project_voltage_path is not None:
+        try:
+            voltage_frame = pd.read_excel(project_voltage_path)
+        except FileNotFoundError:
+            LOGGER.warning("Projects_KV workbook not found at %s; voltage lookup disabled.", project_voltage_path)
+            voltage_frame = pd.DataFrame()
+        except Exception as exc:
+            LOGGER.warning("Unable to read Projects_KV workbook '%s': %s", project_voltage_path, exc)
+            voltage_frame = pd.DataFrame()
+
+    if data_store is not None:
+        if source_daily is None:
+            source_daily = data_store.get_daily()
+        if source_project_info is None:
+            source_project_info = data_store.get_project_info()
+        if candidate_date is None or pd.isna(candidate_date):
+            candidate_date = data_store.metadata.last_data_date
+
+    if source_daily is None or source_daily.empty:
+        raise ValueError("No erection daily dataframe is available to export.")
+
+    if candidate_date is None or pd.isna(candidate_date):
+        date_series = pd.to_datetime(source_daily.get("date"), errors="coerce").dropna()
+        if date_series.empty:
+            raise ValueError("Unable to determine the current month for the KV productivity export.")
+        candidate_date = date_series.max()
+
+    active_date = pd.Timestamp(candidate_date).normalize()
+    month_start = active_date.to_period("M").to_timestamp()
+    month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+
+    week_labels = _generate_week_labels(month_start, month_end)
+
+    project_info_frame = source_project_info.copy() if isinstance(source_project_info, pd.DataFrame) else pd.DataFrame()
+    voltage_lookup = _prepare_project_voltage_lookup(voltage_frame)
+
+    scope = _prepare_month_scope(source_daily, project_info_frame, month_start, month_end, week_labels)
+    if scope.empty:
+        raise ValueError("No erection rows found for the requested month.")
+    scope = _annotate_scope_with_voltage(scope, voltage_lookup)
+
+    completions = _prepare_completion_scope(scope, month_start, month_end, week_labels)
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        tower_weights = pd.to_numeric(completions.get("tower_weight"), errors="coerce")
+        completions = completions.assign(_tower_weight=tower_weights.fillna(0.0))
+    else:
+        completions = pd.DataFrame(columns=list(scope.columns) + ["_tower_weight"])
+
+    voltage_table = _build_group_productivity_table(
+        scope,
+        completions,
+        week_labels,
+        group_columns=["voltage_label"],
+        column_labels={"voltage_label": "Voltage"},
+    )
+    tower_table = _build_group_productivity_table(
+        scope,
+        completions,
+        week_labels,
+        group_columns=["voltage_label", "tower_type"],
+        column_labels={"voltage_label": "Voltage", "tower_type": "Tower Type"},
+    )
+    family_table = _build_group_productivity_table(
+        scope,
+        completions,
+        week_labels,
+        group_columns=["voltage_label", "tower_family"],
+        column_labels={"voltage_label": "Voltage", "tower_family": "Tower Family"},
+    )
+
+    sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_KV_SHEET_NAME) or _DEFAULT_KV_SHEET_NAME
+    target_path = Path(output_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    LOGGER.info(
+        "Exporting KV productivity summary for %s to %s",
+        active_date.strftime("%Y-%m"),
+        target_path,
+    )
+
+    gap_rows = max(2, int(blank_rows_between_tables))
+    first_table_height = len(voltage_table) + 1
+    second_table_start = first_table_height + gap_rows
+    third_table_start = second_table_start + len(tower_table) + 1 + gap_rows
+
+    with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
+        voltage_table.to_excel(writer, sheet_name=sheet_label, index=False, startrow=0)
+        tower_table.to_excel(writer, sheet_name=sheet_label, index=False, startrow=second_table_start)
+        family_table.to_excel(writer, sheet_name=sheet_label, index=False, startrow=third_table_start)
 
     return target_path
 

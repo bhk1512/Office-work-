@@ -69,6 +69,7 @@ PER_DAY_COLUMNS = [
     "Complete Date",
     "Gang name",
     "Tower Weight",
+    "Tower Type",
     "Productivity",
     "Project Name",
     "Location No.",
@@ -94,6 +95,24 @@ def canonical_header_key(s: str) -> str:
 
 
 EXPECTED_HEADER_KEYS = {exp: canonical_header_key(exp) for exp in EXPECTED_HEADERS}
+
+
+def normalize_tower_type_label(value: object) -> str:
+    text = "" if value is None else str(value).strip().upper()
+    if not text or text in {"NAN", "NA", "NONE"}:
+        return ""
+    text = text.replace("\u00a0", " ")
+    compact = re.sub(r"\s+", "", text)
+    base_match = re.search(r"(DA|DB|DC|DD)", compact)
+    if base_match:
+        compact = compact[base_match.start():]
+    match = re.match(r"^(DA|DB|DC|DD)(?:\+?(\d+))?$", compact)
+    if match:
+        base = match.group(1)
+        ext = match.group(2)
+        ext_value = str(int(ext)) if ext is not None else "0"
+        return f"{base}+{ext_value}"
+    return compact
 
 
 def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Optional[int], Optional[list]]:
@@ -642,6 +661,16 @@ def process_file(path: Path):
 
     work = df[needed].copy()
 
+    tower_type_col = None
+    for candidate in ("type of tower", "tower type", "type"):
+        if candidate in df.columns:
+            tower_type_col = candidate
+            break
+    if tower_type_col:
+        work["Tower Type"] = df[tower_type_col].apply(normalize_tower_type_label)
+    else:
+        work["Tower Type"] = ""
+
     # Parse + clean (do not drop yet; we want to capture issues first)
     work["Start Date"] = work["starting date"].apply(to_date)
     work["Complete Date"] = work["completion date"].apply(to_date)
@@ -678,7 +707,7 @@ def process_file(path: Path):
     def push_data_issue(mask, reason: str):
         if mask.any():
             sub = work.loc[mask, ["Start Date", "Complete Date", "Gang name", "Tower Weight",
-                                  "Productivity", "Project Name", "Location No.", "Status"]].copy()
+                                  "Tower Type", "Productivity", "Project Name", "Location No.", "Status"]].copy()
             sub["Issues"] = reason
             data_issues_rows.append(sub)
 
@@ -695,7 +724,7 @@ def process_file(path: Path):
 
     # ---- Per-erection (UNEXPANDED) ----
     per_erection = work[[
-        "Start Date", "Complete Date", "Gang name", "Tower Weight", "Productivity", "Project Name", "Location No.", "Status"
+        "Start Date", "Complete Date", "Gang name", "Tower Weight", "Tower Type", "Productivity", "Project Name", "Location No.", "Status"
     ]].copy()
 
     # ---- Per-day (EXPANDED) ----
@@ -712,6 +741,7 @@ def process_file(path: Path):
                     "Complete Date": r["Complete Date"].normalize(),
                     "Gang name": r["Gang name"],
                     "Tower Weight": r["Tower Weight"],
+                    "Tower Type": r["Tower Type"],
                     "Productivity": r["Productivity"],
                     "Project Name": r["Project Name"],
                     "Location No.": r["Location No."],
