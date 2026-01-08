@@ -31,6 +31,7 @@ _STRINGING_COLUMN_MAP: Dict[str, str] = {
     "Status": "status",
     "Gang Name": "gang_name",
 }
+_STRINGING_OPTIONAL_HEADERS: set[str] = {"Status"}
 
 
 # --- Header detection utilities (tolerant like erection) ---
@@ -246,28 +247,31 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
             - applied_map: dict[str, str] of column renames actually applied
     """
 
-    required_headers: List[str] = list(_STRINGING_COLUMN_MAP.keys())
-    # Exact-match presence
-    present: List[str] = [name for name in required_headers if name in df.columns]
-    missing: List[str] = [name for name in required_headers if name not in df.columns]
+    tracked_headers: List[str] = list(_STRINGING_COLUMN_MAP.keys())
+    required_headers: List[str] = [
+        name for name in tracked_headers if name not in _STRINGING_OPTIONAL_HEADERS
+    ]
 
-    # Build tolerant rename map using canonical keys as fallback
+    expected_by_key = {_canon_key(k): v for k, v in _STRINGING_COLUMN_MAP.items()}
+    recognized_keys: set[str] = set()
     applied_map: Dict[str, str] = {}
-    # First, capture exact matches
-    for name in present:
-        applied_map[name] = _STRINGING_COLUMN_MAP[name]
-    # Then, try canonical-key matches for the rest
-    if missing:
-        expected_by_key = {_canon_key(k): v for k, v in _STRINGING_COLUMN_MAP.items()}
-        for col in df.columns:
-            if col in applied_map:
-                continue
-            key = _canon_key(col)
-            if key in expected_by_key:
-                applied_map[col] = expected_by_key[key]
-        # recompute presence/missing after tolerant mapping
-        present = [orig for orig in required_headers if orig in df.columns or _canon_key(orig) in {_canon_key(c): c for c in df.columns}]
-        missing = [name for name in required_headers if name not in present]
+
+    for col in df.columns:
+        if col in _STRINGING_COLUMN_MAP:
+            applied_map[col] = _STRINGING_COLUMN_MAP[col]
+            recognized_keys.add(_canon_key(col))
+            continue
+        key = _canon_key(col)
+        if key in expected_by_key and col not in applied_map:
+            applied_map[col] = expected_by_key[key]
+            recognized_keys.add(key)
+
+    present: List[str] = [
+        header for header in tracked_headers if _canon_key(header) in recognized_keys
+    ]
+    missing: List[str] = [
+        header for header in required_headers if _canon_key(header) not in recognized_keys
+    ]
 
     normalized = df.rename(columns=applied_map).copy()
 

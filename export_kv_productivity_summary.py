@@ -49,6 +49,16 @@ def _parse_args() -> argparse.Namespace:
         help="Optional YYYY-MM month to summarise (overrides --as-of-date).",
     )
     parser.add_argument(
+        "--start-month",
+        type=str,
+        help="Optional YYYY-MM start month for a continuous range (requires --end-month).",
+    )
+    parser.add_argument(
+        "--end-month",
+        type=str,
+        help="Optional YYYY-MM end month for a continuous range (requires --start-month).",
+    )
+    parser.add_argument(
         "--sheet-name",
         type=str,
         default="KV Productivity",
@@ -77,12 +87,30 @@ def main() -> int:
     LOGGER.info("Bootstrapping datasets from %s", config.data_path)
     store.bootstrap(config)
 
+    if args.month and (args.start_month or args.end_month):
+        raise SystemExit("Choose either --month or the --start-month/--end-month range, not both.")
+    if (args.start_month and not args.end_month) or (args.end_month and not args.start_month):
+        raise SystemExit("--start-month and --end-month must be provided together.")
+    if args.as_of_date and (args.month or args.start_month or args.end_month):
+        raise SystemExit("--as-of-date cannot be combined with --month or --start-month/--end-month.")
+
     as_of: pd.Timestamp | None = None
+    range_start: pd.Timestamp | None = None
+    range_end: pd.Timestamp | None = None
     if args.month:
         try:
             as_of = pd.Timestamp(f"{args.month}-01")
         except Exception as exc:  # pragma: no cover - defensive parsing
             raise SystemExit(f"Invalid --month value '{args.month}': {exc}") from exc
+    elif args.start_month and args.end_month:
+        try:
+            range_start = pd.Timestamp(f"{args.start_month}-01")
+        except Exception as exc:  # pragma: no cover - defensive parsing
+            raise SystemExit(f"Invalid --start-month value '{args.start_month}': {exc}") from exc
+        try:
+            range_end = pd.Timestamp(f"{args.end_month}-01")
+        except Exception as exc:  # pragma: no cover - defensive parsing
+            raise SystemExit(f"Invalid --end-month value '{args.end_month}': {exc}") from exc
     elif args.as_of_date:
         try:
             as_of = pd.Timestamp(args.as_of_date)
@@ -94,6 +122,8 @@ def main() -> int:
         output_path=output_path,
         data_store=store,
         as_of_date=as_of,
+        range_start=range_start,
+        range_end=range_end,
         sheet_name=args.sheet_name,
         project_voltage_path=Path(args.projects_kv).expanduser(),
     )

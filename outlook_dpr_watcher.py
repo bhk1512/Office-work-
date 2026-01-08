@@ -36,6 +36,19 @@ def norm(s): return (s or "").lower()
 def _normalize_for_contains(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", norm(value))
 
+def _normalize_attachment_key(value: str, *, drop_digits: bool = False) -> str:
+    """
+    Normalize attachment text for substring checks by stripping extension, special chars,
+    and optionally digits (dates in filenames).
+    """
+    text = str(value or "")
+    text = os.path.splitext(text)[0]
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "", text)
+    if drop_digits:
+        text = re.sub(r"\d+", "", text)
+    return text
+
 def _split_possible_subjects(value) -> list[str]:
     if value is None:
         return []
@@ -63,9 +76,16 @@ def load_email_config(path: pathlib.Path = EMAIL_CONFIG_PATH) -> dict[str, dict]
             continue
         name_raw = row.get("Name")
         name = "" if pd.isna(name_raw) else str(name_raw).strip()
+        attachment_raw = row.get("Possible_Attachement_Name")
+        attachment_hint = "" if pd.isna(attachment_raw) else str(attachment_raw).strip()
+        project_code_raw = row.get("Project_Code")
+        project_code = "" if pd.isna(project_code_raw) else str(project_code_raw).strip().upper()
         config[email] = {
             "name": name,
             "possible_subjects": _split_possible_subjects(row.get("Possible_subject")),
+            "possible_attachment_name": attachment_hint,
+            "possible_attachment_key": _normalize_attachment_key(attachment_hint, drop_digits=True) if attachment_hint else "",
+            "project_code": project_code,
         }
     return config
 
@@ -272,22 +292,36 @@ def save_latest_for_mail(mail) -> list[str]:
     atts = getattr(mail, "Attachments", None)
     if not atts or atts.Count == 0: return saved
 
-    # We’ll compute project per attachment (best accuracy), date once per mail (typical)
+    # We'll compute project per attachment (best accuracy), date once per mail (typical)
     mail_date = extract_report_date(mail, fallback_to_received=True)
     download_dir = pathlib.Path(DOWNLOAD_DIR)
     download_dir.mkdir(parents=True, exist_ok=True)
+    sender_email = get_smtp_address(mail)
+    sender_cfg = EMAIL_CONFIG.get(sender_email)
 
     for i in range(1, atts.Count + 1):
         att = atts.Item(i)
         name = att.FileName or ""
         if ALLOWED_EXTS and os.path.splitext(name)[1].lower() not in ALLOWED_EXTS:
             continue
-        # must be a DPR file
-        if not all(re.search(pat, norm(name), flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN):
+        normalized_for_patterns = norm(name)
+        fallback_match = False
+        fallback_project_code = None
+        if sender_cfg:
+            fallback_key = sender_cfg.get("possible_attachment_key") or ""
+            if fallback_key:
+                normalized_for_fallback = _normalize_attachment_key(name, drop_digits=True)
+                if normalized_for_fallback and fallback_key in normalized_for_fallback:
+                    fallback_match = True
+                    fallback_project_code = sender_cfg.get("project_code") or None
+        # must be a DPR file unless fallback hint matched
+        if (not fallback_match) and (not all(re.search(pat, normalized_for_patterns, flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN)):
             continue
 
         # project code from attachment/subject/other attachments
         project = derive_project_code(mail, att)
+        if not project and fallback_match and fallback_project_code:
+            project = fallback_project_code
         if not project:
             # If no project code, skip (or save with original name if you prefer)
             continue

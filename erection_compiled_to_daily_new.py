@@ -53,6 +53,11 @@ EXPECTED_HEADERS = [
     "status",
 ]
 
+HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "location no": ("location number", "loc no"),
+    "tower weight": ("tower weight (mt)", "tower weight(mt)", "weight mt"),
+}
+
 # Accepts: "Erection Compiled", "Erection-Compiled", "Erection Compiled v2", etc.
 TARGET_SHEET_REGEX = re.compile(r"^\s*erection\s*.*\s*compiled\s*$", flags=re.I)
 
@@ -94,7 +99,11 @@ def canonical_header_key(s: str) -> str:
     return re.sub(r"\s+", "", normalized)
 
 
-EXPECTED_HEADER_KEYS = {exp: canonical_header_key(exp) for exp in EXPECTED_HEADERS}
+EXPECTED_HEADER_KEYS: Dict[str, str] = {}
+for exp in EXPECTED_HEADERS:
+    aliases = (exp, *HEADER_ALIASES.get(exp, ()))
+    for alias in aliases:
+        EXPECTED_HEADER_KEYS[canonical_header_key(alias)] = exp
 
 
 def normalize_tower_type_label(value: object) -> str:
@@ -130,14 +139,11 @@ def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Option
         for i, (val, key) in enumerate(zip(row_vals, row_keys)):
             if not key:
                 continue
-            for exp, exp_key in EXPECTED_HEADER_KEYS.items():
-                if exp in used_expected:
-                    continue
-                if key == exp_key:
-                    mapping[i] = exp
-                    score += 1
-                    used_expected.add(exp)
-                    break
+            exp = EXPECTED_HEADER_KEYS.get(key)
+            if exp and exp not in used_expected:
+                mapping[i] = exp
+                score += 1
+                used_expected.add(exp)
 
         non_empty = sum(1 for v in row_vals if v)
         score += max(0, non_empty - 3) * 0.02
@@ -649,7 +655,7 @@ def process_file(path: Path):
     })
 
     # Only the fields we need for computation
-    needed = ["starting date", "completion date", "gang name", "tower weight", "location no","status"]
+    needed = ["starting date", "completion date", "gang name", "tower weight", "location no"]
     missing = [c for c in needed if c not in df.columns]
     if missing:
         issues.append({
@@ -682,9 +688,8 @@ def process_file(path: Path):
         work["location no"].astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
     )
 
-    work["Status"] = (
-        work["status"].astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
-    )
+    status_series = df["status"] if "status" in df.columns else pd.Series(pd.NA, index=df.index)
+    work["Status"] = status_series.astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
 
     # Precompute validity flags
     missing_dt_mask = work["Start Date"].isna() | work["Complete Date"].isna()
