@@ -66,6 +66,17 @@ def _generate_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) ->
     return [f"Week {idx}" for idx in range(1, week_count + 1)]
 
 
+def _generate_quarter_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) -> list[str]:
+    """Generate week labels for a quarter split into 4 weeks per month."""
+    if month_start > month_end:
+        return []
+    start_period = month_start.to_period("M")
+    end_period = month_end.to_period("M")
+    months = (end_period.year - start_period.year) * 12 + (end_period.month - start_period.month) + 1
+    total_weeks = max(1, months * 4)
+    return [f"Week {idx}" for idx in range(1, total_weeks + 1)]
+
+
 _DPR_FILE_SUFFIXES = (".xlsx", ".xlsm", ".xlsb", ".xls")
 _DPR_HEADER_REQUIRED_MARKERS = {
     "sl_no",
@@ -835,6 +846,27 @@ def _assign_week_bucket(dates: pd.Series, month_start: pd.Timestamp, week_labels
     offsets = (dates - month_start).dt.days
     buckets = ((offsets // 7) + 1).clip(lower=1, upper=len(week_labels))
     return buckets.fillna(0).astype(int)
+
+
+def _assign_quarter_week_bucket(
+    dates: pd.Series,
+    quarter_start: pd.Timestamp,
+    *,
+    months_count: int = 3,
+) -> pd.Series:
+    """Assign dates to quarter week buckets (4 weeks per month, last week has remaining days)."""
+    date_series = pd.to_datetime(dates, errors="coerce")
+    if date_series.empty:
+        return pd.Series(index=dates.index, dtype="int64")
+    start_key = quarter_start.year * 12 + quarter_start.month
+    month_key = date_series.dt.year * 12 + date_series.dt.month
+    month_offset = month_key - start_key
+    day = date_series.dt.day
+    week_in_month = ((day - 1) // 7) + 1
+    week_in_month = week_in_month.clip(lower=1, upper=4)
+    week_index = month_offset * 4 + week_in_month
+    valid = date_series.notna() & (month_offset >= 0) & (month_offset < months_count)
+    return week_index.where(valid, 0).fillna(0).astype(int)
 
 
 def _prepare_month_scope(
@@ -1717,16 +1749,37 @@ def export_erection_productivity_summary(
         month_start = active_date.to_period("M").to_timestamp()
         month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
 
-    week_labels = _generate_week_labels(month_start, month_end)
-    offset_days = max(0, (active_date - month_start).days)
-    week_count = len(week_labels) or 1
-    current_week_idx = min(week_count, max(1, (offset_days // 7) + 1))
+    quarter_mode = False
+    if range_start_ts is not None and range_end_ts is not None:
+        start_period = range_start_ts.to_period("M")
+        end_period = range_end_ts.to_period("M")
+        months_count = (end_period.year - start_period.year) * 12 + (end_period.month - start_period.month) + 1
+        quarter_mode = months_count == 3
+    else:
+        months_count = 1
+
+    if quarter_mode:
+        week_labels = _generate_quarter_week_labels(month_start, month_end)
+        week_index = _assign_quarter_week_bucket(pd.Series([active_date]), month_start, months_count=months_count)
+        current_week_idx = int(week_index.iloc[0]) if not week_index.empty else 1
+        current_week_idx = max(1, min(len(week_labels), current_week_idx))
+    else:
+        week_labels = _generate_week_labels(month_start, month_end)
+        offset_days = max(0, (active_date - month_start).days)
+        week_count = len(week_labels) or 1
+        current_week_idx = min(week_count, max(1, (offset_days // 7) + 1))
     current_week_label = week_labels[current_week_idx - 1]
 
     project_info_frame = source_project_info.copy() if isinstance(source_project_info, pd.DataFrame) else pd.DataFrame()
 
     scope = _prepare_month_scope(source_daily, project_info_frame, month_start, month_end, week_labels)
     completions = _prepare_completion_scope(scope, month_start, month_end, week_labels)
+    if quarter_mode:
+        scope["week_index"] = _assign_quarter_week_bucket(scope["date"], month_start, months_count=months_count)
+        if not completions.empty:
+            completions["completion_week_index"] = _assign_quarter_week_bucket(
+                completions["completion_date"], month_start, months_count=months_count
+            )
 
     overall_summary, pch_summary, project_summary = _build_productivity_tables(
         scope,
@@ -1741,10 +1794,110 @@ def export_erection_productivity_summary(
     )
 
     sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_SHEET_NAME) or _DEFAULT_SHEET_NAME
+    review_sheet_label = _sanitize_sheet_name("Review_Format")
     gangs_sheet_label = _sanitize_sheet_name("Project Gang Rankings")
     gang_level_sheet_label = _sanitize_sheet_name("Gang Level Productivity")
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    month_cursor = month_start.to_period("M").to_timestamp()
+    month_end_cursor = month_end.to_period("M").to_timestamp()
+    months: list[pd.Timestamp] = []
+    while month_cursor <= month_end_cursor:
+        months.append(month_cursor)
+        month_cursor = (month_cursor + pd.offsets.MonthBegin(1)).normalize()
+    month_labels = [month.strftime("%b'%y") for month in months]
+
+    def _build_review_table_two(scoped: pd.DataFrame, *, label_col: str = "Erection productivity") -> pd.DataFrame:
+        weight_row: dict[str, object] = {label_col: "Weight/day (Avg)"}
+        gang_row: dict[str, object] = {label_col: "No of Gangs engaged (Avg)"}
+        if scoped.empty:
+            for label in month_labels:
+                weight_row[label] = 0.0
+                gang_row[label] = 0
+            return pd.DataFrame([weight_row, gang_row], columns=[label_col, *month_labels])
+
+        for month_start_ts, label in zip(months, month_labels):
+            month_end_ts = (month_start_ts + pd.offsets.MonthEnd(1)).normalize()
+            month_scope = scoped[(scoped["date"] >= month_start_ts) & (scoped["date"] <= month_end_ts)]
+            if month_scope.empty:
+                weight_row[label] = 0.0
+                gang_row[label] = 0
+                continue
+
+            weight_series = pd.to_numeric(month_scope.get("daily_prod_mt"), errors="coerce").dropna()
+            weight_avg = weight_series.mean() if not weight_series.empty else 0.0
+
+            gangs_scope = month_scope.copy()
+            if "gang_name" in gangs_scope.columns:
+                gangs_scope["gang_name"] = gangs_scope["gang_name"].fillna("").astype(str).str.strip()
+                gangs_scope = gangs_scope[gangs_scope["gang_name"].astype(bool)]
+            else:
+                gangs_scope = gangs_scope.iloc[0:0]
+            gangs_unique = gangs_scope["gang_name"].nunique() if not gangs_scope.empty else 0
+
+            weight_row[label] = round(float(weight_avg), 2)
+            gang_row[label] = int(gangs_unique)
+
+        return pd.DataFrame([weight_row, gang_row], columns=[label_col, *month_labels])
+
+    review_columns = [
+        "PCH",
+        "Project",
+        *week_labels,
+        AVG_PRODUCTIVITY_COLUMN,
+        TOTAL_MT_COLUMN,
+        TOTAL_COUNT_COLUMN,
+    ]
+    review_table_raw = project_summary.reindex(columns=review_columns)
+    if not review_table_raw.empty and AVG_PRODUCTIVITY_COLUMN in review_table_raw.columns:
+        review_table_raw = review_table_raw[review_table_raw[AVG_PRODUCTIVITY_COLUMN] != "Total"]
+
+    review_table_one_groups: list[pd.DataFrame] = []
+    if review_table_raw.empty or "PCH" not in review_table_raw.columns:
+        review_table_one_groups.append(_append_totals_row(review_table_raw))
+    else:
+        unique_pch = sorted(review_table_raw["PCH"].fillna("").astype(str).unique(), key=_pch_sort_components)
+        for pch_name in unique_pch:
+            if not pch_name:
+                continue
+            pch_table = review_table_raw[review_table_raw["PCH"] == pch_name].copy()
+            if pch_table.empty:
+                continue
+            header_row: dict[str, object] = {"PCH": f"PCH: {pch_name}"}
+            for column in review_columns:
+                if column != "PCH":
+                    header_row[column] = ""
+            review_table_one_groups.append(pd.DataFrame([header_row], columns=review_columns))
+            review_table_one_groups.append(_append_totals_row(pch_table))
+
+    review_table_two_groups: list[pd.DataFrame] = []
+    if scope.empty or "pch_display" not in scope.columns:
+        review_table_two_groups.append(_build_review_table_two(scope))
+    else:
+        unique_pch = sorted(scope["pch_display"].fillna("").astype(str).unique(), key=_pch_sort_components)
+        for pch_name in unique_pch:
+            if not pch_name:
+                continue
+            pch_scope = scope[scope["pch_display"] == pch_name]
+            header_row = {"Erection productivity": f"PCH: {pch_name}"}
+            for label in month_labels:
+                header_row[label] = ""
+            review_table_two_groups.append(
+                pd.DataFrame([header_row], columns=["Erection productivity", *month_labels])
+            )
+            review_table_two_groups.append(_build_review_table_two(pch_scope))
+
+    def _unique_sheet_name(base: str, used: set[str]) -> str:
+        sanitized = _sanitize_sheet_name(base) or "Sheet"
+        candidate = sanitized
+        suffix = 2
+        while candidate in used:
+            trimmed = sanitized[: max(0, 31 - len(str(suffix)) - 1)]
+            candidate = f"{trimmed}-{suffix}"
+            suffix += 1
+        used.add(candidate)
+        return candidate
 
     LOGGER.info(
         "Exporting erection productivity summary for %s (current week: %s) to %s",
@@ -1763,6 +1916,31 @@ def export_erection_productivity_summary(
         overall_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=0)
         pch_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=pch_table_start)
         project_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=project_table_start)
+        current_row = 0
+        group_gap_rows = 1
+        for table in review_table_one_groups:
+            if table.empty:
+                continue
+            table.to_excel(
+                writer,
+                sheet_name=review_sheet_label,
+                index=False,
+                startrow=current_row,
+            )
+            current_row += len(table) + 1 + group_gap_rows
+
+        review_gap_rows = 2
+        current_row += review_gap_rows
+        for table in review_table_two_groups:
+            if table.empty:
+                continue
+            table.to_excel(
+                writer,
+                sheet_name=review_sheet_label,
+                index=False,
+                startrow=current_row,
+            )
+            current_row += len(table) + 1 + group_gap_rows
         gang_level_summary.to_excel(writer, sheet_name=gang_level_sheet_label, index=False)
         top_title_row = {
             "PCH": "Top 3 Gangs",
@@ -1792,6 +1970,58 @@ def export_erection_productivity_summary(
             writer, sheet_name=gangs_sheet_label, index=False, header=False, startrow=bottom_title_row
         )
         bottom_gangs.to_excel(writer, sheet_name=gangs_sheet_label, index=False, startrow=bottom_title_row + 1)
+
+        used_sheet_names: set[str] = {sheet_label, review_sheet_label, gangs_sheet_label, gang_level_sheet_label}
+        if not review_table_raw.empty and "PCH" in review_table_raw.columns and "pch_display" in scope.columns:
+            for pch_name in sorted(review_table_raw["PCH"].fillna("").astype(str).unique(), key=_pch_sort_components):
+                if not pch_name:
+                    continue
+                pch_sheet_name = _unique_sheet_name(f"PCH {pch_name}", used_sheet_names)
+                pch_table_one = review_table_raw[review_table_raw["PCH"] == pch_name].copy()
+                if pch_table_one.empty:
+                    continue
+                pch_table_one = _append_totals_row(pch_table_one)
+                pch_scope = scope[scope["pch_display"] == pch_name]
+                pch_table_two_overall = _build_review_table_two(pch_scope)
+
+                current_row = 0
+                pch_table_one.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
+                current_row += len(pch_table_one) + 1 + group_gap_rows
+
+                overall_header = {"Erection productivity": "PCH Overall"}
+                for label in month_labels:
+                    overall_header[label] = ""
+                overall_header_df = pd.DataFrame(
+                    [overall_header], columns=["Erection productivity", *month_labels]
+                )
+                overall_header_df.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
+                current_row += len(overall_header_df) + 1
+                pch_table_two_overall.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
+                current_row += len(pch_table_two_overall) + 1 + group_gap_rows
+
+                if "project_display" in pch_scope.columns:
+                    project_names = (
+                        pch_table_one["Project"]
+                        .dropna()
+                        .astype(str)
+                        .map(str.strip)
+                        .unique()
+                    )
+                    for project_name in project_names:
+                        if not project_name or project_name == "Total":
+                            continue
+                        project_scope = pch_scope[pch_scope["project_display"] == project_name]
+                        header_row = {"Erection productivity": f"Project: {project_name}"}
+                        for label in month_labels:
+                            header_row[label] = ""
+                        header_df = pd.DataFrame(
+                            [header_row], columns=["Erection productivity", *month_labels]
+                        )
+                        header_df.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
+                        current_row += len(header_df) + 1
+                        project_table_two = _build_review_table_two(project_scope)
+                        project_table_two.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
+                        current_row += len(project_table_two) + 1 + group_gap_rows
 
     return target_path
 
