@@ -24,6 +24,13 @@ REM pip install --upgrade pip
 python -m pip install --upgrade pip
 REM pip install -r requirements.txt
 python -m pip install -r requirements.txt
+REM Run outlook watcher once before pipeline
+python outlook_dpr_watcher.py
+if errorlevel 1 (
+    echo [run_app] Outlook watcher failed; not starting pipeline/server.
+    exit /b 1
+)
+
 
 REM Run pipeline only (no dev server) — performs delete + compile sequentially
 python pipeline_runner.py --config pipeline_config.json --no-serve

@@ -13,4 +13,4 @@ prometheus-flask-exporter==0.23.0  # metrics endpoint (optional)
 psutil==5.9.8                # health endpoint memory
 python-json-logger==2.0.7    # structured logs
 waitress==3.0.0
-
+pywin32>=307

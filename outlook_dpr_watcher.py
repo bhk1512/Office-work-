@@ -1,7 +1,7 @@
 # outlook_dpr_run_and_monitor_latest_by_date.py
 # Run: python outlook_dpr_run_and_monitor_latest_by_date.py
 
-import os, time, pathlib, datetime as dt, re
+import os, time, pathlib, datetime as dt, re, argparse
 import pandas as pd
 import pythoncom
 import win32com.client as win32
@@ -394,13 +394,24 @@ def hook_folder_items(folder):
     items.Sort("[ReceivedTime]", True)
     return win32.WithEvents(items, ItemsEventHandler)
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Download DPR attachments from Outlook.")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Keep monitoring for new mail after backfill.",
+    )
+    args = parser.parse_args(argv)
+
     pathlib.Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
     ns = win32.Dispatch("Outlook.Application").GetNamespace("MAPI")
     folder = get_folder_by_path(ns, FOLDER_PATH)
     logprint(f"Target folder: {folder.FolderPath}")
     logprint(f"Saving to:     {DOWNLOAD_DIR}")
     backfill(folder)
+    if not args.watch:
+        logprint("Done. Exiting (use --watch to keep monitoring).")
+        return
     sink = hook_folder_items(folder)
     logprint("Monitoring for new mail… (Ctrl+C to stop)")
     try:
