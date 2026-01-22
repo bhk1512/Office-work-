@@ -25,6 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 LOGGER = logging.getLogger(__name__)
 
 AVG_PRODUCTIVITY_COLUMN = "Avg Productivity (MTD)"
+AVG_PRODUCTIVITY_OVERALL_COLUMN = "Avg Productivity (Overall)"
 TOTAL_MT_COLUMN = "Total MT (MTD)"
 TOTAL_COUNT_COLUMN = "Total No. of Erections (MTD)"
 TOWER_BUCKETS = ("DA", "DB", "DC", "DD")
@@ -33,19 +34,9 @@ AVG_TOWER_WEIGHT_OVERALL_COLUMN = "Avg Tower Weight Overall"
 TOWER_BUCKET_COUNT_COLUMNS = [*TOWER_BUCKETS, EXCEPTION_BUCKET]
 TOWER_BUCKET_AVG_COLUMNS = [f"{bucket} Avg Tower Weight" for bucket in TOWER_BUCKETS]
 TOWER_BUCKET_AVG_COLUMNS.append(f"{EXCEPTION_BUCKET} Avg Tower Weight")
-TOWER_WEIGHT_COLUMNS = [
-    TOWER_BUCKETS[0],
-    TOWER_BUCKET_AVG_COLUMNS[0],
-    TOWER_BUCKETS[1],
-    TOWER_BUCKET_AVG_COLUMNS[1],
-    TOWER_BUCKETS[2],
-    TOWER_BUCKET_AVG_COLUMNS[2],
-    TOWER_BUCKETS[3],
-    TOWER_BUCKET_AVG_COLUMNS[3],
-    EXCEPTION_BUCKET,
-    TOWER_BUCKET_AVG_COLUMNS[4],
-    AVG_TOWER_WEIGHT_OVERALL_COLUMN,
-]
+TOWER_WEIGHT_COLUMNS = [AVG_TOWER_WEIGHT_OVERALL_COLUMN]
+IDLE_DAYS_COLUMN = "Idle Counted (days)"
+IDLE_INTERVALS_COLUMN = "Number of Idle Intervals"
 YTD_METRIC_LABELS = {
     AVG_PRODUCTIVITY_COLUMN: "Avg Productivity (YTD)",
     TOTAL_MT_COLUMN: "Total MT (YTD)",
@@ -1282,9 +1273,12 @@ def _build_project_gang_rankings(
         "Project",
         "Gang Name",
         AVG_PRODUCTIVITY_COLUMN,
+        AVG_PRODUCTIVITY_OVERALL_COLUMN,
         TOTAL_MT_COLUMN,
         TOTAL_COUNT_COLUMN,
         *TOWER_WEIGHT_COLUMNS,
+        IDLE_DAYS_COLUMN,
+        IDLE_INTERVALS_COLUMN,
     ]
     if scope is None or scope.empty or "gang_name" not in scope.columns:
         empty = pd.DataFrame(columns=columns)
@@ -1354,6 +1348,17 @@ def _build_project_gang_rankings(
                 merged[column] = merged[column].astype(int)
             else:
                 merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0.0).round(2)
+    for column in (IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN):
+        if column not in merged.columns:
+            merged[column] = 0
+        else:
+            merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0).astype(int)
+    if AVG_PRODUCTIVITY_OVERALL_COLUMN not in merged.columns:
+        merged[AVG_PRODUCTIVITY_OVERALL_COLUMN] = 0.0
+    else:
+        merged[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
+            pd.to_numeric(merged[AVG_PRODUCTIVITY_OVERALL_COLUMN], errors="coerce").fillna(0.0).round(2)
+        )
 
     def _collect_ranked(top: bool) -> pd.DataFrame:
         rows: list[pd.DataFrame] = []
@@ -1492,6 +1497,460 @@ def _build_gang_level_productivity_table(
     return merged
 
 
+def _build_overall_gang_productivity_map(daily_df: pd.DataFrame | None) -> dict[str, float]:
+    if daily_df is None or daily_df.empty or "gang_name" not in daily_df.columns:
+        return {}
+    working = daily_df.copy()
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working = working[working["gang_name"].astype(bool)]
+    if working.empty or "daily_prod_mt" not in working.columns:
+        return {}
+    productivity = pd.to_numeric(working["daily_prod_mt"], errors="coerce")
+    grouped = productivity.groupby(working["gang_name"]).mean().dropna()
+    return {gang: round(float(value), 2) for gang, value in grouped.items()}
+
+
+def _build_gang_productivity_map(scope: pd.DataFrame, metric_column: str = "daily_prod_mt") -> dict[str, float]:
+    if scope is None or scope.empty or "gang_name" not in scope.columns:
+        return {}
+    working = scope.copy()
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working = working[working["gang_name"].astype(bool)]
+    if working.empty or metric_column not in working.columns:
+        return {}
+    metric = pd.to_numeric(working[metric_column], errors="coerce")
+    grouped = metric.groupby(working["gang_name"]).mean().dropna()
+    return {gang: round(float(value), 2) for gang, value in grouped.items()}
+
+
+def _build_gang_total_map(scope: pd.DataFrame | None, metric_column: str = "daily_prod_mt") -> dict[str, float]:
+    if scope is None or scope.empty or "gang_name" not in scope.columns:
+        return {}
+    working = scope.copy()
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working = working[working["gang_name"].astype(bool)]
+    if working.empty or metric_column not in working.columns:
+        return {}
+    metric = pd.to_numeric(working[metric_column], errors="coerce").fillna(0.0)
+    grouped = metric.groupby(working["gang_name"]).sum()
+    return {gang: round(float(value), 2) for gang, value in grouped.items()}
+
+
+def _extract_completion_rows(daily_df: pd.DataFrame | None) -> pd.DataFrame:
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame()
+    working = daily_df.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
+    working["completion_date"] = pd.to_datetime(
+        working.get("completion_date"), errors="coerce"
+    ).dt.normalize()
+    working = working.dropna(subset=["date", "completion_date"])
+    if working.empty:
+        return pd.DataFrame()
+    completions = working[working["date"].eq(working["completion_date"])].copy()
+    if completions.empty:
+        return pd.DataFrame()
+    dedup_cols = [
+        col
+        for col in ("project_name_key", "project_name", "location_no", "completion_date")
+        if col in completions.columns
+    ]
+    if dedup_cols:
+        completions = completions.drop_duplicates(subset=dedup_cols, keep="last")
+    return completions
+
+
+def _build_completion_counts_by_gang(completions: pd.DataFrame | None) -> dict[str, int]:
+    if completions is None or completions.empty or "gang_name" not in completions.columns:
+        return {}
+    working = completions.copy()
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working = working[working["gang_name"].astype(bool)]
+    if working.empty:
+        return {}
+    return working.groupby("gang_name").size().astype(int).to_dict()
+
+
+def _idle_productivity_buckets() -> list[tuple[str, callable]]:
+    return [
+        ("0-1", lambda value: 0 <= value < 1),
+        ("1-2", lambda value: 1 <= value < 2),
+        ("2-3", lambda value: 2 <= value < 3),
+        ("3-4", lambda value: 3 <= value < 4),
+        ("4-5", lambda value: 4 <= value < 5),
+        ("5-6", lambda value: 5 <= value < 6),
+        ("6-7", lambda value: 6 <= value < 7),
+        ("7-8", lambda value: 7 <= value < 8),
+        ("8-9", lambda value: 8 <= value < 9),
+        ("9-10", lambda value: 9 <= value < 10),
+        ("10-11", lambda value: 10 <= value < 11),
+        ("11-12", lambda value: 11 <= value <= 12),
+        (">12", lambda value: value > 12),
+    ]
+
+
+def _assign_idle_bucket(value: float, buckets: Sequence[tuple[str, callable]]) -> str:
+    for label, predicate in buckets:
+        if predicate(value):
+            return label
+    return ""
+
+
+def _build_gang_project_code_map(completions: pd.DataFrame | None) -> dict[str, str]:
+    if completions is None or completions.empty:
+        return {}
+    working = completions.copy()
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working = working[working["gang_name"].astype(bool)]
+    if working.empty:
+        return {}
+
+    working["project_code"] = working.get("project_code", "").fillna("").astype(str).str.strip()
+    working["project_name"] = working.get("project_name", "").fillna("").astype(str).str.strip()
+    working["project_label"] = working["project_code"].where(
+        working["project_code"].astype(bool),
+        working["project_name"],
+    )
+
+    def _join_project_codes(series: pd.Series) -> str:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for value in series.fillna("").astype(str):
+            label = value.strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            ordered.append(label)
+        return ", ".join(ordered)
+
+    grouped = (
+        working.groupby("gang_name")["project_label"]
+        .apply(_join_project_codes)
+        .to_dict()
+    )
+    return {str(k): str(v) for k, v in grouped.items() if v}
+
+
+def _build_idle_days_bucket_tables(
+    *,
+    productivity_map: dict[str, float],
+    idle_days_map: dict[str, int],
+    erection_counts: dict[str, int],
+    idle_interval_counts: dict[str, int] | None = None,
+    daily_weight_map: dict[str, float] | None = None,
+    tower_weight_map: dict[str, float] | None = None,
+    thresholds: Sequence[int] = (1, 2, 3),
+) -> dict[int, pd.DataFrame]:
+    buckets = _idle_productivity_buckets()
+    metric_label = "Metric"
+    columns = [metric_label, *[label for label, _ in buckets]]
+    empty = pd.DataFrame(columns=columns)
+    if not productivity_map:
+        return {threshold: empty.copy() for threshold in thresholds}
+
+    effective_interval_counts = idle_interval_counts or {}
+    effective_daily_weight_map = daily_weight_map or {}
+    effective_tower_weight_map = tower_weight_map or {}
+
+    row_order = [
+        "Days per idle window (severity)",
+        "Avg Idle Days (Magnitude)",
+        "Idle windows per gang (Frequency)",
+        "Gang Count",
+        "Weight Erected (MT) - Daily Prod",
+        "Weight Erected (MT) - Tower Weight",
+    ]
+
+    tables: dict[int, pd.DataFrame] = {}
+    for threshold in thresholds:
+        rows: dict[str, dict[str, object]] = {label: {} for label in row_order}
+        for bucket_label, predicate in buckets:
+            gangs = [
+                gang
+                for gang, productivity in productivity_map.items()
+                if productivity is not None
+                and not pd.isna(productivity)
+                and predicate(productivity)
+                and int(erection_counts.get(gang, 0)) >= threshold
+            ]
+            gang_count = len(gangs)
+            idle_days_total = sum(float(idle_days_map.get(gang, 0)) for gang in gangs)
+            idle_windows_total = sum(int(effective_interval_counts.get(gang, 0)) for gang in gangs)
+            severity_sum = sum(
+                (
+                    float(idle_days_map.get(gang, 0)) / int(effective_interval_counts.get(gang, 0))
+                    if int(effective_interval_counts.get(gang, 0)) > 0
+                    else 0.0
+                )
+                for gang in gangs
+            )
+            avg_severity = severity_sum / gang_count if gang_count else 0.0
+            avg_idle_days = idle_days_total / gang_count if gang_count else 0.0
+            avg_idle_windows = idle_windows_total / gang_count if gang_count else 0.0
+            weight_daily = sum(float(effective_daily_weight_map.get(gang, 0.0)) for gang in gangs)
+            weight_tower = sum(float(effective_tower_weight_map.get(gang, 0.0)) for gang in gangs)
+
+            rows["Days per idle window (severity)"][bucket_label] = round(avg_severity, 2)
+            rows["Avg Idle Days (Magnitude)"][bucket_label] = round(avg_idle_days, 2)
+            rows["Idle windows per gang (Frequency)"][bucket_label] = round(avg_idle_windows, 2)
+            rows["Gang Count"][bucket_label] = int(gang_count)
+            rows["Weight Erected (MT) - Daily Prod"][bucket_label] = round(weight_daily, 2)
+            rows["Weight Erected (MT) - Tower Weight"][bucket_label] = round(weight_tower, 2)
+
+        table_rows: list[dict[str, object]] = []
+        for label in row_order:
+            row = {metric_label: label}
+            row.update(rows[label])
+            table_rows.append(row)
+        tables[threshold] = pd.DataFrame(table_rows, columns=columns)
+
+    return tables
+
+
+def _build_idle_days_bucket_audit(
+    *,
+    productivity_map: dict[str, float],
+    idle_days_map: dict[str, int],
+    erection_counts: dict[str, int],
+    idle_interval_counts: dict[str, int] | None,
+    daily_weight_map: dict[str, float] | None,
+    tower_weight_map: dict[str, float] | None,
+    completions: pd.DataFrame | None,
+    threshold: int = 3,
+) -> pd.DataFrame:
+    columns = [
+        "Gang Name",
+        "Productivity (MT/day)",
+        "Bucket",
+        "Idle Days",
+        "Idle Intervals",
+        "Idle Days per Interval",
+        "Towers Erected",
+        "Daily Prod Sum (MT)",
+        "Tower Weight Sum (MT)",
+        "Project Codes",
+    ]
+    if not productivity_map:
+        return pd.DataFrame(columns=columns)
+
+    buckets = _idle_productivity_buckets()
+    idle_intervals = idle_interval_counts or {}
+    daily_weights = daily_weight_map or {}
+    tower_weights = tower_weight_map or {}
+    project_codes = _build_gang_project_code_map(completions)
+
+    rows: list[dict[str, object]] = []
+    for gang, productivity in productivity_map.items():
+        if productivity is None or pd.isna(productivity):
+            continue
+        if int(erection_counts.get(gang, 0)) < threshold:
+            continue
+        bucket_label = _assign_idle_bucket(float(productivity), buckets)
+        if not bucket_label:
+            continue
+        idle_days = float(idle_days_map.get(gang, 0))
+        interval_count = int(idle_intervals.get(gang, 0))
+        idle_per_interval = idle_days / interval_count if interval_count > 0 else 0.0
+        erections = int(erection_counts.get(gang, 0))
+        rows.append(
+            {
+                "Gang Name": gang,
+                "Productivity (MT/day)": round(float(productivity), 2),
+                "Bucket": bucket_label,
+                "Idle Days": round(idle_days, 2),
+                "Idle Intervals": int(interval_count),
+                "Idle Days per Interval": round(idle_per_interval, 2),
+                "Towers Erected": erections,
+                "Daily Prod Sum (MT)": round(float(daily_weights.get(gang, 0.0)), 2),
+                "Tower Weight Sum (MT)": round(float(tower_weights.get(gang, 0.0)), 2),
+                "Project Codes": project_codes.get(gang, ""),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    audit_df = pd.DataFrame(rows, columns=columns)
+    bucket_order = [label for label, _ in buckets]
+    audit_df["Bucket"] = pd.Categorical(audit_df["Bucket"], categories=bucket_order, ordered=True)
+    audit_df = audit_df.sort_values(["Bucket", "Gang Name"]).reset_index(drop=True)
+    audit_df["Bucket"] = audit_df["Bucket"].astype(str)
+    return audit_df
+
+
+def _build_monthly_gang_production_buckets(
+    daily_df: pd.DataFrame | None,
+    *,
+    bucket_min: int = 80,
+    bucket_max: int = 260,
+    bucket_step: int = 20,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    count_columns = ["Bucket", "Gang-Months", "Sum of Tower Weight (MT)"]
+    detail_columns = [
+        "Gang Name",
+        "Month",
+        "Monthly Production (MT)",
+        "Monthly Tower Weight (MT)",
+        "Project Codes",
+        "Towers Erected",
+        "Bucket",
+    ]
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame(columns=count_columns), pd.DataFrame(columns=detail_columns)
+
+    working = daily_df.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"])
+    if working.empty:
+        return pd.DataFrame(columns=count_columns), pd.DataFrame(columns=detail_columns)
+
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working = working[working["gang_name"].astype(bool)]
+    if working.empty:
+        return pd.DataFrame(columns=count_columns), pd.DataFrame(columns=detail_columns)
+
+    working["daily_prod_mt"] = pd.to_numeric(working.get("daily_prod_mt"), errors="coerce").fillna(0.0)
+    working["month"] = working["date"].dt.to_period("M").dt.to_timestamp()
+    monthly = (
+        working.groupby(["gang_name", "month"], dropna=False)["daily_prod_mt"]
+        .sum()
+        .reset_index()
+        .rename(
+            columns={
+                "gang_name": "Gang Name",
+                "month": "Month",
+                "daily_prod_mt": "Monthly Production (MT)",
+            }
+        )
+    )
+    if monthly.empty:
+        return pd.DataFrame(columns=count_columns), pd.DataFrame(columns=detail_columns)
+
+    monthly["Monthly Production (MT)"] = pd.to_numeric(
+        monthly.get("Monthly Production (MT)"), errors="coerce"
+    ).fillna(0.0)
+
+    completion_rows = _extract_completion_rows(daily_df)
+    if not completion_rows.empty:
+        completion_rows["gang_name"] = (
+            completion_rows.get("gang_name", "").fillna("").astype(str).str.strip()
+        )
+        completion_rows = completion_rows[completion_rows["gang_name"].astype(bool)]
+        completion_rows["tower_weight"] = pd.to_numeric(
+            completion_rows.get("tower_weight"), errors="coerce"
+        ).fillna(0.0)
+        completion_rows["project_code"] = (
+            completion_rows.get("project_code", "").fillna("").astype(str).str.strip()
+        )
+        completion_rows["project_name"] = (
+            completion_rows.get("project_name", "").fillna("").astype(str).str.strip()
+        )
+        completion_rows["project_label"] = completion_rows["project_code"].where(
+            completion_rows["project_code"].astype(bool),
+            completion_rows["project_name"],
+        )
+        completion_rows["month_key"] = (
+            pd.to_datetime(completion_rows.get("completion_date"), errors="coerce")
+            .dt.to_period("M")
+            .dt.to_timestamp()
+        )
+
+        def _join_project_codes(series: pd.Series) -> str:
+            seen: set[str] = set()
+            ordered: list[str] = []
+            for value in series.fillna("").astype(str):
+                label = value.strip()
+                if not label or label in seen:
+                    continue
+                seen.add(label)
+                ordered.append(label)
+            return ", ".join(ordered)
+
+        tower_month = (
+            completion_rows.groupby(["gang_name", "month_key"], sort=False)
+            .agg(
+                tower_weight=("tower_weight", "sum"),
+                towers_erected=("tower_weight", "size"),
+                project_codes=("project_label", _join_project_codes),
+            )
+            .reset_index()
+        )
+    else:
+        tower_month = pd.DataFrame(
+            columns=["gang_name", "month_key", "tower_weight", "towers_erected", "project_codes"]
+        )
+
+    monthly = monthly.rename(columns={"Month": "month_key"})
+    monthly = monthly.merge(
+        tower_month,
+        left_on=["Gang Name", "month_key"],
+        right_on=["gang_name", "month_key"],
+        how="left",
+    )
+    monthly["Monthly Tower Weight (MT)"] = pd.to_numeric(
+        monthly.get("tower_weight"), errors="coerce"
+    ).fillna(0.0)
+    monthly["Project Codes"] = monthly.get("project_codes", "").fillna("").astype(str)
+    monthly["Towers Erected"] = pd.to_numeric(
+        monthly.get("towers_erected"), errors="coerce"
+    ).fillna(0).astype(int)
+    monthly["Month"] = pd.to_datetime(monthly["month_key"], errors="coerce").dt.strftime("%Y-%m")
+    monthly["Monthly Production (MT)"] = monthly["Monthly Production (MT)"].round(2)
+    monthly["Monthly Tower Weight (MT)"] = monthly["Monthly Tower Weight (MT)"].round(2)
+    monthly = monthly.drop(
+        columns=[
+            col
+            for col in (
+                "gang_name",
+                "tower_weight",
+                "month_key",
+                "project_codes",
+                "towers_erected",
+            )
+            if col in monthly.columns
+        ]
+    )
+
+    bucket_edges = list(range(int(bucket_min), int(bucket_max) + int(bucket_step), int(bucket_step)))
+    if not bucket_edges:
+        return pd.DataFrame(columns=count_columns), pd.DataFrame(columns=detail_columns)
+    labels = [f"<{bucket_edges[0]}"]
+    labels.extend(
+        f"{bucket_edges[idx]}-{bucket_edges[idx + 1]}"
+        for idx in range(len(bucket_edges) - 1)
+    )
+    labels.append(f">={bucket_edges[-1]}")
+    bins = [-float("inf"), *bucket_edges, float("inf")]
+
+    bucketed = pd.cut(
+        monthly["Monthly Production (MT)"],
+        bins=bins,
+        labels=labels,
+        right=False,
+        include_lowest=True,
+    )
+    bucketed = pd.Categorical(bucketed, categories=labels, ordered=True)
+    monthly["Bucket"] = bucketed
+
+    summary = (
+        monthly.groupby("Bucket", observed=False)
+        .agg(
+            **{
+                "Gang-Months": ("Bucket", "size"),
+                "Sum of Tower Weight (MT)": ("Monthly Tower Weight (MT)", "sum"),
+            }
+        )
+        .reindex(labels)
+        .fillna(0.0)
+    )
+    summary["Gang-Months"] = summary["Gang-Months"].astype(int)
+    summary["Sum of Tower Weight (MT)"] = summary["Sum of Tower Weight (MT)"].round(2)
+    counts_df = summary.reset_index().rename(columns={"Bucket": "Bucket"})
+    monthly["Bucket"] = monthly["Bucket"].astype(str)
+    details_df = monthly.reindex(columns=detail_columns)
+    return counts_df, details_df
+
+
 def _pch_sort_components(value: object) -> tuple[int, str]:
     label = str(value or "").strip()
     if label in _PCH_SORT_ORDER:
@@ -1524,6 +1983,58 @@ def _append_totals_row(df: pd.DataFrame) -> pd.DataFrame:
     totals[TOTAL_MT_COLUMN] = round(float(total_mt), 2)
     totals[TOTAL_COUNT_COLUMN] = int(total_count)
     return pd.concat([df, pd.DataFrame([totals])], ignore_index=True)
+
+
+def _count_unique_nonempty(series: pd.Series | None) -> int:
+    if series is None or not isinstance(series, pd.Series):
+        return 0
+    cleaned = series.fillna("").astype(str).str.strip()
+    return int(cleaned[cleaned.astype(bool)].nunique())
+
+
+def _resolve_project_series(df: pd.DataFrame | None) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
+    for column in ("project_code", "project_display", "project_name", "project"):
+        if column not in df.columns:
+            continue
+        series = df[column]
+        if not isinstance(series, pd.Series):
+            continue
+        cleaned = series.fillna("").astype(str).str.strip()
+        if cleaned[cleaned.astype(bool)].any():
+            return series
+    return pd.Series(dtype="object")
+
+
+def _build_scope_label_from_data(
+    daily_df: pd.DataFrame | None,
+    completions: pd.DataFrame | None,
+    *,
+    date_start: pd.Timestamp | None = None,
+    date_end: pd.Timestamp | None = None,
+) -> str:
+    date_start_ts = pd.Timestamp(date_start) if date_start is not None else None
+    date_end_ts = pd.Timestamp(date_end) if date_end is not None else None
+    if daily_df is not None and not daily_df.empty and (date_start_ts is None or date_end_ts is None):
+        date_series = pd.to_datetime(daily_df.get("date"), errors="coerce").dropna()
+        if not date_series.empty:
+            if date_start_ts is None:
+                date_start_ts = date_series.min()
+            if date_end_ts is None:
+                date_end_ts = date_series.max()
+
+    start_label = date_start_ts.strftime("%Y-%m-%d") if date_start_ts is not None else ""
+    end_label = date_end_ts.strftime("%Y-%m-%d") if date_end_ts is not None else ""
+    project_count = _count_unique_nonempty(_resolve_project_series(daily_df))
+    gang_count = _count_unique_nonempty(
+        daily_df["gang_name"] if daily_df is not None and "gang_name" in daily_df.columns else None
+    )
+    erection_count = int(len(completions)) if completions is not None else 0
+    return (
+        f"Scope: {start_label} to {end_label} | "
+        f"Projects: {project_count} | Erections: {erection_count} | Gangs: {gang_count}"
+    )
 
 
 def _build_group_productivity_table(
@@ -1792,11 +2303,189 @@ def export_erection_productivity_summary(
         completions,
         min_erections=int(gang_min_erections) if gang_min_erections is not None else 4,
     )
+    overall_gang_productivity = _build_overall_gang_productivity_map(source_daily)
+    month_gang_productivity = _build_gang_productivity_map(scope)
+    active_config = data_store._config if data_store is not None else AppConfig()
+    idle_intervals = compute_idle_intervals_per_gang(
+        scope,
+        loss_max_gap_days=active_config.loss_max_gap_days,
+    )
+    overall_idle_source = source_daily.copy()
+    overall_idle_source["date"] = pd.to_datetime(
+        overall_idle_source.get("date"), errors="coerce"
+    ).dt.normalize()
+    overall_idle_source = overall_idle_source.dropna(subset=["date"])
+    overall_idle_source["gang_name"] = (
+        overall_idle_source.get("gang_name", "").fillna("").astype(str).str.strip()
+    )
+    overall_idle_source = overall_idle_source[overall_idle_source["gang_name"].astype(bool)]
+    overall_idle_source["daily_prod_mt"] = pd.to_numeric(
+        overall_idle_source.get("daily_prod_mt"), errors="coerce"
+    ).fillna(0.0)
+    overall_idle_intervals = compute_idle_intervals_per_gang(
+        overall_idle_source,
+        loss_max_gap_days=active_config.loss_max_gap_days,
+    )
+    idle_days_by_gang: dict[str, int] = {}
+    idle_interval_counts_by_gang: dict[str, int] = {}
+    if not idle_intervals.empty and "gang_name" in idle_intervals.columns:
+        idle_days_by_gang = (
+            idle_intervals.groupby("gang_name")["idle_days_capped"].sum().fillna(0).astype(int).to_dict()
+        )
+        idle_interval_counts_by_gang = (
+            idle_intervals.groupby("gang_name").size().fillna(0).astype(int).to_dict()
+        )
+    overall_idle_days_by_gang: dict[str, int] = {}
+    overall_idle_interval_counts_by_gang: dict[str, int] = {}
+    if not overall_idle_intervals.empty and "gang_name" in overall_idle_intervals.columns:
+        overall_idle_days_by_gang = (
+            overall_idle_intervals.groupby("gang_name")["idle_days_capped"].sum().fillna(0).astype(int).to_dict()
+        )
+        overall_idle_interval_counts_by_gang = (
+            overall_idle_intervals.groupby("gang_name").size().fillna(0).astype(int).to_dict()
+        )
+
+    if AVG_PRODUCTIVITY_OVERALL_COLUMN not in gang_level_summary.columns:
+        gang_level_summary[AVG_PRODUCTIVITY_OVERALL_COLUMN] = pd.Series(
+            index=gang_level_summary.index, dtype="float64"
+        )
+    if IDLE_DAYS_COLUMN not in gang_level_summary.columns:
+        gang_level_summary[IDLE_DAYS_COLUMN] = pd.Series(index=gang_level_summary.index, dtype="int64")
+    if IDLE_INTERVALS_COLUMN not in gang_level_summary.columns:
+        gang_level_summary[IDLE_INTERVALS_COLUMN] = pd.Series(index=gang_level_summary.index, dtype="int64")
+    if "Gang Name" in gang_level_summary.columns and not gang_level_summary.empty:
+        gang_names = gang_level_summary["Gang Name"].astype(str).str.strip()
+        gang_level_summary[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
+            gang_names.map(overall_gang_productivity).fillna(0.0).round(2)
+        )
+        gang_level_summary[IDLE_DAYS_COLUMN] = gang_names.map(idle_days_by_gang).fillna(0).astype(int)
+        gang_level_summary[IDLE_INTERVALS_COLUMN] = (
+            gang_names.map(idle_interval_counts_by_gang).fillna(0).astype(int)
+        )
+
+    gang_level_columns = [
+        "PCH",
+        "Project",
+        "Gang Name",
+        AVG_PRODUCTIVITY_COLUMN,
+        AVG_PRODUCTIVITY_OVERALL_COLUMN,
+        TOTAL_MT_COLUMN,
+        TOTAL_COUNT_COLUMN,
+        AVG_TOWER_WEIGHT_OVERALL_COLUMN,
+        IDLE_DAYS_COLUMN,
+        IDLE_INTERVALS_COLUMN,
+    ]
+    gang_level_summary = gang_level_summary.reindex(
+        columns=[column for column in gang_level_columns if column in gang_level_summary.columns]
+    )
+
+    def _apply_gang_metrics(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            df[AVG_PRODUCTIVITY_OVERALL_COLUMN] = pd.Series(dtype="float64")
+            df[IDLE_DAYS_COLUMN] = pd.Series(dtype="int64")
+            df[IDLE_INTERVALS_COLUMN] = pd.Series(dtype="int64")
+            return df
+        if "Gang Name" not in df.columns:
+            df[AVG_PRODUCTIVITY_OVERALL_COLUMN] = 0.0
+            df[IDLE_DAYS_COLUMN] = 0
+            df[IDLE_INTERVALS_COLUMN] = 0
+            return df
+        names = df["Gang Name"].astype(str).str.strip()
+        df[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
+            names.map(overall_gang_productivity).fillna(0.0).round(2)
+        )
+        df[IDLE_DAYS_COLUMN] = names.map(idle_days_by_gang).fillna(0).astype(int)
+        df[IDLE_INTERVALS_COLUMN] = names.map(idle_interval_counts_by_gang).fillna(0).astype(int)
+        return df
+
+    ranking_columns = [
+        "PCH",
+        "Project",
+        "Gang Name",
+        AVG_PRODUCTIVITY_COLUMN,
+        AVG_PRODUCTIVITY_OVERALL_COLUMN,
+        TOTAL_MT_COLUMN,
+        TOTAL_COUNT_COLUMN,
+        AVG_TOWER_WEIGHT_OVERALL_COLUMN,
+        IDLE_DAYS_COLUMN,
+        IDLE_INTERVALS_COLUMN,
+    ]
+    top_gangs = _apply_gang_metrics(top_gangs)
+    bottom_gangs = _apply_gang_metrics(bottom_gangs)
+    top_gangs = top_gangs.reindex(columns=ranking_columns)
+    bottom_gangs = bottom_gangs.reindex(columns=ranking_columns)
+    for column in (IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN):
+        top_gangs[column] = pd.to_numeric(top_gangs[column], errors="coerce").fillna(0).astype(int)
+        bottom_gangs[column] = pd.to_numeric(bottom_gangs[column], errors="coerce").fillna(0).astype(int)
+    if AVG_PRODUCTIVITY_OVERALL_COLUMN in top_gangs.columns:
+        top_gangs[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
+            pd.to_numeric(top_gangs[AVG_PRODUCTIVITY_OVERALL_COLUMN], errors="coerce").fillna(0.0).round(2)
+        )
+    if AVG_PRODUCTIVITY_OVERALL_COLUMN in bottom_gangs.columns:
+        bottom_gangs[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
+            pd.to_numeric(bottom_gangs[AVG_PRODUCTIVITY_OVERALL_COLUMN], errors="coerce").fillna(0.0).round(2)
+        )
+    if AVG_TOWER_WEIGHT_OVERALL_COLUMN in top_gangs.columns:
+        top_gangs[AVG_TOWER_WEIGHT_OVERALL_COLUMN] = (
+            pd.to_numeric(top_gangs[AVG_TOWER_WEIGHT_OVERALL_COLUMN], errors="coerce").fillna(0.0).round(2)
+        )
+    if AVG_TOWER_WEIGHT_OVERALL_COLUMN in bottom_gangs.columns:
+        bottom_gangs[AVG_TOWER_WEIGHT_OVERALL_COLUMN] = (
+            pd.to_numeric(bottom_gangs[AVG_TOWER_WEIGHT_OVERALL_COLUMN], errors="coerce").fillna(0.0).round(2)
+        )
+
+    mtd_erection_counts = _build_completion_counts_by_gang(completions)
+    overall_completions = _extract_completion_rows(source_daily)
+    overall_erection_counts = _build_completion_counts_by_gang(overall_completions)
+    mtd_total_mt_by_gang = _build_gang_total_map(scope)
+    overall_total_mt_by_gang = _build_gang_total_map(overall_idle_source)
+    mtd_tower_weight_by_gang = _build_gang_total_map(completions, metric_column="tower_weight")
+    overall_tower_weight_by_gang = _build_gang_total_map(overall_completions, metric_column="tower_weight")
+    mtd_idle_bucket_tables = _build_idle_days_bucket_tables(
+        productivity_map=month_gang_productivity,
+        idle_days_map=idle_days_by_gang,
+        erection_counts=mtd_erection_counts,
+        idle_interval_counts=idle_interval_counts_by_gang,
+        daily_weight_map=mtd_total_mt_by_gang,
+        tower_weight_map=mtd_tower_weight_by_gang,
+    )
+    overall_idle_bucket_tables = _build_idle_days_bucket_tables(
+        productivity_map=overall_gang_productivity,
+        idle_days_map=overall_idle_days_by_gang,
+        erection_counts=overall_erection_counts,
+        idle_interval_counts=overall_idle_interval_counts_by_gang,
+        daily_weight_map=overall_total_mt_by_gang,
+        tower_weight_map=overall_tower_weight_by_gang,
+    )
+    mtd_idle_bucket_audit = _build_idle_days_bucket_audit(
+        productivity_map=month_gang_productivity,
+        idle_days_map=idle_days_by_gang,
+        erection_counts=mtd_erection_counts,
+        idle_interval_counts=idle_interval_counts_by_gang,
+        daily_weight_map=mtd_total_mt_by_gang,
+        tower_weight_map=mtd_tower_weight_by_gang,
+        completions=completions,
+        threshold=3,
+    )
+    overall_idle_bucket_audit = _build_idle_days_bucket_audit(
+        productivity_map=overall_gang_productivity,
+        idle_days_map=overall_idle_days_by_gang,
+        erection_counts=overall_erection_counts,
+        idle_interval_counts=overall_idle_interval_counts_by_gang,
+        daily_weight_map=overall_total_mt_by_gang,
+        tower_weight_map=overall_tower_weight_by_gang,
+        completions=overall_completions,
+        threshold=3,
+    )
+    monthly_bucket_counts, monthly_bucket_details = _build_monthly_gang_production_buckets(source_daily)
 
     sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_SHEET_NAME) or _DEFAULT_SHEET_NAME
     review_sheet_label = _sanitize_sheet_name("Review_Format")
     gangs_sheet_label = _sanitize_sheet_name("Project Gang Rankings")
     gang_level_sheet_label = _sanitize_sheet_name("Gang Level Productivity")
+    idle_sheet_label = _sanitize_sheet_name("Idle Intervals")
+    idle_bucket_sheet_label = _sanitize_sheet_name("Idle Days Buckets")
+    monthly_bucket_sheet_label = _sanitize_sheet_name("Monthly Gang Buckets")
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1807,6 +2496,16 @@ def export_erection_productivity_summary(
         months.append(month_cursor)
         month_cursor = (month_cursor + pd.offsets.MonthBegin(1)).normalize()
     month_labels = [month.strftime("%b'%y") for month in months]
+    scope_label = _build_scope_label_from_data(
+        scope,
+        completions,
+        date_start=month_start,
+        date_end=month_end,
+    )
+    overall_scope_label = _build_scope_label_from_data(
+        source_daily,
+        overall_completions,
+    )
 
     def _build_review_table_two(scoped: pd.DataFrame, *, label_col: str = "Erection productivity") -> pd.DataFrame:
         weight_row: dict[str, object] = {label_col: "Weight/day (Avg)"}
@@ -1888,6 +2587,32 @@ def export_erection_productivity_summary(
             )
             review_table_two_groups.append(_build_review_table_two(pch_scope))
 
+    idle_export_columns = {
+        "gang_name": "Gang",
+        "interval_start": "Interval Start",
+        "interval_end": "Interval End",
+        "raw_gap_days": "Raw Gap (days)",
+        "idle_days_capped": IDLE_DAYS_COLUMN,
+    }
+    if idle_intervals.empty:
+        idle_export = pd.DataFrame(columns=list(idle_export_columns.values()))
+    else:
+        idle_export = idle_intervals.rename(columns=idle_export_columns).copy()
+        idle_export = idle_export.reindex(columns=list(idle_export_columns.values()))
+        for date_column in ("Interval Start", "Interval End"):
+            if date_column in idle_export.columns:
+                idle_export[date_column] = pd.to_datetime(
+                    idle_export[date_column], errors="coerce"
+                ).dt.strftime("%d-%m-%Y")
+        if "Raw Gap (days)" in idle_export.columns:
+            idle_export["Raw Gap (days)"] = pd.to_numeric(
+                idle_export["Raw Gap (days)"], errors="coerce"
+            ).fillna(0).astype(int)
+        if IDLE_DAYS_COLUMN in idle_export.columns:
+            idle_export[IDLE_DAYS_COLUMN] = pd.to_numeric(
+                idle_export[IDLE_DAYS_COLUMN], errors="coerce"
+            ).fillna(0).astype(int)
+
     def _unique_sheet_name(base: str, used: set[str]) -> str:
         sanitized = _sanitize_sheet_name(base) or "Sheet"
         candidate = sanitized
@@ -1899,6 +2624,32 @@ def export_erection_productivity_summary(
         used.add(candidate)
         return candidate
 
+    def _write_scope_row(
+        writer: pd.ExcelWriter,
+        sheet: str,
+        label: str,
+        *,
+        startrow: int,
+        startcol: int = 0,
+    ) -> int:
+        pd.DataFrame([[label]]).to_excel(
+            writer, sheet_name=sheet, index=False, header=False, startrow=startrow, startcol=startcol
+        )
+        return startrow + 1
+
+    def _write_scoped_table(
+        writer: pd.ExcelWriter,
+        sheet: str,
+        table: pd.DataFrame,
+        label: str,
+        *,
+        startrow: int,
+        startcol: int = 0,
+    ) -> int:
+        next_row = _write_scope_row(writer, sheet, label, startrow=startrow, startcol=startcol)
+        table.to_excel(writer, sheet_name=sheet, index=False, startrow=next_row, startcol=startcol)
+        return next_row + len(table) + 1
+
     LOGGER.info(
         "Exporting erection productivity summary for %s (current week: %s) to %s",
         active_date.strftime("%Y-%m"),
@@ -1907,16 +2658,24 @@ def export_erection_productivity_summary(
     )
 
     gap_rows = max(2, int(blank_rows_between_tables))
-    overall_table_height = len(overall_summary) + 1
-    pch_table_start = overall_table_height + gap_rows
-    pch_table_height = len(pch_summary) + 1
-    project_table_start = pch_table_start + pch_table_height + gap_rows
 
     with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
-        overall_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=0)
-        pch_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=pch_table_start)
-        project_summary.to_excel(writer, sheet_name=sheet_label, index=False, startrow=project_table_start)
+        main_row = 0
+        main_row = _write_scoped_table(
+            writer, sheet_label, overall_summary, scope_label, startrow=main_row
+        )
+        main_row += gap_rows
+        main_row = _write_scoped_table(
+            writer, sheet_label, pch_summary, scope_label, startrow=main_row
+        )
+        main_row += gap_rows
+        _write_scoped_table(
+            writer, sheet_label, project_summary, scope_label, startrow=main_row
+        )
+
         current_row = 0
+        current_row = _write_scope_row(writer, review_sheet_label, scope_label, startrow=current_row)
+        current_row += 1
         group_gap_rows = 1
         for table in review_table_one_groups:
             if table.empty:
@@ -1941,37 +2700,202 @@ def export_erection_productivity_summary(
                 startrow=current_row,
             )
             current_row += len(table) + 1 + group_gap_rows
-        gang_level_summary.to_excel(writer, sheet_name=gang_level_sheet_label, index=False)
-        top_title_row = {
-            "PCH": "Top 3 Gangs",
-            "Project": "",
-            "Gang Name": "",
-            AVG_PRODUCTIVITY_COLUMN: "",
-            TOTAL_MT_COLUMN: "",
-            TOTAL_COUNT_COLUMN: "",
-            **{column: "" for column in TOWER_WEIGHT_COLUMNS},
-        }
-        bottom_title_row = {
-            "PCH": "Bottom 3 Gangs",
-            "Project": "",
-            "Gang Name": "",
-            AVG_PRODUCTIVITY_COLUMN: "",
-            TOTAL_MT_COLUMN: "",
-            TOTAL_COUNT_COLUMN: "",
-            **{column: "" for column in TOWER_WEIGHT_COLUMNS},
-        }
-        top_title = pd.DataFrame([top_title_row])
-        bottom_title = pd.DataFrame([bottom_title_row])
-        top_title.to_excel(writer, sheet_name=gangs_sheet_label, index=False, header=False, startrow=0)
-        top_gangs.to_excel(writer, sheet_name=gangs_sheet_label, index=False, startrow=1)
+        gang_row = _write_scope_row(writer, gang_level_sheet_label, scope_label, startrow=0)
+        gang_level_summary.to_excel(writer, sheet_name=gang_level_sheet_label, index=False, startrow=gang_row)
+
+        idle_row = _write_scope_row(writer, idle_sheet_label, scope_label, startrow=0)
+        idle_export.to_excel(writer, sheet_name=idle_sheet_label, index=False, startrow=idle_row)
+
+        rankings_row = _write_scope_row(writer, gangs_sheet_label, scope_label, startrow=0)
+        top_title_row = {column: "" for column in ranking_columns}
+        top_title_row["PCH"] = "Top 3 Gangs"
+        bottom_title_row = {column: "" for column in ranking_columns}
+        bottom_title_row["PCH"] = "Bottom 3 Gangs"
+        top_title = pd.DataFrame([top_title_row], columns=ranking_columns)
+        bottom_title = pd.DataFrame([bottom_title_row], columns=ranking_columns)
+        top_title_row_start = rankings_row
+        top_title.to_excel(
+            writer, sheet_name=gangs_sheet_label, index=False, header=False, startrow=top_title_row_start
+        )
+        top_gangs_start = top_title_row_start + 1
+        top_gangs.to_excel(writer, sheet_name=gangs_sheet_label, index=False, startrow=top_gangs_start)
         top_table_height = len(top_gangs) + 1
-        bottom_title_row = 1 + top_table_height + gap_rows
+        bottom_title_row = top_gangs_start + top_table_height + gap_rows
         bottom_title.to_excel(
             writer, sheet_name=gangs_sheet_label, index=False, header=False, startrow=bottom_title_row
         )
         bottom_gangs.to_excel(writer, sheet_name=gangs_sheet_label, index=False, startrow=bottom_title_row + 1)
 
-        used_sheet_names: set[str] = {sheet_label, review_sheet_label, gangs_sheet_label, gang_level_sheet_label}
+        bucket_row = 0
+        bucket_gap_rows = 2
+        bucket_gap_cols = 3
+        thresholds = (1, 2, 3)
+        sample_table = overall_idle_bucket_tables.get(thresholds[0])
+        if sample_table is None or not len(sample_table.columns):
+            sample_table = mtd_idle_bucket_tables.get(thresholds[0])
+        table_columns = list(sample_table.columns) if sample_table is not None else []
+        empty_bucket_table = pd.DataFrame(columns=table_columns)
+        table_width = len(table_columns)
+        audit_width = max(len(overall_idle_bucket_audit.columns), len(mtd_idle_bucket_audit.columns))
+        table_span = max(table_width, audit_width)
+        overall_startcol = 0
+        mtd_startcol = overall_startcol + table_span + bucket_gap_cols
+
+        overall_title = pd.DataFrame([["Overall Idle Days Buckets"]])
+        overall_title.to_excel(
+            writer,
+            sheet_name=idle_bucket_sheet_label,
+            index=False,
+            header=False,
+            startrow=bucket_row,
+            startcol=overall_startcol,
+        )
+        mtd_title = pd.DataFrame([["MTD Idle Days Buckets"]])
+        mtd_title.to_excel(
+            writer,
+            sheet_name=idle_bucket_sheet_label,
+            index=False,
+            header=False,
+            startrow=bucket_row,
+            startcol=mtd_startcol,
+        )
+        bucket_row += len(overall_title) + 1
+
+        for threshold in thresholds:
+            label = f"Erections >={threshold}"
+            pd.DataFrame([[label]]).to_excel(
+                writer,
+                sheet_name=idle_bucket_sheet_label,
+                index=False,
+                header=False,
+                startrow=bucket_row,
+                startcol=overall_startcol,
+            )
+            pd.DataFrame([[label]]).to_excel(
+                writer,
+                sheet_name=idle_bucket_sheet_label,
+                index=False,
+                header=False,
+                startrow=bucket_row,
+                startcol=mtd_startcol,
+            )
+            bucket_row += 1
+            _write_scope_row(
+                writer,
+                idle_bucket_sheet_label,
+                overall_scope_label,
+                startrow=bucket_row,
+                startcol=overall_startcol,
+            )
+            _write_scope_row(
+                writer,
+                idle_bucket_sheet_label,
+                scope_label,
+                startrow=bucket_row,
+                startcol=mtd_startcol,
+            )
+            bucket_row += 1
+
+            overall_table = overall_idle_bucket_tables.get(threshold, empty_bucket_table)
+            if overall_table is None:
+                overall_table = empty_bucket_table
+            mtd_table = mtd_idle_bucket_tables.get(threshold, empty_bucket_table)
+            if mtd_table is None:
+                mtd_table = empty_bucket_table
+
+            overall_table.to_excel(
+                writer,
+                sheet_name=idle_bucket_sheet_label,
+                index=False,
+                startrow=bucket_row,
+                startcol=overall_startcol,
+            )
+            mtd_table.to_excel(
+                writer,
+                sheet_name=idle_bucket_sheet_label,
+                index=False,
+                startrow=bucket_row,
+                startcol=mtd_startcol,
+            )
+            table_height = max(len(overall_table), len(mtd_table)) + 1
+            bucket_row += table_height + bucket_gap_rows
+
+        audit_title = pd.DataFrame([["Idle Days Audit (Erections >=3)"]])
+        audit_title.to_excel(
+            writer,
+            sheet_name=idle_bucket_sheet_label,
+            index=False,
+            header=False,
+            startrow=bucket_row,
+            startcol=overall_startcol,
+        )
+        audit_title.to_excel(
+            writer,
+            sheet_name=idle_bucket_sheet_label,
+            index=False,
+            header=False,
+            startrow=bucket_row,
+            startcol=mtd_startcol,
+        )
+        bucket_row += len(audit_title) + 1
+        _write_scope_row(
+            writer,
+            idle_bucket_sheet_label,
+            overall_scope_label,
+            startrow=bucket_row,
+            startcol=overall_startcol,
+        )
+        _write_scope_row(
+            writer,
+            idle_bucket_sheet_label,
+            scope_label,
+            startrow=bucket_row,
+            startcol=mtd_startcol,
+        )
+        bucket_row += 1
+        overall_idle_bucket_audit.to_excel(
+            writer,
+            sheet_name=idle_bucket_sheet_label,
+            index=False,
+            startrow=bucket_row,
+            startcol=overall_startcol,
+        )
+        mtd_idle_bucket_audit.to_excel(
+            writer,
+            sheet_name=idle_bucket_sheet_label,
+            index=False,
+            startrow=bucket_row,
+            startcol=mtd_startcol,
+        )
+
+        monthly_row = 0
+        monthly_gap_rows = 2
+        monthly_title = pd.DataFrame([["Monthly Gang Production Buckets (All Data)"]])
+        monthly_title.to_excel(
+            writer, sheet_name=monthly_bucket_sheet_label, index=False, header=False, startrow=monthly_row
+        )
+        scope_row = monthly_row + len(monthly_title)
+        _write_scope_row(
+            writer, monthly_bucket_sheet_label, overall_scope_label, startrow=scope_row
+        )
+        monthly_row += len(monthly_title) + 2
+        monthly_bucket_counts.to_excel(
+            writer, sheet_name=monthly_bucket_sheet_label, index=False, startrow=monthly_row
+        )
+        monthly_row += len(monthly_bucket_counts) + 1 + monthly_gap_rows
+        monthly_bucket_details.to_excel(
+            writer, sheet_name=monthly_bucket_sheet_label, index=False, startrow=monthly_row
+        )
+
+        used_sheet_names: set[str] = {
+            sheet_label,
+            review_sheet_label,
+            gangs_sheet_label,
+            gang_level_sheet_label,
+            idle_sheet_label,
+            idle_bucket_sheet_label,
+            monthly_bucket_sheet_label,
+        }
         if not review_table_raw.empty and "PCH" in review_table_raw.columns and "pch_display" in scope.columns:
             for pch_name in sorted(review_table_raw["PCH"].fillna("").astype(str).unique(), key=_pch_sort_components):
                 if not pch_name:
@@ -1985,6 +2909,10 @@ def export_erection_productivity_summary(
                 pch_table_two_overall = _build_review_table_two(pch_scope)
 
                 current_row = 0
+                current_row = _write_scope_row(
+                    writer, pch_sheet_name, scope_label, startrow=current_row
+                )
+                current_row += 1
                 pch_table_one.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
                 current_row += len(pch_table_one) + 1 + group_gap_rows
 

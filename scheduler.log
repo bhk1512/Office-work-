@@ -1,0 +1,59 @@
+[Mon 01/19/2026 16:32:21.17] Scheduler started. 
+[Mon 01/19/2026 16:39:25.57] Scheduler started 
+[Mon 01/19/2026 16:41:12.94] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 16:41:25.68] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 16:42:53.88] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 16:49:32.89] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 16:53:02.33] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 16:53:43.22] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 16:58:20.64] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:10:34.98] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:16:32.74] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-run_pipeline_commit.bat
+[Mon 01/19/2026 17:16:32.78] ERROR: JOB_BAT not found: C:\Users\kaushikb\Documents\Work\Git\Office-work-run_pipeline_commit.bat
+[Mon 01/19/2026 17:17:18.32] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:24:16.63] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-\
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:28:19.55] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:28:19.57] Scheduler running (keep window open).
+[Mon 01/19/2026 17:29:15.47] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:29:15.51] NOTE: Lock exists: C:\Users\kaushikb\AppData\Local\Temp\dashboard_scheduler.lock
+[Mon 01/19/2026 17:29:35.12] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Mon 01/19/2026 17:29:35.13] NOTE: Lock exists: C:\Users\kaushikb\AppData\Local\Temp\dashboard_scheduler.lock
+[Tue 01/20/2026 11:47:39.61] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Tue 01/20/2026 11:47:39.61] NOTE: Removing stale lock C:\Users\kaushikb\AppData\Local\Temp\dashboard_scheduler.lock
+[Tue 01/20/2026 11:47:39.63] Scheduler running (keep window open).
+[Thu 01/22/2026 11:21:11.80] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Thu 01/22/2026 11:21:12.04] NOTE: Removing stale lock C:\Users\kaushikb\AppData\Local\Temp\dashboard_scheduler.lock
+[Thu 01/22/2026 11:21:12.09] Scheduler running (keep window open).
+[Thu 01/22/2026 11:30:19.20] Trigger 11:30 starting job
