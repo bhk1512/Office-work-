@@ -35,6 +35,11 @@ try:
 except ImportError:  # Dash < 2.6
     dash_ctx = None
 
+try:
+    from diskcache import Cache
+except Exception:  # pragma: no cover - optional fallback
+    Cache = None  # type: ignore[assignment]
+
 from .charts import (
     # create_monthly_line_chart,
     create_project_lines_chart,
@@ -57,6 +62,13 @@ from .metrics import (
     compute_project_baseline_maps_for,
 )
 from .workbook import make_trace_workbook_bytes
+from .analytics import (
+    build_analytics_payload,
+    IDLE_CAP_DAYS,
+    MIN_ERECTIONS_FOR_TIERS,
+    PRODUCTIVITY_TIER_HIGH,
+    PRODUCTIVITY_TIER_LOW,
+)
 from .callback_utils import DataSelector, ResponsibilitiesAccessor, ResponsibilitiesPayload
 from .plan_utils import (
     normalize_col_key as _normalize_col_key,
@@ -130,6 +142,11 @@ _AGGREGATE_CACHE: "OrderedDict[str, _AggregateCacheEntry]" = OrderedDict()
 DATA_SELECTOR: DataSelector | None = None
 _PROJECT_INFO_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _REGISTERED_DASH_APPS: "WeakSet[Dash]" = WeakSet()
+
+_ANALYTICS_CACHE_TTL_SECONDS = 12 * 60 * 60
+_ANALYTICS_CACHE_DIR = Path(".") / ".analytics_cache"
+_ANALYTICS_CACHE = Cache(str(_ANALYTICS_CACHE_DIR)) if Cache else None
+_ANALYTICS_STAMP_CACHE: dict[str, object] = {"stamp": "", "checked_at": 0.0}
 
 _IDLE_INTERVAL_CACHE_TTL_SECONDS = 300.0
 _IDLE_INTERVAL_CACHE: dict[str, tuple[pd.DataFrame, float]] = {}
@@ -454,6 +471,50 @@ def _format_decimal(value: float | int | None) -> str:
     if pd.isna(value):
         return ""
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def _analytics_data_stamp(data_path: Path) -> str:
+    now = time.time()
+    cached_stamp = _ANALYTICS_STAMP_CACHE.get("stamp")
+    cached_at = _ANALYTICS_STAMP_CACHE.get("checked_at", 0.0)
+    if cached_stamp and isinstance(cached_at, (int, float)) and (now - cached_at) < 300:
+        return str(cached_stamp)
+
+    stamp = 0.0
+    try:
+        path = Path(data_path)
+        if path.is_file():
+            stamp = path.stat().st_mtime
+        else:
+            candidates: list[Path] = []
+            for pattern in ("*.parquet", "*.parq", "*.pq", "*.xlsx", "*.xlsm", "*.xlsb", "*.xls"):
+                candidates.extend(path.rglob(pattern))
+            if candidates:
+                stamp = max(candidate.stat().st_mtime for candidate in candidates)
+            elif path.exists():
+                stamp = path.stat().st_mtime
+    except Exception:
+        stamp = 0.0
+
+    _ANALYTICS_STAMP_CACHE["stamp"] = stamp
+    _ANALYTICS_STAMP_CACHE["checked_at"] = now
+    return str(stamp)
+
+
+def _analytics_cache_key(
+    projects: Sequence[str],
+    months: Sequence[pd.Timestamp],
+    gangs: Sequence[str],
+    data_stamp: str,
+) -> str:
+    payload = {
+        "mode": "erection",
+        "projects": sorted({str(value).strip() for value in projects if str(value).strip()}),
+        "months": [ts.strftime("%Y-%m") for ts in months if isinstance(ts, pd.Timestamp)],
+        "gangs": sorted({str(value).strip() for value in gangs if str(value).strip()}),
+        "data_stamp": data_stamp,
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 # --- helper: average days across selected months (fallback 30) ---
 def _avg_days_in_selected_months(months_ts) -> float:
@@ -5075,6 +5136,16 @@ def register_callbacks(
         if trigger_id in {"btn-reset-filters", "link-clear-quick-range"}:
             return None
         return dash.no_update
+
+    @app.callback(
+        Output("link-clear-quick-range", "style"),
+        Input("f-quick-range", "value"),
+        prevent_initial_call=False,
+    )
+    def toggle_clear_quick_range_link(quick_range: str | None) -> dict:
+        if quick_range:
+            return {}
+        return {"display": "none"}
 
 
     @app.callback(
@@ -10392,6 +10463,845 @@ def register_callbacks(
             title = f"Traceability - {gang_value}"
             return True, title
         raise PreventUpdate
+
+    def _analytics_empty_fig(message: str) -> go.Figure:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=message,
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font={"size": 13, "color": "#64748b"},
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 30, "r": 20, "t": 20, "b": 30},
+            xaxis={"visible": False},
+            yaxis={"visible": False},
+        )
+        return fig
+
+    def _analytics_chart_layout(title: str, yaxis_title: str) -> dict[str, Any]:
+        return {
+            "template": "plotly_white",
+            "paper_bgcolor": "white",
+            "plot_bgcolor": "white",
+            "margin": {"l": 40, "r": 20, "t": 24, "b": 40},
+            "font": {"family": "Inter, system-ui", "size": 12, "color": "#0f172a"},
+            "legend": {"orientation": "h", "y": 1.15, "x": 0},
+            "xaxis": {"title": title, "tickangle": -25},
+            "yaxis": {"title": yaxis_title, "gridcolor": "#e6e9f0", "zerolinecolor": "#e6e9f0"},
+        }
+
+    def _analytics_sparkline(
+        x_values: list[str],
+        y_values: list[float],
+        *,
+        color: str,
+    ) -> go.Figure:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=y_values,
+                mode="lines+markers",
+                line={"color": color, "width": 2},
+                marker={"size": 5},
+                hovertemplate="%{y:.1f}<extra></extra>",
+            )
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 10, "r": 10, "t": 10, "b": 10},
+            xaxis={"visible": False},
+            yaxis={"visible": False},
+        )
+        return fig
+
+    def _analytics_table_from_selection(
+        payload: dict[str, Any] | None,
+        selection: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]], str]:
+        if not payload or not selection:
+            return [], [], ""
+        kind = selection.get("kind")
+        definition = ""
+
+        if kind == "bucket":
+            bucket = selection.get("bucket")
+            rows = [
+                row
+                for row in (payload.get("bucket", {}).get("gang_months") or [])
+                if row.get("bucket_label") == bucket
+            ]
+            df = pd.DataFrame(rows)
+            columns = [
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Month", "id": "month"},
+                {"name": "MT (month)", "id": "total_mt"},
+                {"name": "Bucket", "id": "bucket_label"},
+                {"name": "Projects", "id": "projects"},
+            ]
+            if not df.empty:
+                df["total_mt"] = pd.to_numeric(df["total_mt"], errors="coerce").round(2)
+            definition = (
+                "Gang-month buckets are based on total MT per gang per calendar month. "
+                "Shares compare the count of gang-months with their MT contribution. "
+                "What-if assumes <80 gang-months reach the target average while total output stays constant."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "tier":
+            tier = selection.get("tier")
+            rows = [
+                row
+                for row in (payload.get("tiers", {}).get("gangs") or [])
+                if row.get("tier") == tier
+            ]
+            df = pd.DataFrame(rows)
+            if "erections_completed" in df.columns:
+                df = df[pd.to_numeric(df["erections_completed"], errors="coerce") >= MIN_ERECTIONS_FOR_TIERS]
+            columns = [
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Tier", "id": "tier"},
+                {"name": "Avg MT/day", "id": "avg_prod_mt_day"},
+                {"name": "Idle Windows", "id": "idle_windows"},
+                {"name": "Idle Days", "id": "idle_days_capped"},
+                {"name": "Completions", "id": "erections_completed"},
+                {"name": "Towers", "id": "towers"},
+                {"name": "Projects", "id": "projects"},
+            ]
+            if not df.empty:
+                df["avg_prod_mt_day"] = pd.to_numeric(df["avg_prod_mt_day"], errors="coerce").round(2)
+                df["idle_days_capped"] = pd.to_numeric(df["idle_days_capped"], errors="coerce").round(1)
+            definition = (
+                "Tiers use average MT/day per gang over the selected period. "
+                "Idle windows count gaps between work dates; idle days are capped at 15."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "hist_bin":
+            bin_label = selection.get("bin")
+            rows = [
+                row
+                for row in (payload.get("tiers", {}).get("gangs") or [])
+                if row.get("hist_bin") == bin_label
+            ]
+            df = pd.DataFrame(rows)
+            columns = [
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Bin", "id": "hist_bin"},
+                {"name": "Avg MT/day", "id": "avg_prod_mt_day"},
+                {"name": "Tier", "id": "tier"},
+                {"name": "Idle Windows", "id": "idle_windows"},
+                {"name": "Idle Days", "id": "idle_days_capped"},
+                {"name": "Projects", "id": "projects"},
+            ]
+            if not df.empty:
+                df["avg_prod_mt_day"] = pd.to_numeric(df["avg_prod_mt_day"], errors="coerce").round(2)
+                df["idle_days_capped"] = pd.to_numeric(df["idle_days_capped"], errors="coerce").round(1)
+            definition = (
+                "Histogram bins use per-gang average MT/day across the selected period."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "idle_windows":
+            tiers = set(selection.get("tiers") or [])
+            gang_rows = payload.get("tiers", {}).get("gangs") or []
+            eligible_gangs = {
+                row.get("gang_name")
+                for row in gang_rows
+                if float(row.get("erections_completed", 0) or 0) >= MIN_ERECTIONS_FOR_TIERS
+            }
+            tier_map = {
+                row.get("gang_name"): row.get("tier")
+                for row in gang_rows
+                if row.get("gang_name") in eligible_gangs
+            }
+            interval_rows = payload.get("tiers", {}).get("idle_intervals") or []
+            rows = []
+            for row in interval_rows:
+                if row.get("gang_name") not in eligible_gangs:
+                    continue
+                tier = tier_map.get(row.get("gang_name"))
+                if tiers and tier not in tiers:
+                    continue
+                merged = dict(row)
+                merged["tier"] = tier or ""
+                rows.append(merged)
+            df = pd.DataFrame(rows)
+            columns = [
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Tier", "id": "tier"},
+                {"name": "Interval Start", "id": "interval_start"},
+                {"name": "Interval End", "id": "interval_end"},
+                {"name": "Raw Gap (days)", "id": "raw_gap_days"},
+                {"name": "Idle Counted (days)", "id": "idle_days_capped"},
+            ]
+            definition = (
+                "Idle window = gap between consecutive work dates. "
+                "Idle days per window are capped at 15."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "hotspot":
+            project_name = selection.get("project")
+            rows = [
+                row
+                for row in (payload.get("hotspot", {}).get("gangs") or [])
+                if not project_name or row.get("project_name") == project_name
+            ]
+            if not rows:
+                rows = payload.get("hotspot", {}).get("projects") or []
+            df = pd.DataFrame(rows)
+            if "project_name" in df.columns and "gang_name" in df.columns:
+                columns = [
+                    {"name": "Project", "id": "project_name"},
+                    {"name": "Gang", "id": "gang_name"},
+                    {"name": "Avg MT/day", "id": "avg_prod_mt_day"},
+                    {"name": "Idle Windows", "id": "idle_windows"},
+                    {"name": "Idle Days", "id": "idle_days_capped"},
+                    {"name": "Towers", "id": "towers"},
+                ]
+                if not df.empty:
+                    df["avg_prod_mt_day"] = pd.to_numeric(df["avg_prod_mt_day"], errors="coerce").round(2)
+                    df["idle_days_capped"] = pd.to_numeric(df["idle_days_capped"], errors="coerce").round(1)
+            else:
+                columns = [
+                    {"name": "Project", "id": "project_name"},
+                    {"name": "Gangs", "id": "gangs"},
+                    {"name": "Towers", "id": "towers"},
+                    {"name": "Idle Days", "id": "idle_days"},
+                    {"name": "Idle Days / 100 Towers", "id": "idle_days_per_100"},
+                ]
+                if not df.empty and "idle_days_per_100" in df.columns:
+                    df["idle_days_per_100"] = pd.to_numeric(df["idle_days_per_100"], errors="coerce").round(1)
+            definition = (
+                "Idle days per 100 towers = total idle days / towers * 100. "
+                "Towers are counted from completion-date rows."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "pareto":
+            pareto = payload.get("pareto") or {}
+            df = pd.DataFrame(
+                [
+                    {
+                        "Metric": "Top 20% gang-months output share",
+                        "Output Share (%)": float(pareto.get("top20_share", 0.0)),
+                    },
+                    {
+                        "Metric": "Top 10% gang-months output share",
+                        "Output Share (%)": float(pareto.get("top10_share", 0.0)),
+                    },
+                ]
+            )
+            columns = [
+                {"name": "Metric", "id": "Metric"},
+                {"name": "Output Share (%)", "id": "Output Share (%)"},
+            ]
+            definition = (
+                "Pareto share uses gang-month output sorted descending within the selected window."
+            )
+            df["Output Share (%)"] = pd.to_numeric(df["Output Share (%)"], errors="coerce").round(1)
+            return columns, df.to_dict("records"), definition
+
+        return [], [], ""
+
+    @app.callback(
+        Output("analytics-payload", "data"),
+        Input("f-project", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("analytics-refresh-interval", "n_intervals"),
+        prevent_initial_call=False,
+    )
+    def _compute_analytics_payload(
+        projects: Sequence[str] | None,
+        months: Sequence[str] | None,
+        quick_range: str | None,
+        gangs: Sequence[str] | None,
+        _tick: int | None,
+    ) -> dict[str, Any]:
+        data_selector_local = DATA_SELECTOR
+        if data_selector_local is None:
+            return build_analytics_payload(pd.DataFrame())
+        project_list = _normalize_str_list(_ensure_list(projects))
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        month_list = _normalize_str_list(_ensure_list(months))
+        months_ts = resolve_months(month_list, quick_range)
+        df_day = data_selector_local.select("erection")
+        scoped = apply_filters(df_day, project_list, months_ts, gang_list)
+        data_stamp = _analytics_data_stamp(config.data_path)
+        cache_key = _analytics_cache_key(project_list, months_ts, gang_list, data_stamp)
+        if _ANALYTICS_CACHE is not None:
+            cached = _ANALYTICS_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+        payload = build_analytics_payload(
+            scoped,
+            idle_cap_days=IDLE_CAP_DAYS,
+            min_erections=MIN_ERECTIONS_FOR_TIERS,
+        )
+        scope_start = pd.to_datetime(scoped.get("date"), errors="coerce").min() if "date" in scoped.columns else pd.NaT
+        scope_end = pd.to_datetime(scoped.get("date"), errors="coerce").max() if "date" in scoped.columns else pd.NaT
+        scope_projects = int(scoped["project_name"].nunique()) if "project_name" in scoped.columns else 0
+        scope_gangs = int(scoped["gang_name"].nunique()) if "gang_name" in scoped.columns else 0
+        scope_gang_months = int((payload.get("whatif_base_inputs") or {}).get("total_gang_months", 0))
+        payload["scope"] = {
+            "start": scope_start.strftime("%Y-%m-%d") if pd.notna(scope_start) else "",
+            "end": scope_end.strftime("%Y-%m-%d") if pd.notna(scope_end) else "",
+            "projects": scope_projects,
+            "gangs": scope_gangs,
+            "gang_months": scope_gang_months,
+        }
+        payload["meta"] = {
+            "projects": project_list,
+            "gangs": gang_list,
+            "months": [ts.strftime("%Y-%m") for ts in months_ts],
+            "quick_range": quick_range or "",
+            "data_stamp": data_stamp,
+        }
+        if _ANALYTICS_CACHE is not None:
+            _ANALYTICS_CACHE.set(cache_key, payload, expire=_ANALYTICS_CACHE_TTL_SECONDS)
+        return payload
+
+    @app.callback(
+        Output("analytics-scope-range", "children"),
+        Output("analytics-scope-projects", "children"),
+        Output("analytics-scope-gangs", "children"),
+        Output("analytics-scope-gangmonths", "children"),
+        Output("analytics-lowshare-scope", "children"),
+        Input("analytics-payload", "data"),
+    )
+    def _render_scope_chips(payload: dict[str, Any] | None):
+        scope = (payload or {}).get("scope") or {}
+        start_raw = scope.get("start") or ""
+        end_raw = scope.get("end") or ""
+        start_ts = pd.to_datetime(start_raw, errors="coerce")
+        end_ts = pd.to_datetime(end_raw, errors="coerce")
+
+        if pd.notna(start_ts) and pd.notna(end_ts):
+            range_label = f"Scope: {start_ts.strftime('%d %b %Y')} – {end_ts.strftime('%d %b %Y')}"
+            scope_short = "Scope: {}–{}".format(
+                start_ts.strftime("%b'%y"),
+                end_ts.strftime("%b'%y"),
+            )
+        else:
+            range_label = "Scope: N/A"
+            scope_short = "Scope: N/A"
+
+        projects = int(scope.get("projects", 0) or 0)
+        gangs = int(scope.get("gangs", 0) or 0)
+        gang_months = int(scope.get("gang_months", 0) or 0)
+        return (
+            range_label,
+            f"Projects: {projects}",
+            f"Gangs: {gangs}",
+            f"Gang-months: {gang_months}",
+            scope_short,
+        )
+
+    @app.callback(
+        Output("analytics-kpi-low-output-value", "children"),
+        Output("analytics-kpi-low-output-sub", "children"),
+        Output("analytics-kpi-idle-value", "children"),
+        Output("analytics-kpi-idle-sub", "children"),
+        Output("analytics-kpi-hotspot-value", "children"),
+        Output("analytics-kpi-hotspot-sub", "children"),
+        Input("analytics-payload", "data"),
+    )
+    def _render_analytics_kpis(payload: dict[str, Any] | None):
+        if not payload or not payload.get("kpis"):
+            return "N/A", "", "N/A", "", "N/A", ""
+        kpis = payload["kpis"]
+        low_share = float(kpis.get("low_output_resources_share", 0.0)) * 100.0
+        low_out = float(kpis.get("low_output_output_share", 0.0)) * 100.0
+        low_value = f"{low_share:.0f}% resources -> {low_out:.0f}% output"
+        low_sub = "Share of gang-months vs MT output"
+
+        high_idle = float(kpis.get("idle_windows_high", 0.0))
+        low_idle = float(kpis.get("idle_windows_low", 0.0))
+        idle_value = f"{high_idle:.1f} vs {low_idle:.1f} idle windows/gang"
+        idle_sub = f"High (>{PRODUCTIVITY_TIER_HIGH:g} MT/day) vs Low (<{PRODUCTIVITY_TIER_LOW:g})"
+
+        top_project = str(kpis.get("top_hotspot_project") or "")
+        top_value = float(kpis.get("top_hotspot_value", 0.0))
+        next_value = float(kpis.get("next_hotspot_value", 0.0))
+        if top_project:
+            hotspot_value = f"{top_project}: {top_value:.0f} idle-days/100 towers"
+            hotspot_sub = f"Next highest (>=10 gangs): {next_value:.0f}"
+        else:
+            hotspot_value = "No hotspot found"
+            hotspot_sub = ""
+        return low_value, low_sub, idle_value, idle_sub, hotspot_value, hotspot_sub
+
+    @app.callback(
+        Output("analytics-lowshare-chart", "figure"),
+        Output("analytics-lowshare-value", "children"),
+        Output("analytics-lowshare-delta", "children"),
+        Input("analytics-payload", "data"),
+    )
+    def _render_lowshare_card(payload: dict[str, Any] | None):
+        trends = (payload or {}).get("trends") or {}
+        low_rows = trends.get("low_bucket") or []
+        if len(low_rows) < 3:
+            fig = _analytics_empty_fig("Insufficient history")
+            return fig, "N/A", ""
+
+        low_months = [row.get("month") for row in low_rows]
+        low_values = [float(row.get("pct_low_bucket", 0.0)) for row in low_rows]
+        low_last = low_values[-1]
+        low_prev = low_values[-2] if len(low_values) > 1 else low_last
+        delta = low_last - low_prev
+        delta_text = f"{delta:+.0f} pp"
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=low_months,
+                y=low_values,
+                mode="lines+markers",
+                line={"color": "#2563eb", "width": 3},
+                fill="tozeroy",
+                fillcolor="rgba(37,99,235,0.12)",
+                marker={"size": 6},
+                hovertemplate="%{y:.1f}%<extra></extra>",
+            )
+        )
+        fig.add_annotation(
+            x=low_months[-1],
+            y=low_values[-1],
+            text=f"{low_last:.0f}%",
+            showarrow=True,
+            arrowhead=2,
+            ax=12,
+            ay=-18,
+            font={"size": 11, "color": "#1e3a8a"},
+        )
+        mid_index = len(low_months) // 2
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 20, "r": 20, "t": 10, "b": 20},
+            xaxis={
+                "tickvals": [low_months[0], low_months[mid_index], low_months[-1]],
+                "ticktext": [
+                    pd.to_datetime(low_months[0]).strftime("%b'%y"),
+                    pd.to_datetime(low_months[mid_index]).strftime("%b'%y"),
+                    pd.to_datetime(low_months[-1]).strftime("%b'%y"),
+                ],
+                "tickfont": {"size": 10},
+            },
+            yaxis={"gridcolor": "#e6e9f0", "tickfont": {"size": 10}},
+            showlegend=False,
+        )
+
+        return fig, f"{low_last:.0f}%", delta_text
+
+    @app.callback(
+        Output("analytics-hotspot-chart", "figure"),
+        Output("analytics-hotspot-table", "columns"),
+        Output("analytics-hotspot-table", "data"),
+        Input("analytics-payload", "data"),
+    )
+    def _render_hotspot_ranking(payload: dict[str, Any] | None):
+        rows = (payload or {}).get("hotspot", {}).get("top10") or []
+        if not rows:
+            fig = _analytics_empty_fig("No hotspot data")
+            columns = [
+                {"name": "Project", "id": "project_name"},
+                {"name": "Gangs", "id": "gangs"},
+                {"name": "Towers", "id": "towers"},
+                {"name": "Idle Days / 100 Towers", "id": "idle_days_per_100"},
+            ]
+            return fig, columns, []
+
+        df = pd.DataFrame(rows)
+        df["idle_days_per_100"] = pd.to_numeric(df["idle_days_per_100"], errors="coerce").fillna(0.0)
+        df = df.sort_values("idle_days_per_100", ascending=True)
+        fig = go.Figure()
+        fig.add_bar(
+            x=df["idle_days_per_100"],
+            y=df["project_name"],
+            orientation="h",
+            marker_color="#ef4444",
+            hovertemplate="%{x:.1f}<extra></extra>",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 120, "r": 20, "t": 20, "b": 30},
+            xaxis={"title": "Idle Days / 100 Towers", "gridcolor": "#e6e9f0"},
+            yaxis={"title": "", "tickfont": {"size": 11}},
+        )
+        columns = [
+            {"name": "Project", "id": "project_name"},
+            {"name": "Gangs", "id": "gangs"},
+            {"name": "Towers", "id": "towers"},
+            {"name": "Idle Days / 100 Towers", "id": "idle_days_per_100"},
+        ]
+        df["idle_days_per_100"] = df["idle_days_per_100"].round(1)
+        return fig, columns, df.to_dict("records")
+
+    @app.callback(
+        Output("analytics-whatif-bucket", "options"),
+        Output("analytics-whatif-bucket", "value"),
+        Output("analytics-whatif-slider", "value"),
+        Output("analytics-whatif-slider", "disabled"),
+        Output("analytics-whatif-status", "children"),
+        Input("analytics-payload", "data"),
+        Input("analytics-whatif-bucket", "value"),
+        Input("analytics-whatif-reset", "n_clicks"),
+    )
+    def _sync_whatif_controls(
+        payload: dict[str, Any] | None,
+        current_bucket: str | None,
+        reset_clicks: int | None,
+    ):
+        summary_rows = (payload or {}).get("bucket", {}).get("summary") or []
+        if not summary_rows:
+            return [], None, 60, True, "No bucket data in selected window"
+
+        options = [{"label": row.get("bucket_label"), "value": row.get("bucket_label")} for row in summary_rows]
+        labels = [row.get("bucket_label") for row in summary_rows]
+        counts_map = {row.get("bucket_label"): float(row.get("gang_months", 0.0)) for row in summary_rows}
+        default_bucket = None
+        if "<80" in labels and counts_map.get("<80", 0.0) > 0:
+            default_bucket = "<80"
+        if default_bucket is None:
+            for label in labels:
+                if counts_map.get(label, 0.0) > 0:
+                    default_bucket = label
+                    break
+        if default_bucket is None:
+            default_bucket = "<80" if "<80" in labels else (labels[0] if labels else None)
+        bucket_value = current_bucket if current_bucket in labels else default_bucket
+
+        bucket_map = {row.get("bucket_label"): row for row in summary_rows}
+        bucket_row = bucket_map.get(bucket_value) if bucket_value else None
+        gang_months = float(bucket_row.get("gang_months", 0.0)) if bucket_row else 0.0
+        avg_mt = float(bucket_row.get("avg_mt", 0.0)) if bucket_row else 0.0
+
+        if gang_months <= 0:
+            return options, bucket_value, 60, True, "No bucket data in selected window"
+
+        def _round_to_10(value: float) -> int:
+            return int(round(value / 10.0) * 10)
+
+        slider_value = _round_to_10(avg_mt)
+        slider_value = max(60, min(270, slider_value))
+
+        total_gang_months = float((payload or {}).get("whatif_base_inputs", {}).get("total_gang_months", 0.0))
+        share_text = ""
+        if total_gang_months > 0:
+            share = gang_months / total_gang_months * 100.0
+            share_text = f"Selected bucket share: {share:.0f}% of gang-months"
+
+        return options, bucket_value, slider_value, False, share_text
+
+    @app.callback(
+        Output("analytics-whatif-reduction", "children"),
+        Output("analytics-whatif-saved", "children"),
+        Output("analytics-whatif-chart", "figure"),
+        Input("analytics-payload", "data"),
+        Input("analytics-whatif-bucket", "value"),
+        Input("analytics-whatif-slider", "value"),
+    )
+    def _render_whatif_outputs(
+        payload: dict[str, Any] | None,
+        bucket_value: str | None,
+        target_value: int | float | None,
+    ):
+        summary_rows = (payload or {}).get("bucket", {}).get("summary") or []
+        bucket_map = {row.get("bucket_label"): row for row in summary_rows}
+        bucket_row = bucket_map.get(bucket_value)
+        if not bucket_row:
+            return "0%", "0", _analytics_empty_fig("No data")
+
+        total_inputs = (payload or {}).get("whatif_base_inputs", {})
+        total_output = float(total_inputs.get("total_output", 0.0))
+        total_gm = float(total_inputs.get("total_gang_months", 0.0))
+
+        n_bucket = float(bucket_row.get("gang_months", 0.0))
+        total_bucket = float(bucket_row.get("mt_total", 0.0))
+        current_avg = float(bucket_row.get("avg_mt", 0.0))
+        target_avg = float(target_value or 0.0)
+
+        if n_bucket <= 0 or total_gm <= 0 or total_output <= 0 or target_avg <= 0:
+            return "0%", "0", _analytics_empty_fig("No data")
+
+        n_bucket_new = total_bucket / target_avg if target_avg > 0 else n_bucket
+        n_new = (total_gm - n_bucket) + n_bucket_new
+        saved = total_gm - n_new
+        reduction_pct = (saved / total_gm * 100.0) if total_gm else 0.0
+
+        reduction_text = f"{reduction_pct:.0f}%"
+        saved_text = f"{saved:.0f}"
+
+        fig = go.Figure()
+        fig.add_bar(
+            x=["Current Avg", "Target Avg"],
+            y=[current_avg, target_avg],
+            marker_color=["#94a3b8", "#22c55e"],
+            text=[f"{current_avg:.0f} MT/mo", f"{target_avg:.0f} MT/mo"],
+            textposition="outside",
+            hovertemplate="%{y:.1f} MT/mo<extra></extra>",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 20, "r": 10, "t": 10, "b": 20},
+            xaxis={"title": "", "tickangle": 0},
+            yaxis={"title": "MT/mo"},
+        )
+        return reduction_text, saved_text, fig
+
+    @app.callback(
+        Output("analytics-hist-median", "children"),
+        Output("analytics-hist-pct-low", "children"),
+        Output("analytics-hist-pct-high", "children"),
+        Input("analytics-payload", "data"),
+    )
+    def _render_hist_tiles(payload: dict[str, Any] | None):
+        histogram = (payload or {}).get("histogram", {})
+        median = float(histogram.get("median_prod", 0.0))
+        pct_low = float(histogram.get("pct_below_low", 0.0))
+        pct_high = float(histogram.get("pct_above_high", 0.0))
+        return f"{median:.2f}", f"{pct_low:.0f}%", f"{pct_high:.0f}%"
+
+    @app.callback(
+        Output("analytics-bucket-chart", "figure"),
+        Output("analytics-tier-chart", "figure"),
+        Output("analytics-hist-chart", "figure"),
+        Input("analytics-payload", "data"),
+    )
+    def _render_analytics_charts(payload: dict[str, Any] | None):
+        if not payload:
+            empty = _analytics_empty_fig("No data")
+            return empty, empty, empty
+
+        bucket_rows = payload.get("bucket", {}).get("summary") or []
+        if not bucket_rows:
+            bucket_fig = _analytics_empty_fig("No bucket data")
+        else:
+            labels = [row.get("bucket_label") for row in bucket_rows]
+            gang_share = [float(row.get("gang_month_share", 0.0)) * 100.0 for row in bucket_rows]
+            mt_share = [float(row.get("mt_share", 0.0)) * 100.0 for row in bucket_rows]
+            bucket_fig = go.Figure()
+            bucket_fig.add_bar(
+                x=labels,
+                y=gang_share,
+                name="Gang-Months Share",
+                marker_color="#2563eb",
+                hovertemplate="%{y:.1f}%<extra></extra>",
+            )
+            bucket_fig.add_bar(
+                x=labels,
+                y=mt_share,
+                name="MT Output Share",
+                marker_color="#22c55e",
+                hovertemplate="%{y:.1f}%<extra></extra>",
+            )
+            bucket_fig.update_layout(
+                barmode="group",
+                **_analytics_chart_layout("Bucket", "Share (%)"),
+            )
+
+        tier_rows = payload.get("tiers", {}).get("summary") or []
+        if not tier_rows:
+            tier_fig = _analytics_empty_fig("No tier data")
+        else:
+            tier_labels = [row.get("tier") for row in tier_rows]
+            tier_windows = [float(row.get("avg_idle_windows", 0.0)) for row in tier_rows]
+            tier_days = [float(row.get("avg_idle_days", 0.0)) for row in tier_rows]
+            tier_fig = go.Figure()
+            tier_fig.add_bar(
+                x=tier_labels,
+                y=tier_windows,
+                name="Avg Idle Windows",
+                marker_color="#f97316",
+                text=[f"{value:.1f}" for value in tier_windows],
+                textposition="outside",
+                hovertemplate="%{y:.2f}<extra></extra>",
+            )
+            tier_fig.add_bar(
+                x=tier_labels,
+                y=tier_days,
+                name="Avg Idle Days",
+                marker_color="#38bdf8",
+                text=[f"{value:.1f}" for value in tier_days],
+                textposition="outside",
+                hovertemplate="%{y:.2f}<extra></extra>",
+            )
+            tier_fig.update_layout(
+                barmode="group",
+                **_analytics_chart_layout("Tier", "Avg Idle Windows / Days"),
+            )
+
+        hist_rows = payload.get("histogram", {}).get("bins") or []
+        if not hist_rows:
+            hist_fig = _analytics_empty_fig("No histogram data")
+        else:
+            hist_labels = [row.get("bin_label") for row in hist_rows]
+            hist_values = [int(row.get("count", 0)) for row in hist_rows]
+            hist_fig = go.Figure()
+            hist_fig.add_bar(
+                x=hist_labels,
+                y=hist_values,
+                marker_color="#0f766e",
+                hovertemplate="%{y} gangs<extra></extra>",
+            )
+            hist_fig.update_layout(**_analytics_chart_layout("MT/day Bin", "Gangs"))
+            hist_fig.update_xaxes(
+                type="category",
+                categoryorder="array",
+                categoryarray=hist_labels,
+            )
+
+        return bucket_fig, tier_fig, hist_fig
+
+    @app.callback(
+        Output("analytics-audit-drawer", "is_open"),
+        Output("analytics-audit-selection", "data"),
+        Output("analytics-audit-title", "children"),
+        Input("analytics-kpi-low-output", "n_clicks"),
+        Input("analytics-kpi-idle-windows", "n_clicks"),
+        Input("analytics-kpi-hotspot", "n_clicks"),
+        Input("analytics-bucket-chart", "clickData"),
+        Input("analytics-tier-chart", "clickData"),
+        Input("analytics-hist-chart", "clickData"),
+        Input("analytics-hotspot-chart", "clickData"),
+        Input("analytics-hotspot-table", "active_cell"),
+        Input("analytics-audit-close", "n_clicks"),
+        State("analytics-hotspot-table", "data"),
+        State("analytics-payload", "data"),
+        State("analytics-audit-drawer", "is_open"),
+        prevent_initial_call=True,
+    )
+    def _toggle_analytics_audit(
+        low_clicks,
+        idle_clicks,
+        hotspot_clicks,
+        bucket_click,
+        tier_click,
+        hist_click,
+        hotspot_chart_click,
+        hotspot_table_cell,
+        close_clicks,
+        hotspot_table_data,
+        payload,
+        is_open,
+    ):
+        trigger = _resolve_triggered_id()
+        if trigger == "analytics-audit-close":
+            return False, dash.no_update, dash.no_update
+        if payload is None:
+            raise PreventUpdate
+
+        selection: dict[str, Any] | None = None
+        title = "Audit"
+        if trigger == "analytics-kpi-low-output":
+            selection = {"kind": "bucket", "bucket": "<80"}
+            title = "Low-output Deployment"
+        elif trigger == "analytics-kpi-idle-windows":
+            selection = {
+                "kind": "idle_windows",
+                "tiers": [
+                    f"High (>{PRODUCTIVITY_TIER_HIGH:g})",
+                    f"Low (<{PRODUCTIVITY_TIER_LOW:g})",
+                ],
+            }
+            title = "Idle Windows: High vs Low"
+        elif trigger == "analytics-kpi-hotspot":
+            top_project = (payload.get("kpis") or {}).get("top_hotspot_project") or ""
+            selection = {"kind": "hotspot", "project": top_project or None}
+            title = "Project Hotspot"
+        elif trigger == "analytics-bucket-chart":
+            bucket_label = (bucket_click or {}).get("points", [{}])[0].get("x")
+            if not bucket_label:
+                raise PreventUpdate
+            selection = {"kind": "bucket", "bucket": bucket_label}
+            title = f"Bucket: {bucket_label}"
+        elif trigger == "analytics-tier-chart":
+            tier_label = (tier_click or {}).get("points", [{}])[0].get("x")
+            if not tier_label:
+                raise PreventUpdate
+            selection = {"kind": "tier", "tier": tier_label}
+            title = f"Tier: {tier_label}"
+        elif trigger == "analytics-hist-chart":
+            bin_label = (hist_click or {}).get("points", [{}])[0].get("x")
+            if not bin_label:
+                raise PreventUpdate
+            selection = {"kind": "hist_bin", "bin": bin_label}
+            title = f"Histogram Bin: {bin_label}"
+        elif trigger == "analytics-hotspot-chart":
+            project_label = (hotspot_chart_click or {}).get("points", [{}])[0].get("y")
+            if not project_label:
+                raise PreventUpdate
+            selection = {"kind": "hotspot", "project": project_label}
+            title = f"Project Hotspot: {project_label}"
+        elif trigger == "analytics-hotspot-table":
+            if not hotspot_table_cell or not hotspot_table_data:
+                raise PreventUpdate
+            row_index = hotspot_table_cell.get("row")
+            if row_index is None or row_index >= len(hotspot_table_data):
+                raise PreventUpdate
+            project_label = hotspot_table_data[row_index].get("project_name")
+            if not project_label:
+                raise PreventUpdate
+            selection = {"kind": "hotspot", "project": project_label}
+            title = f"Project Hotspot: {project_label}"
+        else:
+            raise PreventUpdate
+
+        return True, selection, title
+
+    @app.callback(
+        Output("analytics-audit-table", "columns"),
+        Output("analytics-audit-table", "data"),
+        Output("analytics-audit-definition", "children"),
+        Input("analytics-payload", "data"),
+        Input("analytics-audit-selection", "data"),
+    )
+    def _render_analytics_audit_table(payload: dict[str, Any] | None, selection: dict[str, Any] | None):
+        columns, data, definition = _analytics_table_from_selection(payload, selection)
+        return columns, data, definition
+
+    @app.callback(
+        Output("analytics-audit-download", "data"),
+        Input("analytics-audit-export-btn", "n_clicks"),
+        State("analytics-payload", "data"),
+        State("analytics-audit-selection", "data"),
+        prevent_initial_call=True,
+    )
+    def _export_analytics_audit(
+        export_clicks: int | None,
+        payload: dict[str, Any] | None,
+        selection: dict[str, Any] | None,
+    ):
+        if not export_clicks:
+            raise PreventUpdate
+        columns, data, _definition = _analytics_table_from_selection(payload, selection)
+        if not columns:
+            raise PreventUpdate
+        df = pd.DataFrame(data)
+        if df.empty:
+            df = pd.DataFrame(columns=[col["name"] for col in columns])
+
+        def _writer(buffer: BytesIO) -> None:
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="Audit", index=False)
+
+        return send_bytes(_writer, "Analytics_Audit.xlsx")
 
     if config.enable_stringing:
         try:

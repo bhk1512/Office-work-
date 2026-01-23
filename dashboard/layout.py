@@ -10,6 +10,8 @@ from dash import dash_table
 from dash.dcc import Download
 import urllib.parse
 
+from .analytics_layout import build_analytics_layout
+
 CLICK_GRAPH_CONFIG = {
     "displayModeBar": False,
     "doubleClick": False,
@@ -166,117 +168,44 @@ def _build_trace_contents(
     ]
 
 
-def build_controls() -> dbc.Card:
-    """Filter controls: Projects → Gangs → Months; quick range under Months; Reset left."""
-    return dbc.Card(
-        dbc.CardBody(
-            [
-                # Row 1: Projects + Months (gang filter removed from UI)
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            html.Div(
-                                [
-                                    dcc.Dropdown(
-                                        id="f-project",
-                                        multi=True,
-                                        placeholder="Select project(s)",
-                                        className="filter-select",
-                                    ),
-                                ],
-                                className="filter-field",
-                            ),
-                            md=6,
-                        ),
-                        dbc.Col(
-                            html.Div(
-                                [
-                                    dcc.Dropdown(
-                                        id="f-month",
-                                        multi=True,
-                                        placeholder="Select month(s)",
-                                        className="filter-select",
-                                        value=[CURRENT_MONTH_VALUE],
-                                        persistence=True,
-                                        persistence_type="session",
-                                    ),
-                                ],
-                                className="filter-field",
-                            ),
-                            md=6,
-                        ),
-                    ],
-                    className="g-3",
-                ),
-
-                # Row 2: Reset (left) + Quick range under Months (right)
-                dbc.Row(
-                    [
-                        # Left: Reset button
-                dbc.Col(
-                    html.Div(
-                        [
-                            dbc.Button(
-                                "Reset Filters",
-                                id="btn-reset-filters",
-                                color="secondary",
-                                outline=True,
-                                size="sm",
-                                className="filter-reset-btn",
-                            ),
-                        ],
-                        className="d-flex align-items-center gap-2 flex-wrap",
-                    ),
-                    md=6,
-                    className="d-flex align-items-center",
-                ),
-
-                        # Right: Quick-range radios + Clear link, under Months
-                        dbc.Col(
-                            html.Div(
-                                [
-                                    dbc.RadioItems(
-                                        id="f-quick-range",
-                                        options=[
-                                            {"label": "Last 3M", "value": "3M"},
-                                            {"label": "Last Qtr", "value": "Q"},
-                                            {"label": "Last 6M", "value": "6M"},
-                                            {"label": "YTD", "value": "YTD"},
-                                        ],
-                                        value=None,
-                                        inline=True,
-                                        className="filter-quick-items",
-                                    ),
-                                    html.A(
-                                        "Clear Quick Range",
-                                        id="link-clear-quick-range",
-                                        n_clicks=0,
-                                        className="filter-clear-link",
-                                        style={"cursor": "pointer"},
-                                    ),
-                                ],
-                                className="filter-quick-under-months",
-                            ),
-                            md=6,
-                            className="d-flex justify-content-md-end",
-                        ),
-                    ],
-                    className="g-2 mt-1",
-                ),
-
-                # Hidden gang dropdown to keep callbacks wired without showing the control.
-                html.Div(
-                    dcc.Dropdown(
-                        id="f-gang",
-                        multi=True,
-                        placeholder="Select gang(s)",
-                        className="filter-select",
-                    ),
-                    style={"display": "none"},
-                ),
-            ]
-        ),
-        className="mb-3 shadow-sm filter-card",
+def build_controls() -> html.Div:
+    """Inline filter controls for the header row."""
+    return html.Div(
+        [
+            dcc.Dropdown(
+                id="f-project",
+                multi=True,
+                placeholder="Select project(s)",
+                className="filter-select filter-select--compact",
+                style={"width": "260px"},
+            ),
+            dcc.Dropdown(
+                id="f-month",
+                multi=True,
+                placeholder="Select month(s)",
+                className="filter-select filter-select--compact",
+                value=[CURRENT_MONTH_VALUE],
+                persistence=True,
+                persistence_type="session",
+                style={"width": "220px"},
+            ),
+            dbc.RadioItems(
+                id="f-quick-range",
+                options=[
+                    {"label": "Last 3M", "value": "3M"},
+                    {"label": "Last Qtr", "value": "Q"},
+                    {"label": "Last 6M", "value": "6M"},
+                    {"label": "YTD", "value": "YTD"},
+                ],
+                value=None,
+                inline=True,
+                class_name="segment segment--compact",
+                label_class_name="segment-label",
+                label_checked_class_name="segment-label--active",
+                input_class_name="segment-input",
+            ),
+        ],
+        className="topbar__filters",
     )
 
 
@@ -1500,7 +1429,7 @@ def build_project_responsibilities_modal() -> dbc.Modal:
     )
 
 def build_header(title: str, last_updated_text: str) -> html.Div:
-    """Top section: icon + big title, and 'Last Updated On' line under it."""
+    """Top section: title with inline filters and a compact meta row."""
 
     # Build small inline SVGs as IMG data URIs (Dash-safe across versions)
     cube_svg_str = '''
@@ -1516,31 +1445,60 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
         style={"width": "18px", "height": "18px"},
     )
 
-    calendar_svg_str = '''
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-     xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <rect x="3" y="4" width="18" height="17" rx="2" stroke="#64748B" stroke-width="1.5"/>
-  <path d="M8 2V6M16 2V6" stroke="#64748B" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M3 9H21" stroke="#64748B" stroke-width="1.5"/>
-</svg>
-'''.strip()
-    calendar_img = html.Img(
-        src="data:image/svg+xml;utf8," + urllib.parse.quote(calendar_svg_str),
-        style={"width": "16px", "height": "16px", "marginRight": "8px"},
-    )
+    controls = build_controls()
 
     return html.Div(
         [
             html.Div(
                 [
-                    html.Div(cube_img, className="brand-badge"),
-                    html.Div(title, className="topbar__title"),
+                    html.Div(
+                        [
+                            html.Div(cube_img, className="brand-badge"),
+                            html.Div(title, className="topbar__title"),
+                        ],
+                        className="topbar__left",
+                    ),
+                    controls,
                 ],
-                className="topbar__left",
+                className="topbar__row",
             ),
             html.Div(
-                [calendar_img, html.Span(f"Last Updated On: {last_updated_text}")],
-                className="topbar__meta",
+                [
+                    html.Div(
+                        f"Last updated: {last_updated_text}",
+                        className="topbar__updated",
+                    ),
+                    html.Div(
+                        [
+                            dbc.Button(
+                                "Reset filters",
+                                id="btn-reset-filters",
+                                color="secondary",
+                                outline=True,
+                                size="sm",
+                                className="topbar__reset",
+                            ),
+                            html.A(
+                                "Clear quick range",
+                                id="link-clear-quick-range",
+                                n_clicks=0,
+                                className="topbar__clear-link",
+                                style={"display": "none"},
+                            ),
+                        ],
+                        className="topbar__actions",
+                    ),
+                ],
+                className="topbar__meta-row",
+            ),
+            html.Div(
+                dcc.Dropdown(
+                    id="f-gang",
+                    multi=True,
+                    placeholder="Select gang(s)",
+                    className="filter-select",
+                ),
+                style={"display": "none"},
             ),
         ],
         className="topbar",
@@ -1551,18 +1509,14 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
 def build_layout(last_updated_text: str) -> dbc.Container:
     """Assemble the full Dash layout."""
 
-    controls = build_controls()
-    
     trace_modal = build_trace_modal()
     pch_modal = build_kpi_pch_modal()
     project_modal = build_project_tile_modal()
     global_performance_modal = build_global_performance_modal()
-    layout = dbc.Container(
+    analytics_layout = build_analytics_layout()
+
+    home_content = html.Div(
         [
-            dcc.Location(id="project-modal-location", refresh=False),
-            build_header("Productivity Dashboard", last_updated_text),
-            
-            controls,
             build_mode_summary_cards(),
             build_kpi_cards(),
             build_project_details_card(),
@@ -2015,6 +1969,25 @@ def build_layout(last_updated_text: str) -> dbc.Container:
                 type="button",
                 style={"display": "none"},
             ),
+        ],
+        className="dashboard-tab-content",
+    )
+
+    tabs = dbc.Tabs(
+        [
+            dbc.Tab(home_content, label="Dashboard", tab_id="dashboard"),
+            dbc.Tab(analytics_layout, label="Analytics", tab_id="analytics"),
+        ],
+        id="main-tabs",
+        active_tab="dashboard",
+        className="main-tabs",
+    )
+
+    layout = dbc.Container(
+        [
+            dcc.Location(id="project-modal-location", refresh=False),
+            build_header("Productivity Dashboard", last_updated_text),
+            tabs,
         ],
         fluid=True,
     )

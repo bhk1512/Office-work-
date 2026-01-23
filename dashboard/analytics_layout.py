@@ -1,0 +1,488 @@
+"""Layout for the Analytics tab."""
+from __future__ import annotations
+
+from dash import dcc, html, dash_table
+import dash_bootstrap_components as dbc
+
+
+GRAPH_CONFIG = {
+    "displayModeBar": False,
+    "doubleClick": False,
+    "scrollZoom": False,
+}
+
+
+def _audit_table() -> dash_table.DataTable:
+    return dash_table.DataTable(
+        id="analytics-audit-table",
+        columns=[],
+        data=[],
+        page_size=12,
+        fixed_rows={"headers": True},
+        style_table={"overflowX": "auto", "maxHeight": "440px"},
+        style_cell={
+            "fontFamily": "Inter, system-ui",
+            "fontSize": 13,
+            "border": "1px solid var(--border, #e6e9f0)",
+            "padding": "6px 8px",
+            "textAlign": "left",
+        },
+        style_header={
+            "fontWeight": "600",
+            "backgroundColor": "#f6f8fc",
+            "border": "1px solid var(--border, #e6e9f0)",
+        },
+    )
+
+
+def build_analytics_layout() -> html.Div:
+    """Return the Analytics tab content."""
+    audit_drawer = dbc.Offcanvas(
+        [
+            dbc.Tabs(
+                [
+                    dbc.Tab(_audit_table(), tab_id="audit-table", label="Audit Table"),
+                    dbc.Tab(
+                        html.Div(
+                            id="analytics-audit-definition",
+                            className="analytics-audit-definition",
+                        ),
+                        tab_id="audit-definition",
+                        label="Definition",
+                    ),
+                    dbc.Tab(
+                        html.Div(
+                            [
+                                html.Div(
+                                    "Export the current audit table to Excel.",
+                                    className="text-muted mb-3",
+                                ),
+                                dbc.Button(
+                                    "Export Audit Excel",
+                                    id="analytics-audit-export-btn",
+                                    color="primary",
+                                    className="analytics-export-btn",
+                                ),
+                            ],
+                            className="analytics-audit-export",
+                        ),
+                        tab_id="audit-export",
+                        label="Export",
+                    ),
+                ],
+                id="analytics-audit-tabs",
+                active_tab="audit-table",
+            ),
+            dbc.Button(
+                "Close",
+                id="analytics-audit-close",
+                outline=True,
+                color="secondary",
+                size="sm",
+                className="mt-3",
+            ),
+        ],
+        id="analytics-audit-drawer",
+        title=html.Div(id="analytics-audit-title"),
+        placement="end",
+        is_open=False,
+        scrollable=True,
+        className="analytics-audit-drawer",
+    )
+
+    scope_row = dbc.Row(
+        [
+            dbc.Col(
+                html.Div(
+                    [
+                        html.Span(id="analytics-scope-range", className="analytics-scope-chip"),
+                        html.Span(id="analytics-scope-projects", className="analytics-scope-chip"),
+                        html.Span(id="analytics-scope-gangs", className="analytics-scope-chip"),
+                        html.Span(id="analytics-scope-gangmonths", className="analytics-scope-chip"),
+                        html.Span("Idle cap: 15 days/window", className="analytics-scope-chip"),
+                    ],
+                    className="analytics-scope-strip",
+                ),
+                md=8,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div("Low-output deployment share", className="analytics-lowshare-title"),
+                            html.Div(
+                                "% of gang-months in <80 MT/month bucket",
+                                className="analytics-lowshare-subtitle",
+                            ),
+                            html.Div(id="analytics-lowshare-scope", className="analytics-lowshare-scope"),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        id="analytics-lowshare-value",
+                                        className="analytics-lowshare-value",
+                                    ),
+                                    html.Div(
+                                        id="analytics-lowshare-delta",
+                                        className="analytics-lowshare-delta",
+                                    ),
+                                ],
+                                className="analytics-lowshare-metrics",
+                            ),
+                            dcc.Graph(
+                                id="analytics-lowshare-chart",
+                                config=GRAPH_CONFIG,
+                                style={"height": "130px"},
+                            ),
+                        ]
+                    ),
+                    className="analytics-lowshare-card",
+                ),
+                md=4,
+            ),
+        ],
+        className="g-3 mb-3 align-items-stretch analytics-scope-row",
+    )
+
+    kpi_cards = dbc.Row(
+        [
+            dbc.Col(
+                html.Button(
+                    [
+                        html.Div(
+                            "Low-output deployment (<80 MT/month bucket)",
+                            className="analytics-kpi-title",
+                        ),
+                        html.Div(id="analytics-kpi-low-output-value", className="analytics-kpi-value"),
+                        html.Div(id="analytics-kpi-low-output-sub", className="analytics-kpi-sub"),
+                    ],
+                    id="analytics-kpi-low-output",
+                    className="analytics-kpi-card",
+                    n_clicks=0,
+                    type="button",
+                ),
+                md=4,
+            ),
+            dbc.Col(
+                html.Button(
+                    [
+                        html.Div(
+                            "Idle windows per gang (High vs Low)",
+                            className="analytics-kpi-title",
+                        ),
+                        html.Div(id="analytics-kpi-idle-value", className="analytics-kpi-value"),
+                        html.Div(id="analytics-kpi-idle-sub", className="analytics-kpi-sub"),
+                    ],
+                    id="analytics-kpi-idle-windows",
+                    className="analytics-kpi-card",
+                    n_clicks=0,
+                    type="button",
+                ),
+                md=4,
+            ),
+            dbc.Col(
+                html.Button(
+                    [
+                        html.Div("Hotspot by project", className="analytics-kpi-title"),
+                        html.Div(id="analytics-kpi-hotspot-value", className="analytics-kpi-value"),
+                        html.Div(id="analytics-kpi-hotspot-sub", className="analytics-kpi-sub"),
+                    ],
+                    id="analytics-kpi-hotspot",
+                    className="analytics-kpi-card",
+                    n_clicks=0,
+                    type="button",
+                ),
+                md=4,
+            ),
+        ],
+        className="g-3 mb-4",
+    )
+
+    whatif_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    "What-if: Improve bucket productivity",
+                    className="analytics-whatif-title",
+                ),
+                html.Div(
+                    "Assumption: output constant; uplift applies only to selected bucket",
+                    className="analytics-whatif-subtitle",
+                ),
+                dcc.Dropdown(
+                    id="analytics-whatif-bucket",
+                    options=[],
+                    value=None,
+                    clearable=False,
+                    className="analytics-whatif-select",
+                ),
+                dcc.Slider(
+                    id="analytics-whatif-slider",
+                    min=60,
+                    max=270,
+                    step=10,
+                    value=120,
+                    marks={value: str(value) for value in [60, 90, 120, 150, 180, 210, 240, 270]},
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Div(
+                                    id="analytics-whatif-reduction",
+                                    className="analytics-whatif-value",
+                                ),
+                                html.Div(
+                                    "Estimated gang-month reduction",
+                                    className="analytics-whatif-label",
+                                ),
+                            ],
+                            className="analytics-whatif-metric",
+                        ),
+                        html.Div(
+                            [
+                                html.Div(
+                                    id="analytics-whatif-saved",
+                                    className="analytics-whatif-value",
+                                ),
+                                html.Div(
+                                    "Equivalent gang-months saved",
+                                    className="analytics-whatif-label",
+                                ),
+                            ],
+                            className="analytics-whatif-metric",
+                        ),
+                    ],
+                    className="analytics-whatif-metrics",
+                ),
+                dcc.Graph(
+                    id="analytics-whatif-chart",
+                    config=GRAPH_CONFIG,
+                    style={"height": "120px"},
+                ),
+                html.Div(
+                    [
+                        html.A(
+                            "Reset",
+                            id="analytics-whatif-reset",
+                            n_clicks=0,
+                            className="analytics-whatif-reset",
+                        ),
+                        html.Span(
+                            id="analytics-whatif-status",
+                            className="analytics-whatif-status",
+                        ),
+                    ],
+                    className="analytics-whatif-footer",
+                ),
+            ]
+        ),
+        className="analytics-whatif-card h-100",
+    )
+
+    row2 = dbc.Row(
+        [
+            dbc.Col(
+                dbc.Card(
+                    [
+                        dbc.CardHeader(
+                            [
+                                html.Div("Gang-Months vs Output Share", className="section-title"),
+                                html.Div("Bucketed by MT/month", className="section-sub"),
+                            ]
+                        ),
+                        dbc.CardBody(
+                            dcc.Graph(
+                                id="analytics-bucket-chart",
+                                config=GRAPH_CONFIG,
+                                style={"height": "320px"},
+                            )
+                        ),
+                    ],
+                    className="viz-card shadow-soft h-100",
+                ),
+                md=6,
+            ),
+            dbc.Col(whatif_card, md=6, className="d-flex"),
+        ],
+        className="g-3 mb-4 align-items-stretch analytics-row analytics-row-2",
+    )
+
+    hotspot_row = dbc.Row(
+        [
+            dbc.Col(
+                dbc.Card(
+                    [
+                        dbc.CardHeader(
+                            [
+                                html.Div("Idle frequency and magnitude by productivity tier", className="section-title"),
+                                html.Div("Low (<4), Mid (4-6), High (>6)", className="section-sub"),
+                            ]
+                        ),
+                        dbc.CardBody(
+                            dcc.Graph(
+                                id="analytics-tier-chart",
+                                config=GRAPH_CONFIG,
+                                style={"height": "320px"},
+                            )
+                        ),
+                    ],
+                    className="viz-card shadow-soft h-100",
+                ),
+                md=6,
+            ),
+            dbc.Col(
+                html.Div(
+                    [
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    [
+                                        html.Div("Hotspot Ranking", className="section-title"),
+                                        html.Div("Top 10 projects by idle-days/100 towers", className="section-sub"),
+                                    ]
+                                ),
+                                dbc.CardBody(
+                                    dcc.Graph(
+                                        id="analytics-hotspot-chart",
+                                        config=GRAPH_CONFIG,
+                                        style={"height": "220px"},
+                                    )
+                                ),
+                            ],
+                            className="viz-card shadow-soft",
+                        ),
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    [
+                                        html.Div("Hotspot Table", className="section-title"),
+                                        html.Div("Projects with >=10 gangs", className="section-sub"),
+                                    ]
+                                ),
+                                dbc.CardBody(
+                                    dash_table.DataTable(
+                                        id="analytics-hotspot-table",
+                                        columns=[],
+                                        data=[],
+                                        page_size=10,
+                                        fixed_rows={"headers": True},
+                                        style_table={"overflowX": "auto", "maxHeight": "220px"},
+                                        style_cell={
+                                            "fontFamily": "Inter, system-ui",
+                                            "fontSize": 13,
+                                            "border": "1px solid var(--border, #e6e9f0)",
+                                            "padding": "6px 8px",
+                                            "textAlign": "left",
+                                        },
+                                        style_header={
+                                            "fontWeight": "600",
+                                            "backgroundColor": "#f6f8fc",
+                                            "border": "1px solid var(--border, #e6e9f0)",
+                                        },
+                                    )
+                                ),
+                            ],
+                            className="viz-card shadow-soft",
+                        ),
+                    ],
+                    className="d-flex flex-column gap-3 h-100 analytics-hotspot-stack",
+                ),
+                md=6,
+                className="d-flex",
+            ),
+        ],
+        className="g-3 mb-4 align-items-stretch analytics-row analytics-row-3",
+    )
+
+    histogram = dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.Div("Gang Productivity Distribution", className="section-title"),
+                    html.Div("MT/day bins (0-13)", className="section-sub"),
+                ]
+            ),
+            dbc.CardBody(
+                [
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.Div(
+                                                id="analytics-hist-median",
+                                                className="analytics-mini-value",
+                                            ),
+                                            html.Div("Median Productivity", className="analytics-mini-label"),
+                                        ]
+                                    ),
+                                    className="analytics-mini-card",
+                                ),
+                                md=4,
+                            ),
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.Div(
+                                                id="analytics-hist-pct-low",
+                                                className="analytics-mini-value",
+                                            ),
+                                            html.Div("% <4 MT/day", className="analytics-mini-label"),
+                                        ]
+                                    ),
+                                    className="analytics-mini-card",
+                                ),
+                                md=4,
+                            ),
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.Div(
+                                                id="analytics-hist-pct-high",
+                                                className="analytics-mini-value",
+                                            ),
+                                            html.Div("% >6 MT/day", className="analytics-mini-label"),
+                                        ]
+                                    ),
+                                    className="analytics-mini-card",
+                                ),
+                                md=4,
+                            ),
+                        ],
+                        className="g-3 mb-3",
+                    ),
+                    dcc.Graph(
+                        id="analytics-hist-chart",
+                        config=GRAPH_CONFIG,
+                        style={"height": "320px"},
+                    ),
+                ]
+            ),
+        ],
+        className="viz-card shadow-soft",
+    )
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div("Analytics (Erection)", className="section-title"),
+                ],
+                className="analytics-header",
+            ),
+            scope_row,
+            kpi_cards,
+            row2,
+            hotspot_row,
+            histogram,
+            dcc.Store(id="analytics-payload", data=None),
+            dcc.Store(id="analytics-audit-selection", data=None),
+            dcc.Interval(id="analytics-refresh-interval", interval=30 * 60 * 1000, n_intervals=0),
+            dcc.Download(id="analytics-audit-download"),
+            audit_drawer,
+        ],
+        className="analytics-page",
+    )
