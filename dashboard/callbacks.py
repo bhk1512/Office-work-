@@ -7269,10 +7269,11 @@ def register_callbacks(
             totals_row_value = totals_focus_display
         else:
             totals_row_label = "Towers Delivered / Planned"
+            delivered_count = int(round(total_current))
             if plan_value_available:
-                totals_row_value = f"{int(round(total_current))} / {int(round(total_planned))}"
+                totals_row_value = f"{delivered_count} / {int(round(total_planned))}"
             else:
-                totals_row_value = "No Plan Available"
+                totals_row_value = f"{delivered_count} / No Plan Available"
 
         rows = [
             _row("Prod This Month", _fmt_prod(prod_current_value)),
