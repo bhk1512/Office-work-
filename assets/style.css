@@ -16,6 +16,12 @@ body {
   background-color: #f4f6f8;   /* light gray-off white */
 }
 
+.container-fluid{
+  padding-left: 8px;
+  padding-right: 8px;
+  max-width: 100%;
+}
+
 html {
     scroll-behavior: smooth;
   }
@@ -547,6 +553,7 @@ html {
   .topbar__filters{
     width:100%;
     justify-content:flex-start;
+    margin-left:0;
   }
 }
 
@@ -1169,10 +1176,11 @@ html {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  width: 100%;
 }
 .analytics-header{
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px;
@@ -1185,6 +1193,25 @@ html {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+.analytics-scope-strip--inline{
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.analytics-scope-strip--inline::-webkit-scrollbar{
+  height: 4px;
+}
+.analytics-scope-strip--inline::-webkit-scrollbar-thumb{
+  background: rgba(148,163,184,.45);
+  border-radius: 999px;
+}
+@media (max-width: 992px){
+  .analytics-scope-strip--inline{
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
 }
 .analytics-scope-chip{
   background: #f1f5f9;
@@ -1238,9 +1265,26 @@ html {
   border-radius: 999px;
   padding: 2px 8px;
 }
+.analytics-lowshare-inline{
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border, #e6e9f0);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.analytics-bucket-body{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .analytics-row-2 .viz-card,
 .analytics-row-2 .analytics-whatif-card{
-  min-height: 360px;
+  min-height: 420px;
+}
+.analytics-row .viz-card,
+.analytics-row .analytics-whatif-card{
+  width: 100%;
 }
 .analytics-hotspot-stack .viz-card{
   flex: 1 1 0;
@@ -1371,6 +1415,16 @@ html {
   flex-direction: column;
   gap: 8px;
 }
+.analytics-whatif-body{
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.analytics-whatif-chart-wrap{
+  flex: 1 1 auto;
+  min-height: 160px;
+  display: flex;
+  align-items: stretch;
+}
 .analytics-whatif-title{
   font-weight: 800;
   color: #0f172a;
@@ -1420,6 +1474,7 @@ html {
   align-items: center;
   justify-content: space-between;
   font-size: 0.8rem;
+  margin-top: auto;
 }
 .analytics-whatif-reset{
   color: #2563eb;

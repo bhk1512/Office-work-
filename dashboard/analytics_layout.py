@@ -90,57 +90,15 @@ def build_analytics_layout() -> html.Div:
         className="analytics-audit-drawer",
     )
 
-    scope_row = dbc.Row(
+    scope_strip = html.Div(
         [
-            dbc.Col(
-                html.Div(
-                    [
-                        html.Span(id="analytics-scope-range", className="analytics-scope-chip"),
-                        html.Span(id="analytics-scope-projects", className="analytics-scope-chip"),
-                        html.Span(id="analytics-scope-gangs", className="analytics-scope-chip"),
-                        html.Span(id="analytics-scope-gangmonths", className="analytics-scope-chip"),
-                        html.Span("Idle cap: 15 days/window", className="analytics-scope-chip"),
-                    ],
-                    className="analytics-scope-strip",
-                ),
-                md=8,
-            ),
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div("Low-output deployment share", className="analytics-lowshare-title"),
-                            html.Div(
-                                "% of gang-months in <80 MT/month bucket",
-                                className="analytics-lowshare-subtitle",
-                            ),
-                            html.Div(id="analytics-lowshare-scope", className="analytics-lowshare-scope"),
-                            html.Div(
-                                [
-                                    html.Div(
-                                        id="analytics-lowshare-value",
-                                        className="analytics-lowshare-value",
-                                    ),
-                                    html.Div(
-                                        id="analytics-lowshare-delta",
-                                        className="analytics-lowshare-delta",
-                                    ),
-                                ],
-                                className="analytics-lowshare-metrics",
-                            ),
-                            dcc.Graph(
-                                id="analytics-lowshare-chart",
-                                config=GRAPH_CONFIG,
-                                style={"height": "130px"},
-                            ),
-                        ]
-                    ),
-                    className="analytics-lowshare-card",
-                ),
-                md=4,
-            ),
+            html.Span(id="analytics-scope-range", className="analytics-scope-chip"),
+            html.Span(id="analytics-scope-projects", className="analytics-scope-chip"),
+            html.Span(id="analytics-scope-gangs", className="analytics-scope-chip"),
+            html.Span(id="analytics-scope-gangmonths", className="analytics-scope-chip"),
+            html.Span("Idle cap: 15 days/window", className="analytics-scope-chip"),
         ],
-        className="g-3 mb-3 align-items-stretch analytics-scope-row",
+        className="analytics-scope-strip analytics-scope-strip--inline",
     )
 
     kpi_cards = dbc.Row(
@@ -198,16 +156,21 @@ def build_analytics_layout() -> html.Div:
     )
 
     whatif_card = dbc.Card(
-        dbc.CardBody(
-            [
-                html.Div(
-                    "What-if: Improve bucket productivity",
-                    className="analytics-whatif-title",
-                ),
-                html.Div(
-                    "Assumption: output constant; uplift applies only to selected bucket",
-                    className="analytics-whatif-subtitle",
-                ),
+        [
+            dbc.CardHeader(
+                [
+                    html.Div(
+                        "What-if: Improve bucket productivity",
+                        className="section-title",
+                    ),
+                    html.Div(
+                        "Assumption: output constant; uplift applies only to selected bucket",
+                        className="section-sub",
+                    ),
+                ]
+            ),
+            dbc.CardBody(
+                [
                 dcc.Dropdown(
                     id="analytics-whatif-bucket",
                     options=[],
@@ -254,10 +217,13 @@ def build_analytics_layout() -> html.Div:
                     ],
                     className="analytics-whatif-metrics",
                 ),
-                dcc.Graph(
-                    id="analytics-whatif-chart",
-                    config=GRAPH_CONFIG,
-                    style={"height": "120px"},
+                html.Div(
+                    dcc.Graph(
+                        id="analytics-whatif-chart",
+                        config=GRAPH_CONFIG,
+                        style={"height": "100%", "minHeight": "180px"},
+                    ),
+                    className="analytics-whatif-chart-wrap",
                 ),
                 html.Div(
                     [
@@ -274,9 +240,11 @@ def build_analytics_layout() -> html.Div:
                     ],
                     className="analytics-whatif-footer",
                 ),
-            ]
-        ),
-        className="analytics-whatif-card h-100",
+                ],
+                className="analytics-whatif-body",
+            ),
+        ],
+        className="viz-card shadow-soft analytics-whatif-card h-100 w-100",
     )
 
     row2 = dbc.Row(
@@ -291,16 +259,55 @@ def build_analytics_layout() -> html.Div:
                             ]
                         ),
                         dbc.CardBody(
-                            dcc.Graph(
-                                id="analytics-bucket-chart",
-                                config=GRAPH_CONFIG,
-                                style={"height": "320px"},
-                            )
+                            [
+                                dcc.Graph(
+                                    id="analytics-bucket-chart",
+                                    config=GRAPH_CONFIG,
+                                    style={"height": "240px"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Div(
+                                            "Low-output deployment share",
+                                            className="analytics-lowshare-title",
+                                        ),
+                                        html.Div(
+                                            "% of gang-months in <80 MT/month bucket",
+                                            className="analytics-lowshare-subtitle",
+                                        ),
+                                        html.Div(
+                                            id="analytics-lowshare-scope",
+                                            className="analytics-lowshare-scope",
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Div(
+                                                    id="analytics-lowshare-value",
+                                                    className="analytics-lowshare-value",
+                                                ),
+                                                html.Div(
+                                                    id="analytics-lowshare-delta",
+                                                    className="analytics-lowshare-delta",
+                                                ),
+                                            ],
+                                            className="analytics-lowshare-metrics",
+                                        ),
+                                        dcc.Graph(
+                                            id="analytics-lowshare-chart",
+                                            config=GRAPH_CONFIG,
+                                            style={"height": "140px"},
+                                        ),
+                                    ],
+                                    className="analytics-lowshare-inline",
+                                ),
+                            ],
+                            className="analytics-bucket-body",
                         ),
                     ],
-                    className="viz-card shadow-soft h-100",
+                    className="viz-card shadow-soft h-100 w-100",
                 ),
                 md=6,
+                className="d-flex",
             ),
             dbc.Col(whatif_card, md=6, className="d-flex"),
         ],
@@ -326,66 +333,29 @@ def build_analytics_layout() -> html.Div:
                             )
                         ),
                     ],
-                    className="viz-card shadow-soft h-100",
+                    className="viz-card shadow-soft h-100 w-100",
                 ),
                 md=6,
+                className="d-flex",
             ),
             dbc.Col(
-                html.Div(
+                dbc.Card(
                     [
-                        dbc.Card(
+                        dbc.CardHeader(
                             [
-                                dbc.CardHeader(
-                                    [
-                                        html.Div("Hotspot Ranking", className="section-title"),
-                                        html.Div("Top 10 projects by idle-days/100 towers", className="section-sub"),
-                                    ]
-                                ),
-                                dbc.CardBody(
-                                    dcc.Graph(
-                                        id="analytics-hotspot-chart",
-                                        config=GRAPH_CONFIG,
-                                        style={"height": "220px"},
-                                    )
-                                ),
-                            ],
-                            className="viz-card shadow-soft",
+                                html.Div("Hotspot Ranking", className="section-title"),
+                                html.Div("Top 10 projects by idle-days/100 towers", className="section-sub"),
+                            ]
                         ),
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    [
-                                        html.Div("Hotspot Table", className="section-title"),
-                                        html.Div("Projects with >=10 gangs", className="section-sub"),
-                                    ]
-                                ),
-                                dbc.CardBody(
-                                    dash_table.DataTable(
-                                        id="analytics-hotspot-table",
-                                        columns=[],
-                                        data=[],
-                                        page_size=10,
-                                        fixed_rows={"headers": True},
-                                        style_table={"overflowX": "auto", "maxHeight": "220px"},
-                                        style_cell={
-                                            "fontFamily": "Inter, system-ui",
-                                            "fontSize": 13,
-                                            "border": "1px solid var(--border, #e6e9f0)",
-                                            "padding": "6px 8px",
-                                            "textAlign": "left",
-                                        },
-                                        style_header={
-                                            "fontWeight": "600",
-                                            "backgroundColor": "#f6f8fc",
-                                            "border": "1px solid var(--border, #e6e9f0)",
-                                        },
-                                    )
-                                ),
-                            ],
-                            className="viz-card shadow-soft",
+                        dbc.CardBody(
+                            dcc.Graph(
+                                id="analytics-hotspot-chart",
+                                config=GRAPH_CONFIG,
+                                style={"height": "320px"},
+                            )
                         ),
                     ],
-                    className="d-flex flex-column gap-3 h-100 analytics-hotspot-stack",
+                    className="viz-card shadow-soft h-100 w-100",
                 ),
                 md=6,
                 className="d-flex",
@@ -462,7 +432,12 @@ def build_analytics_layout() -> html.Div:
                 ]
             ),
         ],
-        className="viz-card shadow-soft",
+        className="viz-card shadow-soft w-100",
+    )
+
+    histogram_row = dbc.Row(
+        [dbc.Col(histogram, md=12, className="d-flex")],
+        className="g-3 mb-4 align-items-stretch analytics-row analytics-row-4",
     )
 
     return html.Div(
@@ -470,14 +445,14 @@ def build_analytics_layout() -> html.Div:
             html.Div(
                 [
                     html.Div("Analytics (Erection)", className="section-title"),
+                    scope_strip,
                 ],
                 className="analytics-header",
             ),
-            scope_row,
             kpi_cards,
             row2,
             hotspot_row,
-            histogram,
+            histogram_row,
             dcc.Store(id="analytics-payload", data=None),
             dcc.Store(id="analytics-audit-selection", data=None),
             dcc.Interval(id="analytics-refresh-interval", interval=30 * 60 * 1000, n_intervals=0),

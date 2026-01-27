@@ -7267,6 +7267,12 @@ def register_callbacks(
         if is_stringing:
             totals_row_label = "F/S Total Planned / Done / Balance"
             totals_row_value = totals_focus_display
+        else:
+            totals_row_label = "Towers Delivered / Planned"
+            if plan_value_available:
+                totals_row_value = f"{int(round(total_current))} / {int(round(total_planned))}"
+            else:
+                totals_row_value = "No Plan Available"
 
         rows = [
             _row("Prod This Month", _fmt_prod(prod_current_value)),
@@ -10907,21 +10913,12 @@ def register_callbacks(
 
     @app.callback(
         Output("analytics-hotspot-chart", "figure"),
-        Output("analytics-hotspot-table", "columns"),
-        Output("analytics-hotspot-table", "data"),
         Input("analytics-payload", "data"),
     )
     def _render_hotspot_ranking(payload: dict[str, Any] | None):
         rows = (payload or {}).get("hotspot", {}).get("top10") or []
         if not rows:
-            fig = _analytics_empty_fig("No hotspot data")
-            columns = [
-                {"name": "Project", "id": "project_name"},
-                {"name": "Gangs", "id": "gangs"},
-                {"name": "Towers", "id": "towers"},
-                {"name": "Idle Days / 100 Towers", "id": "idle_days_per_100"},
-            ]
-            return fig, columns, []
+            return _analytics_empty_fig("No hotspot data")
 
         df = pd.DataFrame(rows)
         df["idle_days_per_100"] = pd.to_numeric(df["idle_days_per_100"], errors="coerce").fillna(0.0)
@@ -10942,14 +10939,7 @@ def register_callbacks(
             xaxis={"title": "Idle Days / 100 Towers", "gridcolor": "#e6e9f0"},
             yaxis={"title": "", "tickfont": {"size": 11}},
         )
-        columns = [
-            {"name": "Project", "id": "project_name"},
-            {"name": "Gangs", "id": "gangs"},
-            {"name": "Towers", "id": "towers"},
-            {"name": "Idle Days / 100 Towers", "id": "idle_days_per_100"},
-        ]
-        df["idle_days_per_100"] = df["idle_days_per_100"].round(1)
-        return fig, columns, df.to_dict("records")
+        return fig
 
     @app.callback(
         Output("analytics-whatif-bucket", "options"),
@@ -11180,9 +11170,7 @@ def register_callbacks(
         Input("analytics-tier-chart", "clickData"),
         Input("analytics-hist-chart", "clickData"),
         Input("analytics-hotspot-chart", "clickData"),
-        Input("analytics-hotspot-table", "active_cell"),
         Input("analytics-audit-close", "n_clicks"),
-        State("analytics-hotspot-table", "data"),
         State("analytics-payload", "data"),
         State("analytics-audit-drawer", "is_open"),
         prevent_initial_call=True,
@@ -11195,9 +11183,7 @@ def register_callbacks(
         tier_click,
         hist_click,
         hotspot_chart_click,
-        hotspot_table_cell,
         close_clicks,
-        hotspot_table_data,
         payload,
         is_open,
     ):
@@ -11245,17 +11231,6 @@ def register_callbacks(
             title = f"Histogram Bin: {bin_label}"
         elif trigger == "analytics-hotspot-chart":
             project_label = (hotspot_chart_click or {}).get("points", [{}])[0].get("y")
-            if not project_label:
-                raise PreventUpdate
-            selection = {"kind": "hotspot", "project": project_label}
-            title = f"Project Hotspot: {project_label}"
-        elif trigger == "analytics-hotspot-table":
-            if not hotspot_table_cell or not hotspot_table_data:
-                raise PreventUpdate
-            row_index = hotspot_table_cell.get("row")
-            if row_index is None or row_index >= len(hotspot_table_data):
-                raise PreventUpdate
-            project_label = hotspot_table_data[row_index].get("project_name")
             if not project_label:
                 raise PreventUpdate
             selection = {"kind": "hotspot", "project": project_label}
