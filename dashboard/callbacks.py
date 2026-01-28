@@ -3706,6 +3706,10 @@ def register_callbacks(
                         "fs_complete_date",
                         "fs_start_date",
                         "fs_starting_date",
+                        "po_completion_date",
+                        "po_completion",
+                        "paying_out_complete",
+                        "paying_out_start",
                         "completion date",
                         "starting date",
                         "completion month",
@@ -5720,6 +5724,34 @@ def register_callbacks(
                         .map(lambda value: _compact_project_key(value) or _normalize_lower(value))
                     )
                 delivered_keys = {key for key in delivered_keys if key}
+                po_keys: set[str] = set()
+                try:
+                    po_frame = _get_stringing_po_daily_frame()
+                except Exception:
+                    po_frame = pd.DataFrame()
+                if isinstance(po_frame, pd.DataFrame) and not po_frame.empty:
+                    po_scoped = _stringing_scope(po_frame, selected.get("methods") or [])
+                    po_filtered = apply_filters(po_scoped, project_filters, months_ts, [])
+                    po_filtered = _filter_frame_for_deployment(po_filtered, selected.get("stringing_scope"))
+                    if not po_filtered.empty:
+                        po_col = "project_name" if "project_name" in po_filtered.columns else (
+                            "project" if "project" in po_filtered.columns else None
+                        )
+                        if po_col:
+                            po_values = (
+                                po_filtered[po_col]
+                                .dropna()
+                                .astype(str)
+                                .str.strip()
+                            )
+                            po_keys = {
+                                _compact_project_key(value) or _normalize_lower(value)
+                                for value in po_values
+                                if str(value).strip()
+                            }
+                            po_keys = {key for key in po_keys if key}
+                if po_keys:
+                    delivered_keys.update(po_keys)
                 total_project_keys = plan_keys | delivered_keys
                 total_project_keys = {key for key in total_project_keys if key}
                 if total_project_keys:
@@ -7702,8 +7734,39 @@ def register_callbacks(
                     pd.Index([], name="project_key_norm")
                 )
 
+            po_union = pd.DataFrame(columns=["project_name_po"]).set_index(
+                pd.Index([], name="project_key_norm")
+            )
+            try:
+                po_frame = _get_stringing_po_daily_frame()
+            except Exception:
+                po_frame = pd.DataFrame()
+            if isinstance(po_frame, pd.DataFrame) and not po_frame.empty:
+                po_scoped = _stringing_scope(po_frame, method_list)
+                po_filtered = apply_filters(po_scoped, project_list, months_ts, [])
+                po_filtered = _filter_frame_for_deployment(po_filtered, deployment_scope)
+                if not po_filtered.empty:
+                    po_proj_col = "project_name" if "project_name" in po_filtered.columns else (
+                        "project" if "project" in po_filtered.columns else None
+                    )
+                    if po_proj_col:
+                        po_work = po_filtered.copy()
+                        if po_proj_col != "project_name":
+                            po_work = po_work.rename(columns={po_proj_col: "project_name"})
+                        po_work["project_name"] = po_work["project_name"].astype(str).str.strip()
+                        po_work["project_key_norm"] = po_work["project_name"].map(
+                            lambda value: _compact_project_key(value) or _normalize_lower(value)
+                        )
+                        po_work = po_work[po_work["project_key_norm"].astype(str).str.strip() != ""]
+                        if not po_work.empty:
+                            po_union = (
+                                po_work.drop_duplicates(subset=["project_key_norm"])
+                                .set_index("project_key_norm")[["project_name"]]
+                                .rename(columns={"project_name": "project_name_po"})
+                            )
+
             combined_projects = (
-                plan_union.join(delivered_union, how="outer")
+                plan_union.join(delivered_union, how="outer").join(po_union, how="outer")
                 .fillna({"planned_km": 0.0, "delivered_km": 0.0})
             )
             combined_projects.index.name = "__project_key_norm_idx__"
@@ -7713,7 +7776,13 @@ def register_callbacks(
             )
             delivered_names = projects_df.pop("project_name_delivered").fillna("").astype(str)
             plan_names = projects_df.pop("project_name_plan").fillna("").astype(str)
+            po_names = (
+                projects_df.pop("project_name_po").fillna("").astype(str)
+                if "project_name_po" in projects_df.columns
+                else pd.Series([""] * len(projects_df), index=projects_df.index)
+            )
             base_name = delivered_names.where(delivered_names.str.strip() != "", plan_names)
+            base_name = base_name.where(base_name.str.strip() != "", po_names)
             base_name = base_name.fillna("")
             fallback_mask = base_name.str.strip() == ""
             if fallback_mask.any():
