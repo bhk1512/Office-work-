@@ -14,8 +14,10 @@ from dashboard.config import AppConfig, configure_logging
 from dashboard.plan_utils import compact_project_key, normalize_location
 from dashboard.state import AppDataStore
 from dashboard.stringing import (
+    expand_stringing_to_daily,
     expand_stringing_to_daily_payout,
     expand_stringing_to_daily_fs,
+    add_length_units,
     normalize_stringing_columns,
 )
 
@@ -254,6 +256,314 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
     return grouped.sort_values(["stage", "gang_name"]).reset_index(drop=True)
 
 
+def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, dict[str, str]]:
+    if project_info is None or project_info.empty:
+        return {}
+    info = project_info.copy()
+    project_code = info.get("project_code", pd.Series("", index=info.index)).fillna("").astype(str).str.strip()
+    project_name = info.get("project_name", info.get("Project Name", pd.Series("", index=info.index)))
+    project_name = project_name.fillna("").astype(str).str.strip()
+    key_name = info.get("key_name", pd.Series("", index=info.index)).fillna("").astype(str).str.strip()
+    pch = info.get("pch", pd.Series("", index=info.index)).fillna("").astype(str).str.strip()
+
+    lookup: dict[str, dict[str, str]] = {}
+    for code, name, key, pch_value in zip(project_code, project_name, key_name, pch):
+        display = code or name or key
+        entry = {
+            "project_code": code,
+            "project_display": display,
+            "pch": pch_value,
+        }
+        for candidate in (code, name, key):
+            compact = compact_project_key(candidate)
+            if compact and compact not in lookup:
+                lookup[compact] = entry
+    return lookup
+
+
+def _prepare_stringing_scope(daily_df: pd.DataFrame, project_info: pd.DataFrame | None) -> pd.DataFrame:
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame()
+    working = _add_span_key(daily_df)
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"])
+    working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
+    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working["project_name"] = working.get("project_name", working.get("project", "")).fillna("").astype(str).str.strip()
+    working["project_key_norm"] = working.get("project_key_norm", "").fillna("").astype(str)
+
+    lookup = _build_project_meta_lookup(project_info)
+    if lookup:
+        def _lookup_meta(value: object) -> dict[str, str] | None:
+            key = compact_project_key(value)
+            return lookup.get(key)
+
+        meta_from_key = working["project_key_norm"].map(_lookup_meta)
+        meta_from_name = working["project_name"].map(_lookup_meta)
+        meta_series = meta_from_key.where(meta_from_key.notna(), meta_from_name)
+        working["project_display"] = meta_series.map(
+            lambda rec: rec.get("project_display", "") if isinstance(rec, dict) else ""
+        )
+        working["project_display"] = working["project_display"].where(
+            working["project_display"].astype(bool), working["project_name"]
+        )
+        working["pch_display"] = meta_series.map(
+            lambda rec: rec.get("pch", "") if isinstance(rec, dict) else ""
+        )
+    else:
+        working["project_display"] = working["project_name"]
+        working["pch_display"] = ""
+
+    working["pch_display"] = working["pch_display"].fillna("").astype(str).str.strip()
+    working["pch_display"] = working["pch_display"].where(working["pch_display"].astype(bool), "Unassigned")
+    return working
+
+
+def _prepare_stringing_compiled_scope(compiled_df: pd.DataFrame, project_info: pd.DataFrame | None) -> pd.DataFrame:
+    if compiled_df is None or compiled_df.empty:
+        return pd.DataFrame()
+    normalized, _ = normalize_stringing_columns(compiled_df)
+    normalized = _ensure_project_fields(normalized)
+    normalized, _ = add_length_units(normalized)
+    normalized["fs_complete_date"] = pd.to_datetime(
+        normalized.get("fs_complete_date"), errors="coerce"
+    ).dt.normalize()
+    normalized["month"] = normalized["fs_complete_date"].dt.to_period("M").dt.to_timestamp()
+    normalized["gang_name"] = normalized.get("gang_name", "").fillna("").astype(str).str.strip()
+    normalized["project_name"] = normalized.get("project_name", normalized.get("project", "")).fillna("").astype(str).str.strip()
+    normalized["project_key_norm"] = normalized.get("project_key_norm", "").fillna("").astype(str)
+
+    lookup = _build_project_meta_lookup(project_info)
+    if lookup:
+        def _lookup_meta(value: object) -> dict[str, str] | None:
+            key = compact_project_key(value)
+            return lookup.get(key)
+
+        meta_from_key = normalized["project_key_norm"].map(_lookup_meta)
+        meta_from_name = normalized["project_name"].map(_lookup_meta)
+        meta_series = meta_from_key.where(meta_from_key.notna(), meta_from_name)
+        normalized["project_display"] = meta_series.map(
+            lambda rec: rec.get("project_display", "") if isinstance(rec, dict) else ""
+        )
+        normalized["project_display"] = normalized["project_display"].where(
+            normalized["project_display"].astype(bool), normalized["project_name"]
+        )
+        normalized["pch_display"] = meta_series.map(
+            lambda rec: rec.get("pch", "") if isinstance(rec, dict) else ""
+        )
+    else:
+        normalized["project_display"] = normalized["project_name"]
+        normalized["pch_display"] = ""
+
+    normalized["pch_display"] = normalized["pch_display"].fillna("").astype(str).str.strip()
+    normalized["pch_display"] = normalized["pch_display"].where(normalized["pch_display"].astype(bool), "Unassigned")
+    return normalized
+
+
+def _summarize_scope(
+    scope: pd.DataFrame,
+    *,
+    group_columns: list[str] | None = None,
+    include_project_count: bool = True,
+) -> pd.DataFrame:
+    if scope is None or scope.empty:
+        return pd.DataFrame()
+    group_columns = group_columns or []
+    if group_columns:
+        grouped = scope.groupby(group_columns, dropna=False)
+    else:
+        scope = scope.copy()
+        scope["_all"] = "All"
+        grouped = scope.groupby("_all", dropna=False)
+    summary = grouped.agg(
+        avg_km_month=("daily_km", lambda s: float(s.mean() * _MONTH_PRODUCTIVITY_FACTOR)),
+        total_km=("daily_km", "sum"),
+        spans=("span_key", "nunique"),
+        gangs=("gang_name", "nunique"),
+        projects=("project_key_norm", "nunique"),
+    ).reset_index()
+    summary["avg_km_month"] = summary["avg_km_month"].fillna(0.0).round(4)
+    summary["total_km"] = summary["total_km"].fillna(0.0).round(4)
+    summary["spans"] = summary["spans"].fillna(0).astype(int)
+    summary["gangs"] = summary["gangs"].fillna(0).astype(int)
+    summary["projects"] = summary["projects"].fillna(0).astype(int)
+    if not include_project_count and "projects" in summary.columns:
+        summary = summary.drop(columns=["projects"])
+    if not group_columns:
+        summary = summary.drop(columns=["_all"], errors="ignore")
+    return summary
+
+
+def _build_scope_label(scope: pd.DataFrame, start: pd.Timestamp | None, end: pd.Timestamp | None) -> str:
+    if scope is None or scope.empty:
+        return "Scope: (empty)"
+    start_label = start.strftime("%Y-%m-%d") if start is not None else ""
+    end_label = end.strftime("%Y-%m-%d") if end is not None else ""
+    project_count = int(scope["project_key_norm"].nunique()) if "project_key_norm" in scope.columns else 0
+    gang_count = int(scope["gang_name"].nunique()) if "gang_name" in scope.columns else 0
+    span_count = int(scope["span_key"].nunique()) if "span_key" in scope.columns else 0
+    return (
+        f"Scope: {start_label} to {end_label} | Projects: {project_count} | "
+        f"Spans: {span_count} | Gangs: {gang_count}"
+    )
+
+
+def _append_totals_row(df: pd.DataFrame, *, avg_col: str, total_col: str, span_col: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    totals = {column: "" for column in df.columns}
+    totals[avg_col] = "Total"
+    totals[total_col] = round(float(df[total_col].sum()), 4) if total_col in df.columns else 0.0
+    totals[span_col] = int(df[span_col].sum()) if span_col in df.columns else 0
+    return pd.concat([df, pd.DataFrame([totals])], ignore_index=True)
+
+
+def _build_month_windows_from_series(
+    series: pd.Series,
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+) -> tuple[list[pd.Timestamp], list[str]]:
+    if series is None or series.empty:
+        return [], []
+    series = pd.to_datetime(series, errors="coerce").dropna()
+    if series.empty:
+        return [], []
+    start_ts = start or series.min()
+    end_ts = end or series.max()
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        return [], []
+    start_month = pd.Timestamp(start_ts).to_period("M").to_timestamp()
+    end_month = pd.Timestamp(end_ts).to_period("M").to_timestamp()
+    months = pd.period_range(start_month, end_month, freq="M").to_timestamp().tolist()
+    labels = [month.strftime("%b'%y") for month in months]
+    return months, labels
+
+
+def _build_review_table_two(scope: pd.DataFrame, months: list[pd.Timestamp], labels: list[str]) -> pd.DataFrame:
+    rows = {
+        "Stringing productivity": "KM/month (Avg)",
+    }
+    gang_row = {
+        "Stringing productivity": "No of Gangs engaged (Avg)",
+    }
+    if scope is None or scope.empty or not months:
+        return pd.DataFrame([rows, gang_row], columns=["Stringing productivity", *labels])
+    for month_ts, label in zip(months, labels):
+        month_start = pd.Timestamp(month_ts).normalize()
+        month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+        month_scope = scope[(scope["date"] >= month_start) & (scope["date"] <= month_end)]
+        if month_scope.empty:
+            rows[label] = 0.0
+            gang_row[label] = 0
+            continue
+        avg_prod = float(month_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
+        rows[label] = round(avg_prod, 2)
+        gang_row[label] = int(month_scope["gang_name"].nunique())
+    return pd.DataFrame([rows, gang_row], columns=["Stringing productivity", *labels])
+
+
+def _build_monthly_km_table(
+    scope: pd.DataFrame,
+    months: list[pd.Timestamp],
+    labels: list[str],
+    *,
+    label_col: str = "Stringing productivity",
+    date_column: str = "month",
+    metric_column: str = "length_km",
+) -> pd.DataFrame:
+    rows = {
+        label_col: "KM/month (Total)",
+    }
+    gang_row = {
+        label_col: "No of Gangs",
+    }
+    if scope is None or scope.empty or not months:
+        return pd.DataFrame([rows, gang_row], columns=[label_col, *labels])
+    for month_ts, label in zip(months, labels):
+        month_start = pd.Timestamp(month_ts).normalize()
+        month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+        if date_column == "month":
+            month_scope = scope[scope[date_column] == month_start]
+        else:
+            month_scope = scope[(scope[date_column] >= month_start) & (scope[date_column] <= month_end)]
+        if month_scope.empty:
+            rows[label] = 0.0
+            gang_row[label] = 0
+            continue
+        km_total = float(pd.to_numeric(month_scope[metric_column], errors="coerce").sum())
+        rows[label] = round(km_total, 2)
+        gang_row[label] = int(month_scope["gang_name"].nunique())
+    return pd.DataFrame([rows, gang_row], columns=[label_col, *labels])
+
+
+def _write_scoped_table(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    table: pd.DataFrame,
+    scope_label: str,
+    *,
+    startrow: int,
+) -> int:
+    header_df = pd.DataFrame([[scope_label]])
+    header_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=startrow)
+    table_start = startrow + len(header_df) + 1
+    table.to_excel(writer, sheet_name=sheet_name, index=False, startrow=table_start)
+    return table_start + len(table) + 1
+
+
+def _normalize_method(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"", "nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _method_group(value: str) -> str:
+    if "tse" in value:
+        return "TSE"
+    if "manual" in value:
+        return "Manual"
+    return "Other"
+
+
+def _build_method_summary(
+    scope: pd.DataFrame,
+    issues: list[dict[str, object]],
+) -> pd.DataFrame:
+    if scope is None or scope.empty:
+        return pd.DataFrame()
+    work = scope.copy()
+    method_series = work.get("method", work.get("method_norm", pd.Series("", index=work.index)))
+    method_norm = method_series.map(_normalize_method)
+    work["method_group"] = method_norm.map(_method_group)
+    missing_mask = method_norm.eq("")
+    if missing_mask.any():
+        for _, row in work.loc[missing_mask].iterrows():
+            issues.append(
+                {
+                    "issue_type": "METHOD_MISSING",
+                    "project": row.get("project_name", ""),
+                    "from_ap": row.get("from_ap", ""),
+                    "to_ap": row.get("to_ap", ""),
+                    "date": row.get("date", pd.NaT),
+                    "row_id": row.get("row_id", ""),
+                    "details": "Method column missing or blank",
+                }
+            )
+    summary = _summarize_scope(work, group_columns=["method_group"])
+    if summary.empty:
+        return summary
+    summary = summary.rename(
+        columns={
+            "method_group": "Method",
+            "avg_km_month": "Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+            "projects": "Projects",
+        }
+    )
+    return summary
 def _normalize_stringing_compiled(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -568,7 +878,11 @@ def main() -> int:
         LOGGER.warning("Stringing compiled dataset not available; some analyses will be empty.")
 
     # Overall stringing daily (PO start -> FS complete)
-    overall_daily = _filter_by_date(stringing_daily, "date", start_date, end_date)
+    if stringing_compiled is not None and not stringing_compiled.empty:
+        overall_daily = expand_stringing_to_daily(stringing_compiled)
+    else:
+        overall_daily = stringing_daily
+    overall_daily = _filter_by_date(overall_daily, "date", start_date, end_date)
 
     # PO-only daily (PO start -> PO completion)
     po_daily = expand_stringing_to_daily_payout(stringing_compiled) if not stringing_compiled.empty else pd.DataFrame()
@@ -615,6 +929,154 @@ def main() -> int:
     )
     erection_po_gap_summary = _build_gap_summary(erection_po_gap, "gap_days")
 
+    # Stringing rollups (overall / PCH / project) and review format
+    project_info = store.get_project_info()
+    scope = _prepare_stringing_scope(overall_daily, project_info)
+    compiled_scope = _prepare_stringing_compiled_scope(stringing_compiled, project_info)
+    method_summary = _build_method_summary(scope, issues)
+    months, month_labels = _build_month_windows_from_series(scope["date"], start_date, end_date)
+    scope_label = _build_scope_label(scope, start_date, end_date)
+
+    overall_rollup = _summarize_scope(scope)
+    overall_rollup = overall_rollup.rename(
+        columns={
+            "avg_km_month": "Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+            "projects": "Projects",
+        }
+    )
+    pch_rollup = _summarize_scope(scope, group_columns=["pch_display"])
+    pch_rollup = pch_rollup.rename(
+        columns={
+            "pch_display": "PCH",
+            "avg_km_month": "Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+            "projects": "Projects",
+        }
+    )
+    project_rollup = _summarize_scope(
+        scope,
+        group_columns=["pch_display", "project_display"],
+        include_project_count=False,
+    )
+    project_rollup = project_rollup.rename(
+        columns={
+            "pch_display": "PCH",
+            "project_display": "Project",
+            "avg_km_month": "Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+        }
+    )
+
+    review_table_raw = project_rollup.reindex(
+        columns=["PCH", "Project", "Avg Productivity (KM/month)", "Total KM", "Spans"]
+    )
+    review_table_one_groups: list[pd.DataFrame] = []
+    if review_table_raw.empty or "PCH" not in review_table_raw.columns:
+        review_table_one_groups.append(
+            _append_totals_row(
+                review_table_raw,
+                avg_col="Avg Productivity (KM/month)",
+                total_col="Total KM",
+                span_col="Spans",
+            )
+        )
+    else:
+        unique_pch = sorted(review_table_raw["PCH"].fillna("").astype(str).unique())
+        for pch_name in unique_pch:
+            if not pch_name:
+                continue
+            pch_table = review_table_raw[review_table_raw["PCH"] == pch_name].copy()
+            header_row = {col: "" for col in review_table_raw.columns}
+            header_row["PCH"] = f"PCH: {pch_name}"
+            review_table_one_groups.append(pd.DataFrame([header_row], columns=review_table_raw.columns))
+            review_table_one_groups.append(
+                _append_totals_row(
+                    pch_table,
+                    avg_col="Avg Productivity (KM/month)",
+                    total_col="Total KM",
+                    span_col="Spans",
+                )
+            )
+
+    review_table_two_groups: list[pd.DataFrame] = []
+    review_table_monthly_groups: list[pd.DataFrame] = []
+    if not scope.empty and month_labels:
+        review_table_two_groups.append(_build_review_table_two(scope, months, month_labels))
+        if not compiled_scope.empty:
+            review_table_monthly_groups.append(
+                _build_monthly_km_table(
+                    compiled_scope,
+                    months,
+                    month_labels,
+                    date_column="month",
+                    metric_column="length_km",
+                )
+            )
+        if "pch_display" in scope.columns:
+            for pch_name in sorted(scope["pch_display"].fillna("").astype(str).unique()):
+                if not pch_name:
+                    continue
+                pch_scope = scope[scope["pch_display"] == pch_name]
+                header_row = {"Stringing productivity": f"PCH: {pch_name}"}
+                for label in month_labels:
+                    header_row[label] = ""
+                review_table_two_groups.append(pd.DataFrame([header_row], columns=["Stringing productivity", *month_labels]))
+                review_table_two_groups.append(_build_review_table_two(pch_scope, months, month_labels))
+                if not compiled_scope.empty:
+                    compiled_pch_scope = compiled_scope[compiled_scope["pch_display"] == pch_name]
+                    review_table_monthly_groups.append(
+                        pd.DataFrame([header_row], columns=["Stringing productivity", *month_labels])
+                    )
+                    review_table_monthly_groups.append(
+                        _build_monthly_km_table(
+                            compiled_pch_scope,
+                            months,
+                            month_labels,
+                            date_column="month",
+                            metric_column="length_km",
+                        )
+                    )
+                if "project_display" in pch_scope.columns and "project_key_norm" in pch_scope.columns:
+                    project_pairs = (
+                        pch_scope[["project_display", "project_key_norm"]]
+                        .dropna(subset=["project_key_norm"])
+                        .drop_duplicates()
+                    )
+                    for _, proj_row in project_pairs.iterrows():
+                        project_name = str(proj_row.get("project_display", "")).strip()
+                        project_key = str(proj_row.get("project_key_norm", "")).strip()
+                        if not project_key:
+                            continue
+                        proj_scope = pch_scope[pch_scope["project_key_norm"] == project_key]
+                        header_row = {"Stringing productivity": f"Project: {project_name}"}
+                        for label in month_labels:
+                            header_row[label] = ""
+                        review_table_two_groups.append(
+                            pd.DataFrame([header_row], columns=["Stringing productivity", *month_labels])
+                        )
+                        review_table_two_groups.append(_build_review_table_two(proj_scope, months, month_labels))
+                        if not compiled_scope.empty:
+                            compiled_proj_scope = compiled_scope[compiled_scope["project_key_norm"] == project_key]
+                            review_table_monthly_groups.append(
+                                pd.DataFrame([header_row], columns=["Stringing productivity", *month_labels])
+                            )
+                            review_table_monthly_groups.append(
+                                _build_monthly_km_table(
+                                    compiled_proj_scope,
+                                    months,
+                                    month_labels,
+                                    date_column="month",
+                                    metric_column="length_km",
+                                )
+                            )
+
     issues_df = pd.DataFrame(issues)
     if not issues_df.empty:
         for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
@@ -643,6 +1105,10 @@ def main() -> int:
             "Details": "From/To AP values strip a leading 'AP' (case-insensitive) with optional separators. Parsed as main number + optional letters + optional '/sub'. Order key = main*1,000,000 + letter_rank*1,000 + sub.",
         },
         {
+            "Assumption": "Length units",
+            "Details": "Span lengths are auto-detected per source_file (fallback per project): if p90 <= 50 and max <= 100, values are treated as KM; otherwise meters. KM values are converted to meters for length_m and used directly for length_km.",
+        },
+        {
             "Assumption": "Span matching",
             "Details": "Span ranges are inclusive of From and To locations. If From/To order is reversed, the range is normalized.",
         },
@@ -653,6 +1119,14 @@ def main() -> int:
         {
             "Assumption": "Date filters",
             "Details": "PO-FS gaps are filtered by PO completion date; Erection-PO gaps are filtered by PO start date; daily outputs are filtered by the daily date column.",
+        },
+        {
+            "Assumption": "Method split",
+            "Details": "Method is read from the stringing daily data (method/method_norm). Rows without method are logged in Data_Issues. Summary groups into TSE, Manual, and Other.",
+        },
+        {
+            "Assumption": "Monthly breakup",
+            "Details": "Monthly KM tables use sum(length_km) grouped by F/S completion month and count unique gangs per month.",
         },
     ]
     readme_df = pd.DataFrame(readme_rows)
@@ -665,6 +1139,107 @@ def main() -> int:
         po_fs_gap_summary.to_excel(writer, sheet_name="PO_FS_Gap_Summary", index=False)
         erection_po_gap.to_excel(writer, sheet_name="Erection_PO_Gap", index=False)
         erection_po_gap_summary.to_excel(writer, sheet_name="Erection_PO_Gap_Summary", index=False)
+        if not method_summary.empty:
+            method_summary.to_excel(writer, sheet_name="Method_Summary", index=False)
+        if not overall_rollup.empty or not pch_rollup.empty or not project_rollup.empty:
+            summary_row = 0
+            summary_row = _write_scoped_table(
+                writer, "Stringing Summary", overall_rollup, scope_label, startrow=summary_row
+            )
+            summary_row += 2
+            summary_row = _write_scoped_table(
+                writer, "Stringing Summary", pch_rollup, scope_label, startrow=summary_row
+            )
+            summary_row += 2
+            _write_scoped_table(
+                writer, "Stringing Summary", project_rollup, scope_label, startrow=summary_row
+            )
+        if review_table_one_groups or review_table_two_groups or review_table_monthly_groups:
+            current_row = 0
+            for table in review_table_one_groups:
+                if table.empty:
+                    continue
+                table.to_excel(writer, sheet_name="Review_Format", index=False, startrow=current_row)
+                current_row += len(table) + 2
+            current_row += 1
+            for table in review_table_two_groups:
+                if table.empty:
+                    continue
+                table.to_excel(writer, sheet_name="Review_Format", index=False, startrow=current_row)
+                current_row += len(table) + 2
+            if review_table_monthly_groups:
+                current_row += 1
+                for table in review_table_monthly_groups:
+                    if table.empty:
+                        continue
+                    table.to_excel(writer, sheet_name="Review_Format", index=False, startrow=current_row)
+                    current_row += len(table) + 2
+        if month_labels and not compiled_scope.empty:
+            current_row = 0
+            header = pd.DataFrame([{"Stringing productivity": "Overall"}], columns=["Stringing productivity", *month_labels])
+            header.to_excel(writer, sheet_name="Monthly_Breakup", index=False, startrow=current_row)
+            current_row += len(header) + 1
+            _build_monthly_km_table(
+                compiled_scope,
+                months,
+                month_labels,
+                date_column="month",
+                metric_column="length_km",
+            ).to_excel(
+                writer, sheet_name="Monthly_Breakup", index=False, startrow=current_row
+            )
+            current_row += 4
+            if "pch_display" in scope.columns:
+                for pch_name in sorted(scope["pch_display"].fillna("").astype(str).unique()):
+                    if not pch_name:
+                        continue
+                    header = pd.DataFrame(
+                        [{"Stringing productivity": f"PCH: {pch_name}"}],
+                        columns=["Stringing productivity", *month_labels],
+                    )
+                    header.to_excel(writer, sheet_name="Monthly_Breakup", index=False, startrow=current_row)
+                    current_row += len(header) + 1
+                    pch_scope = compiled_scope[compiled_scope["pch_display"] == pch_name]
+                    _build_monthly_km_table(
+                        pch_scope,
+                        months,
+                        month_labels,
+                        date_column="month",
+                        metric_column="length_km",
+                    ).to_excel(
+                        writer, sheet_name="Monthly_Breakup", index=False, startrow=current_row
+                    )
+                    current_row += 4
+                    if "project_display" in pch_scope.columns and "project_key_norm" in pch_scope.columns:
+                        project_pairs = (
+                            pch_scope[["project_display", "project_key_norm"]]
+                            .dropna(subset=["project_key_norm"])
+                            .drop_duplicates()
+                        )
+                        for _, proj_row in project_pairs.iterrows():
+                            project_name = str(proj_row.get("project_display", "")).strip()
+                            project_key = str(proj_row.get("project_key_norm", "")).strip()
+                            if not project_key:
+                                continue
+                            header = pd.DataFrame(
+                                [{"Stringing productivity": f"Project: {project_name}"}],
+                                columns=["Stringing productivity", *month_labels],
+                            )
+                            header.to_excel(
+                                writer, sheet_name="Monthly_Breakup", index=False, startrow=current_row
+                            )
+                            current_row += len(header) + 1
+                            proj_scope = pch_scope[pch_scope["project_key_norm"] == project_key]
+                            _build_monthly_km_table(
+                                proj_scope,
+                                months,
+                                month_labels,
+                                date_column="month",
+                                metric_column="length_km",
+                            ).to_excel(
+                                writer, sheet_name="Monthly_Breakup", index=False, startrow=current_row
+                            )
+                            current_row += 4
         readme_df.to_excel(writer, sheet_name="README", index=False)
         if not issues_df.empty:
             issues_df.to_excel(writer, sheet_name="Data_Issues", index=False)

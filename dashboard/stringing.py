@@ -469,7 +469,13 @@ def _expand_stringing_stage_to_daily(
     work[start_col] = work[start_col].map(_to_datetime_normalize)
     work[end_col] = work[end_col].map(_to_datetime_normalize)
     if "po" in work.columns and "po_km" not in work.columns:
-        work["po_km"] = pd.to_numeric(work["po"], errors="coerce") / 1000.0
+        po_values = pd.to_numeric(work["po"], errors="coerce")
+        unit_series = work.get("length_unit")
+        if isinstance(unit_series, pd.Series):
+            is_km = unit_series.astype(str).str.lower().eq("km")
+            work["po_km"] = po_values.where(is_km, po_values / 1000.0)
+        else:
+            work["po_km"] = po_values / 1000.0
 
     missing_dt = work[start_col].isna() | work[end_col].isna()
     duration_days = (work[end_col] - work[start_col]).dt.days + 1
@@ -624,8 +630,25 @@ def expand_stringing_to_daily_fs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def _infer_length_unit(values: pd.Series) -> str:
+    """Infer whether length values are in meters or kilometers.
+
+    Heuristic:
+    - If typical values are small (p90 <= 50 and max <= 100), assume KM.
+    - Otherwise assume meters.
+    """
+    cleaned = pd.to_numeric(values, errors="coerce").dropna()
+    if cleaned.empty:
+        return "m"
+    max_val = float(cleaned.max())
+    p90 = float(cleaned.quantile(0.9))
+    if max_val <= 100 and p90 <= 50:
+        return "km"
+    return "m"
+
+
 def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """Add ``length_km`` derived from meters and compute sanity metrics.
+    """Add ``length_km`` derived from length values and compute sanity metrics.
 
     Expects the input DataFrame to have the normalized column ``length_m``.
     If present, attempts to coerce it to numeric meters, derive kilometers,
@@ -655,18 +678,42 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
             "max_length_km": 0.0,
         }
 
-    meters = pd.to_numeric(out["length_m"], errors="coerce")
-    out["length_m"] = meters
-    out["length_km"] = meters / 1000.0
+    raw_values = pd.to_numeric(out["length_m"], errors="coerce")
+    unit_series = pd.Series(index=out.index, dtype="object")
+
+    group_key = None
+    for candidate in ("source_file", "project_name", "project"):
+        if candidate in out.columns:
+            group_key = candidate
+            break
+
+    if group_key:
+        for key, group in out.groupby(group_key, dropna=False):
+            unit = _infer_length_unit(pd.to_numeric(group["length_m"], errors="coerce"))
+            unit_series.loc[group.index] = unit
+    else:
+        unit = _infer_length_unit(raw_values)
+        unit_series = pd.Series(unit, index=out.index, dtype="object")
+
+    unit_series = unit_series.fillna("m")
+    is_km = unit_series.eq("km")
+    out["length_km"] = raw_values.where(is_km, raw_values / 1000.0)
+    out["length_m"] = raw_values.where(~is_km, raw_values * 1000.0)
+    out["length_unit"] = unit_series
 
     km = out["length_km"].dropna()
     total_km = float(km.sum()) if len(km) else 0.0
     min_km = float(km.min()) if len(km) else 0.0
     max_km = float(km.max()) if len(km) else 0.0
 
+    unit_label = "mixed"
+    if unit_series.nunique(dropna=True) == 1:
+        unit_label = str(unit_series.dropna().iloc[0])
+
     metrics: Dict[str, float] = {
         "total_length_km": total_km,
         "min_length_km": min_km,
         "max_length_km": max_km,
+        "length_unit": unit_label,
     }
     return out, metrics
