@@ -8870,6 +8870,77 @@ def register_callbacks(
             except Exception:
                 continue
 
+        # Also include projects seen in the daily scope even if they have no completion rows/plan data
+        try:
+            scoped_projects = []
+            if isinstance(scoped, pd.DataFrame) and not scoped.empty:
+                proj_col = "project_name" if "project_name" in scoped.columns else (
+                    "project" if "project" in scoped.columns else None
+                )
+                if proj_col:
+                    scoped_projects = (
+                        scoped[proj_col]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .tolist()
+                    )
+        except Exception:
+            scoped_projects = []
+
+        if scoped_projects:
+            try:
+                import re as _re
+
+                def _compact_code_fallback(s: str) -> str:
+                    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+            except Exception:
+
+                def _compact_code_fallback(s: str) -> str:
+                    return str(s or "").strip().lower().replace(" ", "")
+
+            for proj in sorted({p for p in scoped_projects if p}):
+                proj_norm = _normalize_lower(proj)
+                proj_key = _compact_code_fallback(proj)
+                if not proj_key or proj_key in aggregated_by_proj_key:
+                    continue
+                meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
+                if (not isinstance(meta, pd.DataFrame)) or meta.empty:
+                    if proj_key and proj_key in info_key_map:
+                        meta = info.loc[[info_key_map[proj_key]]]
+                raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
+                pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
+                try:
+                    proj_code = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
+                        meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
+                    )) if isinstance(meta, pd.DataFrame) else ""
+                except Exception:
+                    proj_code = ""
+                proj_display_name = str(meta.get("project_name_display", pd.Series([proj])).iloc[0]) if isinstance(meta, pd.DataFrame) and not meta.empty else str(proj)
+                resolved_code = _extract_project_code(proj_code) or _extract_project_code(proj_display_name) or _extract_project_code(proj)
+                if not resolved_code:
+                    resolved_code = proj_code or proj
+                proj_display = f"{resolved_code} : {proj_display_name}".strip(" :") if resolved_code else proj_display_name
+                key = (pch_label, proj_display)
+                if key in aggregated:
+                    continue
+                mt_del = float(delivered_mt.get(proj, 0.0)) if hasattr(delivered_mt, "get") else 0.0
+                nos_del = int(delivered_nos.get(proj, 0)) if hasattr(delivered_nos, "get") else 0
+                aggregated[key] = {
+                    "pch": pch_label,
+                    "project_name": proj_display,
+                    "project_code": resolved_code or proj_code,
+                    "code": resolved_code or proj_code,
+                    "planned_mt": 0.0,
+                    "delivered_mt": mt_del,
+                    "planned_nos": 0,
+                    "delivered_nos": nos_del,
+                    "regional_mgr": (meta["regional_mgr"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "regional_mgr" in meta.columns else ""),
+                    "project_mgr": (meta["project_mgr"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "project_mgr" in meta.columns else ""),
+                    "planning_eng": (meta["planning_eng"].iloc[0] if isinstance(meta, pd.DataFrame) and not meta.empty and "planning_eng" in meta.columns else ""),
+                }
+                aggregated_by_proj_key[proj_key] = key
+
         # Build rows grouped by normalized PCH
         projects_rows: dict[str, list[dict]] = {}
         for (_pch_label, _proj), rec in aggregated.items():

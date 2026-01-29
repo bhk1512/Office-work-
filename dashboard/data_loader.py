@@ -2256,6 +2256,197 @@ def _prepare_project_details(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _resolve_project_pch_path() -> Path | None:
+    repo_root = _repo_root_from(Path(__file__))
+    candidate = repo_root / "Raw Data" / "Projects and PCH.xlsx"
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def _load_project_pch_mapping(mapping_path: Path | None) -> pd.DataFrame:
+    if mapping_path is None:
+        return pd.DataFrame()
+
+    try:
+        frame = pd.read_excel(mapping_path)
+    except FileNotFoundError:
+        LOGGER.warning("Projects/PCH workbook was not found at %s; skipping fallback.", mapping_path)
+        return pd.DataFrame()
+    except Exception as exc:  # pragma: no cover - defensive guard for unexpected formats
+        LOGGER.warning("Unable to read Projects/PCH workbook '%s': %s", mapping_path, exc)
+        return pd.DataFrame()
+
+    if frame.empty:
+        LOGGER.warning("Projects/PCH workbook at %s is empty; skipping fallback.", mapping_path)
+        return pd.DataFrame()
+
+    def _match_column(keywords: tuple[str, ...]) -> str:
+        for column in frame.columns:
+            label = str(column).strip().lower()
+            if any(keyword in label for keyword in keywords):
+                return column
+        raise KeyError
+
+    try:
+        project_col = _match_column(("project",))
+        pch_col = _match_column(("pch",))
+    except KeyError:
+        LOGGER.warning(
+            "Projects/PCH workbook '%s' is missing required columns (need both project and PCH); skipping fallback.",
+            mapping_path,
+        )
+        return pd.DataFrame()
+
+    name_col = None
+    for column in frame.columns:
+        label = str(column).strip().lower()
+        if "project name" in label:
+            name_col = column
+            break
+
+    cols = [project_col, pch_col]
+    if name_col:
+        cols.append(name_col)
+    working = frame[cols].copy()
+    rename = {project_col: "project_code", pch_col: "pch"}
+    if name_col:
+        rename[name_col] = "project_name"
+    working = working.rename(columns=rename)
+
+    def _clean_text(value: object) -> str:
+        text = "" if value is None else str(value).strip()
+        lowered = text.lower()
+        if lowered in {"", "nan", "none", "null"}:
+            return ""
+        return text
+
+    working["project_code"] = working["project_code"].map(_clean_text)
+    working["pch"] = working["pch"].map(_clean_text)
+    if "project_name" in working.columns:
+        working["project_name"] = working["project_name"].map(_clean_text)
+    else:
+        working["project_name"] = ""
+
+    working["project_name"] = working["project_name"].where(
+        working["project_name"].astype(bool),
+        working["project_code"],
+    )
+
+    working = working[(working["project_code"].astype(bool)) & (working["pch"].astype(bool))]
+    if working.empty:
+        LOGGER.warning(
+            "Projects/PCH workbook '%s' has no usable rows after cleaning; skipping fallback.",
+            mapping_path,
+        )
+        return pd.DataFrame()
+
+    working["key_name"] = working["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
+    LOGGER.info("Loaded %d project-to-PCH mappings from %s", len(working), mapping_path)
+    return working.reset_index(drop=True)
+
+
+def _augment_project_details_with_pch(details: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
+    if details is None or details.empty:
+        base_cols = [
+            "project_code",
+            "project_name",
+            "client_name",
+            "noa_start",
+            "loa_end",
+            "planning_eng",
+            "pch",
+            "regional_mgr",
+            "project_mgr",
+            "section_inch",
+            "supervisor",
+            "key_name",
+        ]
+        details = pd.DataFrame(columns=base_cols)
+
+    if mapping is None or mapping.empty:
+        return details.copy()
+
+    work = details.copy()
+
+    def _clean_text(value: object) -> str:
+        text = "" if value is None else str(value).strip()
+        lowered = text.lower()
+        if lowered in {"", "nan", "none", "null"}:
+            return ""
+        return text
+
+    def _compact(value: object) -> str:
+        return re.sub(r"[^a-z0-9]", "", _clean_text(value).lower())
+
+    for column in ("project_code", "project_name", "pch"):
+        if column in work.columns:
+            work[column] = work[column].map(_clean_text)
+        else:
+            work[column] = ""
+
+    work["project_code_norm"] = work["project_code"].map(_compact)
+    work["project_name_norm"] = work["project_name"].map(_compact)
+
+    mapping = mapping.copy()
+    mapping["project_code_norm"] = mapping["project_code"].map(_compact)
+    mapping["project_name_norm"] = mapping["project_name"].map(_compact)
+
+    code_to_pch = (
+        mapping.dropna(subset=["project_code_norm", "pch"])
+        .drop_duplicates(subset=["project_code_norm"])
+        .set_index("project_code_norm")["pch"]
+        .to_dict()
+    )
+    name_to_pch = (
+        mapping.dropna(subset=["project_name_norm", "pch"])
+        .drop_duplicates(subset=["project_name_norm"])
+        .set_index("project_name_norm")["pch"]
+        .to_dict()
+    )
+
+    missing_mask = work["pch"].map(_clean_text).eq("")
+    if missing_mask.any():
+        filled = work.loc[missing_mask, "project_code_norm"].map(code_to_pch).fillna("")
+        work.loc[missing_mask, "pch"] = filled
+        missing_mask = work["pch"].map(_clean_text).eq("")
+        if missing_mask.any():
+            filled = work.loc[missing_mask, "project_name_norm"].map(name_to_pch).fillna("")
+            work.loc[missing_mask, "pch"] = filled
+
+    existing_codes = set(work["project_code_norm"].dropna())
+    existing_names = set(work["project_name_norm"].dropna())
+    extra_rows = []
+    for _, row in mapping.iterrows():
+        code_norm = row.get("project_code_norm", "")
+        name_norm = row.get("project_name_norm", "")
+        if code_norm and code_norm in existing_codes:
+            continue
+        if name_norm and name_norm in existing_names:
+            continue
+        project_code = row.get("project_code", "")
+        project_name = row.get("project_name", "") or project_code
+        new_row = {col: "" for col in work.columns}
+        new_row["project_code"] = project_code
+        new_row["project_name"] = project_name
+        new_row["pch"] = row.get("pch", "")
+        if "key_name" in work.columns:
+            new_row["key_name"] = str(project_name).lower().replace("  ", " ").strip()
+        if "Project Name" in work.columns:
+            new_row["Project Name"] = project_name
+        if "noa_start" in work.columns:
+            new_row["noa_start"] = pd.NaT
+        if "loa_end" in work.columns:
+            new_row["loa_end"] = pd.NaT
+        extra_rows.append(new_row)
+
+    if extra_rows:
+        work = pd.concat([work, pd.DataFrame(extra_rows)], ignore_index=True)
+
+    work = work.drop(columns=["project_code_norm", "project_name_norm"], errors="ignore")
+    return work
+
+
 @_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
 def _load_project_details_cached(data_path: str, sheet: str) -> pd.DataFrame:
     path = Path(data_path)
@@ -2280,7 +2471,9 @@ def _load_project_details_cached(data_path: str, sheet: str) -> pd.DataFrame:
 
 def load_project_details(path: Path, sheet: str = "ProjectDetails") -> pd.DataFrame:
     cached = _load_project_details_cached(str(Path(path).resolve()), sheet)
-    return cached.copy()
+    mapping_path = _resolve_project_pch_path()
+    mapping = _load_project_pch_mapping(mapping_path)
+    return _augment_project_details_with_pch(cached, mapping).copy()
 
 
 load_project_details.cache_clear = _load_project_details_cached.cache_clear  # type: ignore[attr-defined]

@@ -612,6 +612,17 @@ def expand_stringing_to_daily_payout(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def expand_stringing_to_daily_fs(df: pd.DataFrame) -> pd.DataFrame:
+    """Expand stringing records between F/S start and F/S completion dates."""
+    return _expand_stringing_stage_to_daily(
+        df,
+        start_column="fs_starting_date",
+        end_column="fs_complete_date",
+        output_end_column="fs_complete_date",
+        value_column="length_km",
+    )
+
+
 
 def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Add ``length_km`` derived from meters and compute sanity metrics.
