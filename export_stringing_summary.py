@@ -24,6 +24,7 @@ LOGGER = logging.getLogger("stringing_export")
 BASE_DIR = Path(__file__).resolve().parent
 PRODUCTIVITY_ROOT = BASE_DIR / "Productivity Summaries"
 DEFAULT_OUTPUT = PRODUCTIVITY_ROOT / "Stringing_Productivity_Summary.xlsx"
+_MONTH_PRODUCTIVITY_FACTOR = 30.0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -92,6 +93,7 @@ def _filter_by_date(df: pd.DataFrame, column: str, start: pd.Timestamp | None, e
 
 
 _LOCATION_RE = re.compile(r"^\s*(\d+)([A-Za-z]+)?(?:\s*/\s*(\d+))?\s*$")
+_AP_PREFIX_RE = re.compile(r"^\s*ap[\s\-_/]*", flags=re.IGNORECASE)
 
 
 def _letter_rank(value: str) -> int:
@@ -102,8 +104,15 @@ def _letter_rank(value: str) -> int:
     return rank
 
 
-def _location_order_key(value: object) -> int | None:
+def _strip_ap_prefix(value: object) -> str:
     text = normalize_location(value)
+    if not text:
+        return ""
+    return _AP_PREFIX_RE.sub("", text).strip()
+
+
+def _location_order_key(value: object) -> int | None:
+    text = _strip_ap_prefix(value)
     if not text:
         return None
     match = _LOCATION_RE.match(text)
@@ -138,8 +147,8 @@ def _add_span_key(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("from_ap", "to_ap"):
         if col not in working.columns:
             working[col] = ""
-    working["from_ap_norm"] = working["from_ap"].map(normalize_location)
-    working["to_ap_norm"] = working["to_ap"].map(normalize_location)
+    working["from_ap_norm"] = working["from_ap"].map(_strip_ap_prefix)
+    working["to_ap_norm"] = working["to_ap"].map(_strip_ap_prefix)
     span_base = (
         working["project_key_norm"].fillna("")
         + "|"
@@ -161,7 +170,7 @@ def _build_stage_summary(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
             [
                 {
                     "stage": stage_label,
-                    "avg_productivity_km_day": 0.0,
+                    "avg_productivity_km_month": 0.0,
                     "total_km": 0.0,
                     "active_days": 0,
                     "spans": 0,
@@ -175,12 +184,12 @@ def _build_stage_summary(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
     working = _add_span_key(df)
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
     dates = pd.to_datetime(working.get("date"), errors="coerce").dropna()
-    avg_prod = round(float(working["daily_km"].mean()), 4) if len(working) else 0.0
+    avg_prod = round(float(working["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR), 4) if len(working) else 0.0
     return pd.DataFrame(
         [
             {
                 "stage": stage_label,
-                "avg_productivity_km_day": avg_prod,
+                "avg_productivity_km_month": avg_prod,
                 "total_km": round(float(working["daily_km"].sum()), 4),
                 "active_days": int(dates.nunique()) if not dates.empty else 0,
                 "spans": int(working["span_key"].nunique()),
@@ -199,7 +208,7 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
             columns=[
                 "stage",
                 "gang_name",
-                "avg_productivity_km_day",
+                "avg_productivity_km_month",
                 "total_km",
                 "active_days",
                 "spans",
@@ -216,7 +225,7 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
             columns=[
                 "stage",
                 "gang_name",
-                "avg_productivity_km_day",
+                "avg_productivity_km_month",
                 "total_km",
                 "active_days",
                 "spans",
@@ -226,7 +235,7 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
     grouped = (
         working.groupby("gang_name", dropna=False)
         .agg(
-            avg_productivity_km_day=("daily_km", "mean"),
+            avg_productivity_km_month=("daily_km", "mean"),
             total_km=("daily_km", "sum"),
             active_days=("date", lambda s: s.dropna().nunique()),
             spans=("span_key", "nunique"),
@@ -234,7 +243,9 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
         )
         .reset_index()
     )
-    grouped["avg_productivity_km_day"] = grouped["avg_productivity_km_day"].fillna(0.0).round(4)
+    grouped["avg_productivity_km_month"] = (
+        grouped["avg_productivity_km_month"].fillna(0.0) * _MONTH_PRODUCTIVITY_FACTOR
+    ).round(4)
     grouped["total_km"] = grouped["total_km"].fillna(0.0).round(4)
     grouped["active_days"] = grouped["active_days"].fillna(0).astype(int)
     grouped["spans"] = grouped["spans"].fillna(0).astype(int)
@@ -284,14 +295,15 @@ def _build_gap_summary(df: pd.DataFrame, gap_column: str) -> pd.DataFrame:
                 }
             ]
         )
+    stats_series = series.clip(lower=0)
     return pd.DataFrame(
         [
             {
-                "count": int(series.size),
-                "avg_gap_days": round(float(series.mean()), 2),
-                "median_gap_days": round(float(series.median()), 2),
-                "min_gap_days": int(series.min()),
-                "max_gap_days": int(series.max()),
+                "count": int(stats_series.size),
+                "avg_gap_days": round(float(stats_series.mean()), 2),
+                "median_gap_days": round(float(stats_series.median()), 2),
+                "min_gap_days": int(stats_series.min()),
+                "max_gap_days": int(stats_series.max()),
             }
         ]
     )
@@ -307,8 +319,10 @@ def _build_po_fs_gap_table(
     work = _normalize_stringing_compiled(compiled)
     if work.empty:
         return pd.DataFrame()
+    work["po_start_date"] = pd.to_datetime(work.get("po_start_date"), errors="coerce").dt.normalize()
     work["po_completion_date"] = pd.to_datetime(work.get("po_completion_date"), errors="coerce").dt.normalize()
     work["fs_starting_date"] = pd.to_datetime(work.get("fs_starting_date"), errors="coerce").dt.normalize()
+    work["fs_complete_date"] = pd.to_datetime(work.get("fs_complete_date"), errors="coerce").dt.normalize()
 
     scoped = work.copy()
     if start_date is not None:
@@ -328,13 +342,14 @@ def _build_po_fs_gap_table(
                     "project": row.get("project_name", ""),
                     "from_ap": row.get("from_ap", ""),
                     "to_ap": row.get("to_ap", ""),
+                    "po_start_date": row.get("po_start_date", pd.NaT),
                     "po_completion_date": row.get("po_completion_date", pd.NaT),
                     "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
                     "details": "FS start is before PO completion",
                 }
             )
-    scoped["gap_days"] = gap.where(gap >= 0)
-    scoped["gap_days"] = scoped["gap_days"].fillna(0).astype(int)
+    scoped["gap_days"] = gap
     scoped["negative_gap_flag"] = negative_mask.fillna(False)
 
     return scoped[
@@ -399,8 +414,8 @@ def _build_erection_po_gap_table(
     if work.empty:
         return pd.DataFrame()
 
-    work["from_ap_norm"] = work["from_ap"].map(normalize_location)
-    work["to_ap_norm"] = work["to_ap"].map(normalize_location)
+    work["from_ap_norm"] = work["from_ap"].map(_strip_ap_prefix)
+    work["to_ap_norm"] = work["to_ap"].map(_strip_ap_prefix)
     work["from_order"] = work["from_ap_norm"].map(_location_order_key)
     work["to_order"] = work["to_ap_norm"].map(_location_order_key)
 
@@ -430,6 +445,10 @@ def _build_erection_po_gap_table(
                     "project": row.get("project_name", ""),
                     "from_ap": from_ap,
                     "to_ap": to_ap,
+                    "po_start_date": po_start,
+                    "po_completion_date": row.get("po_completion_date", pd.NaT),
+                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
                     "details": "Missing PO start date",
                 }
             )
@@ -443,6 +462,10 @@ def _build_erection_po_gap_table(
                     "project": row.get("project_name", ""),
                     "from_ap": from_ap,
                     "to_ap": to_ap,
+                    "po_start_date": po_start,
+                    "po_completion_date": row.get("po_completion_date", pd.NaT),
+                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
                     "details": "Unable to parse span location ordering",
                 }
             )
@@ -457,6 +480,10 @@ def _build_erection_po_gap_table(
                     "project": row.get("project_name", ""),
                     "from_ap": from_ap,
                     "to_ap": to_ap,
+                    "po_start_date": po_start,
+                    "po_completion_date": row.get("po_completion_date", pd.NaT),
+                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
                     "details": "No erection data for project",
                 }
             )
@@ -473,6 +500,10 @@ def _build_erection_po_gap_table(
                     "project": row.get("project_name", ""),
                     "from_ap": from_ap,
                     "to_ap": to_ap,
+                    "po_start_date": po_start,
+                    "po_completion_date": row.get("po_completion_date", pd.NaT),
+                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
                     "details": "No erection locations found in span range",
                 }
             )
@@ -488,6 +519,10 @@ def _build_erection_po_gap_table(
                     "project": row.get("project_name", ""),
                     "from_ap": from_ap,
                     "to_ap": to_ap,
+                    "po_start_date": po_start,
+                    "po_completion_date": row.get("po_completion_date", pd.NaT),
+                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
                     "details": "PO start is before last erection completion in span",
                 }
             )
@@ -581,6 +616,46 @@ def main() -> int:
     erection_po_gap_summary = _build_gap_summary(erection_po_gap, "gap_days")
 
     issues_df = pd.DataFrame(issues)
+    if not issues_df.empty:
+        for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
+            if col not in issues_df.columns:
+                issues_df[col] = pd.NaT
+
+    readme_rows = [
+        {
+            "Assumption": "Productivity units",
+            "Details": "Avg productivity is reported per month as mean(daily_km) * 30. Total_km is the sum of daily_km.",
+        },
+        {
+            "Assumption": "Overall / P/O / F/S daily rows",
+            "Details": "Overall uses PO start to FS complete. P/O uses PO start to PO completion with PO length as primary metric (fallback to span length). F/S uses FS start to FS complete with span length.",
+        },
+        {
+            "Assumption": "PO-FS gap",
+            "Details": "gap_days = fs_starting_date - po_completion_date. Negative gaps are flagged in Data_Issues and retained in PO_FS_Gap; summary stats clamp negatives to 0. Missing dates are excluded from stats.",
+        },
+        {
+            "Assumption": "Erection-PO gap",
+            "Details": "gap_days = po_start_date - last erection completion date within the span (inclusive). Negative gaps are flagged and clamped to 0. Missing dates or unmatched spans are logged in Data_Issues.",
+        },
+        {
+            "Assumption": "Location parsing",
+            "Details": "From/To AP values strip a leading 'AP' (case-insensitive) with optional separators. Parsed as main number + optional letters + optional '/sub'. Order key = main*1,000,000 + letter_rank*1,000 + sub.",
+        },
+        {
+            "Assumption": "Span matching",
+            "Details": "Span ranges are inclusive of From and To locations. If From/To order is reversed, the range is normalized.",
+        },
+        {
+            "Assumption": "Project matching",
+            "Details": "Projects are matched using a compact key (lowercase, alphanumeric only).",
+        },
+        {
+            "Assumption": "Date filters",
+            "Details": "PO-FS gaps are filtered by PO completion date; Erection-PO gaps are filtered by PO start date; daily outputs are filtered by the daily date column.",
+        },
+    ]
+    readme_df = pd.DataFrame(readme_rows)
 
     output_path = _resolve_output_path(args.output)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -590,6 +665,7 @@ def main() -> int:
         po_fs_gap_summary.to_excel(writer, sheet_name="PO_FS_Gap_Summary", index=False)
         erection_po_gap.to_excel(writer, sheet_name="Erection_PO_Gap", index=False)
         erection_po_gap_summary.to_excel(writer, sheet_name="Erection_PO_Gap_Summary", index=False)
+        readme_df.to_excel(writer, sheet_name="README", index=False)
         if not issues_df.empty:
             issues_df.to_excel(writer, sheet_name="Data_Issues", index=False)
 
