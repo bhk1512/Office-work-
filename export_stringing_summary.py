@@ -453,7 +453,10 @@ def _build_review_table_three(
     labels: list[str],
 ) -> pd.DataFrame:
     rows = {
-        "Stringing productivity": "KM/month (Avg)",
+        "Stringing productivity": "Overall KM/month (Avg)",
+    }
+    tse_row = {
+        "Stringing productivity": "TSE KM/month (Avg)",
     }
     gang_row = {
         "Stringing productivity": "No of Gangs engaged (Avg)",
@@ -462,23 +465,40 @@ def _build_review_table_three(
         "Stringing productivity": "KM Total Strung",
     }
     if not months:
-        return pd.DataFrame([rows, gang_row, total_row], columns=["Stringing productivity", *labels])
+        return pd.DataFrame(
+            [rows, tse_row, gang_row, total_row], columns=["Stringing productivity", *labels]
+        )
     daily_empty = daily_scope is None or daily_scope.empty
+    if daily_empty:
+        daily = pd.DataFrame()
+    else:
+        daily = daily_scope.copy()
+        method_series = daily.get("method", daily.get("method_norm", pd.Series("", index=daily.index)))
+        method_norm = method_series.map(_normalize_method)
+        daily["method_group"] = method_norm.map(_method_group)
     for month_ts, label in zip(months, labels):
         month_start = pd.Timestamp(month_ts).normalize()
         month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
         if daily_empty:
             rows[label] = 0.0
+            tse_row[label] = 0.0
             gang_row[label] = 0
         else:
-            month_scope = daily_scope[(daily_scope["date"] >= month_start) & (daily_scope["date"] <= month_end)]
+            month_scope = daily[(daily["date"] >= month_start) & (daily["date"] <= month_end)]
             if month_scope.empty:
                 rows[label] = 0.0
+                tse_row[label] = 0.0
                 gang_row[label] = 0
             else:
                 avg_prod = float(month_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
                 rows[label] = round(avg_prod, 2)
                 gang_row[label] = int(month_scope["gang_name"].nunique())
+                tse_scope = month_scope[month_scope["method_group"] == "TSE"]
+                if tse_scope.empty:
+                    tse_row[label] = 0.0
+                else:
+                    tse_avg = float(tse_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
+                    tse_row[label] = round(tse_avg, 2)
 
         km_total = 0.0
         if compiled_scope is not None and not compiled_scope.empty:
@@ -491,7 +511,7 @@ def _build_review_table_three(
                 ]
             km_total = float(pd.to_numeric(month_compiled["length_km"], errors="coerce").sum())
         total_row[label] = round(km_total, 2)
-    return pd.DataFrame([rows, gang_row, total_row], columns=["Stringing productivity", *labels])
+    return pd.DataFrame([rows, tse_row, gang_row, total_row], columns=["Stringing productivity", *labels])
 
 
 def _build_monthly_km_table(
@@ -596,6 +616,105 @@ def _build_method_summary(
         }
     )
     return summary
+
+
+def _build_pareto_table(
+    daily_scope: pd.DataFrame,
+    compiled_scope: pd.DataFrame,
+    *,
+    method_filter: str | None = None,
+) -> pd.DataFrame:
+    buckets = [
+        (">=6", 6.0, None),
+        ("4-6", 4.0, 6.0),
+        ("3-4", 3.0, 4.0),
+        ("2-3", 2.0, 3.0),
+        ("1-2", 1.0, 2.0),
+        ("<1", None, 1.0),
+    ]
+
+    if daily_scope is None:
+        daily_scope = pd.DataFrame()
+    if compiled_scope is None:
+        compiled_scope = pd.DataFrame()
+
+    daily = daily_scope.copy()
+    compiled = compiled_scope.copy()
+
+    for work in (daily, compiled):
+        if work.empty:
+            continue
+        work["gang_name"] = work.get("gang_name", "").fillna("").astype(str).str.strip()
+        method_series = work.get("method", work.get("method_norm", pd.Series("", index=work.index)))
+        method_norm = method_series.map(_normalize_method)
+        work["method_group"] = method_norm.map(_method_group)
+        work.drop(work[work["gang_name"] == ""].index, inplace=True)
+
+    if method_filter:
+        if not daily.empty:
+            daily = daily[daily["method_group"] == method_filter]
+        if not compiled.empty:
+            compiled = compiled[compiled["method_group"] == method_filter]
+
+    avg_per_gang = (
+        pd.to_numeric(daily.get("daily_km", pd.Series([], dtype=float)), errors="coerce")
+        .groupby(daily.get("gang_name", pd.Series([], dtype=object)))
+        .mean()
+        .mul(_MONTH_PRODUCTIVITY_FACTOR)
+    )
+    length_per_gang = (
+        pd.to_numeric(compiled.get("length_km", pd.Series([], dtype=float)), errors="coerce")
+        .groupby(compiled.get("gang_name", pd.Series([], dtype=object)))
+        .sum()
+    )
+
+    all_gangs = sorted(set(avg_per_gang.index) | set(length_per_gang.index))
+    if not all_gangs:
+        return pd.DataFrame(
+            [
+                {
+                    "Bucket": label,
+                    "KM % Delivered": "0%",
+                    "Number of Gangs": 0,
+                    "Number of Gangs %": "0%",
+                }
+                for label, _, _ in buckets
+            ]
+        )
+
+    avg_per_gang = avg_per_gang.reindex(all_gangs).fillna(0.0)
+    length_per_gang = length_per_gang.reindex(all_gangs).fillna(0.0)
+
+    def _bucket_for(value: float) -> str:
+        for label, lower, upper in buckets:
+            if lower is None and value < upper:
+                return label
+            if upper is None and value >= lower:
+                return label
+            if lower is not None and upper is not None and lower <= value < upper:
+                return label
+        return "<1"
+
+    bucket_series = avg_per_gang.map(_bucket_for)
+    total_km = float(length_per_gang.sum())
+    total_gangs = len(all_gangs)
+
+    rows: list[dict[str, object]] = []
+    for label, _, _ in buckets:
+        gangs_in_bucket = bucket_series[bucket_series == label].index
+        km_sum = float(length_per_gang.loc[gangs_in_bucket].sum()) if len(gangs_in_bucket) else 0.0
+        km_pct = (km_sum / total_km * 100.0) if total_km > 0 else 0.0
+        gangs_count = int(len(gangs_in_bucket))
+        gangs_pct = (gangs_count / total_gangs * 100.0) if total_gangs > 0 else 0.0
+        rows.append(
+            {
+                "Bucket": label,
+                "KM % Delivered": f"{km_pct:.2f}%",
+                "Number of Gangs": gangs_count,
+                "Number of Gangs %": f"{gangs_pct:.2f}%",
+            }
+        )
+    return pd.DataFrame(rows)
 def _normalize_stringing_compiled(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -964,6 +1083,10 @@ def main() -> int:
     # Stringing rollups (overall / PCH / project) and review format
     project_info = store.get_project_info()
     scope = _prepare_stringing_scope(overall_daily, project_info)
+    method_series = scope.get("method", scope.get("method_norm", pd.Series("", index=scope.index)))
+    method_norm = method_series.map(_normalize_method)
+    scope["method_group"] = method_norm.map(_method_group)
+    scope_tse = scope[scope["method_group"] == "TSE"].copy()
     compiled_scope = _prepare_stringing_compiled_scope(stringing_compiled, project_info)
     method_summary = _build_method_summary(scope, issues)
     months, month_labels = _build_month_windows_from_series(scope["date"], start_date, end_date)
@@ -972,24 +1095,68 @@ def main() -> int:
     overall_rollup = _summarize_scope(scope)
     overall_rollup = overall_rollup.rename(
         columns={
-            "avg_km_month": "Avg Productivity (KM/month)",
+            "avg_km_month": "Overall Avg Productivity (KM/month)",
             "total_km": "Total KM",
             "spans": "Spans",
             "gangs": "Gangs",
             "projects": "Projects",
         }
     )
+    if scope_tse.empty:
+        overall_rollup["TSE Avg Productivity (KM/month)"] = 0.0
+    else:
+        tse_overall = _summarize_scope(scope_tse)
+        overall_rollup["TSE Avg Productivity (KM/month)"] = round(
+            float(tse_overall["avg_km_month"].iloc[0]) if not tse_overall.empty else 0.0,
+            4,
+        )
+    overall_rollup = overall_rollup[
+        [
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+            "Projects",
+        ]
+    ]
     pch_rollup = _summarize_scope(scope, group_columns=["pch_display"])
     pch_rollup = pch_rollup.rename(
         columns={
             "pch_display": "PCH",
-            "avg_km_month": "Avg Productivity (KM/month)",
+            "avg_km_month": "Overall Avg Productivity (KM/month)",
             "total_km": "Total KM",
             "spans": "Spans",
             "gangs": "Gangs",
             "projects": "Projects",
         }
     )
+    if not scope_tse.empty:
+        tse_pch = _summarize_scope(scope_tse, group_columns=["pch_display"]).rename(
+            columns={
+                "pch_display": "PCH",
+                "avg_km_month": "TSE Avg Productivity (KM/month)",
+            }
+        )
+        pch_rollup = pch_rollup.merge(
+            tse_pch[["PCH", "TSE Avg Productivity (KM/month)"]],
+            on="PCH",
+            how="left",
+        )
+    pch_rollup["TSE Avg Productivity (KM/month)"] = (
+        pch_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
+    )
+    pch_rollup = pch_rollup[
+        [
+            "PCH",
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+            "Projects",
+        ]
+    ]
     project_rollup = _summarize_scope(
         scope,
         group_columns=["pch_display", "project_display"],
@@ -999,22 +1166,60 @@ def main() -> int:
         columns={
             "pch_display": "PCH",
             "project_display": "Project",
-            "avg_km_month": "Avg Productivity (KM/month)",
+            "avg_km_month": "Overall Avg Productivity (KM/month)",
             "total_km": "Total KM",
             "spans": "Spans",
             "gangs": "Gangs",
         }
     )
+    if not scope_tse.empty:
+        tse_project = _summarize_scope(
+            scope_tse,
+            group_columns=["pch_display", "project_display"],
+            include_project_count=False,
+        ).rename(
+            columns={
+                "pch_display": "PCH",
+                "project_display": "Project",
+                "avg_km_month": "TSE Avg Productivity (KM/month)",
+            }
+        )
+        project_rollup = project_rollup.merge(
+            tse_project[["PCH", "Project", "TSE Avg Productivity (KM/month)"]],
+            on=["PCH", "Project"],
+            how="left",
+        )
+    project_rollup["TSE Avg Productivity (KM/month)"] = (
+        project_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
+    )
+    project_rollup = project_rollup[
+        [
+            "PCH",
+            "Project",
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+        ]
+    ]
 
     review_table_raw = project_rollup.reindex(
-        columns=["PCH", "Project", "Avg Productivity (KM/month)", "Total KM", "Spans"]
+        columns=[
+            "PCH",
+            "Project",
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+        ]
     )
     review_table_one_groups: list[pd.DataFrame] = []
     if review_table_raw.empty or "PCH" not in review_table_raw.columns:
         review_table_one_groups.append(
             _append_totals_row(
                 review_table_raw,
-                avg_col="Avg Productivity (KM/month)",
+                avg_col="Overall Avg Productivity (KM/month)",
                 total_col="Total KM",
                 span_col="Spans",
             )
@@ -1027,7 +1232,7 @@ def main() -> int:
             pch_table = review_table_raw[review_table_raw["PCH"] == pch_name].copy()
             pch_with_total = _append_totals_row(
                 pch_table,
-                avg_col="Avg Productivity (KM/month)",
+                avg_col="Overall Avg Productivity (KM/month)",
                 total_col="Total KM",
                 span_col="Spans",
             )
@@ -1140,6 +1345,10 @@ def main() -> int:
             "Details": "Method is read from the stringing daily data (method/method_norm). Rows without method are logged in Data_Issues. Summary groups into TSE, Manual, and Other.",
         },
         {
+            "Assumption": "Pareto analysis",
+            "Details": "Pareto buckets use gang-level avg_km_month (mean daily_km * 30). KM % Delivered is based on sum(length_km) from compiled rows for gangs in each bucket; counts and percentages reflect unique gangs per bucket.",
+        },
+        {
             "Assumption": "Monthly totals",
             "Details": "Review_Format monthly tables use sum(length_km) grouped by F/S completion month and count unique gangs per month.",
         },
@@ -1155,7 +1364,38 @@ def main() -> int:
         erection_po_gap.to_excel(writer, sheet_name="Erection_PO_Gap", index=False)
         erection_po_gap_summary.to_excel(writer, sheet_name="Erection_PO_Gap_Summary", index=False)
         if not method_summary.empty:
-            method_summary.to_excel(writer, sheet_name="Method_Summary", index=False)
+            current_row = 0
+            method_summary.to_excel(writer, sheet_name="Method_Summary", index=False, startrow=current_row)
+            current_row += len(method_summary) + 2
+
+            pareto_overall = _build_pareto_table(scope, compiled_scope)
+            header = pd.DataFrame(
+                [{
+                    "Bucket": "Pareto Analysis - Overall",
+                    "KM % Delivered": "",
+                    "Number of Gangs": "",
+                    "Number of Gangs %": "",
+                }],
+                columns=["Bucket", "KM % Delivered", "Number of Gangs", "Number of Gangs %"],
+            )
+            header.to_excel(writer, sheet_name="Method_Summary", index=False, header=False, startrow=current_row)
+            current_row += 1
+            pareto_overall.to_excel(writer, sheet_name="Method_Summary", index=False, startrow=current_row)
+            current_row += len(pareto_overall) + 2
+
+            pareto_tse = _build_pareto_table(scope, compiled_scope, method_filter="TSE")
+            header = pd.DataFrame(
+                [{
+                    "Bucket": "Pareto Analysis - TSE",
+                    "KM % Delivered": "",
+                    "Number of Gangs": "",
+                    "Number of Gangs %": "",
+                }],
+                columns=["Bucket", "KM % Delivered", "Number of Gangs", "Number of Gangs %"],
+            )
+            header.to_excel(writer, sheet_name="Method_Summary", index=False, header=False, startrow=current_row)
+            current_row += 1
+            pareto_tse.to_excel(writer, sheet_name="Method_Summary", index=False, startrow=current_row)
         if not overall_rollup.empty or not pch_rollup.empty or not project_rollup.empty:
             summary_row = 0
             summary_row = _write_scoped_table(
