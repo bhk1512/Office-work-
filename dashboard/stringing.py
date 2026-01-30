@@ -306,7 +306,10 @@ def _to_datetime_normalize(value: object) -> pd.Timestamp | None:
         if not text:
             parsed = pd.NaT
         else:
-            parsed = pd.to_datetime(text, errors="coerce")
+            if re.match(r"^\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*$", text):
+                parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+            else:
+                parsed = pd.to_datetime(text, errors="coerce")
             if pd.isna(parsed):
                 numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
                 if pd.notna(numeric):
