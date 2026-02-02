@@ -444,7 +444,7 @@ def build_analytics_layout() -> html.Div:
         [
             html.Div(
                 [
-                    html.Div("Analytics (Erection)", className="section-title"),
+                    html.Div("Tower Erection Analytics", className="section-title"),
                     scope_strip,
                 ],
                 className="analytics-header",

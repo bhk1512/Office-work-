@@ -69,6 +69,7 @@ from .analytics import (
     PRODUCTIVITY_TIER_HIGH,
     PRODUCTIVITY_TIER_LOW,
 )
+from .stringing_analytics import build_stringing_analytics_payload
 from .callback_utils import DataSelector, ResponsibilitiesAccessor, ResponsibilitiesPayload
 from .plan_utils import (
     normalize_col_key as _normalize_col_key,
@@ -513,6 +514,25 @@ def _analytics_cache_key(
         "months": [ts.strftime("%Y-%m") for ts in months if isinstance(ts, pd.Timestamp)],
         "gangs": sorted({str(value).strip() for value in gangs if str(value).strip()}),
         "data_stamp": data_stamp,
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _stringing_analytics_cache_key(
+    projects: Sequence[str],
+    months: Sequence[pd.Timestamp],
+    gangs: Sequence[str],
+    data_stamp: str,
+    compiled_rows: int | None = None,
+) -> str:
+    payload = {
+        "mode": "stringing",
+        "projects": sorted({str(value).strip() for value in projects if str(value).strip()}),
+        "months": [ts.strftime("%Y-%m") for ts in months if isinstance(ts, pd.Timestamp)],
+        "gangs": sorted({str(value).strip() for value in gangs if str(value).strip()}),
+        "data_stamp": data_stamp,
+        "compiled_rows": int(compiled_rows or 0),
+        "version": "v2",
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -11419,6 +11439,797 @@ def register_callbacks(
 
         return send_bytes(_writer, "Analytics_Audit.xlsx")
 
+    # --- Stringing analytics ---
+    def _stringing_analytics_table_from_selection(
+        payload: dict[str, Any] | None,
+        selection: dict[str, Any] | None,
+        section_filter: str | None = None,
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]], str]:
+        if not payload or not selection:
+            return [], [], ""
+        kind = selection.get("kind")
+
+        def _format_dates(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+            for col in columns:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
+            return df
+
+        def _readiness_bucket_label(value: float | int | None) -> str:
+            if value is None or pd.isna(value):
+                return ""
+            if value <= 15:
+                return "0-15"
+            if value <= 30:
+                return "16-30"
+            if value <= 60:
+                return "31-60"
+            if value <= 90:
+                return "61-90"
+            return ">90"
+
+        def _flow_bucket_label(value: float | int | None) -> str:
+            if value is None or pd.isna(value):
+                return ""
+            if value <= 3:
+                return "0-3"
+            if value <= 7:
+                return "4-7"
+            if value <= 14:
+                return "8-14"
+            return ">14"
+
+        def _cycle_bucket_label(value: float | int | None) -> str:
+            if value is None or pd.isna(value):
+                return ""
+            if value <= 30:
+                return "0-30"
+            if value <= 60:
+                return "31-60"
+            if value <= 90:
+                return "61-90"
+            return ">90"
+
+        if kind in {"readiness_gap", "readiness_bucket", "readiness_project"}:
+            rows = (payload.get("readiness") or {}).get("gaps") or []
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return [], [], ""
+            if kind == "readiness_bucket":
+                bucket = selection.get("bucket")
+                df["bucket"] = pd.to_numeric(df.get("gap_days"), errors="coerce").map(_readiness_bucket_label)
+                df = df[df["bucket"] == bucket]
+            if kind == "readiness_project":
+                project = selection.get("project")
+                if project:
+                    df = df[df.get("project_name") == project]
+            if section_filter:
+                df = df[df.get("section") == section_filter]
+            df = _format_dates(df, ["po_start_date", "last_erection_completion_date"])
+            columns = [
+                {"name": "Project", "id": "project_name"},
+                {"name": "Section", "id": "section"},
+                {"name": "Span", "id": "span"},
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Erection complete", "id": "last_erection_completion_date"},
+                {"name": "P/O start", "id": "po_start_date"},
+                {"name": "Gap (days)", "id": "gap_days"},
+            ]
+            definition = (
+                "Readiness delay = P/O start date minus last erection completion within the span. "
+                "TSE-only spans; manual excluded. Negative gaps are retained and should be reviewed."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind in {"flow_gap", "flow_bucket"}:
+            rows = (payload.get("flow") or {}).get("gaps") or []
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return [], [], ""
+            if kind == "flow_bucket":
+                bucket = selection.get("bucket")
+                df["bucket"] = pd.to_numeric(df.get("gap_days"), errors="coerce").map(_flow_bucket_label)
+                df = df[df["bucket"] == bucket]
+            if section_filter:
+                df = df[df.get("section") == section_filter]
+            df = _format_dates(df, ["po_completion_date", "fs_starting_date"])
+            columns = [
+                {"name": "Project", "id": "project_name"},
+                {"name": "Section", "id": "section"},
+                {"name": "Span", "id": "span"},
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "P/O complete", "id": "po_completion_date"},
+                {"name": "Sag start", "id": "fs_starting_date"},
+                {"name": "Gap (days)", "id": "gap_days"},
+            ]
+            definition = (
+                "Flow delay = sag start date minus P/O completion date. "
+                "TSE-only spans; manual excluded."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind in {"cycle_gap", "cycle_bucket"}:
+            rows = (payload.get("cycle") or {}).get("gaps") or []
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return [], [], ""
+            if kind == "cycle_bucket":
+                bucket = selection.get("bucket")
+                df["bucket"] = pd.to_numeric(df.get("cycle_days"), errors="coerce").map(_cycle_bucket_label)
+                df = df[df["bucket"] == bucket]
+            if section_filter:
+                df = df[df.get("section") == section_filter]
+            df = _format_dates(df, ["last_erection_completion_date", "sag_end_date"])
+            columns = [
+                {"name": "Project", "id": "project_name"},
+                {"name": "Section", "id": "section"},
+                {"name": "Span", "id": "span"},
+                {"name": "Erection complete", "id": "last_erection_completion_date"},
+                {"name": "Sag end", "id": "sag_end_date"},
+                {"name": "Cycle days", "id": "cycle_days"},
+            ]
+            definition = (
+                "End-to-end cycle time = sag end (complete or start) minus last erection completion within span. "
+                "TSE-only spans; manual excluded."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "productivity_bucket":
+            rows = (payload.get("productivity") or {}).get("gangs") or []
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return [], [], ""
+            bucket = selection.get("bucket")
+            if bucket:
+                df = df[df.get("bucket") == bucket]
+            columns = [
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Avg km/month", "id": "avg_km_month"},
+                {"name": "Total km", "id": "total_km"},
+                {"name": "Active days", "id": "active_days"},
+                {"name": "Spans", "id": "spans"},
+                {"name": "Projects", "id": "projects"},
+            ]
+            definition = (
+                "Productivity uses average daily km per gang across the selected period, scaled to km/month. "
+                "TSE-only gangs; manual excluded."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "whatif":
+            rows = (payload.get("productivity") or {}).get("gang_months", {}).get("rows") or []
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return [], [], ""
+            bucket = selection.get("bucket")
+            if bucket:
+                df = df[df.get("bucket") == bucket]
+            df["month"] = pd.to_datetime(df.get("month"), errors="coerce").dt.strftime("%Y-%m")
+            columns = [
+                {"name": "Gang", "id": "gang_name"},
+                {"name": "Month", "id": "month"},
+                {"name": "KM (month)", "id": "total_km"},
+                {"name": "Bucket", "id": "bucket"},
+            ]
+            definition = (
+                "What-if uses gang-month totals (sum of daily km per gang per calendar month). "
+                "Illustrative only; assumes output constant."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "ageing":
+            rows = (payload.get("cycle") or {}).get("ageing") or []
+            df = pd.DataFrame(rows)
+            if df.empty:
+                return [], [], ""
+            columns = [
+                {"name": "Project", "id": "project_name"},
+                {"name": "Section", "id": "section"},
+                {"name": "Span", "id": "span"},
+                {"name": "Stage", "id": "current_stage"},
+                {"name": "Ageing days", "id": "ageing_days"},
+            ]
+            definition = (
+                "Ageing shows top spans without sag completion, measured from the latest completed stage. "
+                "TSE-only spans; manual excluded."
+            )
+            return columns, df.to_dict("records"), definition
+
+        if kind == "relationship":
+            rows = (payload.get("relationship") or {}).get("summary") or []
+            df = pd.DataFrame(rows)
+            columns = [
+                {"name": "Readiness bucket", "id": "bucket"},
+                {"name": "Avg productivity (km/month)", "id": "avg_km_month"},
+                {"name": "Spans", "id": "spans"},
+            ]
+            definition = (
+                "Readiness vs productivity groups spans by readiness bucket and averages gang productivity. "
+                "TSE-only spans; manual excluded."
+            )
+            return columns, df.to_dict("records"), definition
+
+        return [], [], ""
+
+    @app.callback(
+        Output("stringing-analytics-payload", "data"),
+        Input("f-project", "value"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("stringing-analytics-refresh-interval", "n_intervals"),
+        prevent_initial_call=False,
+    )
+    def _compute_stringing_analytics_payload(
+        projects: Sequence[str] | None,
+        months: Sequence[str] | None,
+        quick_range: str | None,
+        gangs: Sequence[str] | None,
+        _tick: int | None,
+    ) -> dict[str, Any]:
+        data_selector_local = DATA_SELECTOR
+        if data_selector_local is None:
+            return build_stringing_analytics_payload(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        project_list = _normalize_str_list(_ensure_list(projects))
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        month_list = _normalize_str_list(_ensure_list(months))
+        months_ts = resolve_months(month_list, quick_range)
+        daily = data_selector_local.select("stringing")
+        erection_daily = data_selector_local.select("erection")
+        compiled = pd.DataFrame()
+        if callable(stringing_compiled_provider):
+            try:
+                compiled = stringing_compiled_provider() or pd.DataFrame()
+            except Exception:
+                compiled = pd.DataFrame()
+        data_stamp = _analytics_data_stamp(config.stringing_data_path)
+        cache_key = _stringing_analytics_cache_key(
+            project_list,
+            months_ts,
+            gang_list,
+            data_stamp,
+            compiled_rows=len(compiled.index) if isinstance(compiled, pd.DataFrame) else 0,
+        )
+        if _ANALYTICS_CACHE is not None:
+            cached = _ANALYTICS_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+        payload = build_stringing_analytics_payload(
+            daily,
+            compiled,
+            erection_daily,
+            projects=project_list,
+            months=months_ts,
+            gangs=gang_list,
+            method_filter="tse",
+        )
+        payload["meta"] = {
+            "projects": project_list,
+            "gangs": gang_list,
+            "months": [ts.strftime("%Y-%m") for ts in months_ts],
+            "quick_range": quick_range or "",
+            "data_stamp": data_stamp,
+        }
+        if _ANALYTICS_CACHE is not None:
+            _ANALYTICS_CACHE.set(cache_key, payload, expire=_ANALYTICS_CACHE_TTL_SECONDS)
+        return payload
+
+    @app.callback(
+        Output("stringing-analytics-scope-range", "children"),
+        Output("stringing-analytics-scope-projects", "children"),
+        Output("stringing-analytics-scope-gangs", "children"),
+        Output("stringing-analytics-scope-spans", "children"),
+        Output("stringing-analytics-scope-totalkm", "children"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_stringing_scope_chips(payload: dict[str, Any] | None):
+        scope = (payload or {}).get("scope") or {}
+        start_raw = scope.get("start") or ""
+        end_raw = scope.get("end") or ""
+        start_ts = pd.to_datetime(start_raw, errors="coerce")
+        end_ts = pd.to_datetime(end_raw, errors="coerce")
+        if pd.notna(start_ts) and pd.notna(end_ts):
+            range_label = f"Scope: {start_ts.strftime('%d %b %Y')} - {end_ts.strftime('%d %b %Y')}"
+        else:
+            range_label = "Scope: (empty)"
+        projects = scope.get("projects", 0)
+        gangs = scope.get("gangs", 0)
+        spans = scope.get("spans", 0)
+        total_km = scope.get("total_km", 0.0)
+        return (
+            range_label,
+            f"Projects: {projects}",
+            f"Gangs: {gangs}",
+            f"Spans: {spans}",
+            f"Total km: {total_km:.1f}",
+        )
+
+    @app.callback(
+        Output("stringing-analytics-kpi-output", "children"),
+        Output("stringing-analytics-kpi-output-sub", "children"),
+        Output("stringing-analytics-kpi-readiness", "children"),
+        Output("stringing-analytics-kpi-readiness-sub", "children"),
+        Output("stringing-analytics-kpi-flow", "children"),
+        Output("stringing-analytics-kpi-flow-sub", "children"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_stringing_kpis(payload: dict[str, Any] | None):
+        kpis = (payload or {}).get("kpis") or {}
+        output_km = float(kpis.get("output_km", 0.0))
+        output_n = int(kpis.get("output_n", 0))
+        readiness = float(kpis.get("readiness_median", 0.0))
+        readiness_n = int(kpis.get("readiness_n", 0))
+        flow = float(kpis.get("flow_median", 0.0))
+        flow_n = int(kpis.get("flow_n", 0))
+        return (
+            f"{output_km:.1f}",
+            f"n={output_n}",
+            f"{readiness:.1f}",
+            f"n={readiness_n}",
+            f"{flow:.1f}",
+            f"n={flow_n}",
+        )
+
+    @app.callback(
+        Output("stringing-analytics-readiness-hist", "figure"),
+        Output("stringing-analytics-readiness-pct-15", "children"),
+        Output("stringing-analytics-readiness-pct-60", "children"),
+        Output("stringing-analytics-readiness-median", "children"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_readiness_hist(payload: dict[str, Any] | None):
+        readiness = (payload or {}).get("readiness") or {}
+        stats = readiness.get("stats") or {}
+        hist = readiness.get("histogram") or []
+        if not hist:
+            fig = _analytics_empty_fig("No readiness data")
+        else:
+            labels = [row.get("bucket") for row in hist]
+            values = [int(row.get("count", 0)) for row in hist]
+            fig = go.Figure()
+            fig.add_bar(
+                x=labels,
+                y=values,
+                marker_color="#0ea5e9",
+                hovertemplate="%{y} spans<extra></extra>",
+            )
+            fig.update_layout(**_analytics_chart_layout("Gap bucket (days)", "Spans"))
+        return (
+            fig,
+            f"{float(stats.get('pct_over_15', 0.0)):.0f}%",
+            f"{float(stats.get('pct_over_60', 0.0)):.0f}%",
+            f"{float(stats.get('median', 0.0)):.1f}",
+        )
+
+    @app.callback(
+        Output("stringing-analytics-readiness-hotspot", "figure"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_readiness_hotspot(payload: dict[str, Any] | None):
+        rows = (payload or {}).get("readiness", {}).get("hotspots") or []
+        if not rows:
+            return _analytics_empty_fig("No hotspot data")
+        df = pd.DataFrame(rows).sort_values("median_gap", ascending=True)
+        fig = go.Figure()
+        fig.add_bar(
+            x=df["median_gap"],
+            y=df["project_name"],
+            orientation="h",
+            marker_color="#ef4444",
+            hovertemplate="%{x:.1f} days<extra></extra>",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 120, "r": 20, "t": 20, "b": 30},
+            xaxis={"title": "Median E->P/O gap (days)", "gridcolor": "#e6e9f0"},
+            yaxis={"title": "", "tickfont": {"size": 11}},
+        )
+        return fig
+
+    @app.callback(
+        Output("stringing-analytics-readiness-funnel", "figure"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_readiness_funnel(payload: dict[str, Any] | None):
+        rows = (payload or {}).get("readiness", {}).get("funnel") or []
+        if not rows:
+            return _analytics_empty_fig("No funnel data")
+        labels = [row.get("stage") for row in rows]
+        values = [int(row.get("count", 0)) for row in rows]
+        fig = go.Figure(go.Funnel(y=labels, x=values, textinfo="value+percent initial"))
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 40, "r": 20, "t": 20, "b": 30},
+        )
+        return fig
+
+    @app.callback(
+        Output("stringing-analytics-prod-hist", "figure"),
+        Output("stringing-analytics-prod-median", "children"),
+        Output("stringing-analytics-prod-pct-low", "children"),
+        Output("stringing-analytics-prod-pct-high", "children"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_productivity_hist(payload: dict[str, Any] | None):
+        productivity = (payload or {}).get("productivity") or {}
+        summary = productivity.get("summary") or {}
+        hist = productivity.get("histogram") or []
+        if not hist:
+            fig = _analytics_empty_fig("No productivity data")
+        else:
+            labels = [row.get("bucket") for row in hist]
+            values = [int(row.get("count", 0)) for row in hist]
+            fig = go.Figure()
+            fig.add_bar(
+                x=labels,
+                y=values,
+                marker_color="#14b8a6",
+                hovertemplate="%{y} gangs<extra></extra>",
+            )
+            fig.update_layout(**_analytics_chart_layout("KM/month bucket", "Gangs"))
+        return (
+            fig,
+            f"{float(summary.get('median', 0.0)):.2f}",
+            f"{float(summary.get('pct_below_3', 0.0)):.0f}%",
+            f"{float(summary.get('pct_above_6', 0.0)):.0f}%",
+        )
+
+    @app.callback(
+        Output("stringing-analytics-share-chart", "figure"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_productivity_share(payload: dict[str, Any] | None):
+        rows = (payload or {}).get("productivity", {}).get("share") or []
+        if not rows:
+            return _analytics_empty_fig("No share data")
+        df = pd.DataFrame(rows)
+        fig = go.Figure()
+        fig.add_bar(
+            x=df["bucket"],
+            y=df["gang_share"],
+            name="Gang share",
+            marker_color="#2563eb",
+            hovertemplate="%{y:.1f}%<extra></extra>",
+        )
+        fig.add_bar(
+            x=df["bucket"],
+            y=df["km_share"],
+            name="Output share",
+            marker_color="#22c55e",
+            hovertemplate="%{y:.1f}%<extra></extra>",
+        )
+        fig.update_layout(barmode="group", **_analytics_chart_layout("Bucket", "Share (%)"))
+        return fig
+
+    @app.callback(
+        Output("stringing-analytics-whatif-bucket", "options"),
+        Output("stringing-analytics-whatif-bucket", "value"),
+        Output("stringing-analytics-whatif-slider", "value"),
+        Output("stringing-analytics-whatif-slider", "disabled"),
+        Output("stringing-analytics-whatif-status", "children"),
+        Input("stringing-analytics-payload", "data"),
+        Input("stringing-analytics-whatif-bucket", "value"),
+        Input("stringing-analytics-whatif-reset", "n_clicks"),
+    )
+    def _sync_stringing_whatif_controls(
+        payload: dict[str, Any] | None,
+        current_bucket: str | None,
+        reset_clicks: int | None,
+    ):
+        summary_rows = (payload or {}).get("productivity", {}).get("gang_months", {}).get("summary") or []
+        if not summary_rows:
+            return [], None, 4, True, "No bucket data"
+        options = [{"label": row.get("bucket"), "value": row.get("bucket")} for row in summary_rows]
+        labels = [row.get("bucket") for row in summary_rows]
+        counts_map = {row.get("bucket"): float(row.get("gang_months", 0.0)) for row in summary_rows}
+        default_bucket = None
+        if "0-2" in labels and counts_map.get("0-2", 0.0) > 0:
+            default_bucket = "0-2"
+        if default_bucket is None:
+            for label in labels:
+                if counts_map.get(label, 0.0) > 0:
+                    default_bucket = label
+                    break
+        bucket_value = current_bucket if current_bucket in labels else default_bucket
+        bucket_map = {row.get("bucket"): row for row in summary_rows}
+        bucket_row = bucket_map.get(bucket_value) if bucket_value else None
+        avg_km = float(bucket_row.get("avg_km", 0.0)) if bucket_row else 0.0
+        disabled = float(bucket_row.get("gang_months", 0.0)) <= 0 if bucket_row else True
+        status = ""
+        total_gm = float((payload or {}).get("productivity", {}).get("gang_months", {}).get("total_gang_months", 0.0))
+        if total_gm > 0 and bucket_row:
+            share = float(bucket_row.get("gang_months", 0.0)) / total_gm * 100.0
+            status = f"Selected bucket share: {share:.0f}% of gang-months"
+        return options, bucket_value, round(avg_km or 4, 1), disabled, status
+
+    @app.callback(
+        Output("stringing-analytics-whatif-saved", "children"),
+        Output("stringing-analytics-whatif-unlocked", "children"),
+        Output("stringing-analytics-whatif-chart", "figure"),
+        Input("stringing-analytics-payload", "data"),
+        Input("stringing-analytics-whatif-bucket", "value"),
+        Input("stringing-analytics-whatif-slider", "value"),
+    )
+    def _render_stringing_whatif_outputs(
+        payload: dict[str, Any] | None,
+        bucket_value: str | None,
+        target_value: int | float | None,
+    ):
+        gang_months = (payload or {}).get("productivity", {}).get("gang_months", {}) or {}
+        summary_rows = gang_months.get("summary") or []
+        bucket_map = {row.get("bucket"): row for row in summary_rows}
+        bucket_row = bucket_map.get(bucket_value)
+        if not bucket_row:
+            return "0", "0", _analytics_empty_fig("No data")
+        total_gm = float(gang_months.get("total_gang_months", 0.0))
+        n_bucket = float(bucket_row.get("gang_months", 0.0))
+        total_bucket = float(bucket_row.get("km_total", 0.0))
+        current_avg = float(bucket_row.get("avg_km", 0.0))
+        target_avg = float(target_value or 0.0)
+        if n_bucket <= 0 or total_gm <= 0 or target_avg <= 0:
+            return "0", "0", _analytics_empty_fig("No data")
+        n_bucket_new = total_bucket / target_avg if target_avg > 0 else n_bucket
+        n_new = (total_gm - n_bucket) + n_bucket_new
+        saved = total_gm - n_new
+        unlocked = max(target_avg - current_avg, 0.0) * n_bucket
+        fig = go.Figure()
+        fig.add_bar(
+            x=["Current Avg", "Target Avg"],
+            y=[current_avg, target_avg],
+            marker_color=["#94a3b8", "#22c55e"],
+            text=[f"{current_avg:.1f}", f"{target_avg:.1f}"],
+            textposition="outside",
+            hovertemplate="%{y:.1f} km/mo<extra></extra>",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            margin={"l": 20, "r": 10, "t": 10, "b": 20},
+            xaxis={"title": ""},
+            yaxis={"title": "KM/month"},
+        )
+        return f"{saved:.1f}", f"{unlocked:.1f}", fig
+
+    @app.callback(
+        Output("stringing-analytics-flow-hist", "figure"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_flow_hist(payload: dict[str, Any] | None):
+        flow = (payload or {}).get("flow") or {}
+        hist = flow.get("histogram") or []
+        if not hist:
+            return _analytics_empty_fig("No flow data")
+        labels = [row.get("bucket") for row in hist]
+        values = [int(row.get("count", 0)) for row in hist]
+        fig = go.Figure()
+        fig.add_bar(
+            x=labels,
+            y=values,
+            marker_color="#f97316",
+            hovertemplate="%{y} spans<extra></extra>",
+        )
+        fig.update_layout(**_analytics_chart_layout("Gap bucket (days)", "Spans"))
+        return fig
+
+    @app.callback(
+        Output("stringing-analytics-cycle-chart", "figure"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_cycle_chart(payload: dict[str, Any] | None):
+        cycle = (payload or {}).get("cycle") or {}
+        hist = cycle.get("histogram") or []
+        if not hist:
+            return _analytics_empty_fig("No cycle data")
+        labels = [row.get("bucket") for row in hist]
+        values = [int(row.get("count", 0)) for row in hist]
+        fig = go.Figure()
+        fig.add_bar(
+            x=labels,
+            y=values,
+            marker_color="#6366f1",
+            hovertemplate="%{y} spans<extra></extra>",
+        )
+        fig.update_layout(**_analytics_chart_layout("Cycle bucket (days)", "Spans"))
+        return fig
+
+    @app.callback(
+        Output("stringing-analytics-ageing-table", "columns"),
+        Output("stringing-analytics-ageing-table", "data"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_ageing_table(payload: dict[str, Any] | None):
+        rows = (payload or {}).get("cycle", {}).get("ageing") or []
+        df = pd.DataFrame(rows)
+        columns = [
+            {"name": "Project", "id": "project_name"},
+            {"name": "Section", "id": "section"},
+            {"name": "Span", "id": "span"},
+            {"name": "Stage", "id": "current_stage"},
+            {"name": "Ageing days", "id": "ageing_days"},
+        ]
+        return columns, df.to_dict("records")
+
+    @app.callback(
+        Output("stringing-analytics-relationship-chart", "figure"),
+        Input("stringing-analytics-payload", "data"),
+    )
+    def _render_relationship_chart(payload: dict[str, Any] | None):
+        rows = (payload or {}).get("relationship", {}).get("summary") or []
+        if not rows:
+            return _analytics_empty_fig("No relationship data")
+        df = pd.DataFrame(rows)
+        fig = go.Figure()
+        fig.add_bar(
+            x=df["bucket"],
+            y=df["avg_km_month"],
+            marker_color="#0f766e",
+            hovertemplate="%{y:.2f} km/month<extra></extra>",
+        )
+        fig.update_layout(**_analytics_chart_layout("Readiness bucket", "Avg km/month"))
+        return fig
+
+    @app.callback(
+        Output("stringing-analytics-audit-drawer", "is_open"),
+        Output("stringing-analytics-audit-selection", "data"),
+        Output("stringing-analytics-audit-title", "children"),
+        Input("stringing-analytics-kpi-output-card", "n_clicks"),
+        Input("stringing-analytics-kpi-readiness-card", "n_clicks"),
+        Input("stringing-analytics-kpi-flow-card", "n_clicks"),
+        Input("stringing-analytics-readiness-hist", "clickData"),
+        Input("stringing-analytics-readiness-hotspot", "clickData"),
+        Input("stringing-analytics-readiness-funnel", "clickData"),
+        Input("stringing-analytics-prod-hist", "clickData"),
+        Input("stringing-analytics-share-chart", "clickData"),
+        Input("stringing-analytics-flow-hist", "clickData"),
+        Input("stringing-analytics-cycle-chart", "clickData"),
+        Input("stringing-analytics-relationship-chart", "clickData"),
+        Input("stringing-analytics-audit-close", "n_clicks"),
+        State("stringing-analytics-payload", "data"),
+        State("stringing-analytics-audit-drawer", "is_open"),
+        prevent_initial_call=True,
+    )
+    def _toggle_stringing_analytics_audit(
+        output_click,
+        readiness_click,
+        flow_click,
+        readiness_hist_click,
+        readiness_hotspot_click,
+        readiness_funnel_click,
+        prod_hist_click,
+        share_click,
+        flow_hist_click,
+        cycle_click,
+        relationship_click,
+        close_click,
+        payload,
+        is_open,
+    ):
+        trigger = _resolve_triggered_id()
+        if trigger == "stringing-analytics-audit-close":
+            return False, dash.no_update, dash.no_update
+        if payload is None:
+            raise PreventUpdate
+        selection: dict[str, Any] | None = None
+        title = "Audit"
+        if trigger == "stringing-analytics-kpi-output-card":
+            selection = {"kind": "productivity_bucket"}
+            title = "Output (KM) by Gang"
+        elif trigger == "stringing-analytics-kpi-readiness-card":
+            selection = {"kind": "readiness_gap"}
+            title = "Readiness Gap"
+        elif trigger == "stringing-analytics-kpi-flow-card":
+            selection = {"kind": "flow_gap"}
+            title = "Flow Gap"
+        elif trigger == "stringing-analytics-readiness-hist":
+            bucket = (readiness_hist_click or {}).get("points", [{}])[0].get("x")
+            selection = {"kind": "readiness_bucket", "bucket": bucket}
+            title = f"Readiness Bucket: {bucket}"
+        elif trigger == "stringing-analytics-readiness-hotspot":
+            project = (readiness_hotspot_click or {}).get("points", [{}])[0].get("y")
+            selection = {"kind": "readiness_project", "project": project}
+            title = f"Readiness Hotspot: {project}"
+        elif trigger == "stringing-analytics-readiness-funnel":
+            selection = {"kind": "readiness_gap"}
+            title = "Readiness Funnel"
+        elif trigger == "stringing-analytics-prod-hist":
+            bucket = (prod_hist_click or {}).get("points", [{}])[0].get("x")
+            selection = {"kind": "productivity_bucket", "bucket": bucket}
+            title = f"Productivity Bucket: {bucket}"
+        elif trigger == "stringing-analytics-share-chart":
+            bucket = (share_click or {}).get("points", [{}])[0].get("x")
+            selection = {"kind": "productivity_bucket", "bucket": bucket}
+            title = f"Share Bucket: {bucket}"
+        elif trigger == "stringing-analytics-flow-hist":
+            bucket = (flow_hist_click or {}).get("points", [{}])[0].get("x")
+            selection = {"kind": "flow_bucket", "bucket": bucket}
+            title = f"Flow Bucket: {bucket}"
+        elif trigger == "stringing-analytics-cycle-chart":
+            bucket = (cycle_click or {}).get("points", [{}])[0].get("x")
+            selection = {"kind": "cycle_bucket", "bucket": bucket}
+            title = f"Cycle Bucket: {bucket}"
+        elif trigger == "stringing-analytics-relationship-chart":
+            selection = {"kind": "relationship"}
+            title = "Readiness vs Productivity"
+        else:
+            raise PreventUpdate
+        return True, selection, title
+
+    @app.callback(
+        Output("stringing-analytics-section-filter", "options"),
+        Output("stringing-analytics-section-filter", "value"),
+        Input("stringing-analytics-audit-selection", "data"),
+        State("stringing-analytics-payload", "data"),
+    )
+    def _sync_stringing_section_filter(selection: dict[str, Any] | None, payload: dict[str, Any] | None):
+        if not selection or not payload:
+            return [], None
+        if selection.get("kind") != "readiness_project":
+            return [], None
+        project = selection.get("project")
+        rows = (payload.get("readiness") or {}).get("gaps") or []
+        df = pd.DataFrame(rows)
+        if project:
+            df = df[df.get("project_name") == project]
+        if df.empty or "section" not in df.columns:
+            return [], None
+        sections = sorted({str(val) for val in df["section"].dropna().astype(str).str.strip() if val})
+        options = [{"label": value, "value": value} for value in sections]
+        return options, None
+
+    @app.callback(
+        Output("stringing-analytics-audit-table", "columns"),
+        Output("stringing-analytics-audit-table", "data"),
+        Output("stringing-analytics-audit-definition", "children"),
+        Input("stringing-analytics-payload", "data"),
+        Input("stringing-analytics-audit-selection", "data"),
+        Input("stringing-analytics-section-filter", "value"),
+    )
+    def _render_stringing_audit_table(
+        payload: dict[str, Any] | None,
+        selection: dict[str, Any] | None,
+        section_value: str | None,
+    ):
+        columns, data, definition = _stringing_analytics_table_from_selection(
+            payload, selection, section_value
+        )
+        return columns, data, definition
+
+    @app.callback(
+        Output("stringing-analytics-audit-download", "data"),
+        Input("stringing-analytics-audit-export-btn", "n_clicks"),
+        State("stringing-analytics-payload", "data"),
+        State("stringing-analytics-audit-selection", "data"),
+        State("stringing-analytics-section-filter", "value"),
+        prevent_initial_call=True,
+    )
+    def _export_stringing_audit(
+        export_clicks: int | None,
+        payload: dict[str, Any] | None,
+        selection: dict[str, Any] | None,
+        section_value: str | None,
+    ):
+        if not export_clicks:
+            raise PreventUpdate
+        columns, data, _definition = _stringing_analytics_table_from_selection(
+            payload, selection, section_value
+        )
+        if not columns:
+            raise PreventUpdate
+        df = pd.DataFrame(data)
+        if df.empty:
+            df = pd.DataFrame(columns=[col["name"] for col in columns])
+
+        def _writer(buffer: BytesIO) -> None:
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="Audit", index=False)
+
+        return send_bytes(_writer, "Stringing_Analytics_Audit.xlsx")
+
     if config.enable_stringing:
         try:
             _load_stringing_plan_snapshot(config)
@@ -11798,5 +12609,6 @@ def _load_stringing_plan_snapshot(
         return frame, completion_keys, [], []
 
     return None, set(), [], []
+
 
 

@@ -11,6 +11,7 @@ from dash.dcc import Download
 import urllib.parse
 
 from .analytics_layout import build_analytics_layout
+from .stringing_analytics_layout import build_stringing_analytics_layout
 
 CLICK_GRAPH_CONFIG = {
     "displayModeBar": False,
@@ -1514,6 +1515,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     project_modal = build_project_tile_modal()
     global_performance_modal = build_global_performance_modal()
     analytics_layout = build_analytics_layout()
+    stringing_analytics_layout = build_stringing_analytics_layout()
 
     home_content = html.Div(
         [
@@ -1976,7 +1978,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
     tabs = dbc.Tabs(
         [
             dbc.Tab(home_content, label="Dashboard", tab_id="dashboard"),
-            dbc.Tab(analytics_layout, label="Analytics", tab_id="analytics"),
+            dbc.Tab(analytics_layout, label="Tower Erection Analytics", tab_id="analytics"),
+            dbc.Tab(stringing_analytics_layout, label="Stringing Analytics", tab_id="stringing-analytics"),
         ],
         id="main-tabs",
         active_tab="dashboard",
