@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import duckdb
 import pandas as pd
 
-from erection_compiled_to_daily_new import run_pipeline
+from erection_compiled_to_daily_new import run_pipeline, load_sheet_with_csv_fallback
 from dashboard.config import AppConfig
 from dashboard.stringing import (
     expand_stringing_to_daily,
@@ -192,8 +192,7 @@ def _normalize_sheet_label(label: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]+", "", lowered)
 
 
-def _find_stringing_sheet_name(xl: pd.ExcelFile, preferred: Optional[str]) -> Optional[str]:
-    names = list(xl.sheet_names)
+def _find_stringing_sheet_name_from_list(names: list[str], preferred: Optional[str]) -> Optional[str]:
     if not names:
         return None
     if preferred:
@@ -212,6 +211,10 @@ def _find_stringing_sheet_name(xl: pd.ExcelFile, preferred: Optional[str]) -> Op
         if "stringing" in low and "compiled" in low:
             return original
     return None
+
+
+def _find_stringing_sheet_name(xl: pd.ExcelFile, preferred: Optional[str]) -> Optional[str]:
+    return _find_stringing_sheet_name_from_list(list(xl.sheet_names), preferred)
 
 
 def _write_stringing_artifacts(
@@ -349,10 +352,51 @@ def compile_stringing_to_workbook(
 
     for f in candidates:
         project = parse_project_code_from_filename(f.name) or "UNKNOWN"
+        found = None
+        header_row = None
+        header_labels: List[str] = []
+        fallback_note = None
+        df = None
+
         try:
             with pd.ExcelFile(f) as xl:
                 found = _find_stringing_sheet_name(xl, preferred)
                 if not found:
+                    raise ValueError("NO_TARGET_SHEET")
+                used_name = used_name or found
+                try:
+                    df_probe = xl.parse(sheet_name=found, header=None)
+                    header_row, header_labels = find_stringing_header_row(df_probe)
+                    header_labels = [str(label).strip() for label in (header_labels or [])]
+                except Exception:
+                    header_row, header_labels = None, []
+            df = read_stringing_sheet_robust(str(f), found)
+        except Exception:
+            try:
+                selector = lambda names, pref=preferred: _find_stringing_sheet_name_from_list(list(names), pref)
+                df_raw, found, fallback_note = load_sheet_with_csv_fallback(
+                    f,
+                    selector,
+                    read_excel_kwargs={"header": None},
+                    read_csv_kwargs={"header": None},
+                )
+                if found is None or df_raw is None or df_raw.empty:
+                    raise ValueError("NO_TARGET_SHEET")
+                used_name = used_name or found
+                header_row, header_labels = find_stringing_header_row(df_raw)
+                if header_row is None or header_labels is None:
+                    raise ValueError("HEADER_NOT_FOUND")
+                header_labels = [str(label).strip() for label in (header_labels or [])]
+                data = df_raw.iloc[header_row + 1 :].copy()
+                labels_series = pd.Series(header_labels)
+                last_non_empty = labels_series.replace("", pd.NA).last_valid_index()
+                if last_non_empty is not None:
+                    data = data.iloc[:, : last_non_empty + 1]
+                    labels_series = labels_series.iloc[: last_non_empty + 1]
+                data.columns = [str(c).strip() for c in labels_series.values]
+                df = data.reset_index(drop=True)
+            except Exception as fallback_exc:
+                if isinstance(fallback_exc, ValueError) and str(fallback_exc) == "NO_TARGET_SHEET":
                     missing.append(f.name)
                     issue_rows.append(
                         {
@@ -379,28 +423,16 @@ def compile_stringing_to_workbook(
                             "Rows": 0,
                             "DailyRows": 0,
                             "Status": "NO_TARGET_SHEET",
+                            "FallbackNote": "",
                         }
                     )
-                    continue
-                used_name = used_name or found
-                header_row = None
-                header_labels: List[str] = []
-                try:
-                    df_probe = xl.parse(sheet_name=found, header=None)
-                    header_row, header_labels = find_stringing_header_row(df_probe)
-                    header_labels = [str(label).strip() for label in (header_labels or [])]
-                except Exception:
-                    header_row, header_labels = None, []
-                # Robust header detection and parse
-                try:
-                    df = read_stringing_sheet_robust(str(f), found)
-                except Exception as exc:
+                elif isinstance(fallback_exc, ValueError) and str(fallback_exc) == "HEADER_NOT_FOUND":
                     issue_rows.append(
                         {
                             "Workbook": f.name,
                             "Project": project,
-                            "Sheet": found,
-                            "Issue": f"READ_FAIL: {type(exc).__name__}",
+                            "Sheet": found or "",
+                            "Issue": "HEADER_NOT_FOUND",
                             "MissingColumns": "",
                             "Rows": 0,
                             "DailyRows": 0,
@@ -410,7 +442,36 @@ def compile_stringing_to_workbook(
                         {
                             "Workbook": f.name,
                             "Project": project,
-                            "Sheet": found,
+                            "Sheet": found or "",
+                            "DetectedHeaderRow": "",
+                            "ColumnsDetected": "",
+                            "NormalizedColumnsOk": "",
+                            "PresentColumns": "",
+                            "MissingColumns": "",
+                            "AppliedMap": "",
+                            "Rows": 0,
+                            "DailyRows": 0,
+                            "Status": "HEADER_NOT_FOUND",
+                            "FallbackNote": "",
+                        }
+                    )
+                else:
+                    issue_rows.append(
+                        {
+                            "Workbook": f.name,
+                            "Project": project,
+                            "Sheet": found or "",
+                            "Issue": f"READ_FAIL: {type(fallback_exc).__name__}",
+                            "MissingColumns": "",
+                            "Rows": 0,
+                            "DailyRows": 0,
+                        }
+                    )
+                    diag_rows.append(
+                        {
+                            "Workbook": f.name,
+                            "Project": project,
+                            "Sheet": found or "",
                             "DetectedHeaderRow": "" if header_row is None else int(header_row),
                             "ColumnsDetected": ", ".join(header_labels),
                             "NormalizedColumnsOk": "",
@@ -420,239 +481,228 @@ def compile_stringing_to_workbook(
                             "Rows": 0,
                             "DailyRows": 0,
                             "Status": "READ_FAIL",
+                            "FallbackNote": "",
                         }
                     )
-                    continue
+                continue
 
-                if df is None or df.empty:
-                    issue_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found,
-                            "Issue": "EMPTY_SHEET",
-                            "MissingColumns": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                        }
-                    )
-                    diag_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found,
-                            "DetectedHeaderRow": "" if header_row is None else int(header_row),
-                            "ColumnsDetected": ", ".join(header_labels),
-                            "NormalizedColumnsOk": "",
-                            "PresentColumns": "",
-                            "MissingColumns": "",
-                            "AppliedMap": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                            "Status": "EMPTY_SHEET",
-                        }
-                    )
-                    continue
-
-                df = df.copy()
-                df["_source_file"] = f.name
-                compiled.append(df)
-
-                try:
-                    compiled_norm, norm_report = normalize_stringing_columns(df)
-                except Exception:
-                    compiled_norm = df.copy()
-                    norm_report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
-
-                missing_headers = list(norm_report.get("missing", []))
-                if missing_headers:
-                    issue_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found,
-                            "Issue": "MISSING_REQUIRED_COLUMNS",
-                            "MissingColumns": ", ".join(missing_headers),
-                            "Rows": int(len(df.index)),
-                            "DailyRows": 0,
-                        }
-                    )
-
-                # Row-level data issues
-                try:
-                    work = compiled_norm.copy()
-                    has_po_start = "po_start_date" in work.columns
-                    has_po_complete = "po_completion_date" in work.columns
-                    has_fs_start = "fs_starting_date" in work.columns
-                    has_fs_complete = "fs_complete_date" in work.columns
-                    for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
-                        if col in work.columns:
-                            work[col] = pd.to_datetime(work[col], errors="coerce").dt.normalize()
-                        else:
-                            work[col] = pd.NaT
-
-                    def _filled(series: pd.Series) -> pd.Series:
-                        return series.notna() & series.astype(str).str.strip().ne("")
-
-                    po_start_filled = _filled(work["po_start_date"]) if has_po_start else pd.Series(False, index=work.index)
-                    po_complete_filled = _filled(work["po_completion_date"]) if has_po_complete else pd.Series(False, index=work.index)
-                    fs_start_filled = _filled(work["fs_starting_date"]) if has_fs_start else pd.Series(False, index=work.index)
-                    fs_complete_filled = _filled(work["fs_complete_date"]) if has_fs_complete else pd.Series(False, index=work.index)
-
-                    po_start_invalid = po_start_filled & work["po_start_date"].isna() if has_po_start else pd.Series(False, index=work.index)
-                    po_complete_invalid = po_complete_filled & work["po_completion_date"].isna() if has_po_complete else pd.Series(False, index=work.index)
-                    fs_start_invalid = fs_start_filled & work["fs_starting_date"].isna() if has_fs_start else pd.Series(False, index=work.index)
-                    fs_complete_invalid = fs_complete_filled & work["fs_complete_date"].isna() if has_fs_complete else pd.Series(False, index=work.index)
-
-                    po_missing = (
-                        (~po_start_filled if has_po_start else pd.Series(False, index=work.index))
-                        | (~po_complete_filled if has_po_complete else pd.Series(False, index=work.index))
-                    )
-                    fs_missing = (
-                        (~fs_start_filled if has_fs_start else pd.Series(False, index=work.index))
-                        | (~fs_complete_filled if has_fs_complete else pd.Series(False, index=work.index))
-                    )
-
-                    po_non_positive = (
-                        work["po_start_date"].notna()
-                        & work["po_completion_date"].notna()
-                        & ((work["po_completion_date"] - work["po_start_date"]).dt.days + 1 <= 0)
-                    ) if has_po_start and has_po_complete else pd.Series(False, index=work.index)
-                    fs_non_positive = (
-                        work["fs_starting_date"].notna()
-                        & work["fs_complete_date"].notna()
-                        & ((work["fs_complete_date"] - work["fs_starting_date"]).dt.days + 1 <= 0)
-                    ) if has_fs_start and has_fs_complete else pd.Series(False, index=work.index)
-
-                    po_future = (work["po_completion_date"].notna() & (work["po_completion_date"] >= today)) if has_po_complete else pd.Series(False, index=work.index)
-                    fs_future = (work["fs_complete_date"].notna() & (work["fs_complete_date"] >= today)) if has_fs_complete else pd.Series(False, index=work.index)
-
-                    any_issue = (
-                        po_start_invalid
-                        | po_complete_invalid
-                        | fs_start_invalid
-                        | fs_complete_invalid
-                        | po_missing
-                        | fs_missing
-                        | po_non_positive
-                        | fs_non_positive
-                        | po_future
-                        | fs_future
-                    )
-
-                    if any_issue.any():
-                        columns_for_issues = [
-                            "project_name",
-                            "from_ap",
-                            "to_ap",
-                            "gang_name",
-                            "method",
-                            "status",
-                            "po_start_date",
-                            "po_completion_date",
-                            "fs_starting_date",
-                            "fs_complete_date",
-                            "length_m",
-                            "length_km",
-                            "po_km",
-                            "_source_file",
-                        ]
-                        for col in columns_for_issues:
-                            if col not in work.columns:
-                                work[col] = pd.NA
-
-                        def _mk_issue(row: pd.Series) -> str:
-                            messages: List[str] = []
-                            if has_po_start and pd.isna(row.get("po_start_date")):
-                                messages.append("Missing/Invalid PO Start Date")
-                            if has_po_complete and pd.isna(row.get("po_completion_date")):
-                                messages.append("Missing/Invalid PO Complete Date")
-                            if has_fs_start and pd.isna(row.get("fs_starting_date")):
-                                messages.append("Missing/Invalid F/S Start Date")
-                            if has_fs_complete and pd.isna(row.get("fs_complete_date")):
-                                messages.append("Missing/Invalid F/S Complete Date")
-                            if has_po_start and has_po_complete:
-                                try:
-                                    if (row["po_completion_date"] - row["po_start_date"]).days + 1 <= 0:
-                                        messages.append("PO Start > PO Complete (non-positive duration)")
-                                except Exception:
-                                    pass
-                            if has_fs_start and has_fs_complete:
-                                try:
-                                    if (row["fs_complete_date"] - row["fs_starting_date"]).days + 1 <= 0:
-                                        messages.append("F/S Start > F/S Complete (non-positive duration)")
-                                except Exception:
-                                    pass
-                            if has_po_complete and pd.notna(row.get("po_completion_date")) and row["po_completion_date"] >= today:
-                                messages.append("PO Completion >= today (future)")
-                            if has_fs_complete and pd.notna(row.get("fs_complete_date")) and row["fs_complete_date"] >= today:
-                                messages.append("F/S Completion >= today (future)")
-                            return "; ".join(messages)
-
-                        issue_rows = work.loc[any_issue, columns_for_issues].copy()
-                        issue_rows = issue_rows.rename(columns={"_source_file": "source_file"})
-                        issue_rows["Issues"] = issue_rows.apply(_mk_issue, axis=1)
-                        data_issue_rows.append(issue_rows)
-                except Exception:
-                    pass
-
-                daily_rows = 0
-                try:
-                    daily = expand_stringing_to_daily(compiled_norm)
-                    if daily is not None and not daily.empty:
-                        daily_rows = int(len(daily.index))
-                    else:
-                        daily_rows = 0
-                except Exception:
-                    daily_rows = 0
-
-                if daily_rows == 0:
-                    issue_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found,
-                            "Issue": "NO_DAILY",
-                            "MissingColumns": "",
-                            "Rows": int(len(df.index)),
-                            "DailyRows": 0,
-                        }
-                    )
-
-                diag_rows.append(
-                    {
-                        "Workbook": f.name,
-                        "Project": project,
-                        "Sheet": found,
-                        "DetectedHeaderRow": "" if header_row is None else int(header_row),
-                        "ColumnsDetected": ", ".join(header_labels),
-                        "NormalizedColumnsOk": bool(norm_report.get("normalized_columns_ok", False)),
-                        "PresentColumns": ", ".join(norm_report.get("present", [])),
-                        "MissingColumns": ", ".join(norm_report.get("missing", [])),
-                        "AppliedMap": ", ".join(
-                            [f"{key}->{value}" for key, value in norm_report.get("applied_map", {}).items()]
-                        ),
-                        "Rows": int(len(df.index)),
-                        "DailyRows": daily_rows,
-                        "Status": "NO_DAILY" if daily_rows == 0 else "OK",
-                    }
-                )
-        except Exception as exc:
-            print(f"[pipeline] Stringing: failed reading {f}: {exc}")
+        if df is None or df.empty:
             issue_rows.append(
                 {
                     "Workbook": f.name,
                     "Project": project,
-                    "Sheet": "",
-                    "Issue": f"READ_FAIL: {type(exc).__name__}",
+                    "Sheet": found or "",
+                    "Issue": "EMPTY_SHEET",
                     "MissingColumns": "",
                     "Rows": 0,
                     "DailyRows": 0,
                 }
             )
+            diag_rows.append(
+                {
+                    "Workbook": f.name,
+                    "Project": project,
+                    "Sheet": found or "",
+                    "DetectedHeaderRow": "" if header_row is None else int(header_row),
+                    "ColumnsDetected": ", ".join(header_labels),
+                    "NormalizedColumnsOk": "",
+                    "PresentColumns": "",
+                    "MissingColumns": "",
+                    "AppliedMap": "",
+                    "Rows": 0,
+                    "DailyRows": 0,
+                    "Status": "EMPTY_SHEET",
+                    "FallbackNote": fallback_note or "",
+                }
+            )
+            continue
+
+        df = df.copy()
+        df["_source_file"] = f.name
+        compiled.append(df)
+
+        try:
+            compiled_norm, norm_report = normalize_stringing_columns(df)
+        except Exception:
+            compiled_norm = df.copy()
+            norm_report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
+
+        missing_headers = list(norm_report.get("missing", []))
+        if missing_headers:
+            issue_rows.append(
+                {
+                    "Workbook": f.name,
+                    "Project": project,
+                    "Sheet": found,
+                    "Issue": "MISSING_REQUIRED_COLUMNS",
+                    "MissingColumns": ", ".join(missing_headers),
+                    "Rows": int(len(df.index)),
+                    "DailyRows": 0,
+                }
+            )
+
+        try:
+            work = compiled_norm.copy()
+            has_po_start = "po_start_date" in work.columns
+            has_po_complete = "po_completion_date" in work.columns
+            has_fs_start = "fs_starting_date" in work.columns
+            has_fs_complete = "fs_complete_date" in work.columns
+            for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
+                if col in work.columns:
+                    work[col] = pd.to_datetime(work[col], errors="coerce").dt.normalize()
+                else:
+                    work[col] = pd.NaT
+
+            def _filled(series: pd.Series) -> pd.Series:
+                return series.notna() & series.astype(str).str.strip().ne("")
+
+            po_start_filled = _filled(work["po_start_date"]) if has_po_start else pd.Series(False, index=work.index)
+            po_complete_filled = _filled(work["po_completion_date"]) if has_po_complete else pd.Series(False, index=work.index)
+            fs_start_filled = _filled(work["fs_starting_date"]) if has_fs_start else pd.Series(False, index=work.index)
+            fs_complete_filled = _filled(work["fs_complete_date"]) if has_fs_complete else pd.Series(False, index=work.index)
+
+            po_start_invalid = po_start_filled & work["po_start_date"].isna() if has_po_start else pd.Series(False, index=work.index)
+            po_complete_invalid = po_complete_filled & work["po_completion_date"].isna() if has_po_complete else pd.Series(False, index=work.index)
+            fs_start_invalid = fs_start_filled & work["fs_starting_date"].isna() if has_fs_start else pd.Series(False, index=work.index)
+            fs_complete_invalid = fs_complete_filled & work["fs_complete_date"].isna() if has_fs_complete else pd.Series(False, index=work.index)
+
+            po_missing = (
+                (~po_start_filled if has_po_start else pd.Series(False, index=work.index))
+                | (~po_complete_filled if has_po_complete else pd.Series(False, index=work.index))
+            )
+            fs_missing = (
+                (~fs_start_filled if has_fs_start else pd.Series(False, index=work.index))
+                | (~fs_complete_filled if has_fs_complete else pd.Series(False, index=work.index))
+            )
+
+            po_non_positive = (
+                work["po_start_date"].notna()
+                & work["po_completion_date"].notna()
+                & ((work["po_completion_date"] - work["po_start_date"]).dt.days + 1 <= 0)
+            ) if has_po_start and has_po_complete else pd.Series(False, index=work.index)
+            fs_non_positive = (
+                work["fs_starting_date"].notna()
+                & work["fs_complete_date"].notna()
+                & ((work["fs_complete_date"] - work["fs_starting_date"]).dt.days + 1 <= 0)
+            ) if has_fs_start and has_fs_complete else pd.Series(False, index=work.index)
+
+            po_future = (work["po_completion_date"].notna() & (work["po_completion_date"] >= today)) if has_po_complete else pd.Series(False, index=work.index)
+            fs_future = (work["fs_complete_date"].notna() & (work["fs_complete_date"] >= today)) if has_fs_complete else pd.Series(False, index=work.index)
+
+            any_issue = (
+                po_start_invalid
+                | po_complete_invalid
+                | fs_start_invalid
+                | fs_complete_invalid
+                | po_missing
+                | fs_missing
+                | po_non_positive
+                | fs_non_positive
+                | po_future
+                | fs_future
+            )
+
+            if any_issue.any():
+                columns_for_issues = [
+                    "project_name",
+                    "from_ap",
+                    "to_ap",
+                    "gang_name",
+                    "method",
+                    "status",
+                    "po_start_date",
+                    "po_completion_date",
+                    "fs_starting_date",
+                    "fs_complete_date",
+                    "length_m",
+                    "length_km",
+                    "po_km",
+                    "_source_file",
+                ]
+                for col in columns_for_issues:
+                    if col not in work.columns:
+                        work[col] = pd.NA
+
+                def _mk_issue(row: pd.Series) -> str:
+                    messages: List[str] = []
+                    if has_po_start and pd.isna(row.get("po_start_date")):
+                        messages.append("Missing/Invalid PO Start Date")
+                    if has_po_complete and pd.isna(row.get("po_completion_date")):
+                        messages.append("Missing/Invalid PO Complete Date")
+                    if has_fs_start and pd.isna(row.get("fs_starting_date")):
+                        messages.append("Missing/Invalid F/S Start Date")
+                    if has_fs_complete and pd.isna(row.get("fs_complete_date")):
+                        messages.append("Missing/Invalid F/S Complete Date")
+                    if has_po_start and has_po_complete:
+                        try:
+                            if (row["po_completion_date"] - row["po_start_date"]).days + 1 <= 0:
+                                messages.append("PO Start > PO Complete (non-positive duration)")
+                        except Exception:
+                            pass
+                    if has_fs_start and has_fs_complete:
+                        try:
+                            if (row["fs_complete_date"] - row["fs_starting_date"]).dt.days + 1 <= 0:
+                                messages.append("F/S Start > F/S Complete (non-positive duration)")
+                        except Exception:
+                            pass
+                    if has_po_complete and pd.notna(row.get("po_completion_date")) and row["po_completion_date"] >= today:
+                        messages.append("PO Completion >= today (future)")
+                    if has_fs_complete and pd.notna(row.get("fs_complete_date")) and row["fs_complete_date"] >= today:
+                        messages.append("F/S Completion >= today (future)")
+                    return "; ".join(messages)
+
+                issue_df = work.loc[any_issue, columns_for_issues].copy()
+                issue_df = issue_df.rename(columns={"_source_file": "source_file"})
+                issue_df["Issues"] = issue_df.apply(_mk_issue, axis=1)
+                data_issue_rows.append(issue_df)
+        except Exception:
+            pass
+
+        daily_rows = 0
+        try:
+            daily = expand_stringing_to_daily(compiled_norm)
+            if daily is not None and not daily.empty:
+                daily_rows = int(len(daily.index))
+            else:
+                daily_rows = 0
+        except Exception:
+            daily_rows = 0
+
+        if daily_rows == 0:
+            issue_rows.append(
+                {
+                    "Workbook": f.name,
+                    "Project": project,
+                    "Sheet": found,
+                    "Issue": "NO_DAILY",
+                    "MissingColumns": "",
+                    "Rows": int(len(df.index)),
+                    "DailyRows": 0,
+                }
+            )
+
+        status = "NO_DAILY" if daily_rows == 0 else ("FALLBACK" if fallback_note else "OK")
+        diag_rows.append(
+            {
+                "Workbook": f.name,
+                "Project": project,
+                "Sheet": found,
+                "DetectedHeaderRow": "" if header_row is None else int(header_row),
+                "ColumnsDetected": ", ".join(header_labels),
+                "NormalizedColumnsOk": bool(norm_report.get("normalized_columns_ok", False)),
+                "PresentColumns": ", ".join(norm_report.get("present", [])),
+                "MissingColumns": ", ".join(norm_report.get("missing", [])),
+                "AppliedMap": ", ".join(
+                    [f"{key}->{value}" for key, value in norm_report.get("applied_map", {}).items()]
+                ),
+                "Rows": int(len(df.index)),
+                "DailyRows": daily_rows,
+                "Status": status,
+                "FallbackNote": fallback_note or "",
+            }
+        )
 
     if not compiled and missing:
-        # Write an empty workbook with diagnostics for visibility
         empty_df = pd.DataFrame()
         _ = _write_stringing_artifacts(
             output_path,
@@ -681,7 +731,6 @@ def compile_stringing_to_workbook(
     )
     return parquet_dir
 
-
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
     """Reload the dashboard dataframe and recompute derived fields."""
     df = dashboard_module.load_daily(workbook_path)
@@ -690,6 +739,31 @@ def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
         dashboard_module.set_df_day(df)
     else:
         dashboard_module.df_day = df
+
+
+def _clear_stringing_artifacts(base_dir: Path) -> None:
+    if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+        stringing_base = base_dir.parent / "Stringing"
+    else:
+        stringing_base = base_dir / "Stringing" if base_dir.name != "Stringing" else base_dir
+
+    targets = [
+        stringing_base / "StringingCompiled_Output.xlsx",
+        stringing_base / "StringingCompiled.parquet",
+        stringing_base / "StringingDaily.parquet",
+        stringing_base / "StringingDaily" / "stringing_daily.parquet",
+        stringing_base / "StringingDaily",
+    ]
+
+    for target in targets:
+        try:
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+        except Exception as exc:
+            print(f"[pipeline] Warning: failed to remove stringing artifact {target}: {exc}")
 
 
 
@@ -702,6 +776,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("--files", nargs="+", help="Explicit list of Excel files (overrides --input).")
     parser.add_argument("--output", help="Destination Excel workbook path.")
     parser.add_argument("--skip-compile", action="store_true", help="Launch dashboard without re-running the pipeline.")
+    parser.add_argument(
+        "--force-stringing-rebuild",
+        action="store_true",
+        help="Delete cached Stringing outputs before compiling (forces DPR re-read).",
+    )
     parser.add_argument(
         "--config",
         default="pipeline_config.json",
@@ -788,6 +867,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     shutil.rmtree(parquet_dir)
             except Exception as exc:
                 print(f"[pipeline] Warning: failed to remove parquet dir {parquet_dir}: {exc}")
+
+        if args.force_stringing_rebuild:
+            _clear_stringing_artifacts(resolved_output.parent if resolved_output else BASE_DIR)
 
         if resolved_input:
             print(f"[pipeline] Compiling from folder: {resolved_input}")

@@ -42,6 +42,11 @@ YTD_METRIC_LABELS = {
     TOTAL_MT_COLUMN: "Total MT (YTD)",
     TOTAL_COUNT_COLUMN: "Total No. of Erections (YTD)",
 }
+SUMMARY_METRIC_LABELS = {
+    AVG_PRODUCTIVITY_COLUMN: "Avg Productivity",
+    TOTAL_MT_COLUMN: "Total MT",
+    TOTAL_COUNT_COLUMN: "Total No. of Erections",
+}
 _DEFAULT_SHEET_NAME = "Erection Summary"
 _DEFAULT_KV_SHEET_NAME = "KV Productivity"
 _PCH_SORT_ORDER = {name: idx for idx, name in enumerate(CANONICAL_PCH_PRIMARY)}
@@ -866,14 +871,20 @@ def _prepare_month_scope(
     month_start: pd.Timestamp,
     month_end: pd.Timestamp,
     week_labels: Sequence[str],
+    *,
+    filter_by_date: bool = True,
 ) -> pd.DataFrame:
     if daily_df is None or daily_df.empty:
         return pd.DataFrame()
 
     working = daily_df.copy()
     working["date"] = pd.to_datetime(working["date"], errors="coerce").dt.normalize()
-    working = working.dropna(subset=["date"])
-    scope = working[(working["date"] >= month_start) & (working["date"] <= month_end)].copy()
+    if filter_by_date:
+        working = working.dropna(subset=["date"])
+    if filter_by_date:
+        scope = working[(working["date"] >= month_start) & (working["date"] <= month_end)].copy()
+    else:
+        scope = working.copy()
     if scope.empty:
         return scope
 
@@ -940,7 +951,6 @@ def _prepare_completion_scope(
         return pd.DataFrame()
     completion_mask = (
         scope["completion_date"].notna()
-        & scope["date"].eq(scope["completion_date"])
         & (scope["completion_date"] >= month_start)
         & (scope["completion_date"] <= month_end)
     )
@@ -2037,6 +2047,81 @@ def _build_scope_label_from_data(
     )
 
 
+def _build_kv_export_issues(
+    daily_df: pd.DataFrame | None,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    voltage_lookup: dict[str, str],
+) -> pd.DataFrame:
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame([{"Issue": "No data loaded"}])
+
+    working = daily_df.copy()
+
+    date_series = working.get("date")
+    if isinstance(date_series, pd.Series):
+        working["date"] = pd.to_datetime(date_series, errors="coerce").dt.normalize()
+    else:
+        working["date"] = pd.NaT
+
+    completion_series = working.get("completion_date")
+    if isinstance(completion_series, pd.Series):
+        working["completion_date"] = pd.to_datetime(completion_series, errors="coerce").dt.normalize()
+    else:
+        working["completion_date"] = pd.NaT
+
+    working = _annotate_scope_with_voltage(working, voltage_lookup)
+    if working.empty:
+        return pd.DataFrame([{"Issue": "No data loaded"}])
+
+    preferred_columns = [
+        "date",
+        "completion_date",
+        "project_code",
+        "project_name",
+        "project_display",
+        "pch_display",
+        "location_no",
+        "gang_name",
+        "tower_type",
+        "tower_family",
+        "tower_weight",
+        "daily_prod_mt",
+        "voltage_label",
+    ]
+    base_columns = [col for col in preferred_columns if col in working.columns]
+
+    date_in_scope = working["date"].notna() & (working["date"] >= month_start) & (working["date"] <= month_end)
+    completion_in_scope = working["completion_date"].notna() & (
+        (working["completion_date"] >= month_start) & (working["completion_date"] <= month_end)
+    )
+    excluded_mask = ~(date_in_scope | completion_in_scope)
+    if not excluded_mask.any():
+        return pd.DataFrame([{"Issue": "No issues detected"}])
+
+    def _build_issue_row(row: pd.Series) -> str:
+        parts: list[str] = []
+        if pd.isna(row.get("date")):
+            parts.append("Invalid or missing date")
+        else:
+            date_value = row.get("date")
+            if isinstance(date_value, pd.Timestamp) and (date_value < month_start or date_value > month_end):
+                parts.append("Date outside selected range")
+        if pd.isna(row.get("completion_date")):
+            parts.append("Missing completion date")
+        else:
+            comp_value = row.get("completion_date")
+            if isinstance(comp_value, pd.Timestamp) and (comp_value < month_start or comp_value > month_end):
+                parts.append("Completion date outside selected range")
+        return "; ".join(parts) if parts else "Excluded from calculations"
+
+    subset = working.loc[excluded_mask, base_columns].copy()
+    subset["Issue"] = subset.apply(_build_issue_row, axis=1)
+    subset["Excluded From"] = "Avg Productivity + Totals"
+    ordered = ["Issue", "Excluded From", *base_columns]
+    return subset.reindex(columns=ordered)
+
+
 def _build_group_productivity_table(
     scope: pd.DataFrame,
     completions: pd.DataFrame,
@@ -2283,8 +2368,13 @@ def export_erection_productivity_summary(
 
     project_info_frame = source_project_info.copy() if isinstance(source_project_info, pd.DataFrame) else pd.DataFrame()
 
-    scope = _prepare_month_scope(source_daily, project_info_frame, month_start, month_end, week_labels)
-    completions = _prepare_completion_scope(scope, month_start, month_end, week_labels)
+    scope = _prepare_month_scope(
+        source_daily, project_info_frame, month_start, month_end, week_labels, filter_by_date=True
+    )
+    completion_base = _prepare_month_scope(
+        source_daily, project_info_frame, month_start, month_end, week_labels, filter_by_date=False
+    )
+    completions = _prepare_completion_scope(completion_base, month_start, month_end, week_labels)
     if quarter_mode:
         scope["week_index"] = _assign_quarter_week_bucket(scope["date"], month_start, months_count=months_count)
         if not completions.empty:
@@ -2965,7 +3055,9 @@ def export_voltage_tower_productivity_summary(
     as_of_date: pd.Timestamp | str | None = None,
     range_start: pd.Timestamp | str | None = None,
     range_end: pd.Timestamp | str | None = None,
+    scope_mode: str = "auto",
     sheet_name: str = _DEFAULT_KV_SHEET_NAME,
+    issues_sheet_name: str = "Issues",
     blank_rows_between_tables: int = 3,
 ) -> Path:
     """Export productivity grouped by KV level and tower type."""
@@ -2998,15 +3090,23 @@ def export_voltage_tower_productivity_summary(
     if date_series.empty:
         raise ValueError("Unable to determine a date range for the KV productivity export.")
 
-    range_start_ts = None
-    range_end_ts = None
-    if range_start is not None:
-        range_start_ts = pd.Timestamp(range_start)
-    if range_end is not None:
-        range_end_ts = pd.Timestamp(range_end)
+    range_start_ts = pd.Timestamp(range_start) if range_start is not None else None
+    range_end_ts = pd.Timestamp(range_end) if range_end is not None else None
 
-    range_mode = range_start_ts is not None or range_end_ts is not None
-    if range_mode:
+    scope_mode_norm = (scope_mode or "auto").strip().lower()
+    if scope_mode_norm not in {"auto", "full", "month", "range"}:
+        raise ValueError(f"Unknown scope_mode '{scope_mode}'. Expected one of: auto, full, month, range.")
+
+    if scope_mode_norm == "full":
+        if range_start_ts is not None or range_end_ts is not None or candidate_date is not None:
+            raise ValueError("scope_mode='full' cannot be combined with range_start/range_end/as_of_date.")
+        range_mode = False
+        full_range = True
+        month_start = date_series.min().normalize()
+        month_end = date_series.max().normalize()
+        active_date = month_end
+    elif scope_mode_norm == "range":
+        range_mode = True
         if range_start_ts is None or range_end_ts is None:
             raise ValueError("Both range_start and range_end are required for a date range export.")
         start_month = range_start_ts.to_period("M").to_timestamp()
@@ -3017,28 +3117,57 @@ def export_voltage_tower_productivity_summary(
         month_end = (end_month + pd.offsets.MonthEnd(1)).normalize()
         active_date = month_end
         full_range = False
+    elif scope_mode_norm == "month":
+        if range_start_ts is not None or range_end_ts is not None:
+            raise ValueError("scope_mode='month' cannot be combined with range_start/range_end.")
+        if candidate_date is None or pd.isna(candidate_date):
+            candidate_date = date_series.max()
+        range_mode = False
+        full_range = False
+        active_date = pd.Timestamp(candidate_date).normalize()
+        month_start = active_date.to_period("M").to_timestamp()
+        month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
     else:
-        full_range = candidate_date is None or pd.isna(candidate_date)
-        if full_range:
-            month_start = date_series.min().normalize()
-            month_end = date_series.max().normalize()
+        range_mode = range_start_ts is not None or range_end_ts is not None
+        if range_mode:
+            if range_start_ts is None or range_end_ts is None:
+                raise ValueError("Both range_start and range_end are required for a date range export.")
+            start_month = range_start_ts.to_period("M").to_timestamp()
+            end_month = range_end_ts.to_period("M").to_timestamp()
+            if end_month < start_month:
+                raise ValueError("range_end must be the same month or after range_start.")
+            month_start = start_month.normalize()
+            month_end = (end_month + pd.offsets.MonthEnd(1)).normalize()
             active_date = month_end
+            full_range = False
         else:
-            active_date = pd.Timestamp(candidate_date).normalize()
-            month_start = active_date.to_period("M").to_timestamp()
-            month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+            full_range = candidate_date is None or pd.isna(candidate_date)
+            if full_range:
+                month_start = date_series.min().normalize()
+                month_end = date_series.max().normalize()
+                active_date = month_end
+            else:
+                active_date = pd.Timestamp(candidate_date).normalize()
+                month_start = active_date.to_period("M").to_timestamp()
+                month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
 
     week_labels = _generate_week_labels(month_start, month_end)
 
     project_info_frame = source_project_info.copy() if isinstance(source_project_info, pd.DataFrame) else pd.DataFrame()
     voltage_lookup = _prepare_project_voltage_lookup(voltage_frame)
 
-    scope = _prepare_month_scope(source_daily, project_info_frame, month_start, month_end, week_labels)
+    scope = _prepare_month_scope(
+        source_daily, project_info_frame, month_start, month_end, week_labels, filter_by_date=True
+    )
     if scope.empty:
         raise ValueError("No erection rows found for the requested period.")
     scope = _annotate_scope_with_voltage(scope, voltage_lookup)
 
-    completions = _prepare_completion_scope(scope, month_start, month_end, week_labels)
+    completion_base = _prepare_month_scope(
+        source_daily, project_info_frame, month_start, month_end, week_labels, filter_by_date=False
+    )
+    completion_base = _annotate_scope_with_voltage(completion_base, voltage_lookup)
+    completions = _prepare_completion_scope(completion_base, month_start, month_end, week_labels)
     if isinstance(completions, pd.DataFrame) and not completions.empty:
         tower_weights = pd.to_numeric(completions.get("tower_weight"), errors="coerce")
         completions = completions.assign(_tower_weight=tower_weights.fillna(0.0))
@@ -3061,7 +3190,7 @@ def export_voltage_tower_productivity_summary(
         group_columns=["voltage_label", "tower_family"],
         column_labels={"voltage_label": "Voltage", "tower_family": "Tower Family"},
         include_weekly=False,
-        metric_labels=YTD_METRIC_LABELS,
+        metric_labels=SUMMARY_METRIC_LABELS,
     )
     tower_table = _build_group_productivity_table(
         scope,
@@ -3074,6 +3203,7 @@ def export_voltage_tower_productivity_summary(
     )
 
     sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_KV_SHEET_NAME) or _DEFAULT_KV_SHEET_NAME
+    issues_label = _sanitize_sheet_name(issues_sheet_name or "Issues") or "Issues"
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3087,11 +3217,14 @@ def export_voltage_tower_productivity_summary(
 
     gap_rows = max(2, int(blank_rows_between_tables))
     tables = [voltage_table, family_table, tower_table]
+    issues_table = _build_kv_export_issues(source_daily, month_start, month_end, voltage_lookup)
     start_row = 0
     with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
         for table in tables:
             table.to_excel(writer, sheet_name=sheet_label, index=False, startrow=start_row)
             start_row += len(table) + 1 + gap_rows
+        if issues_table is not None:
+            issues_table.to_excel(writer, sheet_name=issues_label, index=False)
 
     return target_path
 

@@ -44,6 +44,19 @@ def _parse_args() -> argparse.Namespace:
         help="Optional YYYY-MM-DD date to treat as 'today' for the export.",
     )
     parser.add_argument(
+        "--scope",
+        type=str,
+        default="auto",
+        choices=["auto", "full", "month", "range"],
+        help=(
+            "Scope selection mode. "
+            "'auto' uses the provided date args (default). "
+            "'full' ignores date args and uses the full dataset. "
+            "'month' uses --month/--as-of-date (or latest month if omitted). "
+            "'range' requires --start-month and --end-month."
+        ),
+    )
+    parser.add_argument(
         "--month",
         type=str,
         help="Optional YYYY-MM month to summarise (overrides --as-of-date).",
@@ -87,12 +100,29 @@ def main() -> int:
     LOGGER.info("Bootstrapping datasets from %s", config.data_path)
     store.bootstrap(config)
 
-    if args.month and (args.start_month or args.end_month):
-        raise SystemExit("Choose either --month or the --start-month/--end-month range, not both.")
-    if (args.start_month and not args.end_month) or (args.end_month and not args.start_month):
-        raise SystemExit("--start-month and --end-month must be provided together.")
-    if args.as_of_date and (args.month or args.start_month or args.end_month):
-        raise SystemExit("--as-of-date cannot be combined with --month or --start-month/--end-month.")
+    scope_mode = (args.scope or "auto").strip().lower()
+    if scope_mode == "full":
+        if args.month or args.start_month or args.end_month or args.as_of_date:
+            raise SystemExit("--scope full cannot be combined with date arguments.")
+    elif scope_mode == "range":
+        if args.month or args.as_of_date:
+            raise SystemExit("--scope range cannot be combined with --month or --as-of-date.")
+        if (args.start_month and not args.end_month) or (args.end_month and not args.start_month):
+            raise SystemExit("--start-month and --end-month must be provided together.")
+        if not args.start_month or not args.end_month:
+            raise SystemExit("--scope range requires --start-month and --end-month.")
+    elif scope_mode == "month":
+        if args.start_month or args.end_month:
+            raise SystemExit("--scope month cannot be combined with --start-month or --end-month.")
+        if args.month and args.as_of_date:
+            raise SystemExit("--scope month supports only one of --month or --as-of-date.")
+    else:
+        if args.month and (args.start_month or args.end_month):
+            raise SystemExit("Choose either --month or the --start-month/--end-month range, not both.")
+        if (args.start_month and not args.end_month) or (args.end_month and not args.start_month):
+            raise SystemExit("--start-month and --end-month must be provided together.")
+        if args.as_of_date and (args.month or args.start_month or args.end_month):
+            raise SystemExit("--as-of-date cannot be combined with --month or --start-month/--end-month.")
 
     as_of: pd.Timestamp | None = None
     range_start: pd.Timestamp | None = None
@@ -124,6 +154,7 @@ def main() -> int:
         as_of_date=as_of,
         range_start=range_start,
         range_end=range_end,
+        scope_mode=scope_mode,
         sheet_name=args.sheet_name,
         project_voltage_path=Path(args.projects_kv).expanduser(),
     )

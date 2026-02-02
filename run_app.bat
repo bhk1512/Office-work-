@@ -37,7 +37,11 @@ if defined SKIP_DPR_WATCHER (
 
 
 REM Run pipeline only (no dev server) — performs delete + compile sequentially
-python pipeline_runner.py --config pipeline_config.json --no-serve
+set "PIPELINE_EXTRA_ARGS="
+if defined FORCE_STRINGING_REBUILD (
+    set "PIPELINE_EXTRA_ARGS=--force-stringing-rebuild"
+)
+python pipeline_runner.py --config pipeline_config.json --no-serve %PIPELINE_EXTRA_ARGS%
 if errorlevel 1 (
     echo [run_app] Pipeline failed; not starting server.
     exit /b 1

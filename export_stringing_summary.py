@@ -105,6 +105,7 @@ def _parse_date_series(series: pd.Series) -> pd.Series:
 
 _LOCATION_RE = re.compile(r"^\s*(\d+)([A-Za-z]+)?(?:\s*/\s*(\d+))?\s*$")
 _AP_PREFIX_RE = re.compile(r"^\s*ap[\s\-_/]*", flags=re.IGNORECASE)
+_GANTRY_RE = re.compile(r"\b(gantry|gty)\b", flags=re.IGNORECASE)
 
 
 def _letter_rank(value: str) -> int:
@@ -120,6 +121,14 @@ def _strip_ap_prefix(value: object) -> str:
     if not text:
         return ""
     return _AP_PREFIX_RE.sub("", text).strip()
+
+
+def _is_gantry_label(value: object) -> bool:
+    text = normalize_location(value)
+    if not text:
+        return False
+    cleaned = re.sub(r"[^a-z]+", " ", text.lower()).strip()
+    return bool(_GANTRY_RE.search(cleaned))
 
 
 def _location_order_key(value: object) -> int | None:
@@ -458,6 +467,9 @@ def _build_review_table_three(
     tse_row = {
         "Stringing productivity": "TSE KM/month (Avg)",
     }
+    tse_total_row = {
+        "Stringing productivity": "TSE - KM Total Strung",
+    }
     gang_row = {
         "Stringing productivity": "No of Gangs engaged (Avg)",
     }
@@ -466,7 +478,8 @@ def _build_review_table_three(
     }
     if not months:
         return pd.DataFrame(
-            [rows, tse_row, gang_row, total_row], columns=["Stringing productivity", *labels]
+            [rows, tse_row, tse_total_row, gang_row, total_row],
+            columns=["Stringing productivity", *labels],
         )
     daily_empty = daily_scope is None or daily_scope.empty
     if daily_empty:
@@ -476,18 +489,27 @@ def _build_review_table_three(
         method_series = daily.get("method", daily.get("method_norm", pd.Series("", index=daily.index)))
         method_norm = method_series.map(_normalize_method)
         daily["method_group"] = method_norm.map(_method_group)
+    if compiled_scope is None or compiled_scope.empty:
+        compiled = pd.DataFrame()
+    else:
+        compiled = compiled_scope.copy()
+        method_series = compiled.get("method", compiled.get("method_norm", pd.Series("", index=compiled.index)))
+        method_norm = method_series.map(_normalize_method)
+        compiled["method_group"] = method_norm.map(_method_group)
     for month_ts, label in zip(months, labels):
         month_start = pd.Timestamp(month_ts).normalize()
         month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
         if daily_empty:
             rows[label] = 0.0
             tse_row[label] = 0.0
+            tse_total_row[label] = 0.0
             gang_row[label] = 0
         else:
             month_scope = daily[(daily["date"] >= month_start) & (daily["date"] <= month_end)]
             if month_scope.empty:
                 rows[label] = 0.0
                 tse_row[label] = 0.0
+                tse_total_row[label] = 0.0
                 gang_row[label] = 0
             else:
                 avg_prod = float(month_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
@@ -501,17 +523,147 @@ def _build_review_table_three(
                     tse_row[label] = round(tse_avg, 2)
 
         km_total = 0.0
-        if compiled_scope is not None and not compiled_scope.empty:
-            if "month" in compiled_scope.columns:
-                month_compiled = compiled_scope[compiled_scope["month"] == month_start]
+        tse_km_total = 0.0
+        if not compiled.empty:
+            if "month" in compiled.columns:
+                month_compiled = compiled[compiled["month"] == month_start]
             else:
-                month_compiled = compiled_scope[
-                    (compiled_scope["fs_complete_date"] >= month_start)
-                    & (compiled_scope["fs_complete_date"] <= month_end)
+                month_compiled = compiled[
+                    (compiled["fs_complete_date"] >= month_start)
+                    & (compiled["fs_complete_date"] <= month_end)
                 ]
             km_total = float(pd.to_numeric(month_compiled["length_km"], errors="coerce").sum())
+            month_compiled_tse = month_compiled[month_compiled["method_group"] == "TSE"]
+            tse_km_total = float(
+                pd.to_numeric(month_compiled_tse["length_km"], errors="coerce").sum()
+            )
         total_row[label] = round(km_total, 2)
-    return pd.DataFrame([rows, tse_row, gang_row, total_row], columns=["Stringing productivity", *labels])
+        tse_total_row[label] = round(tse_km_total, 2)
+    return pd.DataFrame(
+        [rows, tse_row, tse_total_row, gang_row, total_row],
+        columns=["Stringing productivity", *labels],
+    )
+
+
+def _build_rollup_tables(
+    scope: pd.DataFrame,
+    scope_tse: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    overall_rollup = _summarize_scope(scope)
+    overall_rollup = overall_rollup.rename(
+        columns={
+            "avg_km_month": "Overall Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+            "projects": "Projects",
+        }
+    )
+    if scope_tse is None or scope_tse.empty:
+        overall_rollup["TSE Avg Productivity (KM/month)"] = 0.0
+    else:
+        tse_overall = _summarize_scope(scope_tse)
+        overall_rollup["TSE Avg Productivity (KM/month)"] = round(
+            float(tse_overall["avg_km_month"].iloc[0]) if not tse_overall.empty else 0.0,
+            4,
+        )
+    overall_rollup = overall_rollup[
+        [
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+            "Projects",
+        ]
+    ]
+
+    pch_rollup = _summarize_scope(scope, group_columns=["pch_display"])
+    pch_rollup = pch_rollup.rename(
+        columns={
+            "pch_display": "PCH",
+            "avg_km_month": "Overall Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+            "projects": "Projects",
+        }
+    )
+    if scope_tse is not None and not scope_tse.empty:
+        tse_pch = _summarize_scope(scope_tse, group_columns=["pch_display"]).rename(
+            columns={
+                "pch_display": "PCH",
+                "avg_km_month": "TSE Avg Productivity (KM/month)",
+            }
+        )
+        pch_rollup = pch_rollup.merge(
+            tse_pch[["PCH", "TSE Avg Productivity (KM/month)"]],
+            on="PCH",
+            how="left",
+        )
+    pch_rollup["TSE Avg Productivity (KM/month)"] = (
+        pch_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
+    )
+    pch_rollup = pch_rollup[
+        [
+            "PCH",
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+            "Projects",
+        ]
+    ]
+
+    project_rollup = _summarize_scope(
+        scope,
+        group_columns=["pch_display", "project_display"],
+        include_project_count=False,
+    )
+    project_rollup = project_rollup.rename(
+        columns={
+            "pch_display": "PCH",
+            "project_display": "Project",
+            "avg_km_month": "Overall Avg Productivity (KM/month)",
+            "total_km": "Total KM",
+            "spans": "Spans",
+            "gangs": "Gangs",
+        }
+    )
+    if scope_tse is not None and not scope_tse.empty:
+        tse_project = _summarize_scope(
+            scope_tse,
+            group_columns=["pch_display", "project_display"],
+            include_project_count=False,
+        ).rename(
+            columns={
+                "pch_display": "PCH",
+                "project_display": "Project",
+                "avg_km_month": "TSE Avg Productivity (KM/month)",
+            }
+        )
+        project_rollup = project_rollup.merge(
+            tse_project[["PCH", "Project", "TSE Avg Productivity (KM/month)"]],
+            on=["PCH", "Project"],
+            how="left",
+        )
+    project_rollup["TSE Avg Productivity (KM/month)"] = (
+        project_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
+    )
+    project_rollup = project_rollup[
+        [
+            "PCH",
+            "Project",
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+        ]
+    ]
+
+    return overall_rollup, pch_rollup, project_rollup
 
 
 def _build_monthly_km_table(
@@ -559,6 +711,23 @@ def _write_scoped_table(
     header_df = pd.DataFrame([[scope_label]])
     header_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=startrow)
     table_start = startrow + len(header_df) + 1
+    table.to_excel(writer, sheet_name=sheet_name, index=False, startrow=table_start)
+    return table_start + len(table) + 1
+
+
+def _write_labeled_table(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    label: str,
+    table: pd.DataFrame,
+    *,
+    startrow: int,
+) -> int:
+    label_df = pd.DataFrame([[label]])
+    label_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=startrow)
+    table_start = startrow + len(label_df) + 1
+    if table is None or table.empty:
+        return table_start
     table.to_excel(writer, sheet_name=sheet_name, index=False, startrow=table_start)
     return table_start + len(table) + 1
 
@@ -618,6 +787,16 @@ def _build_method_summary(
     return summary
 
 
+def _filter_tse_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    method_series = work.get("method", work.get("method_norm", pd.Series("", index=work.index)))
+    method_norm = method_series.map(_normalize_method)
+    work["method_group"] = method_norm.map(_method_group)
+    return work[work["method_group"] == "TSE"].copy()
+
+
 def _build_pareto_table(
     daily_scope: pd.DataFrame,
     compiled_scope: pd.DataFrame,
@@ -674,9 +853,10 @@ def _build_pareto_table(
             [
                 {
                     "Bucket": label,
-                    "KM % Delivered": "0%",
+                    "KM Delivered": 0.0,
                     "Number of Gangs": 0,
-                    "Number of Gangs %": "0%",
+                    "KM % Delivered": "",
+                    "Number of Gangs %": "",
                 }
                 for label, _, _ in buckets
             ]
@@ -703,18 +883,47 @@ def _build_pareto_table(
     for label, _, _ in buckets:
         gangs_in_bucket = bucket_series[bucket_series == label].index
         km_sum = float(length_per_gang.loc[gangs_in_bucket].sum()) if len(gangs_in_bucket) else 0.0
-        km_pct = (km_sum / total_km * 100.0) if total_km > 0 else 0.0
         gangs_count = int(len(gangs_in_bucket))
-        gangs_pct = (gangs_count / total_gangs * 100.0) if total_gangs > 0 else 0.0
         rows.append(
             {
                 "Bucket": label,
-                "KM % Delivered": f"{km_pct:.2f}%",
+                "KM Delivered": round(km_sum, 2),
                 "Number of Gangs": gangs_count,
-                "Number of Gangs %": f"{gangs_pct:.2f}%",
+                "KM % Delivered": "",
+                "Number of Gangs %": "",
             }
         )
     return pd.DataFrame(rows)
+
+
+def _apply_pareto_formulas(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    *,
+    startrow: int,
+    table: pd.DataFrame,
+) -> None:
+    if table is None or table.empty:
+        return
+    workbook = writer.book
+    if sheet_name not in workbook.sheetnames:
+        return
+    ws = workbook[sheet_name]
+    first_row = startrow + 2
+    last_row = startrow + 1 + len(table)
+    if last_row < first_row:
+        return
+    sum_km = f"$B${first_row}:$B${last_row}"
+    sum_gangs = f"$C${first_row}:$C${last_row}"
+    for row in range(first_row, last_row + 1):
+        km_cell = f"B{row}"
+        gangs_cell = f"C{row}"
+        km_pct_cell = f"D{row}"
+        gangs_pct_cell = f"E{row}"
+        ws[km_pct_cell].value = f"=IF(SUM({sum_km})=0,0,{km_cell}/SUM({sum_km}))"
+        ws[gangs_pct_cell].value = f"=IF(SUM({sum_gangs})=0,0,{gangs_cell}/SUM({sum_gangs}))"
+        ws[km_pct_cell].number_format = "0.00%"
+        ws[gangs_pct_cell].number_format = "0.00%"
 def _normalize_stringing_compiled(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -879,6 +1088,8 @@ def _build_erection_po_gap_table(
     work["to_ap_norm"] = work["to_ap"].map(_strip_ap_prefix)
     work["from_order"] = work["from_ap_norm"].map(_location_order_key)
     work["to_order"] = work["to_ap_norm"].map(_location_order_key)
+    work["from_is_gantry"] = work["from_ap"].map(_is_gantry_label)
+    work["to_is_gantry"] = work["to_ap"].map(_is_gantry_label)
 
     erection_map = _build_erection_location_map(erection_daily)
 
@@ -890,6 +1101,8 @@ def _build_erection_po_gap_table(
         to_order = row.get("to_order")
         from_ap = row.get("from_ap", "")
         to_ap = row.get("to_ap", "")
+        from_is_gantry = bool(row.get("from_is_gantry", False))
+        to_is_gantry = bool(row.get("to_is_gantry", False))
         base = {
             "project_name": row.get("project_name", ""),
             "from_ap": from_ap,
@@ -916,7 +1129,24 @@ def _build_erection_po_gap_table(
             rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
             continue
 
-        if pd.isna(from_order) or pd.isna(to_order):
+        if from_is_gantry and to_is_gantry:
+            issues.append(
+                {
+                    "issue_type": "GANTRY_BOTH_SIDES",
+                    "project": row.get("project_name", ""),
+                    "from_ap": from_ap,
+                    "to_ap": to_ap,
+                    "po_start_date": po_start,
+                    "po_completion_date": row.get("po_completion_date", pd.NaT),
+                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
+                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
+                    "details": "Both From_AP and To_AP marked as gantry/end",
+                }
+            )
+            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
+            continue
+
+        if (not from_is_gantry and pd.isna(from_order)) or (not to_is_gantry and pd.isna(to_order)):
             issues.append(
                 {
                     "issue_type": "LOCATION_PARSE_FAILED",
@@ -951,8 +1181,15 @@ def _build_erection_po_gap_table(
             rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
             continue
 
-        lo = min(int(from_order), int(to_order))
-        hi = max(int(from_order), int(to_order))
+        if to_is_gantry and not from_is_gantry:
+            lo = int(from_order)
+            hi = int(project_df["loc_order"].max())
+        elif from_is_gantry and not to_is_gantry:
+            lo = int(project_df["loc_order"].min())
+            hi = int(to_order)
+        else:
+            lo = min(int(from_order), int(to_order))
+            hi = max(int(from_order), int(to_order))
         span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
         if span_df.empty:
             issues.append(
@@ -987,7 +1224,6 @@ def _build_erection_po_gap_table(
                     "details": "PO start is before last erection completion in span",
                 }
             )
-            gap_days = 0
 
         rows.append(
             {
@@ -1034,14 +1270,17 @@ def main() -> int:
     else:
         overall_daily = stringing_daily
     overall_daily = _filter_by_date(overall_daily, "date", start_date, end_date)
+    overall_daily_tse = _filter_tse_rows(overall_daily)
 
     # PO-only daily (PO start -> PO completion)
     po_daily = expand_stringing_to_daily_payout(stringing_compiled) if not stringing_compiled.empty else pd.DataFrame()
     po_daily = _filter_by_date(po_daily, "date", start_date, end_date)
+    po_daily_tse = _filter_tse_rows(po_daily)
 
     # FS-only daily (FS start -> FS complete)
     fs_daily = expand_stringing_to_daily_fs(stringing_compiled) if not stringing_compiled.empty else pd.DataFrame()
     fs_daily = _filter_by_date(fs_daily, "date", start_date, end_date)
+    fs_daily_tse = _filter_tse_rows(fs_daily)
 
     summary_rows = pd.concat(
         [
@@ -1051,12 +1290,28 @@ def main() -> int:
         ],
         ignore_index=True,
     )
+    summary_rows_tse = pd.concat(
+        [
+            _build_stage_summary(overall_daily_tse, "Overall"),
+            _build_stage_summary(po_daily_tse, "P/O"),
+            _build_stage_summary(fs_daily_tse, "F/S"),
+        ],
+        ignore_index=True,
+    )
 
     gang_rows = pd.concat(
         [
             _build_gang_productivity(overall_daily, "Overall"),
             _build_gang_productivity(po_daily, "P/O"),
             _build_gang_productivity(fs_daily, "F/S"),
+        ],
+        ignore_index=True,
+    )
+    gang_rows_tse = pd.concat(
+        [
+            _build_gang_productivity(overall_daily_tse, "Overall"),
+            _build_gang_productivity(po_daily_tse, "P/O"),
+            _build_gang_productivity(fs_daily_tse, "F/S"),
         ],
         ignore_index=True,
     )
@@ -1070,6 +1325,15 @@ def main() -> int:
         issues=issues,
     )
     po_fs_gap_summary = _build_gap_summary(po_fs_gap, "gap_days")
+    po_fs_gap_tse = _build_po_fs_gap_table(
+        _filter_tse_rows(stringing_compiled),
+        start_date=start_date,
+        end_date=end_date,
+        issues=[],
+    )
+    if po_fs_gap_tse.empty and not po_fs_gap.empty:
+        po_fs_gap_tse = po_fs_gap.head(0)
+    po_fs_gap_summary_tse = _build_gap_summary(po_fs_gap_tse, "gap_days")
 
     erection_po_gap = _build_erection_po_gap_table(
         stringing_compiled,
@@ -1079,6 +1343,16 @@ def main() -> int:
         issues=issues,
     )
     erection_po_gap_summary = _build_gap_summary(erection_po_gap, "gap_days")
+    erection_po_gap_tse = _build_erection_po_gap_table(
+        _filter_tse_rows(stringing_compiled),
+        erection_daily,
+        start_date=start_date,
+        end_date=end_date,
+        issues=[],
+    )
+    if erection_po_gap_tse.empty and not erection_po_gap.empty:
+        erection_po_gap_tse = erection_po_gap.head(0)
+    erection_po_gap_summary_tse = _build_gap_summary(erection_po_gap_tse, "gap_days")
 
     # Stringing rollups (overall / PCH / project) and review format
     project_info = store.get_project_info()
@@ -1092,117 +1366,8 @@ def main() -> int:
     months, month_labels = _build_month_windows_from_series(scope["date"], start_date, end_date)
     scope_label = _build_scope_label(scope, start_date, end_date)
 
-    overall_rollup = _summarize_scope(scope)
-    overall_rollup = overall_rollup.rename(
-        columns={
-            "avg_km_month": "Overall Avg Productivity (KM/month)",
-            "total_km": "Total KM",
-            "spans": "Spans",
-            "gangs": "Gangs",
-            "projects": "Projects",
-        }
-    )
-    if scope_tse.empty:
-        overall_rollup["TSE Avg Productivity (KM/month)"] = 0.0
-    else:
-        tse_overall = _summarize_scope(scope_tse)
-        overall_rollup["TSE Avg Productivity (KM/month)"] = round(
-            float(tse_overall["avg_km_month"].iloc[0]) if not tse_overall.empty else 0.0,
-            4,
-        )
-    overall_rollup = overall_rollup[
-        [
-            "Overall Avg Productivity (KM/month)",
-            "TSE Avg Productivity (KM/month)",
-            "Total KM",
-            "Spans",
-            "Gangs",
-            "Projects",
-        ]
-    ]
-    pch_rollup = _summarize_scope(scope, group_columns=["pch_display"])
-    pch_rollup = pch_rollup.rename(
-        columns={
-            "pch_display": "PCH",
-            "avg_km_month": "Overall Avg Productivity (KM/month)",
-            "total_km": "Total KM",
-            "spans": "Spans",
-            "gangs": "Gangs",
-            "projects": "Projects",
-        }
-    )
-    if not scope_tse.empty:
-        tse_pch = _summarize_scope(scope_tse, group_columns=["pch_display"]).rename(
-            columns={
-                "pch_display": "PCH",
-                "avg_km_month": "TSE Avg Productivity (KM/month)",
-            }
-        )
-        pch_rollup = pch_rollup.merge(
-            tse_pch[["PCH", "TSE Avg Productivity (KM/month)"]],
-            on="PCH",
-            how="left",
-        )
-    pch_rollup["TSE Avg Productivity (KM/month)"] = (
-        pch_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
-    )
-    pch_rollup = pch_rollup[
-        [
-            "PCH",
-            "Overall Avg Productivity (KM/month)",
-            "TSE Avg Productivity (KM/month)",
-            "Total KM",
-            "Spans",
-            "Gangs",
-            "Projects",
-        ]
-    ]
-    project_rollup = _summarize_scope(
-        scope,
-        group_columns=["pch_display", "project_display"],
-        include_project_count=False,
-    )
-    project_rollup = project_rollup.rename(
-        columns={
-            "pch_display": "PCH",
-            "project_display": "Project",
-            "avg_km_month": "Overall Avg Productivity (KM/month)",
-            "total_km": "Total KM",
-            "spans": "Spans",
-            "gangs": "Gangs",
-        }
-    )
-    if not scope_tse.empty:
-        tse_project = _summarize_scope(
-            scope_tse,
-            group_columns=["pch_display", "project_display"],
-            include_project_count=False,
-        ).rename(
-            columns={
-                "pch_display": "PCH",
-                "project_display": "Project",
-                "avg_km_month": "TSE Avg Productivity (KM/month)",
-            }
-        )
-        project_rollup = project_rollup.merge(
-            tse_project[["PCH", "Project", "TSE Avg Productivity (KM/month)"]],
-            on=["PCH", "Project"],
-            how="left",
-        )
-    project_rollup["TSE Avg Productivity (KM/month)"] = (
-        project_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
-    )
-    project_rollup = project_rollup[
-        [
-            "PCH",
-            "Project",
-            "Overall Avg Productivity (KM/month)",
-            "TSE Avg Productivity (KM/month)",
-            "Total KM",
-            "Spans",
-            "Gangs",
-        ]
-    ]
+    overall_rollup, pch_rollup, project_rollup = _build_rollup_tables(scope, scope_tse)
+    tse_overall_rollup, tse_pch_rollup, tse_project_rollup = _build_rollup_tables(scope_tse, scope_tse)
 
     review_table_raw = project_rollup.reindex(
         columns=[
@@ -1215,15 +1380,27 @@ def main() -> int:
         ]
     )
     review_table_one_groups: list[pd.DataFrame] = []
-    if review_table_raw.empty or "PCH" not in review_table_raw.columns:
-        review_table_one_groups.append(
-            _append_totals_row(
-                review_table_raw,
-                avg_col="Overall Avg Productivity (KM/month)",
-                total_col="Total KM",
-                span_col="Spans",
-            )
+    if not review_table_raw.empty:
+        overall_table = _append_totals_row(
+            review_table_raw.copy(),
+            avg_col="Overall Avg Productivity (KM/month)",
+            total_col="Total KM",
+            span_col="Spans",
         )
+        if not overall_table.empty and "PCH" in overall_table.columns:
+            overall_table.loc[overall_table.index[-1], "PCH"] = "Overall"
+        review_table_one_groups.append(overall_table)
+
+    if review_table_raw.empty or "PCH" not in review_table_raw.columns:
+        if review_table_raw.empty:
+            review_table_one_groups.append(
+                _append_totals_row(
+                    review_table_raw,
+                    avg_col="Overall Avg Productivity (KM/month)",
+                    total_col="Total KM",
+                    span_col="Spans",
+                )
+            )
     else:
         unique_pch = sorted(review_table_raw["PCH"].fillna("").astype(str).unique())
         for pch_name in unique_pch:
@@ -1241,57 +1418,47 @@ def main() -> int:
             review_table_one_groups.append(pch_with_total)
 
     review_table_two_groups: list[pd.DataFrame] = []
-    if not scope.empty and month_labels:
+    if not scope.empty and month_labels and "pch_display" in scope.columns:
         months_desc = list(reversed(months))
         labels_desc = list(reversed(month_labels))
-        review_table_two_groups.append(
-            _build_review_table_three(scope, compiled_scope, months_desc, labels_desc)
-        )
-        if "pch_display" in scope.columns:
-            for pch_name in sorted(scope["pch_display"].fillna("").astype(str).unique()):
-                if not pch_name:
-                    continue
-                pch_scope = scope[scope["pch_display"] == pch_name]
-                header_row = {"Stringing productivity": f"PCH: {pch_name}"}
-                for label in labels_desc:
-                    header_row[label] = ""
-                review_table_two_groups.append(
-                    pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc])
+        for pch_name in sorted(scope["pch_display"].fillna("").astype(str).unique()):
+            if not pch_name:
+                continue
+            pch_scope = scope[scope["pch_display"] == pch_name]
+            header_row = {"Stringing productivity": f"PCH: {pch_name}"}
+            for label in labels_desc:
+                header_row[label] = ""
+            review_table_two_groups.append(
+                pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc])
+            )
+            if "project_display" in pch_scope.columns and "project_key_norm" in pch_scope.columns:
+                project_pairs = (
+                    pch_scope[["project_display", "project_key_norm"]]
+                    .dropna(subset=["project_key_norm"])
+                    .drop_duplicates()
                 )
-                compiled_pch_scope = (
-                    compiled_scope[compiled_scope["pch_display"] == pch_name]
-                    if not compiled_scope.empty
-                    else pd.DataFrame()
-                )
-                review_table_two_groups.append(
-                    _build_review_table_three(pch_scope, compiled_pch_scope, months_desc, labels_desc)
-                )
-                if "project_display" in pch_scope.columns and "project_key_norm" in pch_scope.columns:
-                    project_pairs = (
-                        pch_scope[["project_display", "project_key_norm"]]
-                        .dropna(subset=["project_key_norm"])
-                        .drop_duplicates()
+                for _, proj_row in project_pairs.iterrows():
+                    project_name = str(proj_row.get("project_display", "")).strip()
+                    project_key = str(proj_row.get("project_key_norm", "")).strip()
+                    if not project_key:
+                        continue
+                    proj_scope = pch_scope[pch_scope["project_key_norm"] == project_key]
+                    header_row = {"Stringing productivity": f"Project: {project_name}"}
+                    for label in labels_desc:
+                        header_row[label] = ""
+                    review_table_two_groups.append(
+                        pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc])
                     )
-                    for _, proj_row in project_pairs.iterrows():
-                        project_name = str(proj_row.get("project_display", "")).strip()
-                        project_key = str(proj_row.get("project_key_norm", "")).strip()
-                        if not project_key:
-                            continue
-                        proj_scope = pch_scope[pch_scope["project_key_norm"] == project_key]
-                        header_row = {"Stringing productivity": f"Project: {project_name}"}
-                        for label in labels_desc:
-                            header_row[label] = ""
-                        review_table_two_groups.append(
-                            pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc])
+                    compiled_proj_scope = (
+                        compiled_scope[compiled_scope["project_key_norm"] == project_key]
+                        if not compiled_scope.empty
+                        else pd.DataFrame()
+                    )
+                    review_table_two_groups.append(
+                        _build_review_table_three(
+                            proj_scope, compiled_proj_scope, months_desc, labels_desc
                         )
-                        compiled_proj_scope = (
-                            compiled_scope[compiled_scope["project_key_norm"] == project_key]
-                            if not compiled_scope.empty
-                            else pd.DataFrame()
-                        )
-                        review_table_two_groups.append(
-                            _build_review_table_three(proj_scope, compiled_proj_scope, months_desc, labels_desc)
-                        )
+                    )
 
     issues_df = pd.DataFrame(issues)
     if not issues_df.empty:
@@ -1319,6 +1486,10 @@ def main() -> int:
         {
             "Assumption": "Location parsing",
             "Details": "From/To AP values strip a leading 'AP' (case-insensitive) with optional separators. Parsed as main number + optional letters + optional '/sub'. Order key = main*1,000,000 + letter_rank*1,000 + sub.",
+        },
+        {
+            "Assumption": "Gantry spans",
+            "Details": "From/To AP values containing 'gantry' or 'gty' are treated as line ends. If To_AP is gantry, the span runs from From_AP to the max location for that project; if From_AP is gantry, the span runs from the min location to To_AP. Both ends marked gantry are flagged as data issues.",
         },
         {
             "Assumption": "Length units",
@@ -1357,12 +1528,61 @@ def main() -> int:
 
     output_path = _resolve_output_path(args.output)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        summary_rows.to_excel(writer, sheet_name="Summary", index=False)
-        gang_rows.to_excel(writer, sheet_name="Gang_Productivity", index=False)
-        po_fs_gap.to_excel(writer, sheet_name="PO_FS_Gap", index=False)
-        po_fs_gap_summary.to_excel(writer, sheet_name="PO_FS_Gap_Summary", index=False)
-        erection_po_gap.to_excel(writer, sheet_name="Erection_PO_Gap", index=False)
-        erection_po_gap_summary.to_excel(writer, sheet_name="Erection_PO_Gap_Summary", index=False)
+        current_row = 0
+        current_row = _write_labeled_table(
+            writer, "Summary", "TSE", summary_rows_tse, startrow=current_row
+        )
+        current_row += 1
+        _write_labeled_table(writer, "Summary", "Overall", summary_rows, startrow=current_row)
+
+        current_row = 0
+        current_row = _write_labeled_table(
+            writer, "Gang_Productivity", "TSE", gang_rows_tse, startrow=current_row
+        )
+        current_row += 1
+        _write_labeled_table(
+            writer, "Gang_Productivity", "Overall", gang_rows, startrow=current_row
+        )
+
+        current_row = 0
+        current_row = _write_labeled_table(
+            writer, "PO_FS_Gap", "TSE", po_fs_gap_tse, startrow=current_row
+        )
+        current_row += 1
+        _write_labeled_table(
+            writer, "PO_FS_Gap", "Overall", po_fs_gap, startrow=current_row
+        )
+
+        current_row = 0
+        current_row = _write_labeled_table(
+            writer, "PO_FS_Gap_Summary", "TSE", po_fs_gap_summary_tse, startrow=current_row
+        )
+        current_row += 1
+        _write_labeled_table(
+            writer, "PO_FS_Gap_Summary", "Overall", po_fs_gap_summary, startrow=current_row
+        )
+
+        current_row = 0
+        current_row = _write_labeled_table(
+            writer, "Erection_PO_Gap", "TSE", erection_po_gap_tse, startrow=current_row
+        )
+        current_row += 1
+        _write_labeled_table(
+            writer, "Erection_PO_Gap", "Overall", erection_po_gap, startrow=current_row
+        )
+
+        current_row = 0
+        current_row = _write_labeled_table(
+            writer, "Erection_PO_Gap_Summary", "TSE", erection_po_gap_summary_tse, startrow=current_row
+        )
+        current_row += 1
+        _write_labeled_table(
+            writer,
+            "Erection_PO_Gap_Summary",
+            "Overall",
+            erection_po_gap_summary,
+            startrow=current_row,
+        )
         if not method_summary.empty:
             current_row = 0
             method_summary.to_excel(writer, sheet_name="Method_Summary", index=False, startrow=current_row)
@@ -1372,32 +1592,59 @@ def main() -> int:
             header = pd.DataFrame(
                 [{
                     "Bucket": "Pareto Analysis - Overall",
-                    "KM % Delivered": "",
+                    "KM Delivered": "",
                     "Number of Gangs": "",
+                    "KM % Delivered": "",
                     "Number of Gangs %": "",
                 }],
-                columns=["Bucket", "KM % Delivered", "Number of Gangs", "Number of Gangs %"],
+                columns=["Bucket", "KM Delivered", "Number of Gangs", "KM % Delivered", "Number of Gangs %"],
             )
             header.to_excel(writer, sheet_name="Method_Summary", index=False, header=False, startrow=current_row)
             current_row += 1
             pareto_overall.to_excel(writer, sheet_name="Method_Summary", index=False, startrow=current_row)
+            _apply_pareto_formulas(
+                writer, "Method_Summary", startrow=current_row, table=pareto_overall
+            )
             current_row += len(pareto_overall) + 2
 
             pareto_tse = _build_pareto_table(scope, compiled_scope, method_filter="TSE")
             header = pd.DataFrame(
                 [{
                     "Bucket": "Pareto Analysis - TSE",
-                    "KM % Delivered": "",
+                    "KM Delivered": "",
                     "Number of Gangs": "",
+                    "KM % Delivered": "",
                     "Number of Gangs %": "",
                 }],
-                columns=["Bucket", "KM % Delivered", "Number of Gangs", "Number of Gangs %"],
+                columns=["Bucket", "KM Delivered", "Number of Gangs", "KM % Delivered", "Number of Gangs %"],
             )
             header.to_excel(writer, sheet_name="Method_Summary", index=False, header=False, startrow=current_row)
             current_row += 1
             pareto_tse.to_excel(writer, sheet_name="Method_Summary", index=False, startrow=current_row)
+            _apply_pareto_formulas(
+                writer, "Method_Summary", startrow=current_row, table=pareto_tse
+            )
         if not overall_rollup.empty or not pch_rollup.empty or not project_rollup.empty:
             summary_row = 0
+            summary_row = _write_labeled_table(
+                writer, "Stringing Summary", "TSE", pd.DataFrame(), startrow=summary_row
+            )
+            scope_label_tse = _build_scope_label(scope_tse, start_date, end_date).replace("Scope:", "Scope (TSE):")
+            summary_row = _write_scoped_table(
+                writer, "Stringing Summary", tse_overall_rollup, scope_label_tse, startrow=summary_row
+            )
+            summary_row += 2
+            summary_row = _write_scoped_table(
+                writer, "Stringing Summary", tse_pch_rollup, scope_label_tse, startrow=summary_row
+            )
+            summary_row += 2
+            summary_row = _write_scoped_table(
+                writer, "Stringing Summary", tse_project_rollup, scope_label_tse, startrow=summary_row
+            )
+            summary_row += 2
+            summary_row = _write_labeled_table(
+                writer, "Stringing Summary", "Overall", pd.DataFrame(), startrow=summary_row
+            )
             summary_row = _write_scoped_table(
                 writer, "Stringing Summary", overall_rollup, scope_label, startrow=summary_row
             )
