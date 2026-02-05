@@ -473,12 +473,15 @@ def _build_review_table_three(
     gang_row = {
         "Stringing productivity": "No of Gangs engaged (Avg)",
     }
+    tse_gang_row = {
+        "Stringing productivity": "No of Gangs TSE Engaged",
+    }
     total_row = {
         "Stringing productivity": "KM Total Strung",
     }
     if not months:
         return pd.DataFrame(
-            [rows, tse_row, tse_total_row, gang_row, total_row],
+            [rows, tse_row, tse_total_row, gang_row, tse_gang_row, total_row],
             columns=["Stringing productivity", *labels],
         )
     daily_empty = daily_scope is None or daily_scope.empty
@@ -504,6 +507,7 @@ def _build_review_table_three(
             tse_row[label] = 0.0
             tse_total_row[label] = 0.0
             gang_row[label] = 0
+            tse_gang_row[label] = 0
         else:
             month_scope = daily[(daily["date"] >= month_start) & (daily["date"] <= month_end)]
             if month_scope.empty:
@@ -511,6 +515,7 @@ def _build_review_table_three(
                 tse_row[label] = 0.0
                 tse_total_row[label] = 0.0
                 gang_row[label] = 0
+                tse_gang_row[label] = 0
             else:
                 avg_prod = float(month_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
                 rows[label] = round(avg_prod, 2)
@@ -518,9 +523,11 @@ def _build_review_table_three(
                 tse_scope = month_scope[month_scope["method_group"] == "TSE"]
                 if tse_scope.empty:
                     tse_row[label] = 0.0
+                    tse_gang_row[label] = 0
                 else:
                     tse_avg = float(tse_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
                     tse_row[label] = round(tse_avg, 2)
+                    tse_gang_row[label] = int(tse_scope["gang_name"].nunique())
 
         km_total = 0.0
         tse_km_total = 0.0
@@ -540,7 +547,7 @@ def _build_review_table_three(
         total_row[label] = round(km_total, 2)
         tse_total_row[label] = round(tse_km_total, 2)
     return pd.DataFrame(
-        [rows, tse_row, tse_total_row, gang_row, total_row],
+        [rows, tse_row, tse_total_row, gang_row, tse_gang_row, total_row],
         columns=["Stringing productivity", *labels],
     )
 
@@ -1417,10 +1424,13 @@ def main() -> int:
                 pch_with_total.loc[pch_with_total.index[-1], "PCH"] = pch_name
             review_table_one_groups.append(pch_with_total)
 
-    review_table_two_groups: list[pd.DataFrame] = []
+    review_table_two_groups: list[tuple[pd.DataFrame, bool]] = []
     if not scope.empty and month_labels and "pch_display" in scope.columns:
         months_desc = list(reversed(months))
         labels_desc = list(reversed(month_labels))
+        review_table_two_groups.append(
+            (_build_review_table_three(scope, compiled_scope, months_desc, labels_desc), True)
+        )
         for pch_name in sorted(scope["pch_display"].fillna("").astype(str).unique()):
             if not pch_name:
                 continue
@@ -1429,7 +1439,7 @@ def main() -> int:
             for label in labels_desc:
                 header_row[label] = ""
             review_table_two_groups.append(
-                pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc])
+                (pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc]), False)
             )
             if "project_display" in pch_scope.columns and "project_key_norm" in pch_scope.columns:
                 project_pairs = (
@@ -1447,7 +1457,7 @@ def main() -> int:
                     for label in labels_desc:
                         header_row[label] = ""
                     review_table_two_groups.append(
-                        pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc])
+                        (pd.DataFrame([header_row], columns=["Stringing productivity", *labels_desc]), False)
                     )
                     compiled_proj_scope = (
                         compiled_scope[compiled_scope["project_key_norm"] == project_key]
@@ -1455,8 +1465,11 @@ def main() -> int:
                         else pd.DataFrame()
                     )
                     review_table_two_groups.append(
-                        _build_review_table_three(
-                            proj_scope, compiled_proj_scope, months_desc, labels_desc
+                        (
+                            _build_review_table_three(
+                                proj_scope, compiled_proj_scope, months_desc, labels_desc
+                            ),
+                            True,
                         )
                     )
 
@@ -1664,11 +1677,17 @@ def main() -> int:
                 table.to_excel(writer, sheet_name="Review_Format", index=False, startrow=current_row)
                 current_row += len(table) + 2
             current_row += 1
-            for table in review_table_two_groups:
+            for table, include_header in review_table_two_groups:
                 if table.empty:
                     continue
-                table.to_excel(writer, sheet_name="Review_Format", index=False, startrow=current_row)
-                current_row += len(table) + 2
+                table.to_excel(
+                    writer,
+                    sheet_name="Review_Format",
+                    index=False,
+                    header=include_header,
+                    startrow=current_row,
+                )
+                current_row += len(table) + (1 if include_header else 0) + 1
         readme_df.to_excel(writer, sheet_name="README", index=False)
         if not issues_df.empty:
             issues_df.to_excel(writer, sheet_name="Data_Issues", index=False)
