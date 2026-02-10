@@ -107,7 +107,7 @@ def build_analytics_layout() -> html.Div:
                 html.Button(
                     [
                         html.Div(
-                            "Low-output deployment (<80 MT/month bucket)",
+                            "Low-productivity deployment (0-4 MT/day bucket)",
                             className="analytics-kpi-title",
                         ),
                         html.Div(id="analytics-kpi-low-output-value", className="analytics-kpi-value"),
@@ -180,11 +180,11 @@ def build_analytics_layout() -> html.Div:
                 ),
                 dcc.Slider(
                     id="analytics-whatif-slider",
-                    min=60,
-                    max=270,
-                    step=10,
-                    value=120,
-                    marks={value: str(value) for value in [60, 90, 120, 150, 180, 210, 240, 270]},
+                    min=2,
+                    max=20,
+                    step=0.5,
+                    value=4,
+                    marks={value: str(value) for value in [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]},
                 ),
                 html.Div(
                     [
@@ -208,7 +208,7 @@ def build_analytics_layout() -> html.Div:
                                     className="analytics-whatif-value",
                                 ),
                                 html.Div(
-                                    "Equivalent gang-months saved",
+                                    "Equivalent gang periods saved",
                                     className="analytics-whatif-label",
                                 ),
                             ],
@@ -254,8 +254,8 @@ def build_analytics_layout() -> html.Div:
                     [
                         dbc.CardHeader(
                             [
-                                html.Div("Gang-Months vs Output Share", className="section-title"),
-                                html.Div("Bucketed by MT/month", className="section-sub"),
+                                html.Div("Deployment vs Output Share", className="section-title"),
+                                html.Div("Bucketed by MT/day", className="section-sub"),
                             ]
                         ),
                         dbc.CardBody(
@@ -268,11 +268,11 @@ def build_analytics_layout() -> html.Div:
                                 html.Div(
                                     [
                                         html.Div(
-                                            "Low-output deployment share",
+                                            "Low-productivity deployment share",
                                             className="analytics-lowshare-title",
                                         ),
                                         html.Div(
-                                            "% of gang-months in <80 MT/month bucket",
+                                            "% of gang periods in 0-4 MT/day bucket",
                                             className="analytics-lowshare-subtitle",
                                         ),
                                         html.Div(

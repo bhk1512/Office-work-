@@ -178,6 +178,7 @@ def _compute_gang_month_buckets(
         frame.groupby(["gang_name", "month"])
         .agg(
             total_mt=("daily_prod_mt", "sum"),
+            active_days=("date", "nunique"),
             projects=("project_name", _join_unique),
         )
         .reset_index()
@@ -185,10 +186,13 @@ def _compute_gang_month_buckets(
     if grouped.empty:
         return _empty_bucket_frames()
 
-    max_mt = grouped["total_mt"].max()
-    bins, labels = _bucket_bins_and_labels(max_mt)
+    grouped["avg_mt_day"] = (
+        grouped["total_mt"].astype(float) / grouped["active_days"].replace(0, np.nan).astype(float)
+    ).fillna(0.0)
+
+    bins, labels = _bucket_bins_and_labels(grouped["avg_mt_day"].max())
     grouped["bucket_label"] = pd.cut(
-        grouped["total_mt"],
+        grouped["avg_mt_day"].clip(lower=0),
         bins=bins,
         labels=labels,
         include_lowest=True,
@@ -203,6 +207,7 @@ def _compute_gang_month_buckets(
         .agg(
             gang_months=("gang_name", "size"),
             mt_total=("total_mt", "sum"),
+            active_days_total=("active_days", "sum"),
         )
         .reset_index()
     )
@@ -214,18 +219,18 @@ def _compute_gang_month_buckets(
     summary["avg_mt"] = (
         summary["mt_total"].astype(float) / summary["gang_months"].replace(0, np.nan)
     ).fillna(0.0)
+    summary["avg_mt_day"] = (
+        summary["mt_total"].astype(float) / summary["active_days_total"].replace(0, np.nan)
+    ).fillna(0.0)
+    summary["avg_active_days"] = (
+        summary["active_days_total"].astype(float) / summary["gang_months"].replace(0, np.nan)
+    ).fillna(0.0)
     return summary, grouped
 
 
 def _bucket_bins_and_labels(max_mt: float | int | None) -> tuple[list[float], list[str]]:
-    base_edges = [0, 80, 100, 120, 140, 160, 180]
-    labels = ["<80", "80-100", "100-120", "120-140", "140-160", "160-180"]
-    if max_mt is not None and float(max_mt) >= 200:
-        edges = [*base_edges, 200, float("inf")]
-        labels = [*labels, "180-200", ">=200"]
-    else:
-        edges = [*base_edges, float("inf")]
-        labels = [*labels, ">=180"]
+    edges = [0, 4, 6, 8, 10, 12, float("inf")]
+    labels = ["0-4", "4-6", "6-8", "8-10", "10-12", "12+"]
     return edges, labels
 
 
@@ -538,7 +543,7 @@ def _compute_trends(
             continue
         month_buckets, month_rows = _compute_gang_month_buckets(month_df)
         if not month_rows.empty:
-            low_count = int((month_rows["bucket_label"] == "<80").sum())
+            low_count = int((month_rows["bucket_label"] == "0-4").sum())
             total_count = int(len(month_rows.index))
             pct_low = (low_count / total_count * 100.0) if total_count else 0.0
         else:
@@ -598,12 +603,13 @@ def _compute_whatif_inputs(gang_month_rows: pd.DataFrame) -> dict[str, float]:
         }
     working = gang_month_rows.copy()
     working["total_mt"] = pd.to_numeric(working["total_mt"], errors="coerce").fillna(0.0)
-    low_mask = working["bucket_label"] == "<80"
+    low_mask = working["bucket_label"] == "0-4"
     low_count = float(low_mask.sum())
     low_output = float(working.loc[low_mask, "total_mt"].sum())
+    low_active_days = float(pd.to_numeric(working.loc[low_mask, "active_days"], errors="coerce").fillna(0).sum())
     total_gm = float(len(working.index))
     total_output = float(working["total_mt"].sum())
-    low_avg = (low_output / low_count) if low_count else 0.0
+    low_avg = (low_output / low_active_days) if low_active_days else 0.0
     return {
         "low_bucket_count": low_count,
         "low_bucket_output": low_output,
@@ -618,7 +624,7 @@ def _build_kpis(
     tier_summary: pd.DataFrame,
     project_summary: pd.DataFrame,
 ) -> dict:
-    low_bucket = bucket_summary[bucket_summary["bucket_label"] == "<80"]
+    low_bucket = bucket_summary[bucket_summary["bucket_label"] == "0-4"]
     low_share = float(low_bucket["gang_month_share"].iloc[0]) if not low_bucket.empty else 0.0
     low_mt_share = float(low_bucket["mt_share"].iloc[0]) if not low_bucket.empty else 0.0
 
@@ -683,8 +689,30 @@ def _serialize_frame(
 
 def _empty_bucket_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
     return (
-        pd.DataFrame(columns=["bucket_label", "gang_months", "mt_total", "gang_month_share", "mt_share"]),
-        pd.DataFrame(columns=["gang_name", "month", "total_mt", "projects", "bucket_label"]),
+        pd.DataFrame(
+            columns=[
+                "bucket_label",
+                "gang_months",
+                "mt_total",
+                "active_days_total",
+                "gang_month_share",
+                "mt_share",
+                "avg_mt",
+                "avg_mt_day",
+                "avg_active_days",
+            ]
+        ),
+        pd.DataFrame(
+            columns=[
+                "gang_name",
+                "month",
+                "total_mt",
+                "active_days",
+                "avg_mt_day",
+                "projects",
+                "bucket_label",
+            ]
+        ),
     )
 
 
