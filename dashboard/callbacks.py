@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import json
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -47,7 +48,7 @@ from .charts import (
     build_responsibilities_chart,
     build_empty_responsibilities_figure,
 )
-from .config import AppConfig
+from .config import AppConfig, resolve_log_level
 from .data_loader import (
     load_stringing_compiled_raw as _load_stringing_compiled_raw,
     _resolve_stringing_microplan_root,
@@ -86,11 +87,11 @@ from .stringing import expand_stringing_to_daily_payout, build_tse_lookup_from_d
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     _handler = logging.StreamHandler()
-    _handler.setLevel(logging.INFO)
+    _handler.setLevel(resolve_log_level(os.getenv("LOG_LEVEL")))
     _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
     LOGGER.addHandler(_handler)
     LOGGER.propagate = False
-LOGGER.setLevel(logging.INFO)
+LOGGER.setLevel(resolve_log_level(os.getenv("LOG_LEVEL")))
 LOGGER.info("dashboard.callbacks module loaded")
 
 BENCHMARK_MT_PER_DAY = 9.0
@@ -10651,6 +10652,13 @@ def register_callbacks(
         )
         return fig
 
+    def _safe_float(value: object) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return number if np.isfinite(number) else 0.0
+
     def _analytics_chart_layout(title: str, yaxis_title: str) -> dict[str, Any]:
         return {
             "template": "plotly_white",
@@ -11248,84 +11256,98 @@ def register_callbacks(
         if not bucket_rows:
             bucket_fig = _analytics_empty_fig("No bucket data")
         else:
-            labels = [str(row.get("bucket_label") or "") for row in bucket_rows]
-            gang_share = [float(row.get("gang_month_share", 0.0)) * 100.0 for row in bucket_rows]
-            mt_share = [float(row.get("mt_share", 0.0)) * 100.0 for row in bucket_rows]
-            bucket_fig = go.Figure()
-            bucket_fig.add_bar(
-                x=labels,
-                y=gang_share,
-                name="Deployment Share",
-                marker_color="#2563eb",
-                hovertemplate="%{y:.1f}%<extra></extra>",
-            )
-            bucket_fig.add_bar(
-                x=labels,
-                y=mt_share,
-                name="MT Output Share",
-                marker_color="#22c55e",
-                hovertemplate="%{y:.1f}%<extra></extra>",
-            )
+            bucket_order = ["0-4", "4-6", "6-8", "8-10", "10-12", "12+"]
+            bucket_map = {str(row.get("bucket_label") or ""): row for row in bucket_rows}
+            labels = [label for label in bucket_order if label in bucket_map]
+            if not labels:
+                labels = [str(row.get("bucket_label") or "") for row in bucket_rows]
+            gang_share = [_safe_float(bucket_map.get(label, {}).get("gang_month_share", 0.0)) * 100.0 for label in labels]
+            mt_share = [_safe_float(bucket_map.get(label, {}).get("mt_share", 0.0)) * 100.0 for label in labels]
+            if sum(gang_share) <= 0.0 and sum(mt_share) <= 0.0:
+                bucket_fig = _analytics_empty_fig("No bucket data")
+            else:
+                bucket_fig = go.Figure()
+                bucket_fig.add_bar(
+                    x=labels,
+                    y=gang_share,
+                    name="Deployment Share",
+                    marker_color="#2563eb",
+                    hovertemplate="%{y:.1f}%<extra></extra>",
+                )
+                bucket_fig.add_bar(
+                    x=labels,
+                    y=mt_share,
+                    name="MT Output Share",
+                    marker_color="#22c55e",
+                    hovertemplate="%{y:.1f}%<extra></extra>",
+                )
+            bucket_layout = _analytics_chart_layout("Bucket", "Share (%)")
+            bucket_layout["xaxis"] = {**bucket_layout.get("xaxis", {}), "type": "category"}
             bucket_fig.update_layout(
                 barmode="group",
-                **_analytics_chart_layout("Bucket", "Share (%)"),
-                xaxis={
-                    "type": "category",
-                    "categoryorder": "array",
-                    "categoryarray": labels,
-                },
+                **bucket_layout,
             )
 
         tier_rows = payload.get("tiers", {}).get("summary") or []
         if not tier_rows:
             tier_fig = _analytics_empty_fig("No tier data")
         else:
-            tier_labels = [row.get("tier") for row in tier_rows]
-            tier_windows = [float(row.get("avg_idle_windows", 0.0)) for row in tier_rows]
-            tier_days = [float(row.get("avg_idle_days", 0.0)) for row in tier_rows]
-            tier_fig = go.Figure()
-            tier_fig.add_bar(
-                x=tier_labels,
-                y=tier_windows,
-                name="Avg Idle Windows",
-                marker_color="#f97316",
-                text=[f"{value:.1f}" for value in tier_windows],
-                textposition="outside",
-                hovertemplate="%{y:.2f}<extra></extra>",
-            )
-            tier_fig.add_bar(
-                x=tier_labels,
-                y=tier_days,
-                name="Avg Idle Days",
-                marker_color="#38bdf8",
-                text=[f"{value:.1f}" for value in tier_days],
-                textposition="outside",
-                hovertemplate="%{y:.2f}<extra></extra>",
-            )
-            tier_fig.update_layout(
-                barmode="group",
-                **_analytics_chart_layout("Tier", "Avg Idle Windows / Days"),
-            )
+            tier_order = [
+                f"Low (<{PRODUCTIVITY_TIER_LOW:g})",
+                f"Mid ({PRODUCTIVITY_TIER_LOW:g}-{PRODUCTIVITY_TIER_HIGH:g})",
+                f"High (>{PRODUCTIVITY_TIER_HIGH:g})",
+            ]
+            tier_map = {str(row.get("tier") or ""): row for row in tier_rows}
+            tier_labels = [label for label in tier_order if label in tier_map]
+            if not tier_labels:
+                tier_labels = [str(row.get("tier") or "") for row in tier_rows]
+            tier_windows = [_safe_float(tier_map.get(label, {}).get("avg_idle_windows", 0.0)) for label in tier_labels]
+            tier_days = [_safe_float(tier_map.get(label, {}).get("avg_idle_days", 0.0)) for label in tier_labels]
+            if sum(tier_windows) <= 0.0 and sum(tier_days) <= 0.0:
+                tier_fig = _analytics_empty_fig("No tier data")
+            else:
+                tier_fig = go.Figure()
+                tier_fig.add_bar(
+                    x=tier_labels,
+                    y=tier_windows,
+                    name="Avg Idle Windows",
+                    marker_color="#f97316",
+                    text=[f"{value:.1f}" for value in tier_windows],
+                    textposition="outside",
+                    hovertemplate="%{y:.2f}<extra></extra>",
+                )
+                tier_fig.add_bar(
+                    x=tier_labels,
+                    y=tier_days,
+                    name="Avg Idle Days",
+                    marker_color="#38bdf8",
+                    text=[f"{value:.1f}" for value in tier_days],
+                    textposition="outside",
+                    hovertemplate="%{y:.2f}<extra></extra>",
+                )
+                tier_fig.update_layout(
+                    barmode="group",
+                    **_analytics_chart_layout("Tier", "Avg Idle Windows / Days"),
+                )
 
         hist_rows = payload.get("histogram", {}).get("bins") or []
         if not hist_rows:
             hist_fig = _analytics_empty_fig("No histogram data")
         else:
-            hist_labels = [row.get("bin_label") for row in hist_rows]
-            hist_values = [int(row.get("count", 0)) for row in hist_rows]
-            hist_fig = go.Figure()
-            hist_fig.add_bar(
-                x=hist_labels,
-                y=hist_values,
-                marker_color="#0f766e",
-                hovertemplate="%{y} gangs<extra></extra>",
-            )
-            hist_fig.update_layout(**_analytics_chart_layout("MT/day Bin", "Gangs"))
-            hist_fig.update_xaxes(
-                type="category",
-                categoryorder="array",
-                categoryarray=hist_labels,
-            )
+            hist_labels = [str(row.get("bin_label") or "") for row in hist_rows]
+            hist_values = [_safe_float(row.get("count", 0.0)) for row in hist_rows]
+            if sum(hist_values) <= 0.0:
+                hist_fig = _analytics_empty_fig("No histogram data")
+            else:
+                hist_fig = go.Figure()
+                hist_fig.add_bar(
+                    x=hist_labels,
+                    y=hist_values,
+                    marker_color="#0f766e",
+                    hovertemplate="%{y} gangs<extra></extra>",
+                )
+                hist_fig.update_layout(**_analytics_chart_layout("MT/day Bin", "Gangs"))
+                hist_fig.update_xaxes(type="category")
 
         return bucket_fig, tier_fig, hist_fig
 
@@ -11691,6 +11713,11 @@ def register_callbacks(
                 compiled = stringing_compiled_provider() or pd.DataFrame()
             except Exception:
                 compiled = pd.DataFrame()
+        if compiled.empty:
+            try:
+                compiled = _load_stringing_compiled_raw(config.stringing_data_path)
+            except Exception:
+                compiled = pd.DataFrame()
         data_stamp = _analytics_data_stamp(config.stringing_data_path)
         cache_key = _stringing_analytics_cache_key(
             project_list,
@@ -11795,14 +11822,17 @@ def register_callbacks(
         else:
             labels = [row.get("bucket") for row in hist]
             values = [int(row.get("count", 0)) for row in hist]
-            fig = go.Figure()
-            fig.add_bar(
-                x=labels,
-                y=values,
-                marker_color="#0ea5e9",
-                hovertemplate="%{y} spans<extra></extra>",
-            )
-            fig.update_layout(**_analytics_chart_layout("Gap bucket (days)", "Spans"))
+            if sum(values) <= 0:
+                fig = _analytics_empty_fig("No readiness data")
+            else:
+                fig = go.Figure()
+                fig.add_bar(
+                    x=labels,
+                    y=values,
+                    marker_color="#0ea5e9",
+                    hovertemplate="%{y} spans<extra></extra>",
+                )
+                fig.update_layout(**_analytics_chart_layout("Gap bucket (days)", "Spans"))
         return (
             fig,
             f"{float(stats.get('pct_over_15', 0.0)):.0f}%",
@@ -12015,6 +12045,8 @@ def register_callbacks(
             return _analytics_empty_fig("No flow data")
         labels = [row.get("bucket") for row in hist]
         values = [int(row.get("count", 0)) for row in hist]
+        if sum(values) <= 0:
+            return _analytics_empty_fig("No flow data")
         fig = go.Figure()
         fig.add_bar(
             x=labels,
@@ -12036,6 +12068,8 @@ def register_callbacks(
             return _analytics_empty_fig("No cycle data")
         labels = [row.get("bucket") for row in hist]
         values = [int(row.get("count", 0)) for row in hist]
+        if sum(values) <= 0:
+            return _analytics_empty_fig("No cycle data")
         fig = go.Figure()
         fig.add_bar(
             x=labels,

@@ -153,7 +153,16 @@ class AppConfig:
             )
 
 
-def configure_logging(level: int = logging.INFO) -> None:
+def resolve_log_level(value: str | None) -> int:
+    if not value:
+        return logging.WARNING
+    text = value.strip().upper()
+    if text.isdigit():
+        return int(text)
+    return logging._nameToLevel.get(text, logging.WARNING)
+
+
+def configure_logging(level: int | None = None) -> None:
     """Configure root logging once for the application."""
 
     root_logger = logging.getLogger()
@@ -161,8 +170,10 @@ def configure_logging(level: int = logging.INFO) -> None:
         root_logger.debug("Logging already configured; skipping reconfiguration.")
         return
 
+    effective_level = level if level is not None else resolve_log_level(os.getenv("LOG_LEVEL"))
+
     logging.basicConfig(
-        level=level,
+        level=effective_level,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 

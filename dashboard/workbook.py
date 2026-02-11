@@ -964,6 +964,163 @@ def _prepare_completion_scope(
     return completed
 
 
+def _build_excluded_data_audit_tables(
+    scope: pd.DataFrame,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary_columns = [
+        "PCH",
+        "Project",
+        "Productivity Missing Date",
+        "Productivity Date Outside Range",
+        "Completion Missing Date",
+        "Completion Date Outside Range",
+        "Completion Duplicate Rows",
+        "Total Excluded Rows",
+        "Total Rows",
+    ]
+    detail_columns = [
+        "PCH",
+        "Project",
+        "Project Code",
+        "Project Name",
+        "Work Date",
+        "Completion Date",
+        "Location No",
+        "Gang Name",
+        "Daily Productivity (MT)",
+        "Tower Weight (MT)",
+        "Status",
+        "Productivity Exclusion",
+        "Completion Exclusion",
+        "Duplicate Completion Row",
+    ]
+    if scope is None or scope.empty:
+        return (
+            pd.DataFrame(columns=summary_columns),
+            pd.DataFrame(columns=detail_columns),
+        )
+
+    working = scope.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
+    working["completion_date"] = pd.to_datetime(
+        working.get("completion_date"), errors="coerce"
+    ).dt.normalize()
+
+    def _safe_text_series(frame: pd.DataFrame, column: str, fallback: str | None = None) -> pd.Series:
+        if isinstance(frame.get(column), pd.Series):
+            series = frame[column]
+        elif fallback and isinstance(frame.get(fallback), pd.Series):
+            series = frame[fallback]
+        else:
+            return pd.Series("", index=frame.index, dtype="object")
+        return series.fillna("").astype(str).str.strip()
+
+    project_display = _safe_text_series(working, "project_display", "project_name")
+    project_code = _safe_text_series(working, "project_code")
+    project_display = project_display.where(project_display.astype(bool), project_code)
+    project_display = project_display.where(project_display.astype(bool), "(Unlabeled Project)")
+    working["project_display"] = project_display
+    working["project_code"] = project_code
+    working["project_name"] = _safe_text_series(working, "project_name")
+
+    pch_display = _safe_text_series(working, "pch_display", "pch")
+    pch_display = pch_display.map(normalize_pch)
+    pch_display = pch_display.where(pch_display.astype(bool), "Unassigned")
+    working["pch_display"] = pch_display
+
+    date_valid = working["date"].notna()
+    date_in_range = working["date"].between(month_start, month_end, inclusive="both")
+    completion_valid = working["completion_date"].notna()
+    completion_in_range = working["completion_date"].between(month_start, month_end, inclusive="both")
+
+    productivity_reason = pd.Series("", index=working.index, dtype="object")
+    productivity_reason.loc[~date_valid] = "Missing/invalid date"
+    productivity_reason.loc[date_valid & ~date_in_range] = "Date outside selected range"
+
+    completion_reason = pd.Series("", index=working.index, dtype="object")
+    completion_reason.loc[~completion_valid] = "Missing/invalid completion date"
+    completion_reason.loc[completion_valid & ~completion_in_range] = "Completion date outside selected range"
+
+    duplicate_completion = pd.Series(False, index=working.index)
+    dedup_cols = [col for col in ("project_name_key", "location_no", "completion_date") if col in working.columns]
+    if dedup_cols and completion_in_range.any():
+        completion_scope = working[completion_in_range]
+        dupes = completion_scope.duplicated(subset=dedup_cols, keep="last")
+        duplicate_completion.loc[completion_scope.index] = dupes
+
+    has_issue = (productivity_reason != "") | (completion_reason != "") | duplicate_completion
+    working["_prod_missing"] = (~date_valid).astype(int)
+    working["_prod_out"] = (date_valid & ~date_in_range).astype(int)
+    working["_comp_missing"] = (~completion_valid).astype(int)
+    working["_comp_out"] = (completion_valid & ~completion_in_range).astype(int)
+    working["_comp_dup"] = duplicate_completion.astype(int)
+    working["_any_issue"] = has_issue.astype(int)
+    working["_row_count"] = 1
+
+    group_cols = ["pch_display", "project_display"]
+    total_rows = working.groupby(group_cols, dropna=False)["_row_count"].sum().rename("Total Rows")
+    issue_summary = (
+        working[has_issue]
+        .groupby(group_cols, dropna=False)
+        .agg(
+            **{
+                "Productivity Missing Date": ("_prod_missing", "sum"),
+                "Productivity Date Outside Range": ("_prod_out", "sum"),
+                "Completion Missing Date": ("_comp_missing", "sum"),
+                "Completion Date Outside Range": ("_comp_out", "sum"),
+                "Completion Duplicate Rows": ("_comp_dup", "sum"),
+                "Total Excluded Rows": ("_any_issue", "sum"),
+            }
+        )
+    )
+    if issue_summary.empty:
+        summary = pd.DataFrame(columns=summary_columns)
+    else:
+        summary = (
+            issue_summary.merge(total_rows, left_index=True, right_index=True, how="left")
+            .reset_index()
+            .rename(columns={"pch_display": "PCH", "project_display": "Project"})
+        )
+        summary = summary.reindex(columns=summary_columns)
+
+    detail = working[has_issue].copy()
+    detail["Productivity Exclusion"] = productivity_reason.loc[detail.index]
+    detail["Completion Exclusion"] = completion_reason.loc[detail.index]
+    detail["Duplicate Completion Row"] = duplicate_completion.loc[detail.index].map(
+        lambda value: "Yes" if value else "No"
+    )
+    for date_column in ("date", "completion_date"):
+        if date_column in detail.columns:
+            detail[date_column] = pd.to_datetime(detail[date_column], errors="coerce").dt.strftime("%d-%m-%Y")
+            detail[date_column] = detail[date_column].fillna("")
+    for numeric_column in ("daily_prod_mt", "tower_weight"):
+        if numeric_column in detail.columns:
+            detail[numeric_column] = pd.to_numeric(detail[numeric_column], errors="coerce").round(3)
+
+    detail = detail.rename(
+        columns={
+            "pch_display": "PCH",
+            "project_display": "Project",
+            "project_code": "Project Code",
+            "project_name": "Project Name",
+            "date": "Work Date",
+            "completion_date": "Completion Date",
+            "location_no": "Location No",
+            "gang_name": "Gang Name",
+            "daily_prod_mt": "Daily Productivity (MT)",
+            "tower_weight": "Tower Weight (MT)",
+            "status": "Status",
+        }
+    )
+    detail = detail.reindex(columns=[column for column in detail_columns if column in detail.columns])
+    if detail.empty:
+        detail = pd.DataFrame(columns=detail_columns)
+
+    return summary, detail
+
+
 def _safe_average(values: list[object]) -> float:
     filtered = [float(v) for v in values if v is not None and not pd.isna(v)]
     return round(sum(filtered) / len(filtered), 2) if filtered else 0.0
@@ -2568,6 +2725,11 @@ def export_erection_productivity_summary(
         threshold=3,
     )
     monthly_bucket_counts, monthly_bucket_details = _build_monthly_gang_production_buckets(source_daily)
+    excluded_summary, excluded_detail = _build_excluded_data_audit_tables(
+        completion_base,
+        month_start,
+        month_end,
+    )
 
     sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_SHEET_NAME) or _DEFAULT_SHEET_NAME
     review_sheet_label = _sanitize_sheet_name("Review_Format")
@@ -2576,6 +2738,7 @@ def export_erection_productivity_summary(
     idle_sheet_label = _sanitize_sheet_name("Idle Intervals")
     idle_bucket_sheet_label = _sanitize_sheet_name("Idle Days Buckets")
     monthly_bucket_sheet_label = _sanitize_sheet_name("Monthly Gang Buckets")
+    excluded_sheet_label = _sanitize_sheet_name("Excluded Data Audit")
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2977,6 +3140,33 @@ def export_erection_productivity_summary(
             writer, sheet_name=monthly_bucket_sheet_label, index=False, startrow=monthly_row
         )
 
+        audit_row = 0
+        audit_row = _write_scope_row(writer, excluded_sheet_label, scope_label, startrow=audit_row)
+        audit_row += 1
+        pd.DataFrame([["Project-wise Excluded Rows"]]).to_excel(
+            writer,
+            sheet_name=excluded_sheet_label,
+            index=False,
+            header=False,
+            startrow=audit_row,
+        )
+        audit_row += 2
+        excluded_summary.to_excel(
+            writer, sheet_name=excluded_sheet_label, index=False, startrow=audit_row
+        )
+        audit_row += len(excluded_summary) + 2
+        pd.DataFrame([["Excluded Row Details"]]).to_excel(
+            writer,
+            sheet_name=excluded_sheet_label,
+            index=False,
+            header=False,
+            startrow=audit_row,
+        )
+        audit_row += 2
+        excluded_detail.to_excel(
+            writer, sheet_name=excluded_sheet_label, index=False, startrow=audit_row
+        )
+
         used_sheet_names: set[str] = {
             sheet_label,
             review_sheet_label,
@@ -2985,6 +3175,7 @@ def export_erection_productivity_summary(
             idle_sheet_label,
             idle_bucket_sheet_label,
             monthly_bucket_sheet_label,
+            excluded_sheet_label,
         }
         if not review_table_raw.empty and "PCH" in review_table_raw.columns and "pch_display" in scope.columns:
             for pch_name in sorted(review_table_raw["PCH"].fillna("").astype(str).unique(), key=_pch_sort_components):

@@ -195,7 +195,7 @@ def build_analytics_layout() -> html.Div:
                                     className="analytics-whatif-value",
                                 ),
                                 html.Div(
-                                    "Estimated gang-month reduction",
+                                    "Estimated deployment reduction",
                                     className="analytics-whatif-label",
                                 ),
                             ],
