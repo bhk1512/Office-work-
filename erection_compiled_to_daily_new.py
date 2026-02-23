@@ -27,6 +27,7 @@ import logging
 import re
 import shutil
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -271,6 +272,80 @@ def to_date(x):
     return pd.to_datetime(x, errors="coerce", dayfirst=True)
 
 
+def to_date_monthfirst(x):
+    """Parse text dates with month-first preference while preserving Excel serials."""
+    excel_ts = _coerce_excel_serial(x)
+    if excel_ts is not None:
+        return excel_ts
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return pd.to_datetime(x, errors="coerce", dayfirst=False)
+
+
+_AMBIGUOUS_NUMERIC_DATE_RE = re.compile(r"^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+.*)?$")
+
+
+def _is_ambiguous_numeric_date(value: object) -> bool:
+    """True when *value* is textual and both day/month positions can be <= 12."""
+    if pd.isna(value):
+        return False
+    if isinstance(value, (pd.Timestamp, np.datetime64)):
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    match = _AMBIGUOUS_NUMERIC_DATE_RE.match(text)
+    if not match:
+        return False
+    first = int(match.group(1))
+    second = int(match.group(2))
+    return 1 <= first <= 12 and 1 <= second <= 12
+
+
+def _repair_ambiguous_non_positive_dates(work: pd.DataFrame) -> int:
+    """
+    For rows parsed as Start>Date, retry ambiguous numeric dates in month-first
+    mode and accept only repairs that produce a positive duration.
+    """
+    required = {"starting date", "completion date", "Start Date", "Complete Date"}
+    if not required.issubset(work.columns):
+        return 0
+
+    missing_dt_mask = work["Start Date"].isna() | work["Complete Date"].isna()
+    days = (work["Complete Date"] - work["Start Date"]).dt.days + 1
+    non_positive_mask = (~missing_dt_mask) & (days <= 0)
+    if not non_positive_mask.any():
+        return 0
+
+    repaired = 0
+    for idx in work.index[non_positive_mask]:
+        raw_start = work.at[idx, "starting date"]
+        raw_end = work.at[idx, "completion date"]
+        if not (_is_ambiguous_numeric_date(raw_start) or _is_ambiguous_numeric_date(raw_end)):
+            continue
+
+        parsed_start = work.at[idx, "Start Date"]
+        parsed_end = work.at[idx, "Complete Date"]
+        start_monthfirst = to_date_monthfirst(raw_start)
+        end_monthfirst = to_date_monthfirst(raw_end)
+
+        for cand_start, cand_end in (
+            (start_monthfirst, parsed_end),
+            (parsed_start, end_monthfirst),
+            (start_monthfirst, end_monthfirst),
+        ):
+            if pd.isna(cand_start) or pd.isna(cand_end):
+                continue
+            if (cand_end - cand_start).days + 1 <= 0:
+                continue
+            work.at[idx, "Start Date"] = cand_start
+            work.at[idx, "Complete Date"] = cand_end
+            repaired += 1
+            break
+
+    return repaired
+
+
 def parse_project_from_filename(name: str) -> str:
     m = re.search(r"\b(TA|TB)\s*[- ]?\s*(\d{3,4})\b", name.upper())
     if m:
@@ -434,7 +509,7 @@ def export_sheet_via_excel_to_df(
     wb = None
     csv_path: Optional[Path] = None
     try:
-        wb = excel.Workbooks.Open(str(source), UpdateLinks=False, ReadOnly=True)
+        wb = excel.Workbooks.Open(str(source.resolve()), UpdateLinks=False, ReadOnly=True)
         sheet_names = [ws.Name for ws in wb.Worksheets]
         target = selector(sheet_names)
         if not target:
@@ -557,6 +632,20 @@ def load_sheet_with_csv_fallback(
         fallback_messages = []
 
         try:
+            df_scrub, sheet_name = load_sheet_from_scrubbed_copy(
+                source, selector, read_excel_kwargs=read_excel_kwargs
+            )
+        except Exception as scrub_error:
+            logger.warning("XML scrub fallback failed for '%s': %s", source.name, scrub_error)
+            fallback_messages.append(f"XML scrub fallback failed ({scrub_error})")
+        else:
+            if sheet_name is None:
+                return None, None, None
+            note = f"XML scrub fallback used for sheet '{sheet_name}'"
+            logger.warning("%s in '%s'", note, source.name)
+            return df_scrub, sheet_name, note
+
+        try:
             df_csv, sheet_name = export_sheet_via_excel_to_df(
                 source, selector, read_csv_kwargs=read_csv_kwargs
             )
@@ -565,45 +654,21 @@ def load_sheet_with_csv_fallback(
                 "Excel COM CSV fallback unavailable for '%s': %s", source.name, com_exc
             )
             fallback_messages.append(f"Excel COM CSV fallback unavailable ({com_exc})")
-            try:
-                df_scrub, sheet_name = load_sheet_from_scrubbed_copy(
-                    source, selector, read_excel_kwargs=read_excel_kwargs
-                )
-            except Exception as scrub_error:
-                fallback_messages.append(f"XML scrub fallback failed ({scrub_error})")
-                raise RuntimeError(
-                    f"openpyxl load failed ({primary_error}); " + "; ".join(fallback_messages)
-                ) from scrub_error
-            if sheet_name is None:
-                return None, None, None
-            note = f"XML scrub fallback used for sheet '{sheet_name}'"
-            logger.warning("%s in '%s'", note, source.name)
-            return df_scrub, sheet_name, note
         except Exception as fallback_error:
             logger.warning(
                 "Excel COM CSV fallback failed for '%s': %s", source.name, fallback_error
             )
             fallback_messages.append(f"Excel COM CSV fallback failed ({fallback_error})")
-            try:
-                df_scrub, sheet_name = load_sheet_from_scrubbed_copy(
-                    source, selector, read_excel_kwargs=read_excel_kwargs
-                )
-            except Exception as scrub_error:
-                fallback_messages.append(f"XML scrub fallback failed ({scrub_error})")
-                raise RuntimeError(
-                    f"openpyxl load failed ({primary_error}); " + "; ".join(fallback_messages)
-                ) from scrub_error
-            if sheet_name is None:
-                return None, None, None
-            note = f"XML scrub fallback used for sheet '{sheet_name}' after COM failure"
-            logger.warning("%s in '%s'", note, source.name)
-            return df_scrub, sheet_name, note
         else:
             if sheet_name is None:
                 return None, None, None
-            note = f"Excel COM CSV fallback used for sheet '{sheet_name}'"
+            note = f"Excel COM CSV fallback used for sheet '{sheet_name}' after XML scrub failure"
             logger.warning("%s in '%s'", note, source.name)
             return df_csv, sheet_name, note
+
+        raise RuntimeError(
+            f"openpyxl load failed ({primary_error}); " + "; ".join(fallback_messages)
+        ) from primary_error
 
 
 # ---------- Core (per file) ----------
@@ -680,6 +745,15 @@ def process_file(path: Path):
     # Parse + clean (do not drop yet; we want to capture issues first)
     work["Start Date"] = work["starting date"].apply(to_date)
     work["Complete Date"] = work["completion date"].apply(to_date)
+    repaired_dates = _repair_ambiguous_non_positive_dates(work)
+    diag["date_repairs_applied"] = int(repaired_dates)
+    if repaired_dates:
+        issues.append(
+            {
+                "file": path.name,
+                "issue": f"Auto-corrected {repaired_dates} ambiguous Start/Complete date row(s)",
+            }
+        )
     work["Gang name"] = work["gang name"].apply(normalize_gang_name)
     work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
     work["Project Name"] = parse_project_from_filename(path.name)
@@ -959,6 +1033,7 @@ def main(argv=None):
         f"- Completion date must be before {TODAY.date()} (future completions go to 'Data Issues').",
         f"- Tower Weight range: only [{TOWER_MIN_MT:.0f}, {TOWER_MAX_MT:.0f}] MT is considered valid for expansion; out-of-range rows go to 'Data Issues'.",
         "- Missing or non-positive durations (Start/End missing or Start > End or 0) are logged to 'Data Issues' and not expanded.",
+        "- Ambiguous numeric dates (e.g., 1/12/2025) that initially parse as Start > End are retried with month-first before being marked invalid.",
         "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
         "- Sheets:",
         "    â€¢ ProdDailyExpanded  : per-day expanded rows used by the dashboard",
