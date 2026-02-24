@@ -593,14 +593,14 @@ def _write_stringing_artifacts(
     except Exception as exc:
         print(f"[pipeline] Warning: failed to write stringing workbook {output_path}: {exc}")
 
-    # Parquet directory for compiled raw
-    try:
-        if parquet_dir.exists():
-            shutil.rmtree(parquet_dir)
-    except Exception as exc:
-        print(f"[pipeline] Warning: failed to clear stringing parquet dir {parquet_dir}: {exc}")
+    # Refresh parquet artifacts without deleting the just-written workbook.
     parquet_dir.mkdir(parents=True, exist_ok=True)
     compiled_parquet = parquet_dir / "StringingCompiled.parquet"
+    if compiled_parquet.exists():
+        try:
+            compiled_parquet.unlink()
+        except Exception as exc:
+            print(f"[pipeline] Warning: failed to replace stringing parquet {compiled_parquet}: {exc}")
     compiled_ready = _normalize_stringing_dates_for_parquet(raw_df)
     _write_parquet(compiled_ready, compiled_parquet)
     print(f"[pipeline] Stringing: wrote compiled parquet {compiled_parquet}")
@@ -610,6 +610,8 @@ def _write_stringing_artifacts(
         daily = expand_stringing_to_daily(raw_df)
         if daily is not None and not daily.empty:
             daily_dir = output_path.parent / "StringingDaily"
+            if daily_dir.exists():
+                shutil.rmtree(daily_dir)
             daily_dir.mkdir(parents=True, exist_ok=True)
             daily_ready = _normalize_stringing_dates_for_parquet(daily)
             _write_parquet(daily_ready, daily_dir / "stringing_daily.parquet")
@@ -644,6 +646,8 @@ def compile_stringing_to_workbook(
         ]
     ] = []
     skipped_no_stringing = 0
+    skipped_not_in_config = 0
+    has_stringing_config = bool(stringing_sheet_config)
     for candidate in candidates:
         project = parse_project_code_from_filename(candidate.name) or "UNKNOWN"
         project_key = _normalize_project_code_key(project)
@@ -652,6 +656,9 @@ def compile_stringing_to_workbook(
         template_map = template_pair[0] if template_pair else None
         template_sheet_name = template_pair[1] if template_pair else None
         template_error = stringing_template_errors.get(project_key)
+        if has_stringing_config and configured_sheets is None:
+            skipped_not_in_config += 1
+            continue
         if configured_sheets is not None:
             if not configured_sheets:
                 skipped_no_stringing += 1
@@ -664,6 +671,8 @@ def compile_stringing_to_workbook(
 
     if skipped_no_stringing:
         print(f"[pipeline] Stringing: skipped {skipped_no_stringing} workbook(s) per DPR_Config (no stringing sheet configured).")
+    if skipped_not_in_config:
+        print(f"[pipeline] Stringing: skipped {skipped_not_in_config} workbook(s) not listed in DPR_Config.")
     if not selected_candidates:
         print("[pipeline] Stringing: no workbooks require stringing compilation after DPR_Config filtering.")
         return None

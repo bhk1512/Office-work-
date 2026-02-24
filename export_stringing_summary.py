@@ -9,6 +9,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from dashboard.config import AppConfig, configure_logging
 from dashboard.plan_utils import compact_project_key, normalize_location
@@ -737,6 +740,96 @@ def _write_labeled_table(
         return table_start
     table.to_excel(writer, sheet_name=sheet_name, index=False, startrow=table_start)
     return table_start + len(table) + 1
+
+
+def _style_clean_sheet(writer: pd.ExcelWriter, sheet_name: str) -> None:
+    worksheet = writer.sheets.get(sheet_name)
+    if worksheet is None:
+        return
+
+    thin = Side(style="thin", color="D9E2EC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    label_font = Font(bold=True, color="334155")
+    header_font = Font(bold=True, color="1F2937")
+    data_font = Font(color="111827")
+    label_fill = PatternFill(fill_type="solid", fgColor="F8FAFC")
+    header_fill = PatternFill(fill_type="solid", fgColor="F3F7FB")
+    zebra_fill = PatternFill(fill_type="solid", fgColor="FAFCFF")
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+
+    max_row = worksheet.max_row or 0
+    max_col = worksheet.max_column or 0
+    if max_row == 0 or max_col == 0:
+        return
+
+    column_widths: dict[int, int] = {}
+    data_row_band = 0
+
+    for row_idx in range(1, max_row + 1):
+        row_values = [worksheet.cell(row=row_idx, column=col_idx).value for col_idx in range(1, max_col + 1)]
+        non_empty_pairs = [
+            (idx + 1, value)
+            for idx, value in enumerate(row_values)
+            if value is not None and str(value).strip() != ""
+        ]
+        if not non_empty_pairs:
+            continue
+
+        non_empty_values = [value for _, value in non_empty_pairs]
+        string_count = sum(1 for value in non_empty_values if isinstance(value, str))
+        numeric_count = sum(
+            1 for value in non_empty_values if isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+        is_label_row = len(non_empty_pairs) == 1 and string_count == 1
+        is_header_row = (
+            (not is_label_row)
+            and len(non_empty_pairs) >= 2
+            and string_count >= max(2, int(len(non_empty_pairs) * 0.6))
+            and numeric_count <= max(2, int(len(non_empty_pairs) * 0.4))
+        )
+        is_data_row = not is_label_row and not is_header_row
+        if is_data_row:
+            data_row_band += 1
+
+        for col_idx, value in non_empty_pairs:
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+
+            cell_text = str(value)
+            width_hint = min(48, max(8, len(cell_text) + 2))
+            prev_width = column_widths.get(col_idx, 0)
+            if width_hint > prev_width:
+                column_widths[col_idx] = width_hint
+
+            cell.border = border
+            if is_label_row:
+                cell.font = label_font
+                cell.fill = label_fill
+                cell.alignment = left
+                continue
+            if is_header_row:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center
+                continue
+
+            cell.font = data_font
+            if data_row_band % 2 == 0:
+                cell.fill = zebra_fill
+            cell.alignment = left if col_idx <= 2 else center
+            if isinstance(value, bool):
+                continue
+            if cell.number_format in {"General", "0", ""}:
+                if isinstance(value, int):
+                    cell.number_format = "#,##0"
+                elif isinstance(value, float):
+                    cell.number_format = "#,##0.00"
+
+    for col_idx, width in column_widths.items():
+        col_letter = get_column_letter(col_idx)
+        worksheet.column_dimensions[col_letter].width = width
 
 
 def _normalize_method(value: object) -> str:
@@ -1691,6 +1784,8 @@ def main() -> int:
         readme_df.to_excel(writer, sheet_name="README", index=False)
         if not issues_df.empty:
             issues_df.to_excel(writer, sheet_name="Data_Issues", index=False)
+        for styled_sheet in writer.book.sheetnames:
+            _style_clean_sheet(writer, styled_sheet)
 
     LOGGER.info("Stringing summary exported to %s", output_path)
     print(f"[export] Wrote '{output_path}'")
