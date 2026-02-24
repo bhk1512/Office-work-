@@ -35,6 +35,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
+from openpyxl import load_workbook
 
 logger = logging.getLogger("erection_compiled")
 
@@ -66,7 +67,8 @@ TARGET_SHEET_REGEX = re.compile(r"^\s*erection\s*.*\s*compiled\s*$", flags=re.I)
 START_CUTOFF = pd.Timestamp("2021-01-01")
 TODAY = pd.Timestamp.today().normalize()
 TOWER_MIN_MT = 4.0
-TOWER_MAX_MT = 200.0
+TOWER_MAX_MT = 500.0
+DEFAULT_TOWER_WEIGHT_ASSUMED_MT = 45.0
 
 # Column order for per-day expanded output
 PER_DAY_COLUMNS = [
@@ -351,6 +353,194 @@ def parse_project_from_filename(name: str) -> str:
     if m:
         return f"{m.group(1)}{m.group(2)}"
     return Path(name).stem
+
+
+def _normalize_space_only(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _normalize_project_code_key(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _resolve_dpr_config_path(input_folder: Optional[Path]) -> Optional[Path]:
+    if input_folder is not None:
+        candidate = input_folder.parent / "DPR_Config.xlsx"
+        if candidate.exists():
+            return candidate
+    fallback = Path(__file__).resolve().parent / "Raw Data" / "DPR_Config.xlsx"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def load_erection_sheet_config(input_folder: Optional[Path]) -> Dict[str, List[str]]:
+    config_path = _resolve_dpr_config_path(input_folder)
+    if config_path is None:
+        return {}
+
+    try:
+        wb = load_workbook(config_path, data_only=True, read_only=True)
+    except Exception as exc:
+        logger.warning("Erection config: failed to read DPR config '%s': %s", config_path, exc)
+        return {}
+
+    try:
+        if "Sheet Names Check" not in wb.sheetnames:
+            logger.warning("Erection config: 'Sheet Names Check' not found in '%s'", config_path)
+            return {}
+
+        ws = wb["Sheet Names Check"]
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            return {}
+
+        normalized_headers = [_normalize_space_only(v) for v in header_row]
+        try:
+            project_idx = normalized_headers.index("project code")
+            erection_idx = normalized_headers.index("erection sheet names")
+        except ValueError:
+            logger.warning(
+                "Erection config: DPR config missing 'Project Code' or 'Erection Sheet Names' columns."
+            )
+            return {}
+
+        mapping: Dict[str, List[str]] = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row is None:
+                continue
+            project = row[project_idx] if project_idx < len(row) else None
+            if project in (None, ""):
+                continue
+
+            project_key = _normalize_project_code_key(project)
+            raw_names = row[erection_idx] if erection_idx < len(row) else None
+            if raw_names in (None, ""):
+                mapping[project_key] = []
+                continue
+
+            names: List[str] = []
+            for chunk in str(raw_names).split(","):
+                name = str(chunk).strip()
+                if name:
+                    names.append(name)
+            mapping[project_key] = names
+        return mapping
+    finally:
+        wb.close()
+
+
+def _resolve_named_template_sheet(wb, expected_name: str) -> Optional[str]:
+    expected_key = _normalize_space_only(expected_name)
+    for name in wb.sheetnames:
+        if _normalize_space_only(name) == expected_key:
+            return name
+    return None
+
+
+def _extract_template_column_map(ws) -> Dict[int, str]:
+    to_map_row = None
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        for cell in row:
+            if _normalize_space_only(cell) == "to map":
+                to_map_row = row_idx
+                break
+        if to_map_row is not None:
+            break
+
+    if to_map_row is None:
+        return {}
+
+    labels_row = to_map_row + 1
+    col_map: Dict[int, str] = {}
+    for col_idx, val in enumerate(next(ws.iter_rows(min_row=labels_row, max_row=labels_row, values_only=True), ()), start=0):
+        normalized = nrm_header(val)
+        if not normalized or normalized in {"nan", "none"}:
+            continue
+        col_map[col_idx] = normalized
+    return col_map
+
+
+def load_erection_template_mapping_config(
+    input_folder: Optional[Path],
+) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
+    config_path = _resolve_dpr_config_path(input_folder)
+    if config_path is None:
+        return {}, {}
+
+    try:
+        wb = load_workbook(config_path, data_only=True, read_only=True)
+    except Exception as exc:
+        logger.warning("Erection template config: failed to read DPR config '%s': %s", config_path, exc)
+        return {}
+
+    try:
+        if "Sheet Names Check" not in wb.sheetnames:
+            return {}, {}
+
+        ws = wb["Sheet Names Check"]
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            return {}, {}
+
+        normalized_headers = [_normalize_space_only(v) for v in header_row]
+        try:
+            project_idx = normalized_headers.index("project code")
+            check_idx = normalized_headers.index("erection template check")
+        except ValueError:
+            return {}, {}
+
+        mapping: Dict[str, Tuple[Dict[int, str], str]] = {}
+        errors: Dict[str, str] = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row is None:
+                continue
+            project = row[project_idx] if project_idx < len(row) else None
+            if project in (None, ""):
+                continue
+
+            check_val = row[check_idx] if check_idx < len(row) else None
+            if _normalize_space_only(check_val) != "yes":
+                continue
+
+            project_key = _normalize_project_code_key(project)
+            expected_tab_name = f"{str(project).strip()} Erection Template Check"
+            template_sheet = _resolve_named_template_sheet(wb, expected_tab_name)
+            if not template_sheet:
+                errors[project_key] = (
+                    f"Erection Template Check is Yes but mapping tab '{expected_tab_name}' is missing."
+                )
+                continue
+
+            col_map = _extract_template_column_map(wb[template_sheet])
+            if not col_map:
+                errors[project_key] = (
+                    f"Erection template tab '{template_sheet}' has no usable 'To Map' mapping row."
+                )
+                continue
+
+            mapping[project_key] = (col_map, template_sheet)
+        return mapping, errors
+    finally:
+        wb.close()
+
+
+def build_exact_sheet_selector(sheet_name: str):
+    expected_key = _normalize_space_only(sheet_name)
+
+    def _selector(sheet_names: List[str]) -> Optional[str]:
+        by_key: Dict[str, str] = {}
+        for existing in sheet_names:
+            key = _normalize_space_only(existing)
+            if key and key not in by_key:
+                by_key[key] = existing
+        return by_key.get(expected_key)
+
+    return _selector
 
 
 def normalize_gang_name(name: str) -> str:
@@ -672,141 +862,39 @@ def load_sheet_with_csv_fallback(
 
 
 # ---------- Core (per file) ----------
-def process_file(path: Path):
+def process_file(
+    path: Path,
+    configured_sheet_names: Optional[List[str]] = None,
+    template_column_map: Optional[Dict[int, str]] = None,
+    template_sheet_name: Optional[str] = None,
+):
     """
     Process a single workbook; return:
       per_day_with_singles : per-day rows including single-occurrence gangs
-      per_erection         : per-erection (unexpanded) rows (the 6 fields)
-      diagnostics          : dict (file, project, sheet, detected header row, normalized columns)
+      per_erection         : per-erection (unexpanded) rows
+      diagnostics          : list[dict] (one row per processed sheet)
       issues               : list[dict] (file-level)
       data_issues_df       : DataFrame with requested columns + 'Issues' (row-level)
     """
-    issues = []
-    data_issues_rows = []  # row-level issues here
-    empty_df = pd.DataFrame()
-    diag = {"file": path.name, "project": parse_project_from_filename(path.name)}
+    issues: List[dict] = []
+    per_day_frames: List[pd.DataFrame] = []
+    per_erection_frames: List[pd.DataFrame] = []
+    data_issue_frames: List[pd.DataFrame] = []
+    diagnostics: List[dict] = []
+    project_name = parse_project_from_filename(path.name)
 
-    try:
-        df_raw, target, fallback_note = load_sheet_with_csv_fallback(
-            path,
-            find_target_sheet,
-            read_excel_kwargs={"header": None},
-            read_csv_kwargs={"header": None},
-        )
-    except Exception as e:
-        issues.append({"file": path.name, "issue": f"'Erection Compiled' load error: {e}"})
-        return empty_df, empty_df, diag, issues, empty_df
+    sheet_requests: List[Tuple[Optional[str], Callable[[List[str]], Optional[str]]]] = []
+    if configured_sheet_names:
+        seen_keys = set()
+        for configured_name in configured_sheet_names:
+            key = _normalize_space_only(configured_name)
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            sheet_requests.append((configured_name, build_exact_sheet_selector(configured_name)))
+    if not sheet_requests:
+        sheet_requests = [(None, find_target_sheet)]
 
-    if df_raw is None or target is None:
-        issues.append({"file": path.name, "issue": "Sheet 'Erection Compiled' not found"})
-        return empty_df, empty_df, diag, issues, empty_df
-
-    if fallback_note:
-        logger.warning("Fallback note for '%s': %s", path.name, fallback_note)
-        issues.append({"file": path.name, "issue": fallback_note})
-
-    hdr_row, cols = find_header_row(df_raw, search_rows=30)
-    if hdr_row is None:
-        issues.append({"file": path.name, "issue": "Could not detect header row automatically", "sheet": target})
-        return empty_df, empty_df, diag, issues, empty_df
-
-    df = df_raw.iloc[hdr_row + 1:].copy()
-    df.columns = cols
-
-    diag.update({
-        "sheet": target,
-        "detected_header_row": hdr_row,
-        "columns_detected": ", ".join(cols[:20])
-    })
-
-    # Only the fields we need for computation
-    needed = ["starting date", "completion date", "gang name", "tower weight", "location no"]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        issues.append({
-            "file": path.name,
-            "issue": f"Missing required columns after header-detect: {missing}",
-            "columns": list(df.columns)
-        })
-        return empty_df, empty_df, diag, issues, empty_df
-
-    work = df[needed].copy()
-
-    tower_type_col = None
-    for candidate in ("type of tower", "tower type", "type"):
-        if candidate in df.columns:
-            tower_type_col = candidate
-            break
-    if tower_type_col:
-        work["Tower Type"] = df[tower_type_col].apply(normalize_tower_type_label)
-    else:
-        work["Tower Type"] = ""
-
-    # Parse + clean (do not drop yet; we want to capture issues first)
-    work["Start Date"] = work["starting date"].apply(to_date)
-    work["Complete Date"] = work["completion date"].apply(to_date)
-    repaired_dates = _repair_ambiguous_non_positive_dates(work)
-    diag["date_repairs_applied"] = int(repaired_dates)
-    if repaired_dates:
-        issues.append(
-            {
-                "file": path.name,
-                "issue": f"Auto-corrected {repaired_dates} ambiguous Start/Complete date row(s)",
-            }
-        )
-    work["Gang name"] = work["gang name"].apply(normalize_gang_name)
-    work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
-    work["Project Name"] = parse_project_from_filename(path.name)
-    # NEW: normalize required passthrough fields
-    work["Location No."] = (
-        work["location no"].astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
-    )
-
-    status_series = df["status"] if "status" in df.columns else pd.Series(pd.NA, index=df.index)
-    work["Status"] = status_series.astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
-
-    # Precompute validity flags
-    missing_dt_mask = work["Start Date"].isna() | work["Complete Date"].isna()
-    # compute days where both dates exist
-    days = (work["Complete Date"] - work["Start Date"]).dt.days + 1
-    non_positive_days_mask = (~missing_dt_mask) & (days <= 0)
-    old_start_mask = (~work["Start Date"].isna()) & (work["Start Date"] < START_CUTOFF)
-    future_completion_mask = (~work["Complete Date"].isna()) & (work["Complete Date"] >= TODAY)
-    tw_out_of_range_mask = (~work["Tower Weight"].isna()) & (
-        (work["Tower Weight"] < TOWER_MIN_MT) | (work["Tower Weight"] > TOWER_MAX_MT)
-    )
-
-    # Productivity (only where days valid)
-    prod = pd.Series(np.nan, index=work.index, dtype="float")
-    valid_for_prod = (~missing_dt_mask) & (days > 0)
-    prod[valid_for_prod] = work.loc[valid_for_prod, "Tower Weight"] / days[valid_for_prod]
-    work["Productivity"] = prod
-
-    # Helper to push rows into Data Issues with a reason
-    def push_data_issue(mask, reason: str):
-        if mask.any():
-            sub = work.loc[mask, ["Start Date", "Complete Date", "Gang name", "Tower Weight",
-                                  "Tower Type", "Productivity", "Project Name", "Location No.", "Status"]].copy()
-            sub["Issues"] = reason
-            data_issues_rows.append(sub)
-
-    # Collect row-level issues (not expanded)
-    push_data_issue(missing_dt_mask, "Missing start/end date (not expanded)")
-    push_data_issue(non_positive_days_mask, "Non-positive duration (Start > End or 0) (not expanded)")
-    push_data_issue(old_start_mask, f"Start before {START_CUTOFF.date()} (not expanded)")
-    push_data_issue(future_completion_mask, f"Completion on/after {TODAY.date()} (not expanded)")
-    push_data_issue(tw_out_of_range_mask, f"Tower Weight out of range (<{TOWER_MIN_MT} or >{TOWER_MAX_MT}) (not expanded)")
-
-    # Exclude all above issues from expansion consideration
-    invalid_mask = missing_dt_mask | non_positive_days_mask | old_start_mask | future_completion_mask | tw_out_of_range_mask
-    work_valid = work.loc[~invalid_mask].copy()
-
-    # ---- Per-erection (UNEXPANDED) ----
-    per_erection = work[[
-        "Start Date", "Complete Date", "Gang name", "Tower Weight", "Tower Type", "Productivity", "Project Name", "Location No.", "Status"
-    ]].copy()
-
-    # ---- Per-day (EXPANDED) ----
     def expand_per_day(source: pd.DataFrame) -> pd.DataFrame:
         if source.empty:
             return pd.DataFrame(columns=PER_DAY_COLUMNS)
@@ -814,18 +902,20 @@ def process_file(path: Path):
         rows = []
         for _, r in source.iterrows():
             for d in pd.date_range(r["Start Date"], r["Complete Date"], freq="D"):
-                rows.append({
-                    "Work Date": d.normalize(),
-                    "Start Date": r["Start Date"].normalize(),
-                    "Complete Date": r["Complete Date"].normalize(),
-                    "Gang name": r["Gang name"],
-                    "Tower Weight": r["Tower Weight"],
-                    "Tower Type": r["Tower Type"],
-                    "Productivity": r["Productivity"],
-                    "Project Name": r["Project Name"],
-                    "Location No.": r["Location No."],
-                    "Status": r["Status"],
-                })
+                rows.append(
+                    {
+                        "Work Date": d.normalize(),
+                        "Start Date": r["Start Date"].normalize(),
+                        "Complete Date": r["Complete Date"].normalize(),
+                        "Gang name": r["Gang name"],
+                        "Tower Weight": r["Tower Weight"],
+                        "Tower Type": r["Tower Type"],
+                        "Productivity": r["Productivity"],
+                        "Project Name": r["Project Name"],
+                        "Location No.": r["Location No."],
+                        "Status": r["Status"],
+                    }
+                )
 
         result = pd.DataFrame(rows)
         if result.empty:
@@ -833,16 +923,235 @@ def process_file(path: Path):
 
         result = result.sort_values(
             ["Project Name", "Work Date", "Gang name", "Start Date"],
-            ignore_index=True
+            ignore_index=True,
         )
         return result.reindex(columns=PER_DAY_COLUMNS)
 
-    # Build the expanded per-day rows from all valid records
-    per_day_with_singles = expand_per_day(work_valid)
+    for requested_name, selector in sheet_requests:
+        try:
+            df_raw, target, fallback_note = load_sheet_with_csv_fallback(
+                path,
+                selector,
+                read_excel_kwargs={"header": None},
+                read_csv_kwargs={"header": None},
+            )
+        except Exception as e:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": requested_name or "",
+                    "issue": f"'Erection' load error: {e}",
+                }
+            )
+            continue
 
-    data_issues_df = pd.concat(data_issues_rows, ignore_index=True) if data_issues_rows else pd.DataFrame()
+        if df_raw is None or target is None:
+            if requested_name:
+                issues.append(
+                    {
+                        "file": path.name,
+                        "sheet": requested_name,
+                        "issue": f"Configured erection sheet not found: '{requested_name}'",
+                    }
+                )
+            else:
+                issues.append({"file": path.name, "issue": "Sheet 'Erection Compiled' not found"})
+            continue
 
-    return per_day_with_singles, per_erection, diag, issues, data_issues_df
+        if fallback_note:
+            logger.warning("Fallback note for '%s': %s", path.name, fallback_note)
+            issues.append({"file": path.name, "sheet": target, "issue": fallback_note})
+
+        hdr_row, cols = find_header_row(df_raw, search_rows=30)
+        if hdr_row is None:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": "Could not detect header row automatically",
+                }
+            )
+            continue
+
+        df = df_raw.iloc[hdr_row + 1 :].copy()
+        df.columns = cols
+
+        applied_mapping: List[str] = []
+        if template_column_map:
+            remapped_columns = list(df.columns)
+            for idx, mapped in sorted(template_column_map.items()):
+                if idx >= len(remapped_columns):
+                    continue
+                current = nrm_header(remapped_columns[idx])
+                mapped_target = nrm_header(mapped)
+                if not mapped_target:
+                    continue
+                remapped_columns[idx] = mapped_target
+                if current != mapped_target:
+                    applied_mapping.append(f"C{idx + 1}:{current}->{mapped_target}")
+            df.columns = remapped_columns
+
+        diag = {
+            "file": path.name,
+            "project": project_name,
+            "sheet": target,
+            "detected_header_row": hdr_row,
+            "columns_detected": ", ".join(cols[:20]),
+        }
+        if requested_name:
+            diag["configured_sheet"] = requested_name
+        if template_column_map:
+            diag["template_mapping_sheet"] = template_sheet_name or ""
+            diag["template_mapping_applied"] = bool(applied_mapping)
+            diag["template_mapping_changes"] = "; ".join(applied_mapping)
+
+        # Only the fields we need for computation. Tower Weight may be absent.
+        needed = ["starting date", "completion date", "gang name", "location no"]
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": f"Missing required columns after header-detect: {missing}",
+                    "columns": list(df.columns),
+                }
+            )
+            diagnostics.append(diag)
+            continue
+
+        work = df[needed].copy()
+        if "tower weight" in df.columns:
+            work["tower weight"] = df["tower weight"]
+            diag["tower_weight_assumed_mt"] = ""
+            diag["tower_weight_assumption_rows"] = 0
+        else:
+            work["tower weight"] = DEFAULT_TOWER_WEIGHT_ASSUMED_MT
+            diag["tower_weight_assumed_mt"] = float(DEFAULT_TOWER_WEIGHT_ASSUMED_MT)
+            diag["tower_weight_assumption_rows"] = int(len(work.index))
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": (
+                        f"'tower weight' header missing; assumed "
+                        f"{DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT for all rows in this sheet"
+                    ),
+                }
+            )
+
+        tower_type_col = None
+        for candidate in ("type of tower", "tower type", "type"):
+            if candidate in df.columns:
+                tower_type_col = candidate
+                break
+        if tower_type_col:
+            work["Tower Type"] = df[tower_type_col].apply(normalize_tower_type_label)
+        else:
+            work["Tower Type"] = ""
+
+        # Parse + clean (do not drop yet; capture issues first)
+        work["Start Date"] = work["starting date"].apply(to_date)
+        work["Complete Date"] = work["completion date"].apply(to_date)
+        repaired_dates = _repair_ambiguous_non_positive_dates(work)
+        diag["date_repairs_applied"] = int(repaired_dates)
+        if repaired_dates:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": f"Auto-corrected {repaired_dates} ambiguous Start/Complete date row(s)",
+                }
+            )
+        work["Gang name"] = work["gang name"].apply(normalize_gang_name)
+        work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
+        work["Project Name"] = project_name
+        work["Location No."] = work["location no"].astype(object).map(
+            lambda x: str(x).strip() if pd.notna(x) else pd.NA
+        )
+
+        status_series = df["status"] if "status" in df.columns else pd.Series(pd.NA, index=df.index)
+        work["Status"] = status_series.astype(object).map(lambda x: str(x).strip() if pd.notna(x) else pd.NA)
+
+        # Precompute validity flags
+        missing_dt_mask = work["Start Date"].isna() | work["Complete Date"].isna()
+        days = (work["Complete Date"] - work["Start Date"]).dt.days + 1
+        non_positive_days_mask = (~missing_dt_mask) & (days <= 0)
+        old_start_mask = (~work["Start Date"].isna()) & (work["Start Date"] < START_CUTOFF)
+        future_completion_mask = (~work["Complete Date"].isna()) & (work["Complete Date"] >= TODAY)
+        tw_out_of_range_mask = (~work["Tower Weight"].isna()) & (
+            (work["Tower Weight"] < TOWER_MIN_MT) | (work["Tower Weight"] > TOWER_MAX_MT)
+        )
+
+        # Productivity (only where days valid)
+        prod = pd.Series(np.nan, index=work.index, dtype="float")
+        valid_for_prod = (~missing_dt_mask) & (days > 0)
+        prod[valid_for_prod] = work.loc[valid_for_prod, "Tower Weight"] / days[valid_for_prod]
+        work["Productivity"] = prod
+
+        data_issues_rows: List[pd.DataFrame] = []
+
+        def push_data_issue(mask, reason: str):
+            if mask.any():
+                sub = work.loc[
+                    mask,
+                    [
+                        "Start Date",
+                        "Complete Date",
+                        "Gang name",
+                        "Tower Weight",
+                        "Tower Type",
+                        "Productivity",
+                        "Project Name",
+                        "Location No.",
+                        "Status",
+                    ],
+                ].copy()
+                sub["Issues"] = reason
+                data_issues_rows.append(sub)
+
+        push_data_issue(missing_dt_mask, "Missing start/end date (not expanded)")
+        push_data_issue(non_positive_days_mask, "Non-positive duration (Start > End or 0) (not expanded)")
+        push_data_issue(old_start_mask, f"Start before {START_CUTOFF.date()} (not expanded)")
+        push_data_issue(future_completion_mask, f"Completion on/after {TODAY.date()} (not expanded)")
+        push_data_issue(
+            tw_out_of_range_mask,
+            f"Tower Weight out of range (<{TOWER_MIN_MT} or >{TOWER_MAX_MT}) (not expanded)",
+        )
+
+        invalid_mask = (
+            missing_dt_mask | non_positive_days_mask | old_start_mask | future_completion_mask | tw_out_of_range_mask
+        )
+        work_valid = work.loc[~invalid_mask].copy()
+
+        per_erection = work[
+            [
+                "Start Date",
+                "Complete Date",
+                "Gang name",
+                "Tower Weight",
+                "Tower Type",
+                "Productivity",
+                "Project Name",
+                "Location No.",
+                "Status",
+            ]
+        ].copy()
+        per_day_with_singles = expand_per_day(work_valid)
+        data_issues_df = pd.concat(data_issues_rows, ignore_index=True) if data_issues_rows else pd.DataFrame()
+
+        if not per_day_with_singles.empty:
+            per_day_frames.append(per_day_with_singles)
+        if not per_erection.empty:
+            per_erection_frames.append(per_erection)
+        if not data_issues_df.empty:
+            data_issue_frames.append(data_issues_df)
+        diagnostics.append(diag)
+
+    per_day_consol = pd.concat(per_day_frames, ignore_index=True) if per_day_frames else pd.DataFrame()
+    per_erection_consol = pd.concat(per_erection_frames, ignore_index=True) if per_erection_frames else pd.DataFrame()
+    data_issues_consol = pd.concat(data_issue_frames, ignore_index=True) if data_issue_frames else pd.DataFrame()
+    return per_day_consol, per_erection_consol, diagnostics, issues, data_issues_consol
 
 
 # ---------- Styling ----------
@@ -912,11 +1221,12 @@ def main(argv=None):
 
     # Resolve input files
     paths: List[Path] = []
+    input_folder: Optional[Path] = None
     if args.input:
-        folder = Path(args.input)
-        if not folder.exists():
-            raise SystemExit(f"Input folder not found: {folder}")
-        for fp in folder.iterdir():
+        input_folder = Path(args.input)
+        if not input_folder.exists():
+            raise SystemExit(f"Input folder not found: {input_folder}")
+        for fp in input_folder.iterdir():
             if fp.is_file() and fp.suffix.lower() in (".xlsx", ".xlsm"):
                 name_lower = fp.name.lower()
                 if any(k in name_lower for k in ("consolidated", "output", "compiled")) and "erection" not in name_lower:
@@ -929,14 +1239,50 @@ def main(argv=None):
     all_issues, all_diag = [], []
     all_data_issues = []
     all_proj_details = []
+    erection_sheet_config = load_erection_sheet_config(input_folder or (paths[0].parent if paths else None))
+    erection_template_config, erection_template_errors = load_erection_template_mapping_config(
+        input_folder or (paths[0].parent if paths else None)
+    )
+    skipped_no_erection = 0
 
     for p in paths:
         if not p.exists():
             all_issues.append({"file": p.name, "issue": "missing"})
             continue
 
+        project_code = parse_project_from_filename(p.name)
+        project_key = _normalize_project_code_key(project_code)
+        configured_erection_sheets = erection_sheet_config.get(project_key)
+        template_column_map = None
+        template_sheet_name = None
+        template_error = erection_template_errors.get(project_key)
+        if project_key in erection_template_config:
+            template_column_map, template_sheet_name = erection_template_config[project_key]
+        if template_error:
+            all_issues.append(
+                {
+                    "file": p.name,
+                    "issue": f"Template mapping configuration error: {template_error}",
+                }
+            )
+            continue
+        if configured_erection_sheets is not None and not configured_erection_sheets:
+            skipped_no_erection += 1
+            all_issues.append(
+                {
+                    "file": p.name,
+                    "issue": "Skipped: no erection sheet configured for this project in DPR_Config.",
+                }
+            )
+            continue
+
         try:
-            per_day_with_singles, per_erection, diag, issues, data_issues_df = process_file(p)
+            per_day_with_singles, per_erection, diagnostics, issues, data_issues_df = process_file(
+                p,
+                configured_sheet_names=configured_erection_sheets,
+                template_column_map=template_column_map,
+                template_sheet_name=template_sheet_name,
+            )
         except Exception as e:
             # Guardrail: never let a single bad file crash the whole pipeline
             all_issues.append({"file": p.name, "issue": f"Unhandled processing error: {e}"})
@@ -969,9 +1315,15 @@ def main(argv=None):
         if not data_issues_df.empty:
             all_data_issues.append(data_issues_df.assign(_source_file=p.name))
 
-        if diag:
-            all_diag.append(diag)
+        if diagnostics:
+            all_diag.extend(diagnostics)
         all_issues.extend(issues)
+
+    if skipped_no_erection:
+        logger.info(
+            "Skipped %d workbook(s) because DPR_Config has no erection sheet configured.",
+            skipped_no_erection,
+        )
 
 
     # Consolidate across all inputs
@@ -1035,6 +1387,9 @@ def main(argv=None):
         "- Missing or non-positive durations (Start/End missing or Start > End or 0) are logged to 'Data Issues' and not expanded.",
         "- Ambiguous numeric dates (e.g., 1/12/2025) that initially parse as Start > End are retried with month-first before being marked invalid.",
         "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
+        f"- If 'Tower Weight' header is missing in a sheet, Tower Weight is assumed as {DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT for all rows in that sheet (noted in 'Issues').",
+        "- DPR_Config support: when multiple erection sheet names are configured for a project, each listed sheet is processed and combined.",
+        "- DPR_Config template mapping: for projects with discipline-specific template check marked Yes, column-wise mapping from the discipline template tab is applied before required-field validation.",
         "- Sheets:",
         "    â€¢ ProdDailyExpanded  : per-day expanded rows used by the dashboard",
         "    â€¢ ProdDailyExpandedSingles : per-day expanded rows including single-occurrence gangs",
