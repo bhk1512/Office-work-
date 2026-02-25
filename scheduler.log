@@ -224,3 +224,4 @@ JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.ba
 [Wed 02/25/2026 11:56:59.81] Scheduler running (keep window open).
 [Wed 02/25/2026 12:02:03.26] Trigger 12:02 starting job
 [Wed 02/25/2026 12:02:19.24] Trigger 12:02 starting job
+[Wed 02/25/2026 12:02:03.26] Job finished errorlevel=1
