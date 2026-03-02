@@ -199,6 +199,85 @@ def _project_from_filename(name: str) -> str | None:
     m = _PROJECT_RE.search(Path(name).name.upper())
     return f"{m.group(1)} {m.group(2)}" if m else None
 
+
+def _normalize_project_code_key(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _normalize_space_only(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _resolve_dpr_config_path(raw_root: Path) -> Path | None:
+    candidate = raw_root.parent / "DPR_Config.xlsx"
+    if candidate.exists():
+        return candidate
+    repo_root = _repo_root_from(Path(__file__))
+    fallback = repo_root / "Raw Data" / "DPR_Config.xlsx"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[str]]:
+    config_path = _resolve_dpr_config_path(raw_root)
+    if config_path is None:
+        return {}
+
+    try:
+        df = pd.read_excel(config_path, sheet_name="Sheet Names Check", dtype=object)
+    except Exception as exc:
+        LOGGER.warning("Stringing: failed to read DPR config %s: %s", config_path, exc)
+        return {}
+
+    if df is None or df.empty:
+        return {}
+
+    headers = {_normalize_space_only(col): col for col in df.columns}
+    project_col = headers.get("project code")
+    stringing_col = headers.get("stringing sheet names")
+    if project_col is None or stringing_col is None:
+        LOGGER.warning(
+            "Stringing: DPR config %s is missing columns 'Project Code' or 'Stringing Sheet Names'.",
+            config_path,
+        )
+        return {}
+
+    mapping: dict[str, list[str]] = {}
+    for _, row in df.iterrows():
+        project_val = row.get(project_col)
+        if project_val is None or pd.isna(project_val) or str(project_val).strip() == "":
+            continue
+        project_key = _normalize_project_code_key(project_val)
+        raw_stringing = row.get(stringing_col)
+        if raw_stringing is None or pd.isna(raw_stringing) or str(raw_stringing).strip() == "":
+            mapping[project_key] = []
+            continue
+        sheets: list[str] = []
+        for chunk in str(raw_stringing).split(","):
+            candidate = str(chunk).strip()
+            if candidate:
+                sheets.append(candidate)
+        mapping[project_key] = sheets
+    return mapping
+
+
+def _resolve_project_sheet_name(sheet_names: Iterable[str], project_candidates: list[str]) -> str | None:
+    by_space_key: dict[str, str] = {}
+    for name in sheet_names:
+        key = _normalize_space_only(name)
+        if key and key not in by_space_key:
+            by_space_key[key] = str(name)
+    for candidate in project_candidates:
+        hit = by_space_key.get(_normalize_space_only(candidate))
+        if hit:
+            return hit
+    return None
+
 def _stringing_root(base: Path) -> Path:
     """
     Resolve the single Stringing artifacts folder: <repo>/Parquets/Stringing.
@@ -386,6 +465,10 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     out_root = _stringing_root(raw_root)
 
     candidates = _iter_excel_candidates(raw_root)
+    stringing_sheet_config = _load_stringing_sheet_config(raw_root)
+    has_stringing_config = bool(stringing_sheet_config)
+    skipped_no_stringing = 0
+    skipped_not_in_config = 0
     plan_candidates = _iter_excel_candidates(plan_root)
     compiled_frames: list[pd.DataFrame] = []
     daily_frames: list[pd.DataFrame] = []
@@ -499,14 +582,27 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
+        project_key = _normalize_project_code_key(proj)
+        project_sheet_candidates = stringing_sheet_config.get(project_key)
+        if has_stringing_config and project_sheet_candidates is None:
+            skipped_not_in_config += 1
+            continue
+        if project_sheet_candidates is not None and not project_sheet_candidates:
+            skipped_no_stringing += 1
+            continue
         today = pd.Timestamp.today().normalize()
 
         # If the sheet does not exist, log and continue (so Diagnostics shows it)
-        actual_sheet = _resolve_excel_sheet_name(
-            wb,
-            sheet_name,
-            contains_keyword="stringing",
-        )
+        workbook_sheet_names, _ = _list_excel_sheet_names(wb)
+        if project_sheet_candidates:
+            actual_sheet = _resolve_project_sheet_name(workbook_sheet_names, project_sheet_candidates)
+        else:
+            actual_sheet = _resolve_excel_sheet_name(
+                wb,
+                sheet_name,
+                contains_keyword="stringing",
+                sheet_names=workbook_sheet_names,
+            )
         if not actual_sheet:
             _log_dpr_diag(wb, proj, 0, 0, "NO_TARGET_SHEET", sheet_name=actual_sheet)
             continue
@@ -774,6 +870,17 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 missing_columns=list(norm_report.get("missing", [])),
                 applied_map=dict(norm_report.get("applied_map", {})),
             )
+
+    if skipped_no_stringing:
+        LOGGER.info(
+            "Stringing: skipped %s workbook(s) per DPR_Config (no stringing sheet configured).",
+            skipped_no_stringing,
+        )
+    if skipped_not_in_config:
+        LOGGER.info(
+            "Stringing: skipped %s workbook(s) not listed in DPR_Config.",
+            skipped_not_in_config,
+        )
 
     precompiled_plan = _load_precompiled_stringing_microplan(out_root)
     plan_responsibilities: pd.DataFrame | None = None

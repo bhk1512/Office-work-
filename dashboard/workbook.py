@@ -9,6 +9,9 @@ from math import ceil
 from typing import Sequence, TYPE_CHECKING
 
 import pandas as pd
+from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from .config import AppConfig
 from .metrics import (
@@ -47,6 +50,9 @@ SUMMARY_METRIC_LABELS = {
     TOTAL_MT_COLUMN: "Total MT",
     TOTAL_COUNT_COLUMN: "Total No. of Erections",
 }
+MONTHLY_AVG_LABEL = "Avg Productivity"
+MONTHLY_COUNT_LABEL = "No. of Erections"
+MONTHLY_MT_LABEL = "MT Erected"
 _DEFAULT_SHEET_NAME = "Erection Summary"
 _DEFAULT_KV_SHEET_NAME = "KV Productivity"
 _PCH_SORT_ORDER = {name: idx for idx, name in enumerate(CANONICAL_PCH_PRIMARY)}
@@ -1428,6 +1434,303 @@ def _build_productivity_tables(
     return overall_summary, pch_summary, project_summary
 
 
+def _monthly_avg_column(month_label: str) -> str:
+    return f"{month_label}__avg"
+
+
+def _monthly_count_column(month_label: str) -> str:
+    return f"{month_label}__count"
+
+
+def _monthly_mt_column(month_label: str) -> str:
+    return f"{month_label}__mt"
+
+
+def _monthly_column_layout(
+    month_labels: Sequence[str],
+    *,
+    group_labels: Sequence[str],
+) -> tuple[list[str], list[str], list[str]]:
+    ordered_columns = [*group_labels]
+    top_headers: list[str] = []
+    bottom_headers: list[str] = []
+
+    for label in group_labels:
+        top_headers.append("")
+        bottom_headers.append(label)
+
+    for month_label in month_labels:
+        ordered_columns.extend(
+            [
+                _monthly_avg_column(month_label),
+                _monthly_count_column(month_label),
+                _monthly_mt_column(month_label),
+            ]
+        )
+        top_headers.extend([month_label, "", ""])
+        bottom_headers.extend([MONTHLY_AVG_LABEL, MONTHLY_COUNT_LABEL, MONTHLY_MT_LABEL])
+
+    ordered_columns.extend(
+        [
+            _monthly_avg_column("Overall"),
+            _monthly_count_column("Overall"),
+            _monthly_mt_column("Overall"),
+        ]
+    )
+    top_headers.extend(["Overall", "", ""])
+    bottom_headers.extend([MONTHLY_AVG_LABEL, MONTHLY_COUNT_LABEL, MONTHLY_MT_LABEL])
+    return ordered_columns, top_headers, bottom_headers
+
+
+def _build_monthly_group_productivity_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    month_keys: Sequence[pd.Timestamp],
+    month_labels: Sequence[str],
+    group_columns: Sequence[str],
+    group_labels: Sequence[str],
+) -> pd.DataFrame:
+    ordered_columns, _, _ = _monthly_column_layout(month_labels, group_labels=group_labels)
+    if scope is None or scope.empty:
+        return pd.DataFrame(columns=ordered_columns)
+
+    working_scope = scope.copy()
+    working_scope["date"] = pd.to_datetime(working_scope.get("date"), errors="coerce").dt.normalize()
+    working_scope["daily_prod_mt"] = pd.to_numeric(working_scope.get("daily_prod_mt"), errors="coerce")
+    working_scope = working_scope.dropna(subset=["date"])
+    if working_scope.empty:
+        return pd.DataFrame(columns=ordered_columns)
+    working_scope["month_key"] = working_scope["date"].dt.to_period("M").dt.to_timestamp()
+
+    groups = list(group_columns)
+    rename_map = {source: label for source, label in zip(group_columns, group_labels)}
+
+    def _month_avg_key(label: str) -> str:
+        return _monthly_avg_column(label)
+
+    def _month_count_key(label: str) -> str:
+        return _monthly_count_column(label)
+
+    def _month_mt_key(label: str) -> str:
+        return _monthly_mt_column(label)
+
+    overall_avg_key = _month_avg_key("Overall")
+    overall_count_key = _month_count_key("Overall")
+    overall_mt_key = _month_mt_key("Overall")
+    numeric_columns = [overall_avg_key, overall_count_key, overall_mt_key]
+
+    if not groups:
+        row: dict[str, object] = {}
+        for month_key, month_label in zip(month_keys, month_labels):
+            month_scope = working_scope[working_scope["month_key"] == month_key]
+            avg_value = month_scope["daily_prod_mt"].dropna().mean() if not month_scope.empty else 0.0
+            row[_month_avg_key(month_label)] = round(float(avg_value) if not pd.isna(avg_value) else 0.0, 2)
+            row[_month_count_key(month_label)] = 0
+            row[_month_mt_key(month_label)] = 0.0
+            numeric_columns.extend(
+                [_month_avg_key(month_label), _month_count_key(month_label), _month_mt_key(month_label)]
+            )
+
+        overall_avg_value = working_scope["daily_prod_mt"].dropna().mean()
+        row[overall_avg_key] = round(float(overall_avg_value) if not pd.isna(overall_avg_value) else 0.0, 2)
+        row[overall_count_key] = 0
+        row[overall_mt_key] = 0.0
+
+        if isinstance(completions, pd.DataFrame) and not completions.empty:
+            completion_scope = completions.copy()
+            completion_scope["completion_date"] = pd.to_datetime(
+                completion_scope.get("completion_date"), errors="coerce"
+            ).dt.normalize()
+            completion_scope = completion_scope.dropna(subset=["completion_date"])
+            if not completion_scope.empty:
+                completion_scope["month_key"] = completion_scope["completion_date"].dt.to_period("M").dt.to_timestamp()
+                completion_scope["_tower_weight"] = _coerce_numeric_series(
+                    completion_scope, "tower_weight"
+                ).fillna(0.0)
+                for month_key, month_label in zip(month_keys, month_labels):
+                    month_comp = completion_scope[completion_scope["month_key"] == month_key]
+                    row[_month_count_key(month_label)] = int(len(month_comp))
+                    row[_month_mt_key(month_label)] = round(float(month_comp["_tower_weight"].sum()), 2)
+                row[overall_count_key] = int(len(completion_scope))
+                row[overall_mt_key] = round(float(completion_scope["_tower_weight"].sum()), 2)
+
+        result = pd.DataFrame([row], columns=ordered_columns).fillna(0.0)
+        for month_label in month_labels:
+            count_key = _month_count_key(month_label)
+            if count_key in result.columns:
+                result[count_key] = pd.to_numeric(result[count_key], errors="coerce").fillna(0).astype(int)
+            mt_key = _month_mt_key(month_label)
+            if mt_key in result.columns:
+                result[mt_key] = pd.to_numeric(result[mt_key], errors="coerce").fillna(0.0).round(2)
+        result[overall_count_key] = pd.to_numeric(result[overall_count_key], errors="coerce").fillna(0).astype(int)
+        result[overall_mt_key] = pd.to_numeric(result[overall_mt_key], errors="coerce").fillna(0.0).round(2)
+        return result
+
+    for column in groups:
+        if column not in working_scope.columns:
+            working_scope[column] = ""
+        working_scope[column] = working_scope[column].fillna("").astype(str).str.strip()
+
+    summary = working_scope[groups].drop_duplicates().reset_index(drop=True)
+    overall_avg = (
+        working_scope.groupby(groups, dropna=False)["daily_prod_mt"]
+        .mean()
+        .reset_index(name=overall_avg_key)
+    )
+    summary = summary.merge(overall_avg, on=groups, how="left")
+
+    for month_key, month_label in zip(month_keys, month_labels):
+        avg_key = _month_avg_key(month_label)
+        month_avg = (
+            working_scope[working_scope["month_key"] == month_key]
+            .groupby(groups, dropna=False)["daily_prod_mt"]
+            .mean()
+            .reset_index(name=avg_key)
+        )
+        summary = summary.merge(month_avg, on=groups, how="left")
+        numeric_columns.append(avg_key)
+
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        completion_scope = completions.copy()
+        completion_scope["completion_date"] = pd.to_datetime(
+            completion_scope.get("completion_date"), errors="coerce"
+        ).dt.normalize()
+        completion_scope = completion_scope.dropna(subset=["completion_date"])
+        if not completion_scope.empty:
+            for column in groups:
+                if column not in completion_scope.columns:
+                    completion_scope[column] = ""
+                completion_scope[column] = completion_scope[column].fillna("").astype(str).str.strip()
+            completion_scope["month_key"] = completion_scope["completion_date"].dt.to_period("M").dt.to_timestamp()
+
+            counts_overall = (
+                completion_scope.groupby(groups, dropna=False)
+                .size()
+                .reset_index(name=overall_count_key)
+            )
+            summary = summary.merge(counts_overall, on=groups, how="left")
+            weights_overall = (
+                completion_scope.assign(
+                    _tower_weight=_coerce_numeric_series(completion_scope, "tower_weight").fillna(0.0)
+                )
+                .groupby(groups, dropna=False)["_tower_weight"]
+                .sum()
+                .reset_index(name=overall_mt_key)
+            )
+            summary = summary.merge(weights_overall, on=groups, how="left")
+            for month_key, month_label in zip(month_keys, month_labels):
+                count_key = _month_count_key(month_label)
+                mt_key = _month_mt_key(month_label)
+                month_counts = (
+                    completion_scope[completion_scope["month_key"] == month_key]
+                    .groupby(groups, dropna=False)
+                    .size()
+                    .reset_index(name=count_key)
+                )
+                summary = summary.merge(month_counts, on=groups, how="left")
+                month_weights = (
+                    completion_scope[completion_scope["month_key"] == month_key]
+                    .assign(
+                        _tower_weight=lambda frame: _coerce_numeric_series(frame, "tower_weight").fillna(0.0)
+                    )
+                    .groupby(groups, dropna=False)["_tower_weight"]
+                    .sum()
+                    .reset_index(name=mt_key)
+                )
+                summary = summary.merge(month_weights, on=groups, how="left")
+                numeric_columns.append(count_key)
+                numeric_columns.append(mt_key)
+        else:
+            summary[overall_count_key] = 0
+            summary[overall_mt_key] = 0.0
+            for month_label in month_labels:
+                summary[_month_count_key(month_label)] = 0
+                summary[_month_mt_key(month_label)] = 0.0
+    else:
+        summary[overall_count_key] = 0
+        summary[overall_mt_key] = 0.0
+        for month_label in month_labels:
+            summary[_month_count_key(month_label)] = 0
+            summary[_month_mt_key(month_label)] = 0.0
+
+    summary = summary.rename(columns=rename_map)
+    for month_label in month_labels:
+        count_key = _month_count_key(month_label)
+        if count_key not in summary.columns:
+            summary[count_key] = 0
+        mt_key = _month_mt_key(month_label)
+        if mt_key not in summary.columns:
+            summary[mt_key] = 0.0
+        numeric_columns.append(count_key)
+        numeric_columns.append(mt_key)
+
+    for key in set(numeric_columns):
+        if key not in summary.columns:
+            summary[key] = 0.0
+        if key.endswith("__count"):
+            summary[key] = pd.to_numeric(summary[key], errors="coerce").fillna(0).astype(int)
+        else:
+            summary[key] = pd.to_numeric(summary[key], errors="coerce").fillna(0.0).round(2)
+
+    summary = summary.reindex(columns=ordered_columns)
+
+    if group_labels == ["PCH"]:
+        summary = _sort_pch_frame(summary, column="PCH")
+    elif group_labels == ["PCH", "Project"] and not summary.empty:
+        order_components = summary["PCH"].map(_pch_sort_components)
+        summary = summary.assign(
+            _pch_order_bucket=order_components.map(lambda pair: pair[0]),
+            _pch_order_value=order_components.map(lambda pair: pair[1]),
+            _project_order=summary["Project"].astype(str).str.lower(),
+        )
+        summary = (
+            summary.sort_values(by=["_pch_order_bucket", "_pch_order_value", "_project_order"])
+            .drop(columns=["_pch_order_bucket", "_pch_order_value", "_project_order"])
+            .reset_index(drop=True)
+        )
+    return summary
+
+
+def _build_monthly_productivity_tables(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    months: Sequence[pd.Timestamp],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    normalized_months = [
+        pd.Timestamp(month).normalize().to_period("M").to_timestamp()
+        for month in months
+    ]
+    month_keys = sorted(dict.fromkeys(normalized_months))
+    month_labels = [month.strftime("%b-%y") for month in month_keys]
+    overall_summary = _build_monthly_group_productivity_table(
+        scope,
+        completions,
+        month_keys=month_keys,
+        month_labels=month_labels,
+        group_columns=[],
+        group_labels=[],
+    )
+    pch_summary = _build_monthly_group_productivity_table(
+        scope,
+        completions,
+        month_keys=month_keys,
+        month_labels=month_labels,
+        group_columns=["pch_display"],
+        group_labels=["PCH"],
+    )
+    project_summary = _build_monthly_group_productivity_table(
+        scope,
+        completions,
+        month_keys=month_keys,
+        month_labels=month_labels,
+        group_columns=["pch_display", "project_display"],
+        group_labels=["PCH", "Project"],
+    )
+    return overall_summary, pch_summary, project_summary, month_labels
+
+
 def _build_project_gang_rankings(
     scope: pd.DataFrame,
     completions: pd.DataFrame,
@@ -2731,7 +3034,15 @@ def export_erection_productivity_summary(
         month_end,
     )
 
-    sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_SHEET_NAME) or _DEFAULT_SHEET_NAME
+    base_sheet_name = str(sheet_name or _DEFAULT_SHEET_NAME).strip() or _DEFAULT_SHEET_NAME
+    weekly_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Weekly")
+    monthly_summary_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Monthly")
+    if not weekly_sheet_label:
+        weekly_sheet_label = _sanitize_sheet_name(f"{_DEFAULT_SHEET_NAME} Weekly")
+    if not monthly_summary_sheet_label:
+        monthly_summary_sheet_label = _sanitize_sheet_name(f"{_DEFAULT_SHEET_NAME} Monthly")
+    if monthly_summary_sheet_label == weekly_sheet_label:
+        monthly_summary_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Monthwise")
     review_sheet_label = _sanitize_sheet_name("Review_Format")
     gangs_sheet_label = _sanitize_sheet_name("Project Gang Rankings")
     gang_level_sheet_label = _sanitize_sheet_name("Gang Level Productivity")
@@ -2749,6 +3060,16 @@ def export_erection_productivity_summary(
         months.append(month_cursor)
         month_cursor = (month_cursor + pd.offsets.MonthBegin(1)).normalize()
     month_labels = [month.strftime("%b'%y") for month in months]
+    (
+        monthly_overall_summary,
+        monthly_pch_summary,
+        monthly_project_summary,
+        monthly_summary_labels,
+    ) = _build_monthly_productivity_tables(
+        scope,
+        completions,
+        months=months,
+    )
     scope_label = _build_scope_label_from_data(
         scope,
         completions,
@@ -2903,6 +3224,255 @@ def export_erection_productivity_summary(
         table.to_excel(writer, sheet_name=sheet, index=False, startrow=next_row, startcol=startcol)
         return next_row + len(table) + 1
 
+    def _write_monthly_scoped_table(
+        writer: pd.ExcelWriter,
+        sheet: str,
+        table: pd.DataFrame,
+        label: str,
+        *,
+        month_headers: Sequence[str],
+        group_headers: Sequence[str],
+        startrow: int,
+        startcol: int = 0,
+    ) -> tuple[int, dict[str, int]]:
+        next_row = _write_scope_row(writer, sheet, label, startrow=startrow, startcol=startcol)
+        ordered_columns, top_headers, bottom_headers = _monthly_column_layout(
+            month_headers,
+            group_labels=group_headers,
+        )
+        aligned = table.reindex(columns=ordered_columns)
+        pd.DataFrame([top_headers, bottom_headers], columns=ordered_columns).to_excel(
+            writer,
+            sheet_name=sheet,
+            index=False,
+            header=False,
+            startrow=next_row,
+            startcol=startcol,
+        )
+        data_row = next_row + 2
+        aligned.to_excel(
+            writer,
+            sheet_name=sheet,
+            index=False,
+            header=False,
+            startrow=data_row,
+            startcol=startcol,
+        )
+        next_table_row = data_row + len(aligned) + 1
+        block = {
+            "scope_row": startrow,
+            "header_top_row": next_row,
+            "header_bottom_row": next_row + 1,
+            "data_start_row": data_row,
+            "data_end_row": data_row + max(len(aligned) - 1, 0),
+            "group_count": len(group_headers),
+            "month_count": len(month_headers),
+            "column_count": len(ordered_columns),
+            "start_col": startcol,
+        }
+        return next_table_row, block
+
+    def _style_monthly_summary_sheet(
+        writer: pd.ExcelWriter,
+        sheet: str,
+        blocks: Sequence[dict[str, int]],
+    ) -> None:
+        worksheet = writer.sheets.get(sheet)
+        if worksheet is None or not blocks:
+            return
+
+        thin = Side(style="thin", color="D9E2EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        scope_font = Font(bold=True, color="334155")
+        header_font = Font(bold=True, color="1F2937")
+        data_font = Font(color="111827")
+        scope_fill = PatternFill(fill_type="solid", fgColor="F8FAFC")
+        top_header_fill = PatternFill(fill_type="solid", fgColor="EAF1F8")
+        bottom_header_fill = PatternFill(fill_type="solid", fgColor="F5F8FC")
+        zebra_fill = PatternFill(fill_type="solid", fgColor="FAFCFF")
+        center = Alignment(horizontal="center", vertical="center")
+        left = Alignment(horizontal="left", vertical="center")
+
+        max_columns = max(block["column_count"] + block["start_col"] for block in blocks)
+        for col_idx in range(1, max_columns + 1):
+            col_letter = get_column_letter(col_idx)
+            if col_idx == 1:
+                worksheet.column_dimensions[col_letter].width = 30
+            elif col_idx == 2:
+                worksheet.column_dimensions[col_letter].width = 20
+            else:
+                worksheet.column_dimensions[col_letter].width = 14
+
+        for block in blocks:
+            col_offset = block["start_col"]
+            first_col = col_offset + 1
+            last_col = col_offset + block["column_count"]
+            scope_row = block["scope_row"] + 1
+            top_row = block["header_top_row"] + 1
+            bottom_row = block["header_bottom_row"] + 1
+            data_start = block["data_start_row"] + 1
+            data_end = block["data_end_row"] + 1
+            group_count = block["group_count"]
+
+            scope_cell = worksheet.cell(row=scope_row, column=first_col)
+            scope_cell.font = scope_font
+            scope_cell.fill = scope_fill
+            scope_cell.alignment = left
+
+            for col in range(first_col, last_col + 1):
+                top_cell = worksheet.cell(row=top_row, column=col)
+                top_cell.font = header_font
+                top_cell.fill = top_header_fill
+                top_cell.alignment = center
+                top_cell.border = border
+
+                bottom_cell = worksheet.cell(row=bottom_row, column=col)
+                bottom_cell.font = header_font
+                bottom_cell.fill = bottom_header_fill
+                bottom_cell.alignment = center
+                bottom_cell.border = border
+
+            metric_span = 3
+            month_block_count = block["month_count"] + 1  # includes Overall
+            month_start_col = first_col + group_count
+            for idx in range(month_block_count):
+                span_start = month_start_col + (idx * metric_span)
+                span_end = span_start + metric_span - 1
+                worksheet.merge_cells(
+                    start_row=top_row,
+                    start_column=span_start,
+                    end_row=top_row,
+                    end_column=span_end,
+                )
+
+            if group_count > 0:
+                for offset in range(group_count):
+                    col = first_col + offset
+                    label_value = worksheet.cell(row=bottom_row, column=col).value
+                    worksheet.merge_cells(
+                        start_row=top_row,
+                        start_column=col,
+                        end_row=bottom_row,
+                        end_column=col,
+                    )
+                    merged_cell = worksheet.cell(row=top_row, column=col)
+                    merged_cell.value = label_value
+                    merged_cell.font = header_font
+                    merged_cell.fill = top_header_fill
+                    merged_cell.alignment = center
+                    merged_cell.border = border
+
+            if data_end < data_start:
+                continue
+            for row in range(data_start, data_end + 1):
+                apply_zebra = (row - data_start) % 2 == 1
+                for col in range(first_col, last_col + 1):
+                    cell = worksheet.cell(row=row, column=col)
+                    cell.font = data_font
+                    cell.border = border
+                    is_group_col = col < (first_col + group_count)
+                    cell.alignment = left if is_group_col else center
+                    if apply_zebra:
+                        cell.fill = zebra_fill
+                    if not is_group_col:
+                        metric_idx = (col - (first_col + group_count)) % metric_span
+                        if metric_idx == 1:
+                            cell.number_format = "#,##0"
+                        else:
+                            cell.number_format = "#,##0.00"
+
+            worksheet.row_dimensions[top_row].height = 22
+            worksheet.row_dimensions[bottom_row].height = 22
+
+    def _style_clean_sheet(writer: pd.ExcelWriter, sheet: str) -> None:
+        worksheet = writer.sheets.get(sheet)
+        if worksheet is None:
+            return
+
+        thin = Side(style="thin", color="D9E2EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        label_font = Font(bold=True, color="334155")
+        header_font = Font(bold=True, color="1F2937")
+        data_font = Font(color="111827")
+        label_fill = PatternFill(fill_type="solid", fgColor="F8FAFC")
+        header_fill = PatternFill(fill_type="solid", fgColor="F3F7FB")
+        zebra_fill = PatternFill(fill_type="solid", fgColor="FAFCFF")
+        center = Alignment(horizontal="center", vertical="center")
+        left = Alignment(horizontal="left", vertical="center")
+
+        max_row = worksheet.max_row or 0
+        max_col = worksheet.max_column or 0
+        if max_row == 0 or max_col == 0:
+            return
+
+        column_widths: dict[int, int] = {}
+        data_row_band = 0
+
+        for row_idx in range(1, max_row + 1):
+            row_values = [worksheet.cell(row=row_idx, column=col_idx).value for col_idx in range(1, max_col + 1)]
+            non_empty_pairs = [
+                (idx + 1, value)
+                for idx, value in enumerate(row_values)
+                if value is not None and str(value).strip() != ""
+            ]
+            if not non_empty_pairs:
+                continue
+
+            non_empty_values = [value for _, value in non_empty_pairs]
+            string_count = sum(1 for value in non_empty_values if isinstance(value, str))
+            numeric_count = sum(
+                1 for value in non_empty_values if isinstance(value, (int, float)) and not isinstance(value, bool)
+            )
+            is_label_row = len(non_empty_pairs) == 1 and string_count == 1
+            is_header_row = (
+                (not is_label_row)
+                and len(non_empty_pairs) >= 2
+                and string_count >= max(2, int(len(non_empty_pairs) * 0.6))
+                and numeric_count <= max(2, int(len(non_empty_pairs) * 0.4))
+            )
+            is_data_row = not is_label_row and not is_header_row
+            if is_data_row:
+                data_row_band += 1
+
+            for col_idx, value in non_empty_pairs:
+                cell = worksheet.cell(row=row_idx, column=col_idx)
+                if isinstance(cell, MergedCell):
+                    continue
+
+                cell_text = str(value)
+                width_hint = min(48, max(8, len(cell_text) + 2))
+                prev_width = column_widths.get(col_idx, 0)
+                if width_hint > prev_width:
+                    column_widths[col_idx] = width_hint
+
+                cell.border = border
+                if is_label_row:
+                    cell.font = label_font
+                    cell.fill = label_fill
+                    cell.alignment = left
+                    continue
+                if is_header_row:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = center
+                    continue
+
+                cell.font = data_font
+                if data_row_band % 2 == 0:
+                    cell.fill = zebra_fill
+                cell.alignment = left if col_idx <= 2 else center
+                if isinstance(value, bool):
+                    continue
+                if cell.number_format in {"General", "0", ""}:
+                    if isinstance(value, int):
+                        cell.number_format = "#,##0"
+                    elif isinstance(value, float):
+                        cell.number_format = "#,##0.00"
+
+        for col_idx, width in column_widths.items():
+            col_letter = get_column_letter(col_idx)
+            worksheet.column_dimensions[col_letter].width = width
+
     LOGGER.info(
         "Exporting erection productivity summary for %s (current week: %s) to %s",
         active_date.strftime("%Y-%m"),
@@ -2915,16 +3485,52 @@ def export_erection_productivity_summary(
     with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
         main_row = 0
         main_row = _write_scoped_table(
-            writer, sheet_label, overall_summary, scope_label, startrow=main_row
+            writer, weekly_sheet_label, overall_summary, scope_label, startrow=main_row
         )
         main_row += gap_rows
         main_row = _write_scoped_table(
-            writer, sheet_label, pch_summary, scope_label, startrow=main_row
+            writer, weekly_sheet_label, pch_summary, scope_label, startrow=main_row
         )
         main_row += gap_rows
         _write_scoped_table(
-            writer, sheet_label, project_summary, scope_label, startrow=main_row
+            writer, weekly_sheet_label, project_summary, scope_label, startrow=main_row
         )
+
+        monthly_summary_row = 0
+        monthly_blocks: list[dict[str, int]] = []
+        monthly_summary_row, monthly_block = _write_monthly_scoped_table(
+            writer,
+            monthly_summary_sheet_label,
+            monthly_overall_summary,
+            scope_label,
+            month_headers=monthly_summary_labels,
+            group_headers=[],
+            startrow=monthly_summary_row,
+        )
+        monthly_blocks.append(monthly_block)
+        monthly_summary_row += gap_rows
+        monthly_summary_row, monthly_block = _write_monthly_scoped_table(
+            writer,
+            monthly_summary_sheet_label,
+            monthly_pch_summary,
+            scope_label,
+            month_headers=monthly_summary_labels,
+            group_headers=["PCH"],
+            startrow=monthly_summary_row,
+        )
+        monthly_blocks.append(monthly_block)
+        monthly_summary_row += gap_rows
+        _, monthly_block = _write_monthly_scoped_table(
+            writer,
+            monthly_summary_sheet_label,
+            monthly_project_summary,
+            scope_label,
+            month_headers=monthly_summary_labels,
+            group_headers=["PCH", "Project"],
+            startrow=monthly_summary_row,
+        )
+        monthly_blocks.append(monthly_block)
+        _style_monthly_summary_sheet(writer, monthly_summary_sheet_label, monthly_blocks)
 
         current_row = 0
         current_row = _write_scope_row(writer, review_sheet_label, scope_label, startrow=current_row)
@@ -3168,7 +3774,8 @@ def export_erection_productivity_summary(
         )
 
         used_sheet_names: set[str] = {
-            sheet_label,
+            weekly_sheet_label,
+            monthly_summary_sheet_label,
             review_sheet_label,
             gangs_sheet_label,
             gang_level_sheet_label,
@@ -3231,6 +3838,11 @@ def export_erection_productivity_summary(
                         project_table_two = _build_review_table_two(project_scope)
                         project_table_two.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
                         current_row += len(project_table_two) + 1 + group_gap_rows
+
+        for styled_sheet in sorted(used_sheet_names):
+            if styled_sheet == monthly_summary_sheet_label:
+                continue
+            _style_clean_sheet(writer, styled_sheet)
 
     return target_path
 

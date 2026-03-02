@@ -30,9 +30,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
+from datetime import datetime
 from glob import glob
 from pathlib import Path
 from typing import Callable, Optional
+from zipfile import BadZipFile
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -629,15 +631,44 @@ def _open_writer_overwriting_sheets(output_path: str) -> pd.ExcelWriter:
     Open an ExcelWriter. If the file exists, open in append mode and allow
     us to overwrite specific sheets later. Do NOT assign writer.book.
     """
-    if os.path.exists(output_path):
-        return pd.ExcelWriter(
-            output_path,
-            engine="openpyxl",
-            mode="a",
-            if_sheet_exists="overlay",  # we'll delete/replace targeted sheets ourselves
-        )
-    else:
+    output = Path(output_path)
+    if not output.exists():
         return pd.ExcelWriter(output_path, engine="openpyxl", mode="w")
+
+    # A partially-written/corrupt workbook should not crash the pipeline.
+    # Validate quickly; if invalid, rotate it aside and recreate from scratch.
+    is_valid = True
+    try:
+        if output.stat().st_size == 0:
+            is_valid = False
+        else:
+            wb = load_workbook(output_path, read_only=True, data_only=True, keep_links=False)
+            wb.close()
+    except (BadZipFile, OSError, ValueError, KeyError):
+        is_valid = False
+
+    if not is_valid:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = output.with_name(f"{output.stem}.corrupt.{stamp}{output.suffix}.bak")
+        try:
+            output.replace(backup)
+        except OSError:
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                pass
+        print(
+            f"[microplan] Warning: existing workbook '{output_path}' is not a valid xlsx; "
+            f"recreating a fresh workbook."
+        )
+        return pd.ExcelWriter(output_path, engine="openpyxl", mode="w")
+
+    return pd.ExcelWriter(
+        output_path,
+        engine="openpyxl",
+        mode="a",
+        if_sheet_exists="overlay",  # we'll delete/replace targeted sheets ourselves
+    )
 
 
 # ======================
