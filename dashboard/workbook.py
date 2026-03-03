@@ -41,6 +41,9 @@ TOWER_BUCKET_AVG_COLUMNS.append(f"{EXCEPTION_BUCKET} Avg Tower Weight")
 TOWER_WEIGHT_COLUMNS = [AVG_TOWER_WEIGHT_OVERALL_COLUMN]
 IDLE_DAYS_COLUMN = "Idle Counted (days)"
 IDLE_INTERVALS_COLUMN = "Number of Idle Intervals"
+ACTIVE_DAYS_COLUMN = "Active Days"
+DELIVERED_MT_COLUMN = "Delivered MT"
+IDLE_SEVERITY_COLUMN = "Idle Severity"
 YTD_METRIC_LABELS = {
     AVG_PRODUCTIVITY_COLUMN: "Avg Productivity (YTD)",
     TOTAL_MT_COLUMN: "Total MT (YTD)",
@@ -1822,53 +1825,102 @@ def _build_monthly_productivity_tables(
     return overall_summary, pch_summary, project_summary, month_labels
 
 
-def _build_project_gang_rankings(
+def _sort_project_gang_export_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "PCH" not in df.columns:
+        return df.reset_index(drop=True)
+
+    order_components = df["PCH"].map(_pch_sort_components)
+    sort_columns = ["_pch_order_bucket", "_pch_order_value"]
+    df = df.assign(
+        _pch_order_bucket=order_components.map(lambda pair: pair[0]),
+        _pch_order_value=order_components.map(lambda pair: pair[1]),
+    )
+    if "Project" in df.columns:
+        df["_project_order"] = df["Project"].astype(str).str.lower()
+        sort_columns.append("_project_order")
+    if "Gang Name" in df.columns:
+        df["_gang_order"] = df["Gang Name"].astype(str).str.lower()
+        sort_columns.append("_gang_order")
+    df = df.sort_values(by=sort_columns).reset_index(drop=True)
+    helper_columns = [column for column in ("_pch_order_bucket", "_pch_order_value", "_project_order", "_gang_order") if column in df.columns]
+    if helper_columns:
+        df = df.drop(columns=helper_columns)
+    return df
+
+
+def _build_project_gang_metrics(
     scope: pd.DataFrame,
     completions: pd.DataFrame,
     *,
-    top_n: int = 3,
-    min_erections: int = 4,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    loss_max_gap_days: int | None = None,
+) -> pd.DataFrame:
+    project_group_col = "project_scope_key" if isinstance(scope, pd.DataFrame) and "project_scope_key" in scope.columns else "project_name"
     columns = [
-        "PCH",
-        "Project",
-        "Gang Name",
+        "pch_display",
+        project_group_col,
+        "project_display",
+        "gang_name",
         AVG_PRODUCTIVITY_COLUMN,
-        AVG_PRODUCTIVITY_OVERALL_COLUMN,
+        ACTIVE_DAYS_COLUMN,
+        DELIVERED_MT_COLUMN,
         TOTAL_MT_COLUMN,
         TOTAL_COUNT_COLUMN,
         *TOWER_WEIGHT_COLUMNS,
         IDLE_DAYS_COLUMN,
         IDLE_INTERVALS_COLUMN,
+        IDLE_SEVERITY_COLUMN,
     ]
     if scope is None or scope.empty or "gang_name" not in scope.columns:
-        empty = pd.DataFrame(columns=columns)
-        return empty, empty
+        return pd.DataFrame(columns=columns)
 
     working = scope.copy()
     working["gang_name"] = working["gang_name"].fillna("").astype(str).str.strip()
     working = working[working["gang_name"].astype(bool)]
     if working.empty:
-        empty = pd.DataFrame(columns=columns)
-        return empty, empty
+        return pd.DataFrame(columns=columns)
 
-    project_group_col = "project_scope_key" if "project_scope_key" in working.columns else "project_name"
+    working["daily_prod_mt"] = pd.to_numeric(working.get("daily_prod_mt"), errors="coerce").fillna(0.0)
+    if "pch_display" not in working.columns:
+        working["pch_display"] = "Unassigned"
+    if "project_display" not in working.columns:
+        working["project_display"] = working.get("project_name", "").fillna("").astype(str).str.strip()
+    if project_group_col not in working.columns:
+        working[project_group_col] = working.get("project_name", "").fillna("").astype(str).str.strip()
+
     group_cols = ["pch_display", project_group_col, "project_display", "gang_name"]
-    avg_prod = (
-        working.groupby(group_cols, dropna=False)["daily_prod_mt"]
-        .mean()
+    daily_metrics = (
+        working.groupby(group_cols, dropna=False)
+        .agg(
+            **{
+                AVG_PRODUCTIVITY_COLUMN: ("daily_prod_mt", "mean"),
+                ACTIVE_DAYS_COLUMN: ("daily_prod_mt", "size"),
+                DELIVERED_MT_COLUMN: ("daily_prod_mt", "sum"),
+            }
+        )
         .reset_index()
-        .rename(columns={"daily_prod_mt": AVG_PRODUCTIVITY_COLUMN})
     )
-    avg_prod[AVG_PRODUCTIVITY_COLUMN] = pd.to_numeric(
-        avg_prod[AVG_PRODUCTIVITY_COLUMN], errors="coerce"
-    ).fillna(0.0).round(2)
+    daily_metrics[AVG_PRODUCTIVITY_COLUMN] = (
+        pd.to_numeric(daily_metrics[AVG_PRODUCTIVITY_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    daily_metrics[ACTIVE_DAYS_COLUMN] = (
+        pd.to_numeric(daily_metrics[ACTIVE_DAYS_COLUMN], errors="coerce").fillna(0).astype(int)
+    )
+    daily_metrics[DELIVERED_MT_COLUMN] = (
+        pd.to_numeric(daily_metrics[DELIVERED_MT_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
 
     totals = pd.DataFrame(columns=[*group_cols, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN])
+    comp = pd.DataFrame()
     if isinstance(completions, pd.DataFrame) and not completions.empty:
         comp = completions.copy()
         comp["gang_name"] = comp.get("gang_name", "").fillna("").astype(str).str.strip()
         comp = comp[comp["gang_name"].astype(bool)]
+        if "pch_display" not in comp.columns:
+            comp["pch_display"] = "Unassigned"
+        if "project_display" not in comp.columns:
+            comp["project_display"] = comp.get("project_name", "").fillna("").astype(str).str.strip()
+        if project_group_col not in comp.columns:
+            comp[project_group_col] = comp.get("project_name", "").fillna("").astype(str).str.strip()
         if not comp.empty:
             tower_weights = pd.to_numeric(comp.get("tower_weight"), errors="coerce").fillna(0.0)
             totals = (
@@ -1885,46 +1937,100 @@ def _build_project_gang_rankings(
             totals[TOTAL_MT_COLUMN] = totals[TOTAL_MT_COLUMN].round(2)
             totals[TOTAL_COUNT_COLUMN] = totals[TOTAL_COUNT_COLUMN].astype(int)
 
-    merged = avg_prod.merge(totals, on=group_cols, how="left")
-    merged[TOTAL_MT_COLUMN] = merged[TOTAL_MT_COLUMN].fillna(0.0).round(2)
-    merged[TOTAL_COUNT_COLUMN] = merged[TOTAL_COUNT_COLUMN].fillna(0).astype(int)
-    merged = merged[merged[TOTAL_COUNT_COLUMN] >= min_erections].copy()
-    if merged.empty:
-        empty = pd.DataFrame(columns=columns)
-        return empty, empty
-    tower_metrics = _build_tower_weight_metrics(
-        completions, group_columns=["pch_display", project_group_col, "gang_name"]
-    )
+    merged = daily_metrics.merge(totals, on=group_cols, how="left")
+    merged[TOTAL_MT_COLUMN] = pd.to_numeric(merged[TOTAL_MT_COLUMN], errors="coerce").fillna(0.0).round(2)
+    merged[TOTAL_COUNT_COLUMN] = pd.to_numeric(merged[TOTAL_COUNT_COLUMN], errors="coerce").fillna(0).astype(int)
+
+    tower_metrics = _build_tower_weight_metrics(comp, group_columns=group_cols)
     if not tower_metrics.empty:
-        merged = merged.merge(
-            tower_metrics,
-            on=["pch_display", project_group_col, "gang_name"],
-            how="left",
-        )
+        merged = merged.merge(tower_metrics, on=group_cols, how="left")
     for column in TOWER_WEIGHT_COLUMNS:
         if column not in merged.columns:
             merged[column] = 0.0
         else:
-            merged[column] = merged[column].fillna(0.0)
-            if column in TOWER_BUCKET_COUNT_COLUMNS:
-                merged[column] = merged[column].astype(int)
-            else:
-                merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0.0).round(2)
-    for column in (IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN):
-        if column not in merged.columns:
-            merged[column] = 0
-        else:
-            merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0).astype(int)
-    if AVG_PRODUCTIVITY_OVERALL_COLUMN not in merged.columns:
-        merged[AVG_PRODUCTIVITY_OVERALL_COLUMN] = 0.0
-    else:
-        merged[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
-            pd.to_numeric(merged[AVG_PRODUCTIVITY_OVERALL_COLUMN], errors="coerce").fillna(0.0).round(2)
+            merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0.0).round(2)
+
+    resolved_gap_days = int(loss_max_gap_days) if loss_max_gap_days is not None else int(AppConfig().loss_max_gap_days)
+    idle_rows: list[pd.DataFrame] = []
+    project_keys = ["pch_display", project_group_col, "project_display"]
+    for project_key, project_scope in working.groupby(project_keys, dropna=False):
+        project_idle = compute_idle_intervals_per_gang(project_scope, loss_max_gap_days=resolved_gap_days)
+        if project_idle.empty or "gang_name" not in project_idle.columns:
+            continue
+        idle_summary = (
+            project_idle.groupby("gang_name", dropna=False)["idle_days_capped"]
+            .agg(["sum", "size"])
+            .reset_index()
+            .rename(columns={"sum": IDLE_DAYS_COLUMN, "size": IDLE_INTERVALS_COLUMN})
         )
+        idle_summary["pch_display"] = project_key[0]
+        idle_summary[project_group_col] = project_key[1]
+        idle_summary["project_display"] = project_key[2]
+        idle_rows.append(idle_summary[["pch_display", project_group_col, "project_display", "gang_name", IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN]])
+
+    if idle_rows:
+        idle_metrics = pd.concat(idle_rows, ignore_index=True)
+        merged = merged.merge(idle_metrics, on=group_cols, how="left")
+    else:
+        merged[IDLE_DAYS_COLUMN] = 0
+        merged[IDLE_INTERVALS_COLUMN] = 0
+
+    merged[IDLE_DAYS_COLUMN] = pd.to_numeric(merged[IDLE_DAYS_COLUMN], errors="coerce").fillna(0).astype(int)
+    merged[IDLE_INTERVALS_COLUMN] = pd.to_numeric(merged[IDLE_INTERVALS_COLUMN], errors="coerce").fillna(0).astype(int)
+    merged[IDLE_SEVERITY_COLUMN] = 0.0
+    idle_mask = merged[IDLE_INTERVALS_COLUMN] > 0
+    if idle_mask.any():
+        merged.loc[idle_mask, IDLE_SEVERITY_COLUMN] = (
+            merged.loc[idle_mask, IDLE_DAYS_COLUMN] / merged.loc[idle_mask, IDLE_INTERVALS_COLUMN]
+        )
+    merged[IDLE_SEVERITY_COLUMN] = pd.to_numeric(merged[IDLE_SEVERITY_COLUMN], errors="coerce").fillna(0.0).round(2)
+
+    return merged.reindex(columns=columns)
+
+
+def _build_project_gang_rankings(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    top_n: int = 3,
+    min_erections: int = 4,
+    loss_max_gap_days: int | None = None,
+    project_gang_metrics: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    columns = [
+        "PCH",
+        "Project",
+        "Gang Name",
+        AVG_PRODUCTIVITY_COLUMN,
+        AVG_PRODUCTIVITY_OVERALL_COLUMN,
+        TOTAL_MT_COLUMN,
+        TOTAL_COUNT_COLUMN,
+        *TOWER_WEIGHT_COLUMNS,
+        IDLE_DAYS_COLUMN,
+        IDLE_INTERVALS_COLUMN,
+    ]
+    metrics = (
+        project_gang_metrics.copy()
+        if isinstance(project_gang_metrics, pd.DataFrame)
+        else _build_project_gang_metrics(
+            scope,
+            completions,
+            loss_max_gap_days=loss_max_gap_days,
+        )
+    )
+    if metrics.empty:
+        empty = pd.DataFrame(columns=columns)
+        return empty, empty
+
+    project_group_col = "project_scope_key" if "project_scope_key" in metrics.columns else "project_name"
+    eligible = metrics[metrics[TOTAL_COUNT_COLUMN] >= int(min_erections)].copy()
+    if eligible.empty:
+        empty = pd.DataFrame(columns=columns)
+        return empty, empty
 
     def _collect_ranked(top: bool) -> pd.DataFrame:
         rows: list[pd.DataFrame] = []
-        for _, group in merged.groupby(["pch_display", project_group_col, "project_display"], dropna=False):
+        for _, group in eligible.groupby(["pch_display", project_group_col, "project_display"], dropna=False):
             ordered = group.sort_values(
                 by=[AVG_PRODUCTIVITY_COLUMN, "gang_name"],
                 ascending=[not top, True],
@@ -1934,6 +2040,7 @@ def _build_project_gang_rankings(
         if not rows:
             return pd.DataFrame(columns=columns)
         ranked = pd.concat(rows, ignore_index=True)
+        ranked[AVG_PRODUCTIVITY_OVERALL_COLUMN] = 0.0
         ranked = ranked.rename(
             columns={
                 "pch_display": "PCH",
@@ -1942,18 +2049,7 @@ def _build_project_gang_rankings(
             }
         )
         ranked = ranked[columns].copy()
-        order_components = ranked["PCH"].map(_pch_sort_components)
-        ranked = ranked.assign(
-            _pch_order_bucket=order_components.map(lambda pair: pair[0]),
-            _pch_order_value=order_components.map(lambda pair: pair[1]),
-            _project_order=ranked["Project"].astype(str).str.lower(),
-        )
-        ranked = (
-            ranked.sort_values(by=["_pch_order_bucket", "_pch_order_value", "_project_order"])
-            .drop(columns=["_pch_order_bucket", "_pch_order_value", "_project_order"])
-            .reset_index(drop=True)
-        )
-        return ranked
+        return _sort_project_gang_export_frame(ranked)
 
     top_ranked = _collect_ranked(top=True)
     bottom_ranked = _collect_ranked(top=False)
@@ -1963,6 +2059,9 @@ def _build_project_gang_rankings(
 def _build_gang_level_productivity_table(
     scope: pd.DataFrame,
     completions: pd.DataFrame,
+    *,
+    loss_max_gap_days: int | None = None,
+    project_gang_metrics: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     columns = [
         "PCH",
@@ -1973,70 +2072,19 @@ def _build_gang_level_productivity_table(
         TOTAL_COUNT_COLUMN,
         *TOWER_WEIGHT_COLUMNS,
     ]
-    if scope is None or scope.empty or "gang_name" not in scope.columns:
-        return pd.DataFrame(columns=columns)
-
-    working = scope.copy()
-    working["gang_name"] = working["gang_name"].fillna("").astype(str).str.strip()
-    working = working[working["gang_name"].astype(bool)]
-    if working.empty:
-        return pd.DataFrame(columns=columns)
-
-    if completions is None or completions.empty:
-        return pd.DataFrame(columns=columns)
-
-    comp = completions.copy()
-    comp["gang_name"] = comp.get("gang_name", "").fillna("").astype(str).str.strip()
-    comp = comp[comp["gang_name"].astype(bool)]
-    if comp.empty:
-        return pd.DataFrame(columns=columns)
-
-    project_group_col = "project_scope_key" if "project_scope_key" in working.columns else "project_name"
-    group_cols = ["pch_display", project_group_col, "project_display", "gang_name"]
-    avg_prod = (
-        working.groupby(group_cols, dropna=False)["daily_prod_mt"]
-        .mean()
-        .reset_index()
-        .rename(columns={"daily_prod_mt": AVG_PRODUCTIVITY_COLUMN})
-    )
-    avg_prod[AVG_PRODUCTIVITY_COLUMN] = pd.to_numeric(
-        avg_prod[AVG_PRODUCTIVITY_COLUMN], errors="coerce"
-    ).fillna(0.0).round(2)
-
-    tower_weights = pd.to_numeric(comp.get("tower_weight"), errors="coerce").fillna(0.0)
-    totals = (
-        comp.assign(_tower_weight=tower_weights)
-        .groupby(group_cols, dropna=False)
-        .agg(
-            **{
-                TOTAL_MT_COLUMN: ("_tower_weight", "sum"),
-                TOTAL_COUNT_COLUMN: ("_tower_weight", "size"),
-            }
+    metrics = (
+        project_gang_metrics.copy()
+        if isinstance(project_gang_metrics, pd.DataFrame)
+        else _build_project_gang_metrics(
+            scope,
+            completions,
+            loss_max_gap_days=loss_max_gap_days,
         )
-        .reset_index()
     )
-    totals[TOTAL_MT_COLUMN] = totals[TOTAL_MT_COLUMN].round(2)
-    totals[TOTAL_COUNT_COLUMN] = totals[TOTAL_COUNT_COLUMN].astype(int)
-
-    merged = avg_prod.merge(totals, on=group_cols, how="inner")
-    if merged.empty:
+    if metrics.empty:
         return pd.DataFrame(columns=columns)
 
-    tower_metrics = _build_tower_weight_metrics(comp, group_columns=group_cols)
-    if not tower_metrics.empty:
-        merged = merged.merge(tower_metrics, on=group_cols, how="left")
-
-    for column in TOWER_WEIGHT_COLUMNS:
-        if column not in merged.columns:
-            merged[column] = 0.0
-        else:
-            merged[column] = merged[column].fillna(0.0)
-            if column in TOWER_BUCKET_COUNT_COLUMNS:
-                merged[column] = merged[column].astype(int)
-            else:
-                merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0.0).round(2)
-
-    merged = merged.rename(
+    merged = metrics.rename(
         columns={
             "pch_display": "PCH",
             "project_display": "Project",
@@ -2044,20 +2092,205 @@ def _build_gang_level_productivity_table(
         }
     )
     merged = merged[columns].copy()
+    return _sort_project_gang_export_frame(merged)
 
-    order_components = merged["PCH"].map(_pch_sort_components)
-    merged = merged.assign(
-        _pch_order_bucket=order_components.map(lambda pair: pair[0]),
-        _pch_order_value=order_components.map(lambda pair: pair[1]),
-        _project_order=merged["Project"].astype(str).str.lower(),
-        _gang_order=merged["Gang Name"].astype(str).str.lower(),
+
+def _collapse_project_metrics_for_display(project_metrics: pd.DataFrame) -> pd.DataFrame:
+    project_group_col = "project_scope_key" if "project_scope_key" in project_metrics.columns else "project_name"
+    columns = [
+        "pch_display",
+        project_group_col,
+        "project_display",
+        "gang_name",
+        AVG_PRODUCTIVITY_COLUMN,
+        ACTIVE_DAYS_COLUMN,
+        DELIVERED_MT_COLUMN,
+        TOTAL_MT_COLUMN,
+        TOTAL_COUNT_COLUMN,
+        IDLE_DAYS_COLUMN,
+        IDLE_INTERVALS_COLUMN,
+        IDLE_SEVERITY_COLUMN,
+    ]
+    if project_metrics.empty:
+        return pd.DataFrame(columns=columns)
+
+    first_row = project_metrics.iloc[0]
+    collapsed = (
+        project_metrics.groupby("gang_name", dropna=False)
+        .agg(
+            **{
+                ACTIVE_DAYS_COLUMN: (ACTIVE_DAYS_COLUMN, "sum"),
+                DELIVERED_MT_COLUMN: (DELIVERED_MT_COLUMN, "sum"),
+                TOTAL_MT_COLUMN: (TOTAL_MT_COLUMN, "sum"),
+                TOTAL_COUNT_COLUMN: (TOTAL_COUNT_COLUMN, "sum"),
+                IDLE_DAYS_COLUMN: (IDLE_DAYS_COLUMN, "sum"),
+                IDLE_INTERVALS_COLUMN: (IDLE_INTERVALS_COLUMN, "sum"),
+            }
+        )
+        .reset_index()
     )
-    merged = (
-        merged.sort_values(by=["_pch_order_bucket", "_pch_order_value", "_project_order", "_gang_order"])
-        .drop(columns=["_pch_order_bucket", "_pch_order_value", "_project_order", "_gang_order"])
-        .reset_index(drop=True)
+    collapsed["pch_display"] = first_row.get("pch_display", "")
+    collapsed[project_group_col] = first_row.get(project_group_col, "")
+    collapsed["project_display"] = first_row.get("project_display", "")
+    collapsed[AVG_PRODUCTIVITY_COLUMN] = 0.0
+    active_mask = collapsed[ACTIVE_DAYS_COLUMN] > 0
+    if active_mask.any():
+        collapsed.loc[active_mask, AVG_PRODUCTIVITY_COLUMN] = (
+            collapsed.loc[active_mask, DELIVERED_MT_COLUMN] / collapsed.loc[active_mask, ACTIVE_DAYS_COLUMN]
+        )
+    collapsed[AVG_PRODUCTIVITY_COLUMN] = (
+        pd.to_numeric(collapsed[AVG_PRODUCTIVITY_COLUMN], errors="coerce").fillna(0.0).round(2)
     )
-    return merged
+    collapsed[ACTIVE_DAYS_COLUMN] = (
+        pd.to_numeric(collapsed[ACTIVE_DAYS_COLUMN], errors="coerce").fillna(0).astype(int)
+    )
+    collapsed[DELIVERED_MT_COLUMN] = (
+        pd.to_numeric(collapsed[DELIVERED_MT_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    collapsed[TOTAL_MT_COLUMN] = pd.to_numeric(collapsed[TOTAL_MT_COLUMN], errors="coerce").fillna(0.0).round(2)
+    collapsed[TOTAL_COUNT_COLUMN] = pd.to_numeric(collapsed[TOTAL_COUNT_COLUMN], errors="coerce").fillna(0).astype(int)
+    collapsed[IDLE_DAYS_COLUMN] = pd.to_numeric(collapsed[IDLE_DAYS_COLUMN], errors="coerce").fillna(0).astype(int)
+    collapsed[IDLE_INTERVALS_COLUMN] = (
+        pd.to_numeric(collapsed[IDLE_INTERVALS_COLUMN], errors="coerce").fillna(0).astype(int)
+    )
+    collapsed[IDLE_SEVERITY_COLUMN] = 0.0
+    idle_mask = collapsed[IDLE_INTERVALS_COLUMN] > 0
+    if idle_mask.any():
+        collapsed.loc[idle_mask, IDLE_SEVERITY_COLUMN] = (
+            collapsed.loc[idle_mask, IDLE_DAYS_COLUMN] / collapsed.loc[idle_mask, IDLE_INTERVALS_COLUMN]
+        )
+    collapsed[IDLE_SEVERITY_COLUMN] = (
+        pd.to_numeric(collapsed[IDLE_SEVERITY_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    return collapsed.reindex(columns=columns)
+
+
+def _format_project_gang_insight_entries(project_metrics: pd.DataFrame, *, limit: int = 3) -> str:
+    if project_metrics.empty:
+        return "No eligible gangs"
+
+    entries: list[str] = []
+    for _, row in project_metrics.head(limit).iterrows():
+        gang_name = str(row.get("gang_name", "")).strip() or "(Unnamed)"
+        productivity_value = pd.to_numeric(row.get(AVG_PRODUCTIVITY_COLUMN), errors="coerce")
+        productivity = 0.0 if pd.isna(productivity_value) else float(productivity_value)
+        frequency_value = pd.to_numeric(row.get(IDLE_INTERVALS_COLUMN), errors="coerce")
+        frequency = 0 if pd.isna(frequency_value) else int(frequency_value)
+        magnitude_value = pd.to_numeric(row.get(IDLE_DAYS_COLUMN), errors="coerce")
+        magnitude = 0 if pd.isna(magnitude_value) else int(magnitude_value)
+        severity_value = pd.to_numeric(row.get(IDLE_SEVERITY_COLUMN), errors="coerce")
+        severity = 0.0 if pd.isna(severity_value) else float(severity_value)
+        entries.append(
+            f"{gang_name} (Prod {productivity:.1f} | F {frequency} | M {magnitude}d | S {severity:.1f})"
+        )
+    return ", ".join(entries) if entries else "No eligible gangs"
+
+
+def _build_project_insight_table(
+    project_metrics: pd.DataFrame,
+    *,
+    top_n: int = 3,
+    min_erections: int = 4,
+) -> pd.DataFrame:
+    insight_columns = ["Insight", "Details"]
+    collapsed = _collapse_project_metrics_for_display(project_metrics)
+    if collapsed.empty:
+        return pd.DataFrame(
+            [
+                {"Insight": "Top 3 Gangs", "Details": "No eligible gangs"},
+                {"Insight": "Bottom 3 Gangs", "Details": "No eligible gangs"},
+                {"Insight": "Below 4 MT/day Recovery", "Details": "No eligible gangs"},
+                {"Insight": "Idle Recovery (Top 3)", "Details": "No eligible gangs"},
+            ],
+            columns=insight_columns,
+        )
+
+    eligible = collapsed[collapsed[TOTAL_COUNT_COLUMN] >= int(min_erections)].copy()
+    if eligible.empty:
+        return pd.DataFrame(
+            [
+                {"Insight": "Top 3 Gangs", "Details": "No eligible gangs"},
+                {"Insight": "Bottom 3 Gangs", "Details": "No eligible gangs"},
+                {"Insight": "Below 4 MT/day Recovery", "Details": "No eligible gangs"},
+                {"Insight": "Idle Recovery (Top 3)", "Details": "No eligible gangs"},
+            ],
+            columns=insight_columns,
+        )
+
+    top_gangs = eligible.sort_values(
+        by=[AVG_PRODUCTIVITY_COLUMN, "gang_name"],
+        ascending=[False, True],
+        kind="mergesort",
+    ).head(top_n)
+    bottom_gangs = eligible.sort_values(
+        by=[AVG_PRODUCTIVITY_COLUMN, "gang_name"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).head(top_n)
+
+    total_active_days = int(eligible[ACTIVE_DAYS_COLUMN].sum())
+    total_delivered = float(eligible[DELIVERED_MT_COLUMN].sum())
+    project_avg = (total_delivered / total_active_days) if total_active_days > 0 else 0.0
+    project_best_value = pd.to_numeric(eligible[AVG_PRODUCTIVITY_COLUMN], errors="coerce").max()
+    project_best = 0.0 if pd.isna(project_best_value) else float(project_best_value)
+    low_gangs = eligible[eligible[AVG_PRODUCTIVITY_COLUMN] < 4.0].copy()
+
+    def _recoverable_mt(target: float) -> float:
+        if low_gangs.empty:
+            return 0.0
+        uplift = (
+            (target - low_gangs[AVG_PRODUCTIVITY_COLUMN]).clip(lower=0.0) * low_gangs[ACTIVE_DAYS_COLUMN]
+        )
+        return float(pd.to_numeric(uplift, errors="coerce").fillna(0.0).sum())
+
+    low_count = int(len(low_gangs))
+    low_label = "gang" if low_count == 1 else "gangs"
+    low_detail = (
+        f"{low_count} {low_label} | +{_recoverable_mt(5.0):.1f} @5 | +{_recoverable_mt(6.0):.1f} @6 | "
+        f"+{_recoverable_mt(project_avg):.1f} @ProjAvg({project_avg:.1f}) | "
+        f"+{_recoverable_mt(project_best):.1f} @ProjBest({project_best:.1f})"
+    )
+
+    top_idle_recovery_mt = float(
+        (
+            pd.to_numeric(top_gangs[IDLE_DAYS_COLUMN], errors="coerce").fillna(0.0)
+            * pd.to_numeric(top_gangs[AVG_PRODUCTIVITY_COLUMN], errors="coerce").fillna(0.0)
+        ).sum()
+    )
+    equivalent_gang_days = (top_idle_recovery_mt / project_avg) if project_avg > 0 else 0.0
+    idle_detail = (
+        f"+{top_idle_recovery_mt:.1f} MT if idle=0 | {equivalent_gang_days:.1f} "
+        f"equivalent gang-days @ProjAvg({project_avg:.1f})"
+    )
+
+    rows = [
+        {"Insight": "Top 3 Gangs", "Details": _format_project_gang_insight_entries(top_gangs, limit=top_n)},
+        {"Insight": "Bottom 3 Gangs", "Details": _format_project_gang_insight_entries(bottom_gangs, limit=top_n)},
+        {"Insight": "Below 4 MT/day Recovery", "Details": low_detail},
+        {"Insight": "Idle Recovery (Top 3)", "Details": idle_detail},
+    ]
+    return pd.DataFrame(rows, columns=insight_columns)
+
+
+def _build_project_insight_tables(
+    project_gang_metrics: pd.DataFrame,
+    *,
+    top_n: int = 3,
+    min_erections: int = 4,
+) -> dict[tuple[str, str], pd.DataFrame]:
+    if project_gang_metrics.empty:
+        return {}
+
+    insight_tables: dict[tuple[str, str], pd.DataFrame] = {}
+    for (pch_name, project_name), group in project_gang_metrics.groupby(
+        ["pch_display", "project_display"], dropna=False
+    ):
+        insight_tables[(str(pch_name), str(project_name))] = _build_project_insight_table(
+            group,
+            top_n=top_n,
+            min_erections=min_erections,
+        )
+    return insight_tables
 
 
 def _build_overall_gang_productivity_map(daily_df: pd.DataFrame | None) -> dict[str, float]:
@@ -2956,15 +3189,31 @@ def export_erection_productivity_summary(
         completions,
         week_labels=week_labels,
     )
-    gang_level_summary = _build_gang_level_productivity_table(scope, completions)
+    active_config = data_store._config if data_store is not None else AppConfig()
+    project_gang_metrics = _build_project_gang_metrics(
+        scope,
+        completions,
+        loss_max_gap_days=active_config.loss_max_gap_days,
+    )
+    gang_level_summary = _build_gang_level_productivity_table(
+        scope,
+        completions,
+        loss_max_gap_days=active_config.loss_max_gap_days,
+        project_gang_metrics=project_gang_metrics,
+    )
     top_gangs, bottom_gangs = _build_project_gang_rankings(
         scope,
         completions,
         min_erections=int(gang_min_erections) if gang_min_erections is not None else 4,
+        loss_max_gap_days=active_config.loss_max_gap_days,
+        project_gang_metrics=project_gang_metrics,
+    )
+    project_insight_tables = _build_project_insight_tables(
+        project_gang_metrics,
+        min_erections=int(gang_min_erections) if gang_min_erections is not None else 4,
     )
     overall_gang_productivity = _build_overall_gang_productivity_map(source_daily)
     month_gang_productivity = _build_gang_productivity_map(scope)
-    active_config = data_store._config if data_store is not None else AppConfig()
     idle_intervals = compute_idle_intervals_per_gang(
         scope,
         loss_max_gap_days=active_config.loss_max_gap_days,
@@ -3008,18 +3257,10 @@ def export_erection_productivity_summary(
         gang_level_summary[AVG_PRODUCTIVITY_OVERALL_COLUMN] = pd.Series(
             index=gang_level_summary.index, dtype="float64"
         )
-    if IDLE_DAYS_COLUMN not in gang_level_summary.columns:
-        gang_level_summary[IDLE_DAYS_COLUMN] = pd.Series(index=gang_level_summary.index, dtype="int64")
-    if IDLE_INTERVALS_COLUMN not in gang_level_summary.columns:
-        gang_level_summary[IDLE_INTERVALS_COLUMN] = pd.Series(index=gang_level_summary.index, dtype="int64")
     if "Gang Name" in gang_level_summary.columns and not gang_level_summary.empty:
         gang_names = gang_level_summary["Gang Name"].astype(str).str.strip()
         gang_level_summary[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
             gang_names.map(overall_gang_productivity).fillna(0.0).round(2)
-        )
-        gang_level_summary[IDLE_DAYS_COLUMN] = gang_names.map(idle_days_by_gang).fillna(0).astype(int)
-        gang_level_summary[IDLE_INTERVALS_COLUMN] = (
-            gang_names.map(idle_interval_counts_by_gang).fillna(0).astype(int)
         )
 
     gang_level_columns = [
@@ -3038,23 +3279,17 @@ def export_erection_productivity_summary(
         columns=[column for column in gang_level_columns if column in gang_level_summary.columns]
     )
 
-    def _apply_gang_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    def _apply_overall_productivity(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             df[AVG_PRODUCTIVITY_OVERALL_COLUMN] = pd.Series(dtype="float64")
-            df[IDLE_DAYS_COLUMN] = pd.Series(dtype="int64")
-            df[IDLE_INTERVALS_COLUMN] = pd.Series(dtype="int64")
             return df
         if "Gang Name" not in df.columns:
             df[AVG_PRODUCTIVITY_OVERALL_COLUMN] = 0.0
-            df[IDLE_DAYS_COLUMN] = 0
-            df[IDLE_INTERVALS_COLUMN] = 0
             return df
         names = df["Gang Name"].astype(str).str.strip()
         df[AVG_PRODUCTIVITY_OVERALL_COLUMN] = (
             names.map(overall_gang_productivity).fillna(0.0).round(2)
         )
-        df[IDLE_DAYS_COLUMN] = names.map(idle_days_by_gang).fillna(0).astype(int)
-        df[IDLE_INTERVALS_COLUMN] = names.map(idle_interval_counts_by_gang).fillna(0).astype(int)
         return df
 
     ranking_columns = [
@@ -3069,8 +3304,8 @@ def export_erection_productivity_summary(
         IDLE_DAYS_COLUMN,
         IDLE_INTERVALS_COLUMN,
     ]
-    top_gangs = _apply_gang_metrics(top_gangs)
-    bottom_gangs = _apply_gang_metrics(bottom_gangs)
+    top_gangs = _apply_overall_productivity(top_gangs)
+    bottom_gangs = _apply_overall_productivity(bottom_gangs)
     top_gangs = top_gangs.reindex(columns=ranking_columns)
     bottom_gangs = bottom_gangs.reindex(columns=ranking_columns)
     for column in (IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN):
@@ -3893,11 +4128,13 @@ def export_erection_productivity_summary(
             monthly_bucket_sheet_label,
             excluded_sheet_label,
         }
+        pch_sheet_names_written: list[str] = []
         if not review_table_raw.empty and "PCH" in review_table_raw.columns and "pch_display" in scope.columns:
             for pch_name in sorted(review_table_raw["PCH"].fillna("").astype(str).unique(), key=_pch_sort_components):
                 if not pch_name:
                     continue
                 pch_sheet_name = _unique_sheet_name(f"PCH {pch_name}", used_sheet_names)
+                pch_sheet_names_written.append(pch_sheet_name)
                 pch_table_one = review_table_raw[review_table_raw["PCH"] == pch_name].copy()
                 if pch_table_one.empty:
                     continue
@@ -3946,12 +4183,27 @@ def export_erection_productivity_summary(
                         current_row += len(header_df) + 1
                         project_table_two = _build_review_table_two(project_scope)
                         project_table_two.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
-                        current_row += len(project_table_two) + 1 + group_gap_rows
+                        current_row += len(project_table_two) + 1
+                        insight_table = project_insight_tables.get((str(pch_name), str(project_name)))
+                        if insight_table is not None and not insight_table.empty:
+                            insight_table.to_excel(
+                                writer,
+                                sheet_name=pch_sheet_name,
+                                index=False,
+                                startrow=current_row,
+                            )
+                            current_row += len(insight_table) + 1
+                        current_row += group_gap_rows
 
         for styled_sheet in sorted(used_sheet_names):
             if styled_sheet == monthly_summary_sheet_label:
                 continue
             _style_clean_sheet(writer, styled_sheet)
+        for pch_sheet_name in pch_sheet_names_written:
+            worksheet = writer.sheets.get(pch_sheet_name)
+            if worksheet is None:
+                continue
+            worksheet.column_dimensions["B"].width = max(72, float(worksheet.column_dimensions["B"].width or 0))
 
     return target_path
 

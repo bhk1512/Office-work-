@@ -81,9 +81,9 @@ def _parse_args() -> argparse.Namespace:
         help="Sheet name for the output workbook (default: %(default)s).",
     )
     parser.add_argument(
-        "--skip-stringing",
+        "--include-stringing",
         action="store_true",
-        help="Skip loading stringing datasets to speed up the bootstrap.",
+        help="Opt in to preloading stringing datasets during bootstrap.",
     )
     parser.add_argument(
         "--project-pch-path",
@@ -180,7 +180,7 @@ def main() -> int:
     config = AppConfig()
     if args.data_path:
         config = replace(config, data_path=Path(args.data_path).expanduser())
-    if args.skip_stringing and config.enable_stringing:
+    if config.enable_stringing and not args.include_stringing:
         config = replace(config, enable_stringing=False)
     config.validate()
 
