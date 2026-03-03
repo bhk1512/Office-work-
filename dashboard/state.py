@@ -43,6 +43,7 @@ from .services.responsibilities import (
     ResponsibilitiesSnapshot,
     load_responsibilities_snapshot,
 )
+from .project_identity import build_project_display, build_project_scope_key, normalize_line_name
 from .stringing import build_tse_lookup_from_df
 
 LOGGER = logging.getLogger(__name__)
@@ -463,6 +464,44 @@ class AppDataStore:
         if "project_name" not in working.columns:
             working["project_name"] = ""
         working["project_name"] = working["project_name"].astype(str).str.strip()
+        if "line_name" in working.columns:
+            working["line_name"] = working["line_name"].map(normalize_line_name)
+        else:
+            working["line_name"] = ""
+        if "project_code" not in working.columns:
+            working["project_code"] = ""
+        working["project_code"] = working["project_code"].fillna("").astype(str).str.strip()
+        computed_display = pd.Series(
+            [
+                build_project_display(code, line, fallback)
+                for code, line, fallback in zip(
+                    working["project_code"], working["line_name"], working["project_name"]
+                )
+            ],
+            index=working.index,
+        )
+        if "project_display" in working.columns:
+            existing_display = working["project_display"].fillna("").astype(str).str.strip()
+            working["project_display"] = existing_display.where(existing_display.astype(bool), computed_display)
+            line_mask = working["line_name"].astype(bool)
+            if line_mask.any():
+                working.loc[line_mask, "project_display"] = computed_display.loc[line_mask]
+        else:
+            working["project_display"] = computed_display
+        computed_scope = pd.Series(
+            [
+                build_project_scope_key(code, line, fallback)
+                for code, line, fallback in zip(
+                    working["project_code"], working["line_name"], working["project_name"]
+                )
+            ],
+            index=working.index,
+        )
+        if "project_scope_key" in working.columns:
+            existing_scope = working["project_scope_key"].fillna("").astype(str).str.strip()
+            working["project_scope_key"] = existing_scope.where(existing_scope.astype(bool), computed_scope)
+        else:
+            working["project_scope_key"] = computed_scope
         working["project_name_key"] = working["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
         working["project_key"] = working.get("project_code", working["project_name"])
         working["project_key"] = working["project_key"].fillna("").astype(str)
@@ -471,6 +510,7 @@ class AppDataStore:
             working["project_name"],
         )
         working["project_key_norm"] = working["project_key"].map(compact_project_key)
+        working["project_scope_key_norm"] = working["project_scope_key"].map(compact_project_key)
         if "gang_name" not in working.columns:
             working["gang_name"] = ""
         working["gang_name"] = working["gang_name"].astype(str).str.strip()
@@ -704,12 +744,13 @@ class AppDataStore:
             self._pch_summary = pd.DataFrame()
             return
 
-        lookup = project_info[["key_name", "pch", "project_name"]].dropna(subset=["key_name"]).copy()
+        lookup = project_info[["key_name", "pch", "project_name", "project_code"]].dropna(subset=["key_name"]).copy()
+        lookup["project_code_norm"] = lookup["project_code"].map(compact_project_key)
         lookup["pch"] = lookup["pch"].fillna("Unknown")
         merged = daily.merge(
             lookup,
-            left_on="project_name_key",
-            right_on="key_name",
+            left_on="project_key_norm",
+            right_on="project_code_norm",
             how="left",
         )
         if "project_name" not in merged.columns:
@@ -742,9 +783,9 @@ class AppDataStore:
         )
 
         gang_map = (
-            daily[["gang_name", "project_name_key"]]
+            daily[["gang_name", "project_key_norm"]]
             .drop_duplicates("gang_name")
-            .merge(lookup, left_on="project_name_key", right_on="key_name", how="left")
+            .merge(lookup, left_on="project_key_norm", right_on="project_code_norm", how="left")
         )
         if not self._erection_gang_summary.empty:
             gang_summary = self._erection_gang_summary.reset_index()
@@ -961,13 +1002,33 @@ class AppDataStore:
         working["__key_name__"] = (
             working["project_name"].astype(str).str.lower().str.replace(r"\s+", " ", regex=True)
         )
-        map_df = (
-            project_info[["key_name", "project_code"]]
-            .dropna()
-            .drop_duplicates("key_name")
-        )
+        project_code_series = working.get("project_code")
+        if isinstance(project_code_series, pd.Series):
+            working["__project_code_norm__"] = project_code_series.fillna("").astype(str).map(compact_project_key)
+        else:
+            working["__project_code_norm__"] = ""
+        map_df = project_info[["key_name", "project_code"]].dropna().copy()
+        map_df["__project_code_norm__"] = map_df["project_code"].map(compact_project_key)
+        map_df = map_df.drop_duplicates("key_name")
         enriched = working.merge(map_df, left_on="__key_name__", right_on="key_name", how="left")
-        enriched = enriched.drop(columns=["__key_name__", "key_name"])
+        if "project_code_y" in enriched.columns:
+            base_code = enriched.get("project_code_x", pd.Series("", index=enriched.index)).fillna("").astype(str)
+            lookup_code = enriched.get("project_code_y", pd.Series("", index=enriched.index)).fillna("").astype(str)
+            enriched["project_code"] = base_code.where(base_code.astype(bool), lookup_code)
+            code_missing = ~enriched["project_code"].astype(bool)
+            if code_missing.any():
+                code_map = (
+                    project_info[["project_code"]]
+                    .dropna()
+                    .assign(__project_code_norm__=project_info["project_code"].map(compact_project_key))
+                    .drop_duplicates("__project_code_norm__")
+                    .set_index("__project_code_norm__")["project_code"]
+                )
+                enriched.loc[code_missing, "project_code"] = (
+                    enriched.loc[code_missing, "__project_code_norm__"].map(code_map).fillna("")
+                )
+        enriched = enriched.drop(columns=["__key_name__", "__project_code_norm__", "key_name"], errors="ignore")
+        enriched = enriched.drop(columns=["project_code_x", "project_code_y"], errors="ignore")
         return enriched
 
     def _create_duckdb_connection(self) -> duckdb.DuckDBPyConnection:

@@ -351,7 +351,9 @@ def compute_stringing_completion_pairs(df: pd.DataFrame) -> set[tuple[str, str]]
             "f/s completion date",
         )
     )
-    project_col = _resolve_column(("project_name", "project", "project title", "project code"))
+    project_col = _resolve_column(
+        ("project_scope_key", "project_display", "project_name", "project", "project title", "project code")
+    )
     from_col = _resolve_column(("from_ap", "from ap", "start tower"))
     to_col = _resolve_column(("to_ap", "to ap", "end tower"))
     location_col = _resolve_column(("location_no", "location number", "span label", "span"))

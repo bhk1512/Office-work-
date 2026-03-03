@@ -6,6 +6,12 @@ import pandas as pd
 import pythoncom
 import win32com.client as win32
 
+from dashboard.project_identity import (
+    canonical_dpr_filename,
+    normalize_line_name,
+    parse_project_identity_from_filename,
+)
+
 # ---------------- CONFIG ----------------
 FOLDER_PATH = "Inbox/DPRs"           # <-- use exact Outlook path for your folder
 DOWNLOAD_DIR = r"C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs"
@@ -61,13 +67,53 @@ def _split_possible_subjects(value) -> list[str]:
     parts = re.split(r"[|,;\n]+", text)
     return [p.strip() for p in parts if p.strip()]
 
-def load_email_config(path: pathlib.Path = EMAIL_CONFIG_PATH) -> dict[str, dict]:
+def _split_semicolon_values(value) -> list[str]:
+    if value is None:
+        return []
+    try:
+        if pd.isna(value):
+            return []
+    except Exception:
+        pass
+    parts = [part.strip() for part in str(value).split(";")]
+    return [part for part in parts if part]
+
+
+def _build_attachment_rules(row) -> list[dict]:
+    attachment_names = _split_semicolon_values(row.get("Possible_Attachement_Name"))
+    if not attachment_names:
+        return []
+
+    line_names = _split_semicolon_values(row.get("Line_Name"))
+    if line_names and len(line_names) != len(attachment_names):
+        logprint(
+            "[email-config] warning: skipping line-aware attachment mapping due to count mismatch "
+            f"(attachments={len(attachment_names)}, lines={len(line_names)}) for email={row.get('Email', '')}"
+        )
+        line_names = []
+
+    rules: list[dict] = []
+    for idx, attachment_name in enumerate(attachment_names):
+        line_name = line_names[idx] if idx < len(line_names) else ""
+        rules.append(
+            {
+                "match_text": attachment_name,
+                "match_key": _normalize_attachment_key(attachment_name, drop_digits=True),
+                "line_name": normalize_line_name(line_name),
+                "line_key": _normalize_for_contains(line_name),
+                "row_index": idx,
+            }
+        )
+    return rules
+
+
+def load_email_config(path: pathlib.Path = EMAIL_CONFIG_PATH) -> dict[str, list[dict]]:
     path = pathlib.Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Email configuration file not found at {path}")
     df = pd.read_excel(path)
-    config: dict[str, dict] = {}
-    for _, row in df.iterrows():
+    config: dict[str, list[dict]] = {}
+    for row_idx, row in df.iterrows():
         email_raw = row.get("Email")
         if pd.isna(email_raw):
             continue
@@ -76,17 +122,16 @@ def load_email_config(path: pathlib.Path = EMAIL_CONFIG_PATH) -> dict[str, dict]
             continue
         name_raw = row.get("Name")
         name = "" if pd.isna(name_raw) else str(name_raw).strip()
-        attachment_raw = row.get("Possible_Attachement_Name")
-        attachment_hint = "" if pd.isna(attachment_raw) else str(attachment_raw).strip()
         project_code_raw = row.get("Project_Code")
         project_code = "" if pd.isna(project_code_raw) else str(project_code_raw).strip().upper()
-        config[email] = {
+        entry = {
             "name": name,
             "possible_subjects": _split_possible_subjects(row.get("Possible_subject")),
-            "possible_attachment_name": attachment_hint,
-            "possible_attachment_key": _normalize_attachment_key(attachment_hint, drop_digits=True) if attachment_hint else "",
             "project_code": project_code,
+            "attachment_rules": _build_attachment_rules(row),
+            "config_row_index": int(row_idx),
         }
+        config.setdefault(email, []).append(entry)
     return config
 
 EMAIL_CONFIG = load_email_config()
@@ -118,13 +163,14 @@ def subject_matches(subj: str, sender_email: str | None = None) -> bool:
         if re.search(pat, lowered, flags=re.IGNORECASE):
             return True
     if sender_email:
-        sender_cfg = EMAIL_CONFIG.get(sender_email)
-        if sender_cfg:
+        sender_cfgs = EMAIL_CONFIG.get(sender_email) or []
+        if sender_cfgs:
             normalized_subj = _normalize_for_contains(text)
-            for candidate in sender_cfg.get("possible_subjects", []):
-                candidate_norm = _normalize_for_contains(candidate)
-                if candidate_norm and candidate_norm in normalized_subj:
-                    return True
+            for sender_cfg in sender_cfgs:
+                for candidate in sender_cfg.get("possible_subjects", []):
+                    candidate_norm = _normalize_for_contains(candidate)
+                    if candidate_norm and candidate_norm in normalized_subj:
+                        return True
     return False
 
 def should_process(mail) -> bool:
@@ -259,33 +305,98 @@ def extract_report_date(mail, fallback_to_received=True) -> dt.date:
     return dt.date.today()
 
 # --- File naming, purge, save ---
-def canonical_name(project_code: str, report_date: dt.date, ext: str) -> str:
-    return f"{project_code} - DPR - {report_date:%Y-%m-%d}{ext}"
-
-def _date_from_canonical_filename(filename: str, prefix: str, ext: str) -> dt.date | None:
-    try:
-        suffix_len = len(ext)
-        date_slice = filename[len(prefix):-suffix_len] if suffix_len else filename[len(prefix):]
-        return dt.datetime.strptime(date_slice, "%Y-%m-%d").date()
-    except Exception:
-        return None
-
-def purge_previous_versions(download_dir: pathlib.Path, project_code: str, ext: str, report_date: dt.date) -> bool:
+def purge_previous_versions(
+    download_dir: pathlib.Path,
+    project_code: str,
+    ext: str,
+    report_date: dt.date,
+    line_name: str = "",
+) -> bool:
     """
     Remove older files for this project so only the newest remains.
     Returns False if an equal/newer file already exists and should be kept.
     """
-    prefix = f"{project_code} - DPR - "
-    prefix_lower = prefix.lower()
+    prefix = canonical_dpr_filename(project_code, report_date, ext, line_name=line_name)
+    target_identity = parse_project_identity_from_filename(prefix)
     for fn in os.listdir(download_dir):
         fl = fn.lower()
-        if fl.startswith(prefix_lower) and fl.endswith(ext.lower()):
-            existing_date = _date_from_canonical_filename(fn, prefix, ext)
+        if not fl.endswith(ext.lower()):
+            continue
+        current_identity = parse_project_identity_from_filename(fn)
+        if (
+            current_identity.get("project_code", "") == target_identity.get("project_code", "")
+            and current_identity.get("line_name", "") == target_identity.get("line_name", "")
+        ):
+            existing_date = _extract_canonical_file_date(fn, ext)
             if existing_date and existing_date >= report_date:
                 return False
-            try: os.remove(download_dir / fn)
-            except Exception: pass
+            try:
+                os.remove(download_dir / fn)
+            except Exception:
+                pass
     return True
+
+
+def _extract_canonical_file_date(filename: str, ext: str) -> dt.date | None:
+    candidate = pathlib.Path(filename).name
+    if ext and not candidate.lower().endswith(ext.lower()):
+        return None
+    stem = candidate[: -len(ext)] if ext else pathlib.Path(candidate).stem
+    match = re.search(r"(\d{4}-\d{2}-\d{2})$", stem)
+    if not match:
+        return None
+    try:
+        return dt.datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _resolve_attachment_match(name: str, sender_cfgs: list[dict]) -> dict | None:
+    normalized = _normalize_attachment_key(name, drop_digits=True)
+    if not normalized:
+        return None
+
+    best: dict | None = None
+    for entry in sender_cfgs:
+        for rule_order, rule in enumerate(entry.get("attachment_rules", [])):
+            match_key = rule.get("match_key") or ""
+            if not match_key or match_key not in normalized:
+                continue
+            candidate = {
+                "project_code": entry.get("project_code", "") or "",
+                "line_name": rule.get("line_name", "") or "",
+                "rule_matched": True,
+                "match_len": len(match_key),
+                "config_row_index": int(entry.get("config_row_index", 0)),
+                "rule_index": int(rule_order),
+            }
+            if best is None:
+                best = candidate
+                continue
+            if candidate["match_len"] > best["match_len"]:
+                best = candidate
+                continue
+            if candidate["match_len"] == best["match_len"]:
+                if (candidate["config_row_index"], candidate["rule_index"]) < (
+                    best["config_row_index"],
+                    best["rule_index"],
+                ):
+                    best = candidate
+    if best is not None:
+        return best
+
+    for entry in sender_cfgs:
+        project_code = entry.get("project_code", "") or ""
+        if project_code:
+            return {
+                "project_code": project_code,
+                "line_name": "",
+                "rule_matched": False,
+                "match_len": 0,
+                "config_row_index": int(entry.get("config_row_index", 0)),
+                "rule_index": -1,
+            }
+    return None
 
 def save_latest_for_mail(mail) -> list[str]:
     saved = []
@@ -297,7 +408,7 @@ def save_latest_for_mail(mail) -> list[str]:
     download_dir = pathlib.Path(DOWNLOAD_DIR)
     download_dir.mkdir(parents=True, exist_ok=True)
     sender_email = get_smtp_address(mail)
-    sender_cfg = EMAIL_CONFIG.get(sender_email)
+    sender_cfgs = EMAIL_CONFIG.get(sender_email) or []
 
     for i in range(1, atts.Count + 1):
         att = atts.Item(i)
@@ -305,33 +416,34 @@ def save_latest_for_mail(mail) -> list[str]:
         if ALLOWED_EXTS and os.path.splitext(name)[1].lower() not in ALLOWED_EXTS:
             continue
         normalized_for_patterns = norm(name)
-        fallback_match = False
-        fallback_project_code = None
-        if sender_cfg:
-            fallback_key = sender_cfg.get("possible_attachment_key") or ""
-            if fallback_key:
-                normalized_for_fallback = _normalize_attachment_key(name, drop_digits=True)
-                if normalized_for_fallback and fallback_key in normalized_for_fallback:
-                    fallback_match = True
-                    fallback_project_code = sender_cfg.get("project_code") or None
+        resolved_match = _resolve_attachment_match(name, sender_cfgs)
+        fallback_match = resolved_match is not None and bool(resolved_match.get("project_code"))
         # must be a DPR file unless fallback hint matched
         if (not fallback_match) and (not all(re.search(pat, normalized_for_patterns, flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN)):
             continue
 
-        # project code from attachment/subject/other attachments
-        project = derive_project_code(mail, att)
-        if not project and fallback_match and fallback_project_code:
-            project = fallback_project_code
+        project = ""
+        line_name = ""
+        if resolved_match and resolved_match.get("rule_matched"):
+            project = str(resolved_match.get("project_code") or "").strip()
+            line_name = normalize_line_name(resolved_match.get("line_name"))
+            if not project:
+                project = derive_project_code(mail, att) or ""
+        else:
+            project = derive_project_code(mail, att) or ""
+            if not project and resolved_match:
+                project = str(resolved_match.get("project_code") or "").strip()
+                line_name = normalize_line_name(resolved_match.get("line_name"))
         if not project:
             # If no project code, skip (or save with original name if you prefer)
             continue
 
         ext = os.path.splitext(name)[1].lower()
         # purge any previous versions for this project/ext; skip if a newer file already exists
-        if not purge_previous_versions(download_dir, project, ext, mail_date):
+        if not purge_previous_versions(download_dir, project, ext, mail_date, line_name=line_name):
             continue
         # save with canonical "<PROJECT> - DPR - <YYYY-MM-DD><ext>"
-        target = download_dir / canonical_name(project, mail_date, ext)
+        target = download_dir / canonical_dpr_filename(project, mail_date, ext, line_name=line_name)
         att.SaveAsFile(str(target))
         saved.append(str(target))
     return saved

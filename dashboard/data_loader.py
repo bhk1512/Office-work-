@@ -28,6 +28,13 @@ from .stringing import (
     extract_stringing_number_of_tse,
 )
 from .plan_utils import infer_project_hint, prepare_stringing_plan_frame
+from .project_identity import (
+    build_project_display,
+    build_project_scope_key,
+    parse_sheet_line_entries,
+    normalize_line_name,
+    parse_project_identity_from_filename,
+)
 
 CONFIG = AppConfig()
 
@@ -196,8 +203,81 @@ def _project_from_filename(name: str) -> str | None:
     """Parse TA/TB + digits from a filename -> 'TA 415' / 'TB 408'."""
     if not name:
         return None
-    m = _PROJECT_RE.search(Path(name).name.upper())
-    return f"{m.group(1)} {m.group(2)}" if m else None
+    identity = parse_project_identity_from_filename(Path(name).name)
+    project_code = identity.get("project_code", "")
+    return project_code or None
+
+
+def _apply_project_identity_columns(
+    df: pd.DataFrame,
+    source_path: Path | str | None,
+    *,
+    project_code: str = "",
+    fallback_name: str = "",
+    line_name_override: str = "",
+    source_sheet: str = "",
+    project_name_column: str = "project_name",
+    project_key_column: str = "project_key",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    working = df.copy()
+    source_name = Path(source_path).name if source_path else ""
+    identity = parse_project_identity_from_filename(source_name) if source_name else {}
+    forced_line_name = normalize_line_name(line_name_override)
+    force_line_identity = bool(forced_line_name)
+    line_name = forced_line_name or normalize_line_name(identity.get("line_name", ""))
+    base_code = str(project_code or identity.get("project_code", "") or "").strip()
+    visible_name = build_project_display(base_code, line_name, fallback_name or identity.get("project_display", ""))
+    scope_key = build_project_scope_key(base_code, line_name, fallback_name or identity.get("project_display", ""))
+
+    if "line_name" not in working.columns or force_line_identity:
+        working["line_name"] = line_name
+    else:
+        series = working["line_name"].fillna("").astype(str).map(normalize_line_name)
+        working["line_name"] = series.where(series.astype(bool), line_name)
+
+    if "project_code" not in working.columns:
+        working["project_code"] = base_code
+    else:
+        series = working["project_code"].fillna("").astype(str).str.strip()
+        working["project_code"] = series.where(series.astype(bool), base_code)
+
+    if project_name_column not in working.columns or force_line_identity:
+        working[project_name_column] = visible_name
+    else:
+        series = working[project_name_column].fillna("").astype(str).str.strip()
+        working[project_name_column] = series.where(series.astype(bool), visible_name)
+        if visible_name and line_name:
+            working[project_name_column] = visible_name
+
+    if "project_display" not in working.columns or force_line_identity:
+        working["project_display"] = visible_name
+    else:
+        series = working["project_display"].fillna("").astype(str).str.strip()
+        working["project_display"] = series.where(series.astype(bool), visible_name)
+        if visible_name and line_name:
+            working["project_display"] = visible_name
+
+    if "project_scope_key" not in working.columns or force_line_identity:
+        working["project_scope_key"] = scope_key
+    else:
+        series = working["project_scope_key"].fillna("").astype(str).str.strip()
+        working["project_scope_key"] = series.where(series.astype(bool), scope_key)
+
+    if project_key_column:
+        if project_key_column not in working.columns:
+            working[project_key_column] = base_code or visible_name
+        else:
+            series = working[project_key_column].fillna("").astype(str).str.strip()
+            working[project_key_column] = series.where(series.astype(bool), base_code or visible_name)
+    if source_sheet:
+        if "source_sheet" not in working.columns or force_line_identity:
+            working["source_sheet"] = source_sheet
+        else:
+            series = working["source_sheet"].fillna("").astype(str).str.strip()
+            working["source_sheet"] = series.where(series.astype(bool), source_sheet)
+    return working
 
 
 def _normalize_project_code_key(value: object) -> str:
@@ -223,7 +303,7 @@ def _resolve_dpr_config_path(raw_root: Path) -> Path | None:
     return None
 
 
-def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[str]]:
+def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[dict[str, str]]]:
     config_path = _resolve_dpr_config_path(raw_root)
     if config_path is None:
         return {}
@@ -240,6 +320,7 @@ def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[str]]:
     headers = {_normalize_space_only(col): col for col in df.columns}
     project_col = headers.get("project code")
     stringing_col = headers.get("stringing sheet names")
+    line_col = headers.get("stringing line names")
     if project_col is None or stringing_col is None:
         LOGGER.warning(
             "Stringing: DPR config %s is missing columns 'Project Code' or 'Stringing Sheet Names'.",
@@ -247,7 +328,7 @@ def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[str]]:
         )
         return {}
 
-    mapping: dict[str, list[str]] = {}
+    mapping: dict[str, list[dict[str, str]]] = {}
     for _, row in df.iterrows():
         project_val = row.get(project_col)
         if project_val is None or pd.isna(project_val) or str(project_val).strip() == "":
@@ -257,12 +338,26 @@ def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[str]]:
         if raw_stringing is None or pd.isna(raw_stringing) or str(raw_stringing).strip() == "":
             mapping[project_key] = []
             continue
-        sheets: list[str] = []
-        for chunk in str(raw_stringing).split(","):
-            candidate = str(chunk).strip()
-            if candidate:
-                sheets.append(candidate)
-        mapping[project_key] = sheets
+        raw_line_names = row.get(line_col) if line_col else None
+        sheet_count = len([chunk for chunk in str(raw_stringing).split(",") if str(chunk).strip()])
+        line_chunks = [str(chunk).strip() for chunk in str(raw_line_names).split(",")] if raw_line_names not in (None, "") and not pd.isna(raw_line_names) else []
+        if line_chunks and len(line_chunks) != sheet_count:
+            LOGGER.warning(
+                "Stringing: project '%s' has mismatched 'Stringing Line Names'; falling back to sheet-name inference.",
+                str(project_val).strip(),
+            )
+            raw_line_names = ""
+
+        entries = parse_sheet_line_entries(raw_stringing, raw_line_names, "stringing")
+        deduped_entries: list[dict[str, str]] = []
+        seen_sheet_keys: set[str] = set()
+        for entry in entries:
+            key = _normalize_space_only(entry.get("sheet_name"))
+            if not key or key in seen_sheet_keys:
+                continue
+            seen_sheet_keys.add(key)
+            deduped_entries.append(entry)
+        mapping[project_key] = deduped_entries
     return mapping
 
 
@@ -520,6 +615,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         status: str,
         *,
         sheet_name: str | None = None,
+        configured_sheet: str | None = None,
+        line_name: str | None = None,
+        line_name_source: str | None = None,
         header_row: int | None = None,
         columns_detected: list[str] | None = None,
         normalized_columns_ok: bool | None = None,
@@ -532,6 +630,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "Workbook": Path(workbook).name if workbook else "",
                 "Project": project,
                 "Sheet": sheet_name or "",
+                "ConfiguredSheet": configured_sheet or "",
+                "LineName": line_name or "",
+                "LineNameSource": line_name_source or "",
                 "DetectedHeaderRow": "" if header_row is None else int(header_row),
                 "ColumnsDetected": ", ".join(columns_detected or []),
                 "NormalizedColumnsOk": bool(normalized_columns_ok) if normalized_columns_ok is not None else "",
@@ -551,6 +652,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     "Workbook": Path(workbook).name if workbook else "",
                     "Project": project,
                     "Sheet": sheet_name or "",
+                    "ConfiguredSheet": configured_sheet or "",
+                    "LineName": line_name or "",
+                    "LineNameSource": line_name_source or "",
                     "Issue": status,
                     "MissingColumns": ", ".join(missing_columns or []),
                     "Rows": int(rows),
@@ -563,6 +667,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         project: str,
         *,
         sheet_name: str | None,
+        configured_sheet: str | None = None,
+        line_name: str | None = None,
+        line_name_source: str | None = None,
         issue: str,
         missing_columns: list[str] | None = None,
         rows: int = 0,
@@ -573,6 +680,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "Workbook": Path(workbook).name if workbook else "",
                 "Project": project,
                 "Sheet": sheet_name or "",
+                "ConfiguredSheet": configured_sheet or "",
+                "LineName": line_name or "",
+                "LineNameSource": line_name_source or "",
                 "Issue": issue,
                 "MissingColumns": ", ".join(missing_columns or []),
                 "Rows": int(rows),
@@ -591,11 +701,13 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             skipped_no_stringing += 1
             continue
         today = pd.Timestamp.today().normalize()
-
-        # If the sheet does not exist, log and continue (so Diagnostics shows it)
         workbook_sheet_names, _ = _list_excel_sheet_names(wb)
         if project_sheet_candidates:
-            actual_sheet = _resolve_project_sheet_name(workbook_sheet_names, project_sheet_candidates)
+            sheet_requests: list[tuple[dict[str, str], str | None]] = []
+            for sheet_entry in project_sheet_candidates:
+                configured_name = str(sheet_entry.get("sheet_name", "")).strip()
+                actual_sheet = _resolve_project_sheet_name(workbook_sheet_names, [configured_name])
+                sheet_requests.append((sheet_entry, actual_sheet))
         else:
             actual_sheet = _resolve_excel_sheet_name(
                 wb,
@@ -603,273 +715,316 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 contains_keyword="stringing",
                 sheet_names=workbook_sheet_names,
             )
-        if not actual_sheet:
-            _log_dpr_diag(wb, proj, 0, 0, "NO_TARGET_SHEET", sheet_name=actual_sheet)
-            continue
+            sheet_requests = [({"sheet_name": actual_sheet or "", "line_name": "", "line_name_source": ""}, actual_sheet)]
 
-        header_row = None
-        header_labels: list[str] = []
-        try:
-            with pd.ExcelFile(wb) as xl:
-                df_probe = xl.parse(sheet_name=actual_sheet, header=None)
-            header_row, header_labels = find_stringing_header_row(df_probe)
-            header_labels = [str(label).strip() for label in (header_labels or [])]
-        except Exception:
-            header_row, header_labels = None, []
+        for sheet_entry, actual_sheet in sheet_requests:
+            configured_name = str(sheet_entry.get("sheet_name", "")).strip()
+            line_name_override = normalize_line_name(sheet_entry.get("line_name", ""))
+            line_name_source = str(sheet_entry.get("line_name_source", "")).strip()
 
-        # Try robust parse of the desired sheet
-        try:
-            df_raw = read_stringing_sheet_robust(str(wb), actual_sheet)
-        except Exception as exc:
-            LOGGER.warning(
-                "Stringing: failed reading '%s' [desired='%s', actual='%s']: %s",
+            if not actual_sheet:
+                _log_dpr_diag(
+                    wb,
+                    proj,
+                    0,
+                    0,
+                    "NO_TARGET_SHEET",
+                    sheet_name="",
+                    configured_sheet=configured_name,
+                    line_name=line_name_override,
+                    line_name_source=line_name_source,
+                )
+                continue
+
+            header_row = None
+            header_labels: list[str] = []
+            try:
+                with pd.ExcelFile(wb) as xl:
+                    df_probe = xl.parse(sheet_name=actual_sheet, header=None)
+                header_row, header_labels = find_stringing_header_row(df_probe)
+                header_labels = [str(label).strip() for label in (header_labels or [])]
+            except Exception:
+                header_row, header_labels = None, []
+
+            try:
+                df_raw = read_stringing_sheet_robust(str(wb), actual_sheet)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Stringing: failed reading '%s' [desired='%s', actual='%s']: %s",
+                    wb,
+                    configured_name or sheet_name,
+                    actual_sheet,
+                    exc,
+                )
+                _log_dpr_diag(
+                    wb,
+                    proj,
+                    0,
+                    0,
+                    f"READ_FAIL: {type(exc).__name__}",
+                    sheet_name=actual_sheet,
+                    configured_sheet=configured_name,
+                    line_name=line_name_override,
+                    line_name_source=line_name_source,
+                    header_row=header_row,
+                    columns_detected=header_labels,
+                )
+                continue
+
+            if df_raw is None or df_raw.empty:
+                _log_dpr_diag(
+                    wb,
+                    proj,
+                    0,
+                    0,
+                    "EMPTY_SHEET",
+                    sheet_name=actual_sheet,
+                    configured_sheet=configured_name,
+                    line_name=line_name_override,
+                    line_name_source=line_name_source,
+                    header_row=header_row,
+                    columns_detected=header_labels,
+                )
+                continue
+
+            tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
+
+            try:
+                compiled_norm, norm_report = normalize_stringing_columns(df_raw)
+            except Exception:
+                compiled_norm = df_raw.copy()
+                norm_report = {"missing": []}
+
+            missing_headers = list(norm_report.get("missing", []))
+            if missing_headers:
+                LOGGER.warning(
+                    "Stringing: workbook '%s' sheet '%s' missing required headers: %s",
+                    wb.name,
+                    actual_sheet,
+                    ", ".join(missing_headers),
+                )
+                _append_dpr_issue(
+                    wb,
+                    proj,
+                    sheet_name=actual_sheet,
+                    configured_sheet=configured_name,
+                    line_name=line_name_override,
+                    line_name_source=line_name_source,
+                    issue="MISSING_REQUIRED_COLUMNS",
+                    missing_columns=missing_headers,
+                    rows=int(len(df_raw.index)),
+                    daily_rows=0,
+                )
+
+            duplicate_headers = df_raw.columns[df_raw.columns.duplicated()].tolist()
+            if duplicate_headers:
+                deduped = list(dict.fromkeys(duplicate_headers))
+                LOGGER.warning(
+                    "Stringing: workbook '%s' sheet '%s' has duplicate headers that will be dropped: %s",
+                    wb.name,
+                    actual_sheet,
+                    ", ".join(deduped),
+                )
+
+            if "source_file" not in compiled_norm.columns:
+                compiled_norm["source_file"] = wb.name
+            compiled_norm = _apply_project_identity_columns(
+                compiled_norm,
                 wb,
-                sheet_name,
-                actual_sheet,
-                exc,
+                project_code=proj,
+                fallback_name=proj,
+                line_name_override=line_name_override,
+                source_sheet=actual_sheet,
+                project_name_column="project_name",
+                project_key_column="project_key",
             )
-            _log_dpr_diag(
-                wb,
-                proj,
-                0,
-                0,
-                f"READ_FAIL: {type(exc).__name__}",
-                sheet_name=actual_sheet,
-                header_row=header_row,
-                columns_detected=header_labels,
-            )
-            continue
+            if "project" not in compiled_norm.columns:
+                compiled_norm["project"] = compiled_norm["project_name"]
 
-        if df_raw is None or df_raw.empty:
-            _log_dpr_diag(
-                wb,
-                proj,
-                0,
-                0,
-                "EMPTY_SHEET",
-                sheet_name=actual_sheet,
-                header_row=header_row,
-                columns_detected=header_labels,
-            )
-            continue
+            if "number_of_tse" not in compiled_norm.columns:
+                compiled_norm["number_of_tse"] = pd.NA
+            if tse_value is not None:
+                compiled_norm["number_of_tse"] = int(tse_value)
 
-        tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
+            effective_line_name = str(compiled_norm.get("line_name", pd.Series([""])).iloc[0])
 
-        # Normalize columns
-        try:
-            compiled_norm, norm_report = normalize_stringing_columns(df_raw)
-        except Exception:
-            compiled_norm = df_raw.copy()
-            norm_report = {"missing": []}
+            try:
+                work = compiled_norm.copy()
+                has_po_start = "po_start_date" in work.columns
+                has_po_complete = "po_completion_date" in work.columns
+                has_fs_start = "fs_starting_date" in work.columns
+                has_fs_complete = "fs_complete_date" in work.columns
+                for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
+                    if col in work.columns:
+                        work[col] = pd.to_datetime(work[col], errors="coerce").dt.normalize()
+                    else:
+                        work[col] = pd.NaT
 
-        missing_headers = list(norm_report.get("missing", []))
-        if missing_headers:
-            LOGGER.warning(
-                "Stringing: workbook '%s' missing required headers: %s",
-                wb.name,
-                ", ".join(missing_headers),
-            )
-            _append_dpr_issue(
-                wb,
-                proj,
-                sheet_name=actual_sheet,
-                issue="MISSING_REQUIRED_COLUMNS",
-                missing_columns=missing_headers,
-                rows=int(len(df_raw.index)),
-                daily_rows=0,
-            )
+                work["length_km"] = pd.to_numeric(work.get("length_km", pd.Series(pd.NA, index=work.index)), errors="coerce")
+                work["po_km"] = pd.to_numeric(work.get("po_km", pd.Series(pd.NA, index=work.index)), errors="coerce")
 
-        duplicate_headers = df_raw.columns[df_raw.columns.duplicated()].tolist()
-        if duplicate_headers:
-            deduped = list(dict.fromkeys(duplicate_headers))
-            LOGGER.warning(
-                "Stringing: workbook '%s' has duplicate headers that will be dropped: %s",
-                wb.name,
-                ", ".join(deduped),
-            )
+                def _filled(series: pd.Series) -> pd.Series:
+                    return series.notna() & series.astype(str).str.strip().ne("")
 
-        # Inject project/source for traceability (fill blank project_name)
-        if "project_name" not in compiled_norm.columns:
-            compiled_norm["project_name"] = proj
-        else:
-            s = compiled_norm["project_name"].astype(str).str.strip()
-            compiled_norm["project_name"] = s.mask(s.eq("") | s.eq("nan") | s.eq("None"), proj)
-        if "project" not in compiled_norm.columns:
-            compiled_norm["project"] = compiled_norm["project_name"]
-        if "source_file" not in compiled_norm.columns:
-            compiled_norm["source_file"] = wb.name
+                po_start_filled = _filled(work.get("po_start_date", pd.Series(pd.NaT, index=work.index))) if has_po_start else pd.Series(False, index=work.index)
+                po_complete_filled = _filled(work.get("po_completion_date", pd.Series(pd.NaT, index=work.index))) if has_po_complete else pd.Series(False, index=work.index)
+                fs_start_filled = _filled(work.get("fs_starting_date", pd.Series(pd.NaT, index=work.index))) if has_fs_start else pd.Series(False, index=work.index)
+                fs_complete_filled = _filled(work.get("fs_complete_date", pd.Series(pd.NaT, index=work.index))) if has_fs_complete else pd.Series(False, index=work.index)
 
-        # Persist Number of TSE metadata for downstream consumers
-        if "number_of_tse" not in compiled_norm.columns:
-            compiled_norm["number_of_tse"] = pd.NA
-        if tse_value is not None:
-            compiled_norm["number_of_tse"] = int(tse_value)
+                po_start_invalid = po_start_filled & work["po_start_date"].isna() if has_po_start else pd.Series(False, index=work.index)
+                po_complete_invalid = po_complete_filled & work["po_completion_date"].isna() if has_po_complete else pd.Series(False, index=work.index)
+                fs_start_invalid = fs_start_filled & work["fs_starting_date"].isna() if has_fs_start else pd.Series(False, index=work.index)
+                fs_complete_invalid = fs_complete_filled & work["fs_complete_date"].isna() if has_fs_complete else pd.Series(False, index=work.index)
 
-        # Row-level data issues (stringing)
-        try:
-            work = compiled_norm.copy()
-            has_po_start = "po_start_date" in work.columns
-            has_po_complete = "po_completion_date" in work.columns
-            has_fs_start = "fs_starting_date" in work.columns
-            has_fs_complete = "fs_complete_date" in work.columns
-            for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
-                if col in work.columns:
-                    work[col] = pd.to_datetime(work[col], errors="coerce").dt.normalize()
-                else:
-                    work[col] = pd.NaT
+                po_missing = (
+                    (~po_start_filled if has_po_start else pd.Series(False, index=work.index))
+                    | (~po_complete_filled if has_po_complete else pd.Series(False, index=work.index))
+                )
+                fs_missing = (
+                    (~fs_start_filled if has_fs_start else pd.Series(False, index=work.index))
+                    | (~fs_complete_filled if has_fs_complete else pd.Series(False, index=work.index))
+                )
 
-            work["length_km"] = pd.to_numeric(work.get("length_km", pd.Series(pd.NA, index=work.index)), errors="coerce")
-            work["po_km"] = pd.to_numeric(work.get("po_km", pd.Series(pd.NA, index=work.index)), errors="coerce")
+                po_non_positive = (
+                    work["po_start_date"].notna()
+                    & work["po_completion_date"].notna()
+                    & ((work["po_completion_date"] - work["po_start_date"]).dt.days + 1 <= 0)
+                ) if has_po_start and has_po_complete else pd.Series(False, index=work.index)
+                fs_non_positive = (
+                    work["fs_starting_date"].notna()
+                    & work["fs_complete_date"].notna()
+                    & ((work["fs_complete_date"] - work["fs_starting_date"]).dt.days + 1 <= 0)
+                ) if has_fs_start and has_fs_complete else pd.Series(False, index=work.index)
 
-            def _filled(series: pd.Series) -> pd.Series:
-                return series.notna() & series.astype(str).str.strip().ne("")
+                po_future = (work["po_completion_date"].notna() & (work["po_completion_date"] >= today)) if has_po_complete else pd.Series(False, index=work.index)
+                fs_future = (work["fs_complete_date"].notna() & (work["fs_complete_date"] >= today)) if has_fs_complete else pd.Series(False, index=work.index)
 
-            po_start_filled = _filled(work.get("po_start_date", pd.Series(pd.NaT, index=work.index))) if has_po_start else pd.Series(False, index=work.index)
-            po_complete_filled = _filled(work.get("po_completion_date", pd.Series(pd.NaT, index=work.index))) if has_po_complete else pd.Series(False, index=work.index)
-            fs_start_filled = _filled(work.get("fs_starting_date", pd.Series(pd.NaT, index=work.index))) if has_fs_start else pd.Series(False, index=work.index)
-            fs_complete_filled = _filled(work.get("fs_complete_date", pd.Series(pd.NaT, index=work.index))) if has_fs_complete else pd.Series(False, index=work.index)
+                any_issue = (
+                    po_start_invalid
+                    | po_complete_invalid
+                    | fs_start_invalid
+                    | fs_complete_invalid
+                    | po_missing
+                    | fs_missing
+                    | po_non_positive
+                    | fs_non_positive
+                    | po_future
+                    | fs_future
+                )
 
-            po_start_invalid = po_start_filled & work["po_start_date"].isna() if has_po_start else pd.Series(False, index=work.index)
-            po_complete_invalid = po_complete_filled & work["po_completion_date"].isna() if has_po_complete else pd.Series(False, index=work.index)
-            fs_start_invalid = fs_start_filled & work["fs_starting_date"].isna() if has_fs_start else pd.Series(False, index=work.index)
-            fs_complete_invalid = fs_complete_filled & work["fs_complete_date"].isna() if has_fs_complete else pd.Series(False, index=work.index)
+                if any_issue.any():
+                    columns_for_issues = [
+                        "project_name",
+                        "from_ap",
+                        "to_ap",
+                        "gang_name",
+                        "method",
+                        "status",
+                        "po_start_date",
+                        "po_completion_date",
+                        "fs_starting_date",
+                        "fs_complete_date",
+                        "length_m",
+                        "length_km",
+                        "po_km",
+                        "source_file",
+                        "source_sheet",
+                    ]
+                    for col in columns_for_issues:
+                        if col not in work.columns:
+                            work[col] = pd.NA
 
-            po_missing = (
-                (~po_start_filled if has_po_start else pd.Series(False, index=work.index))
-                | (~po_complete_filled if has_po_complete else pd.Series(False, index=work.index))
-            )
-            fs_missing = (
-                (~fs_start_filled if has_fs_start else pd.Series(False, index=work.index))
-                | (~fs_complete_filled if has_fs_complete else pd.Series(False, index=work.index))
-            )
+                    def _mk_issue(row: pd.Series) -> str:
+                        messages: list[str] = []
+                        if has_po_start and pd.isna(row.get("po_start_date")):
+                            messages.append("Missing/Invalid PO Start Date")
+                        if has_po_complete and pd.isna(row.get("po_completion_date")):
+                            messages.append("Missing/Invalid PO Complete Date")
+                        if has_fs_start and pd.isna(row.get("fs_starting_date")):
+                            messages.append("Missing/Invalid F/S Start Date")
+                        if has_fs_complete and pd.isna(row.get("fs_complete_date")):
+                            messages.append("Missing/Invalid F/S Complete Date")
+                        if has_po_start and has_po_complete and row.get("po_start_date") is not pd.NaT and row.get("po_completion_date") is not pd.NaT:
+                            try:
+                                if (row["po_completion_date"] - row["po_start_date"]).days + 1 <= 0:
+                                    messages.append("PO Start > PO Complete (non-positive duration)")
+                            except Exception:
+                                pass
+                        if has_fs_start and has_fs_complete and row.get("fs_starting_date") is not pd.NaT and row.get("fs_complete_date") is not pd.NaT:
+                            try:
+                                if (row["fs_complete_date"] - row["fs_starting_date"]).days + 1 <= 0:
+                                    messages.append("F/S Start > F/S Complete (non-positive duration)")
+                            except Exception:
+                                pass
+                        if has_po_complete and pd.notna(row.get("po_completion_date")) and row["po_completion_date"] >= today:
+                            messages.append("PO Completion >= today (future)")
+                        if has_fs_complete and pd.notna(row.get("fs_complete_date")) and row["fs_complete_date"] >= today:
+                            messages.append("F/S Completion >= today (future)")
+                        return "; ".join(messages)
 
-            po_non_positive = (
-                work["po_start_date"].notna()
-                & work["po_completion_date"].notna()
-                & ((work["po_completion_date"] - work["po_start_date"]).dt.days + 1 <= 0)
-            ) if has_po_start and has_po_complete else pd.Series(False, index=work.index)
-            fs_non_positive = (
-                work["fs_starting_date"].notna()
-                & work["fs_complete_date"].notna()
-                & ((work["fs_complete_date"] - work["fs_starting_date"]).dt.days + 1 <= 0)
-            ) if has_fs_start and has_fs_complete else pd.Series(False, index=work.index)
+                    issue_rows = work.loc[any_issue, columns_for_issues].copy()
+                    issue_rows["Issues"] = issue_rows.apply(_mk_issue, axis=1)
+                    data_issue_rows.append(issue_rows)
+            except Exception:
+                pass
 
-            po_future = (work["po_completion_date"].notna() & (work["po_completion_date"] >= today)) if has_po_complete else pd.Series(False, index=work.index)
-            fs_future = (work["fs_complete_date"].notna() & (work["fs_complete_date"] >= today)) if has_fs_complete else pd.Series(False, index=work.index)
+            try:
+                daily = expand_stringing_to_daily(compiled_norm)
+            except Exception:
+                daily = pd.DataFrame()
 
-            any_issue = (
-                po_start_invalid
-                | po_complete_invalid
-                | fs_start_invalid
-                | fs_complete_invalid
-                | po_missing
-                | fs_missing
-                | po_non_positive
-                | fs_non_positive
-                | po_future
-                | fs_future
-            )
-
-            if any_issue.any():
-                columns_for_issues = [
-                    "project_name",
-                    "from_ap",
-                    "to_ap",
-                    "gang_name",
-                    "method",
-                    "status",
-                    "po_start_date",
-                    "po_completion_date",
-                    "fs_starting_date",
-                    "fs_complete_date",
-                    "length_m",
-                    "length_km",
-                    "po_km",
-                    "source_file",
-                ]
-                for col in columns_for_issues:
-                    if col not in work.columns:
-                        work[col] = pd.NA
-
-                def _mk_issue(row: pd.Series) -> str:
-                    messages: list[str] = []
-                    if has_po_start and pd.isna(row.get("po_start_date")):
-                        messages.append("Missing/Invalid PO Start Date")
-                    if has_po_complete and pd.isna(row.get("po_completion_date")):
-                        messages.append("Missing/Invalid PO Complete Date")
-                    if has_fs_start and pd.isna(row.get("fs_starting_date")):
-                        messages.append("Missing/Invalid F/S Start Date")
-                    if has_fs_complete and pd.isna(row.get("fs_complete_date")):
-                        messages.append("Missing/Invalid F/S Complete Date")
-                    if has_po_start and has_po_complete and row.get("po_start_date") is not pd.NaT and row.get("po_completion_date") is not pd.NaT:
-                        try:
-                            if (row["po_completion_date"] - row["po_start_date"]).days + 1 <= 0:
-                                messages.append("PO Start > PO Complete (non-positive duration)")
-                        except Exception:
-                            pass
-                    if has_fs_start and has_fs_complete and row.get("fs_starting_date") is not pd.NaT and row.get("fs_complete_date") is not pd.NaT:
-                        try:
-                            if (row["fs_complete_date"] - row["fs_starting_date"]).days + 1 <= 0:
-                                messages.append("F/S Start > F/S Complete (non-positive duration)")
-                        except Exception:
-                            pass
-                    if has_po_complete and pd.notna(row.get("po_completion_date")) and row["po_completion_date"] >= today:
-                        messages.append("PO Completion >= today (future)")
-                    if has_fs_complete and pd.notna(row.get("fs_complete_date")) and row["fs_complete_date"] >= today:
-                        messages.append("F/S Completion >= today (future)")
-                    return "; ".join(messages)
-
-                issue_rows = work.loc[any_issue, columns_for_issues].copy()
-                issue_rows["Issues"] = issue_rows.apply(_mk_issue, axis=1)
-                data_issue_rows.append(issue_rows)
-        except Exception:
-            pass
-
-        # Expand to daily
-        try:
-            daily = expand_stringing_to_daily(compiled_norm)
-        except Exception:
-            daily = pd.DataFrame()
-
-        compiled_frames.append(compiled_norm)
-        if not daily.empty:
-            # Keep project/source on daily rows as well
-            if "project_name" not in daily.columns:
-                daily["project_name"] = compiled_norm["project_name"].iloc[0]
-            if "project" not in daily.columns:
-                daily["project"] = daily["project_name"]
-            if "source_file" not in daily.columns:
-                daily["source_file"] = wb.name
-            daily_frames.append(daily)
-            _log_dpr_diag(
-                wb,
-                proj,
-                int(len(compiled_norm)),
-                int(len(daily)),
-                "OK",
-                sheet_name=actual_sheet,
-                header_row=header_row,
-                columns_detected=header_labels,
-                normalized_columns_ok=bool(norm_report.get("normalized_columns_ok", False)),
-                present_columns=list(norm_report.get("present", [])),
-                missing_columns=list(norm_report.get("missing", [])),
-                applied_map=dict(norm_report.get("applied_map", {})),
-            )
-        else:
-            _log_dpr_diag(
-                wb,
-                proj,
-                int(len(compiled_norm)),
-                0,
-                "NO_DAILY",
-                sheet_name=actual_sheet,
-                header_row=header_row,
-                columns_detected=header_labels,
-                normalized_columns_ok=bool(norm_report.get("normalized_columns_ok", False)),
-                present_columns=list(norm_report.get("present", [])),
-                missing_columns=list(norm_report.get("missing", [])),
-                applied_map=dict(norm_report.get("applied_map", {})),
-            )
+            compiled_frames.append(compiled_norm)
+            if not daily.empty:
+                if "source_file" not in daily.columns:
+                    daily["source_file"] = wb.name
+                daily = _apply_project_identity_columns(
+                    daily,
+                    wb,
+                    project_code=str(compiled_norm.get("project_code", pd.Series([proj])).iloc[0]),
+                    fallback_name=str(compiled_norm.get("project_name", pd.Series([proj])).iloc[0]),
+                    line_name_override=line_name_override,
+                    source_sheet=actual_sheet,
+                    project_name_column="project_name",
+                    project_key_column="project_key",
+                )
+                if "project" not in daily.columns:
+                    daily["project"] = daily["project_name"]
+                daily_frames.append(daily)
+                _log_dpr_diag(
+                    wb,
+                    proj,
+                    int(len(compiled_norm)),
+                    int(len(daily)),
+                    "OK",
+                    sheet_name=actual_sheet,
+                    configured_sheet=configured_name,
+                    line_name=effective_line_name,
+                    line_name_source=line_name_source,
+                    header_row=header_row,
+                    columns_detected=header_labels,
+                    normalized_columns_ok=bool(norm_report.get("normalized_columns_ok", False)),
+                    present_columns=list(norm_report.get("present", [])),
+                    missing_columns=list(norm_report.get("missing", [])),
+                    applied_map=dict(norm_report.get("applied_map", {})),
+                )
+            else:
+                _log_dpr_diag(
+                    wb,
+                    proj,
+                    int(len(compiled_norm)),
+                    0,
+                    "NO_DAILY",
+                    sheet_name=actual_sheet,
+                    configured_sheet=configured_name,
+                    line_name=effective_line_name,
+                    line_name_source=line_name_source,
+                    header_row=header_row,
+                    columns_detected=header_labels,
+                    normalized_columns_ok=bool(norm_report.get("normalized_columns_ok", False)),
+                    present_columns=list(norm_report.get("present", [])),
+                    missing_columns=list(norm_report.get("missing", [])),
+                    applied_map=dict(norm_report.get("applied_map", {})),
+                )
 
     if skipped_no_stringing:
         LOGGER.info(
@@ -948,6 +1103,14 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 normalized["project_key"] = normalized["project_key"].replace("", project_code)
             if project_label:
                 normalized["project_name"] = normalized["project_name"].replace("", project_label)
+            normalized = _apply_project_identity_columns(
+                normalized,
+                wb,
+                project_code=project_code,
+                fallback_name=project_label or project_code,
+                project_name_column="project_name",
+                project_key_column="project_key",
+            )
             plan_frames.append(normalized)
             plan_issue_rows.extend(local_issues)
             plan_month_value = _infer_plan_month_from_frame(normalized)
@@ -1175,43 +1338,16 @@ def _ensure_stringing_project_name(df: pd.DataFrame, base_path: Path) -> pd.Data
     code from the Excel/parquet file name (e.g., TA 415 / TB 408).
     Also sets a 'project' mirror column and 'source_file' for auditability.
     """
-    try:
-        from .stringing import parse_project_code_from_filename
-    except Exception:
-        # Fallback to the local regex helper if needed
-        def parse_project_code_from_filename(name: str) -> str | None:
-            m = _PROJECT_RE.search(str(name).upper())
-            return f"{m.group(1)} {m.group(2)}" if m else None
-
-    df = df.copy()
-    # Where to parse from: prefer the file's name; if it's a directory, still try its name.
-    guess = parse_project_code_from_filename(base_path.name)
-    if not guess:
-        # One more try with the full path string in case the code is in a parent dir
-        guess = parse_project_code_from_filename(str(base_path))
-
-    # Add the source file for traceability (safe no-op if already present)
-    if "source_file" not in df.columns:
-        df["source_file"] = base_path.name
-
-    if not guess:
-        return df
-
-    # Normalize and fill project_name
-    if "project_name" not in df.columns:
-        df["project_name"] = guess
+    working = df.copy()
+    if "source_file" not in working.columns:
+        working["source_file"] = base_path.name
+    working = _apply_project_identity_columns(working, base_path, project_name_column="project_name", project_key_column="")
+    if "project" not in working.columns:
+        working["project"] = working["project_name"]
     else:
-        s = df["project_name"].astype(str).str.strip()
-        df["project_name"] = s.mask(s.eq("") | s.eq("nan") | s.eq("None"), guess)
-
-    # Keep a 'project' mirror (some parts of the app look for this)
-    if "project" not in df.columns:
-        df["project"] = df["project_name"]
-    else:
-        s = df["project"].astype(str).str.strip()
-        df["project"] = s.mask(s.eq("") | s.eq("nan") | s.eq("None"), df["project_name"])
-
-    return df
+        s = working["project"].astype(str).str.strip()
+        working["project"] = s.mask(s.eq("") | s.eq("nan") | s.eq("None"), working["project_name"])
+    return working
 
 
 def _stringing_frame_has_project_metadata(df: pd.DataFrame) -> bool:
@@ -1233,7 +1369,7 @@ def _stringing_frame_has_project_metadata(df: pd.DataFrame) -> bool:
         mask = ~normalized.isin({"", "nan", "none", "null"})
         return bool(mask.any())
 
-    return _has_values("project_name") or _has_values("project")
+    return _has_values("project_name") or _has_values("project") or _has_values("project_display")
 
 
 def _ttl_lru_cache(maxsize: int, ttl_seconds: int):
@@ -1496,19 +1632,29 @@ def _export_stringing_compiled_artifacts(base: Path, sheet_name: str, df_raw: pd
     except Exception:
         normalized, norm_report = df_raw.copy(), {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
 
-    # --- NEW: inject project name into both raw + normalized from file name ---
+    # Keep line-aware project metadata in both raw and normalized artifacts.
     source_name = str(Path(base).name)
     proj = parse_project_code_from_filename(source_name)
-
-    if proj:
-        for fr in (df_raw, normalized):
-            if "project_name" not in fr.columns:
-                fr["project_name"] = proj
-            else:
-                s = fr["project_name"].astype(str).str.strip()
-                fr["project_name"] = s.mask(s.eq("") | s.eq("nan") | s.eq("None"), proj)
-            if "project" not in fr.columns:
-                fr["project"] = fr["project_name"]
+    df_raw = _apply_project_identity_columns(
+        df_raw,
+        Path(base),
+        project_code=proj,
+        fallback_name=proj,
+        project_name_column="project_name",
+        project_key_column="project_key",
+    )
+    normalized = _apply_project_identity_columns(
+        normalized,
+        Path(base),
+        project_code=proj,
+        fallback_name=proj,
+        project_name_column="project_name",
+        project_key_column="project_key",
+    )
+    if "project" not in df_raw.columns:
+        df_raw["project"] = df_raw["project_name"]
+    if "project" not in normalized.columns:
+        normalized["project"] = normalized["project_name"]
 
     # write Excel workbook (always)
     with pd.ExcelWriter(workbook_path, engine="openpyxl", mode="w") as xw:
@@ -1586,7 +1732,7 @@ def _export_stringing_compiled_artifacts(base: Path, sheet_name: str, df_raw: pd
     readme_df = pd.DataFrame([
         {
             "Note": "Stringing compiled workbook generated by dashboard loader.",
-            "Rules": "Dates parsed with pandas to_datetime (coerce); PO start to F/S complete inclusive; basic column normalization applied.",
+            "Rules": "Dates parsed with pandas to_datetime (coerce); configured stringing sheets are processed independently with per-sheet line identity before concatenation; PO start to F/S complete inclusive; basic column normalization applied.",
         }
     ])
 
@@ -2128,6 +2274,18 @@ def load_daily_from_proddailyexpanded(
     col_status = _pick_optional(df, ("Status",))
     if col_status:
         data["status"] = df[col_status].astype(str).str.strip()
+    col_project_code = _pick_optional(df, ("Project Code", "project_code"))
+    if col_project_code:
+        data["project_code"] = df[col_project_code].astype(str).str.strip()
+    col_line_name = _pick_optional(df, ("Line Name", "line_name"))
+    if col_line_name:
+        data["line_name"] = df[col_line_name].astype(str).str.strip()
+    col_project_display = _pick_optional(df, ("Project Display", "project_display"))
+    if col_project_display:
+        data["project_display"] = df[col_project_display].astype(str).str.strip()
+    col_scope_key = _pick_optional(df, ("Project Scope Key", "project_scope_key"))
+    if col_scope_key:
+        data["project_scope_key"] = df[col_scope_key].astype(str).str.strip()
 
     result = pd.DataFrame(data).dropna(subset=["date", "daily_prod_mt"])
     LOGGER.debug("Loaded %d daily rows from %s", len(result), sheet)
@@ -2167,6 +2325,21 @@ def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "R
         base["tower_type"] = df[tower_type_col].map(_normalize_tower_type)
     else:
         base["tower_type"] = ""
+    for output_col, candidates in (
+        ("project_code", ("Project Code", "project_code")),
+        ("line_name", ("Line Name", "line_name")),
+        ("project_display", ("Project Display", "project_display")),
+        ("project_scope_key", ("Project Scope Key", "project_scope_key")),
+    ):
+        selected = None
+        for candidate in candidates:
+            if candidate in df.columns:
+                selected = candidate
+                break
+        if selected:
+            base[output_col] = df[selected].astype(str).str.strip()
+        else:
+            base[output_col] = ""
     rows: list[dict[str, object]] = []
     for _, record in base.iterrows():
         for date in pd.date_range(record["start"], record["end"], freq="D"):
@@ -2175,6 +2348,10 @@ def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "R
                         "date": date.normalize(),
                         "daily_prod_mt": record["daily_prod_mt"],
                         "project_name": record["project_name"],
+                        "project_code": record.get("project_code", ""),
+                        "line_name": record.get("line_name", ""),
+                        "project_display": record.get("project_display", ""),
+                        "project_scope_key": record.get("project_scope_key", ""),
                         "gang_name": record["gang_name"],
                         "tower_type": record.get("tower_type", ""),
                     }

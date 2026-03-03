@@ -38,6 +38,12 @@ from zipfile import BadZipFile
 
 import pandas as pd
 from openpyxl import load_workbook
+from dashboard.project_identity import (
+    build_project_display,
+    build_project_scope_key,
+    normalize_line_name,
+    parse_project_identity_from_filename,
+)
 
 # =========================
 # === Config (Editable) ===
@@ -251,6 +257,12 @@ def infer_project_name_from_filename(path: str) -> str:
     Extract project code from filenames like:
     'Micro Plan - TA-416 Sep'25.xlsx' → 'TA416'
     """
+    identity = parse_project_identity_from_filename(path)
+    project_code = str(identity.get("project_code", "")).strip()
+    line_name = normalize_line_name(identity.get("line_name", ""))
+    if project_code:
+        return build_project_display(project_code, line_name, project_code)
+
     stem = os.path.splitext(os.path.basename(path))[0]
 
     # Strip the "micro plan" words
@@ -676,8 +688,11 @@ def _open_writer_overwriting_sheets(output_path: str) -> pd.ExcelWriter:
 # ======================
 
 def _default_project_metadata(path: str) -> tuple[str, str]:
+    identity = parse_project_identity_from_filename(path)
     name = infer_project_name_from_filename(path)
-    key = normalize_key(name)
+    key = build_project_scope_key(identity.get("project_code", ""), identity.get("line_name", ""), name)
+    if not key:
+        key = normalize_key(name)
     return name, key
 
 

@@ -21,6 +21,7 @@ from .metrics import (
     compute_project_baseline_maps_for,
 )
 from .pch_normalizer import CANONICAL_PCH_PRIMARY, normalize_pch
+from .project_identity import build_project_display, build_project_scope_key, normalize_line_name
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .state import AppDataStore
@@ -143,6 +144,12 @@ _COMPILED_COLUMN_ALIASES = {
     "project": "project_name",
     "project code": "project_code",
     "project_code": "project_code",
+    "line name": "line_name",
+    "line_name": "line_name",
+    "project display": "project_display",
+    "project_display": "project_display",
+    "project scope key": "project_scope_key",
+    "project_scope_key": "project_scope_key",
     "location no.": "location_no",
     "location number": "location_no",
     "location no": "location_no",
@@ -264,7 +271,12 @@ def _load_dpr_table(path: Path) -> pd.DataFrame:
     return data
 
 
-def _load_compiled_completion_rows(path: Path | None, project_code: str) -> pd.DataFrame:
+def _load_compiled_completion_rows(
+    path: Path | None,
+    project_code: str,
+    *,
+    line_name: str | None = None,
+) -> pd.DataFrame:
     if path is None:
         return pd.DataFrame()
 
@@ -304,6 +316,24 @@ def _load_compiled_completion_rows(path: Path | None, project_code: str) -> pd.D
         _ensure_string_column(daily_df, "project_code")
     else:
         daily_df["project_code"] = daily_df["project_name"]
+    if "line_name" in daily_df.columns:
+        daily_df["line_name"] = daily_df["line_name"].map(normalize_line_name)
+    else:
+        daily_df["line_name"] = ""
+    if "project_display" not in daily_df.columns:
+        daily_df["project_display"] = [
+            build_project_display(code, line, fallback)
+            for code, line, fallback in zip(
+                daily_df["project_code"], daily_df["line_name"], daily_df["project_name"]
+            )
+        ]
+    if "project_scope_key" not in daily_df.columns:
+        daily_df["project_scope_key"] = [
+            build_project_scope_key(code, line, fallback)
+            for code, line, fallback in zip(
+                daily_df["project_code"], daily_df["line_name"], daily_df["project_name"]
+            )
+        ]
 
     target_key = _compact_project_key(project_code)
     if not target_key:
@@ -311,7 +341,15 @@ def _load_compiled_completion_rows(path: Path | None, project_code: str) -> pd.D
 
     project_code_keys = daily_df["project_code"].map(_compact_project_key)
     project_name_keys = daily_df["project_name"].map(_compact_project_key)
-    scoped = daily_df[project_code_keys.eq(target_key) | project_name_keys.eq(target_key)].copy()
+    project_display_keys = daily_df["project_display"].map(_compact_project_key)
+    scoped = daily_df[
+        project_code_keys.eq(target_key)
+        | project_name_keys.eq(target_key)
+        | project_display_keys.eq(target_key)
+    ].copy()
+    requested_line = normalize_line_name(line_name)
+    if requested_line:
+        scoped = scoped[scoped["line_name"].astype(str).str.lower().eq(requested_line.lower())].copy()
     if scoped.empty:
         return pd.DataFrame()
 
@@ -330,7 +368,7 @@ def _load_compiled_completion_rows(path: Path | None, project_code: str) -> pd.D
     order_cols = [col for col in ("completion_date", "location_no", "work_date") if col in completed.columns]
     if order_cols:
         completed = completed.sort_values(order_cols)
-    dedup_columns = [col for col in ("project_code", "location_no", "completion_date") if col in completed.columns]
+    dedup_columns = [col for col in ("project_scope_key", "project_code", "location_no", "completion_date") if col in completed.columns]
     if dedup_columns:
         completed = completed.drop_duplicates(subset=dedup_columns, keep="last")
 
@@ -344,7 +382,10 @@ def _load_compiled_completion_rows(path: Path | None, project_code: str) -> pd.D
 
     columns = [
         "project_code",
+        "line_name",
         "project_name",
+        "project_display",
+        "project_scope_key",
         "completion_date",
         "start_date",
         "location_no",
@@ -899,13 +940,49 @@ def _prepare_month_scope(
     scope["project_name"] = scope.get("project_name", "").fillna("").astype(str).str.strip()
     meta_lookup = _build_project_meta_lookup(project_info)
     scope["project_code"] = scope.get("project_code", "").fillna("").astype(str).str.strip()
-    scope["project_display"] = scope["project_code"].where(scope["project_code"].astype(bool), scope["project_name"])
-    scope["project_display"] = scope["project_display"].fillna("").astype(str).str.strip()
-    scope["project_display"] = scope["project_display"].where(scope["project_display"].astype(bool), scope["project_name"])
-    scope["project_display"] = scope["project_display"].where(
-        scope["project_display"].astype(bool), "(Unlabeled Project)"
+    scope["line_name"] = scope.get("line_name", "").fillna("").astype(str).map(normalize_line_name)
+    computed_display = pd.Series(
+        [
+            build_project_display(code, line, fallback)
+            for code, line, fallback in zip(
+                scope["project_code"], scope["line_name"], scope["project_name"]
+            )
+        ],
+        index=scope.index,
     )
+    project_display_series = scope.get("project_display")
+    if isinstance(project_display_series, pd.Series):
+        scope["project_display"] = project_display_series.fillna("").astype(str).str.strip()
+    else:
+        scope["project_display"] = ""
+    scope["project_display"] = scope["project_display"].where(scope["project_display"].astype(bool), computed_display)
+    line_mask = scope["line_name"].astype(bool)
+    if line_mask.any():
+        scope.loc[line_mask, "project_display"] = computed_display.loc[line_mask]
+    scope["project_display"] = scope["project_display"].where(scope["project_display"].astype(bool), "(Unlabeled Project)")
     scope["project_name"] = scope["project_name"].where(scope["project_name"].astype(bool), scope["project_display"])
+    if line_mask.any():
+        scope.loc[line_mask, "project_name"] = scope.loc[line_mask, "project_display"]
+    computed_scope = pd.Series(
+        [
+            build_project_scope_key(code, line, fallback)
+            for code, line, fallback in zip(
+                scope["project_code"], scope["line_name"], scope["project_name"]
+            )
+        ],
+        index=scope.index,
+    )
+    project_scope_series = scope.get("project_scope_key")
+    if isinstance(project_scope_series, pd.Series):
+        scope["project_scope_key"] = project_scope_series.fillna("").astype(str).str.strip()
+    else:
+        scope["project_scope_key"] = ""
+    scope["project_scope_key"] = scope["project_scope_key"].where(scope["project_scope_key"].astype(bool), computed_scope)
+    scope["project_scope_key_norm"] = scope["project_scope_key"].map(_compact_project_key)
+    scope["project_name_key"] = scope["project_scope_key_norm"].where(
+        scope["project_scope_key_norm"].astype(bool),
+        scope["project_name"].map(_compact_project_key),
+    )
 
     def _lookup_meta(value: object) -> dict[str, str] | None:
         if not meta_lookup:
@@ -963,7 +1040,11 @@ def _prepare_completion_scope(
     completed = scope[completion_mask].copy()
     if completed.empty:
         return completed
-    dedup_cols = [col for col in ("project_name_key", "location_no", "completion_date") if col in completed.columns]
+    dedup_cols = [
+        col
+        for col in ("project_scope_key_norm", "project_scope_key", "project_name_key", "location_no", "completion_date")
+        if col in completed.columns
+    ]
     if dedup_cols:
         completed = completed.drop_duplicates(subset=dedup_cols)
     completed["completion_week_index"] = _assign_week_bucket(completed["completion_date"], month_start, week_labels)
@@ -1050,7 +1131,11 @@ def _build_excluded_data_audit_tables(
     completion_reason.loc[completion_valid & ~completion_in_range] = "Completion date outside selected range"
 
     duplicate_completion = pd.Series(False, index=working.index)
-    dedup_cols = [col for col in ("project_name_key", "location_no", "completion_date") if col in working.columns]
+    dedup_cols = [
+        col
+        for col in ("project_scope_key_norm", "project_scope_key", "project_name_key", "location_no", "completion_date")
+        if col in working.columns
+    ]
     if dedup_cols and completion_in_range.any():
         completion_scope = working[completion_in_range]
         dupes = completion_scope.duplicated(subset=dedup_cols, keep="last")
@@ -1235,13 +1320,18 @@ def _compute_weekly_productivity_maps(scope: pd.DataFrame, week_labels: Sequence
     maps = {label: {} for label in week_labels}
     if scope.empty:
         return maps
+    group_col = "project_scope_key" if "project_scope_key" in scope.columns else "project_name"
     for week_idx, label in enumerate(week_labels, start=1):
         week_scope = scope[scope.get("week_index") == week_idx]
         if week_scope.empty:
             continue
-        project_map, _ = compute_project_baseline_maps_for(week_scope, "daily_prod_mt")
-        if project_map:
-            maps[label] = project_map
+        grouped = (
+            week_scope.groupby(group_col)["daily_prod_mt"].mean().dropna()
+            if group_col in week_scope.columns
+            else pd.Series(dtype=float)
+        )
+        if not grouped.empty:
+            maps[label] = {str(project): float(value) for project, value in grouped.items() if not pd.isna(value)}
     return maps
 
 
@@ -1312,16 +1402,17 @@ def _build_productivity_tables(
         )
         return empty_overall, empty_pch, empty_project
 
+    project_group_col = "project_scope_key" if "project_scope_key" in scope.columns else "project_name"
     project_meta = (
-        scope[["pch_display", "project_name", "project_display"]]
-        .dropna(subset=["project_name"])
-        .drop_duplicates(subset=["pch_display", "project_name"])
+        scope[["pch_display", project_group_col, "project_display"]]
+        .dropna(subset=[project_group_col])
+        .drop_duplicates(subset=["pch_display", project_group_col])
         .reset_index(drop=True)
     )
     week_maps = _compute_weekly_productivity_maps(scope, week_labels)
 
     project_avg_map = (
-        scope.groupby("project_name")["daily_prod_mt"].mean().to_dict()
+        scope.groupby(project_group_col)["daily_prod_mt"].mean().to_dict()
         if not scope.empty
         else {}
     )
@@ -1335,13 +1426,13 @@ def _build_productivity_tables(
     if isinstance(completions, pd.DataFrame):
         completions = completions.assign(_tower_weight=tower_weights.fillna(0.0))
     else:
-        completions = pd.DataFrame(columns=["pch_display", "project_name", "_tower_weight"])
+        completions = pd.DataFrame(columns=["pch_display", project_group_col, "_tower_weight"])
 
     overall_summary = _build_overall_productivity_table(scope, completions, week_labels, week_maps)
 
     tower_metrics_pch = _build_tower_weight_metrics(completions, group_columns=["pch_display"])
     tower_metrics_project = _build_tower_weight_metrics(
-        completions, group_columns=["pch_display", "project_name"]
+        completions, group_columns=["pch_display", project_group_col]
     )
     tower_metrics_pch_map = (
         tower_metrics_pch.set_index("pch_display").to_dict(orient="index")
@@ -1349,13 +1440,13 @@ def _build_productivity_tables(
         else {}
     )
     tower_metrics_project_map = (
-        tower_metrics_project.set_index(["pch_display", "project_name"]).to_dict(orient="index")
+        tower_metrics_project.set_index(["pch_display", project_group_col]).to_dict(orient="index")
         if not tower_metrics_project.empty
         else {}
     )
 
     mt_totals_by_project = (
-        completions.groupby(["pch_display", "project_name"])["_tower_weight"].sum().to_dict()
+        completions.groupby(["pch_display", project_group_col])["_tower_weight"].sum().to_dict()
         if not completions.empty
         else {}
     )
@@ -1368,13 +1459,13 @@ def _build_productivity_tables(
     counts_by_project: dict[tuple[str, str], int] = {}
     counts_by_pch: dict[str, int] = {}
     if isinstance(completions, pd.DataFrame) and not completions.empty:
-        counts_by_project = completions.groupby(["pch_display", "project_name"]).size().to_dict()
+        counts_by_project = completions.groupby(["pch_display", project_group_col]).size().to_dict()
         counts_by_pch = completions.groupby("pch_display").size().to_dict()
 
     pch_rows: list[dict[str, object]] = []
     if not project_meta.empty:
         for pch_name in sorted(project_meta["pch_display"].unique(), key=lambda name: _pch_sort_components(name)):
-            projects_in_pch = project_meta[project_meta["pch_display"] == pch_name]["project_name"].tolist()
+            projects_in_pch = project_meta[project_meta["pch_display"] == pch_name][project_group_col].tolist()
             row = {"PCH": pch_name}
             for label in week_labels:
                 project_values = [week_maps.get(label, {}).get(name) for name in projects_in_pch]
@@ -1396,7 +1487,7 @@ def _build_productivity_tables(
     project_rows: list[dict[str, object]] = []
     for _, meta_row in project_meta.sort_values(["pch_display", "project_display"], key=lambda col: col.astype(str)).iterrows():
         pch_value = meta_row["pch_display"]
-        project_name = meta_row["project_name"]
+        project_name = meta_row[project_group_col]
         display_name = meta_row["project_display"]
         row = {"PCH": pch_value, "Project": display_name}
         for label in week_labels:
@@ -1761,7 +1852,8 @@ def _build_project_gang_rankings(
         empty = pd.DataFrame(columns=columns)
         return empty, empty
 
-    group_cols = ["pch_display", "project_name", "project_display", "gang_name"]
+    project_group_col = "project_scope_key" if "project_scope_key" in working.columns else "project_name"
+    group_cols = ["pch_display", project_group_col, "project_display", "gang_name"]
     avg_prod = (
         working.groupby(group_cols, dropna=False)["daily_prod_mt"]
         .mean()
@@ -1801,12 +1893,12 @@ def _build_project_gang_rankings(
         empty = pd.DataFrame(columns=columns)
         return empty, empty
     tower_metrics = _build_tower_weight_metrics(
-        completions, group_columns=["pch_display", "project_name", "gang_name"]
+        completions, group_columns=["pch_display", project_group_col, "gang_name"]
     )
     if not tower_metrics.empty:
         merged = merged.merge(
             tower_metrics,
-            on=["pch_display", "project_name", "gang_name"],
+            on=["pch_display", project_group_col, "gang_name"],
             how="left",
         )
     for column in TOWER_WEIGHT_COLUMNS:
@@ -1832,7 +1924,7 @@ def _build_project_gang_rankings(
 
     def _collect_ranked(top: bool) -> pd.DataFrame:
         rows: list[pd.DataFrame] = []
-        for _, group in merged.groupby(["pch_display", "project_name", "project_display"], dropna=False):
+        for _, group in merged.groupby(["pch_display", project_group_col, "project_display"], dropna=False):
             ordered = group.sort_values(
                 by=[AVG_PRODUCTIVITY_COLUMN, "gang_name"],
                 ascending=[not top, True],
@@ -1899,7 +1991,8 @@ def _build_gang_level_productivity_table(
     if comp.empty:
         return pd.DataFrame(columns=columns)
 
-    group_cols = ["pch_display", "project_name", "project_display", "gang_name"]
+    project_group_col = "project_scope_key" if "project_scope_key" in working.columns else "project_name"
+    group_cols = ["pch_display", project_group_col, "project_display", "gang_name"]
     avg_prod = (
         working.groupby(group_cols, dropna=False)["daily_prod_mt"]
         .mean()
@@ -2022,7 +2115,7 @@ def _extract_completion_rows(daily_df: pd.DataFrame | None) -> pd.DataFrame:
         return pd.DataFrame()
     dedup_cols = [
         col
-        for col in ("project_name_key", "project_name", "location_no", "completion_date")
+        for col in ("project_scope_key_norm", "project_scope_key", "project_name_key", "project_name", "location_no", "completion_date")
         if col in completions.columns
     ]
     if dedup_cols:
@@ -2077,9 +2170,17 @@ def _build_gang_project_code_map(completions: pd.DataFrame | None) -> dict[str, 
 
     working["project_code"] = working.get("project_code", "").fillna("").astype(str).str.strip()
     working["project_name"] = working.get("project_name", "").fillna("").astype(str).str.strip()
-    working["project_label"] = working["project_code"].where(
-        working["project_code"].astype(bool),
-        working["project_name"],
+    project_display_series = working.get("project_display")
+    if isinstance(project_display_series, pd.Series):
+        working["project_display"] = project_display_series.fillna("").astype(str).str.strip()
+    else:
+        working["project_display"] = ""
+    working["project_label"] = working["project_display"].where(
+        working["project_display"].astype(bool),
+        working["project_code"].where(
+            working["project_code"].astype(bool),
+            working["project_name"],
+        ),
     )
 
     def _join_project_codes(series: pd.Series) -> str:
@@ -2315,9 +2416,17 @@ def _build_monthly_gang_production_buckets(
         completion_rows["project_name"] = (
             completion_rows.get("project_name", "").fillna("").astype(str).str.strip()
         )
-        completion_rows["project_label"] = completion_rows["project_code"].where(
-            completion_rows["project_code"].astype(bool),
-            completion_rows["project_name"],
+        project_display_series = completion_rows.get("project_display")
+        if isinstance(project_display_series, pd.Series):
+            completion_rows["project_display"] = project_display_series.fillna("").astype(str).str.strip()
+        else:
+            completion_rows["project_display"] = ""
+        completion_rows["project_label"] = completion_rows["project_display"].where(
+            completion_rows["project_display"].astype(bool),
+            completion_rows["project_code"].where(
+                completion_rows["project_code"].astype(bool),
+                completion_rows["project_name"],
+            ),
         )
         completion_rows["month_key"] = (
             pd.to_datetime(completion_rows.get("completion_date"), errors="coerce")
@@ -4306,6 +4415,7 @@ def export_monthly_productivity_summary(
     project_code: str,
     output_path: str | Path,
     *,
+    line_name: str | None = None,
     compiled_path: str | Path | None = None,
     sheet_summary: str = "MonthlySummary",
     sheet_details: str = "MonthlyDetails",
@@ -4316,14 +4426,16 @@ def export_monthly_productivity_summary(
     """
 
     project_label = str(project_code or "").strip()
+    selected_line = normalize_line_name(line_name)
     if not project_label:
         raise ValueError("A project code is required for the monthly productivity export.")
 
     dataset_path = Path(compiled_path) if compiled_path else Path("Parquets") / "Erection" / "ErectionCompiled_Output.xlsx"
-    completions = _load_compiled_completion_rows(dataset_path, project_label)
+    completions = _load_compiled_completion_rows(dataset_path, project_label, line_name=selected_line or None)
     if completions.empty:
         raise ValueError(
-            f"No completion rows were found in '{dataset_path}' for project '{project_label}'. "
+            f"No completion rows were found in '{dataset_path}' for project '{project_label}'"
+            f"{f' and line {selected_line!r}' if selected_line else ''}. "
             "Ensure the compiled workbook includes the requested project."
         )
 
@@ -4341,12 +4453,14 @@ def export_monthly_productivity_summary(
             "completion_date": "Completion Date",
             "start_date": "Starting Date",
             "location_no": "Location No.",
+            "line_name": "Line Name",
             "tower_type": "Tower Type",
             "tower_weight": "Tower Weight (MT)",
             "gang_name": "Gang Name",
             "status": "Status",
             "derived_productivity": "Productivity (MT/day)",
             "project_name": "Project Name",
+            "project_display": "Project Display",
             "source_file": "Source",
         }
     )
@@ -4365,7 +4479,9 @@ def export_monthly_productivity_summary(
         "Completion Month",
         "Completion Date",
         "Location No.",
+        "Line Name",
         "Project Name",
+        "Project Display",
         "Tower Type",
         "Tower Weight (MT)",
         "Gang Name",
@@ -4384,7 +4500,17 @@ def export_monthly_productivity_summary(
         [
             {
                 "Project Code": project_label,
+                "Line Name": selected_line,
                 "Project Names": ", ".join(project_names),
+                "Project Display Values": ", ".join(
+                    sorted(
+                        {
+                            str(name).strip()
+                            for name in completions.get("project_display", [])
+                            if isinstance(name, str) and str(name).strip()
+                        }
+                    )
+                ),
                 "Dataset Path": str(Path(dataset_path).resolve()),
                 "Range Start": first_completion.date() if pd.notna(first_completion) else "",
                 "Range End": last_completion.date() if pd.notna(last_completion) else "",

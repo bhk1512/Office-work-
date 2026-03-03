@@ -23,6 +23,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("project_code", help="Project code to analyze (e.g., TA414).")
     parser.add_argument(
+        "--line",
+        type=str,
+        help="Optional line name selector for multi-line projects (e.g., LILO).",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=Path,
@@ -78,6 +83,7 @@ def main() -> int:
     export_monthly_productivity_summary(
         project_code=args.project_code,
         output_path=output_path,
+        line_name=args.line,
         compiled_path=compiled_path,
         sheet_summary=args.sheet_summary,
         sheet_details=args.sheet_details,

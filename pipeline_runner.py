@@ -25,6 +25,13 @@ from microplan_compile import (
     compile_microplans_to_workbook,
     compile_stringing_microplans_to_workbook,
 )
+from dashboard.project_identity import (
+    build_project_display,
+    build_project_scope_key,
+    parse_sheet_line_entries,
+    normalize_line_name,
+    parse_project_identity_from_filename,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -208,7 +215,7 @@ def _resolve_dpr_config_path(input_dir: Optional[Path]) -> Optional[Path]:
     return None
 
 
-def _load_stringing_sheet_config(input_dir: Optional[Path]) -> Dict[str, List[str]]:
+def _load_stringing_sheet_config(input_dir: Optional[Path]) -> Dict[str, List[Dict[str, str]]]:
     config_path = _resolve_dpr_config_path(input_dir)
     if config_path is None:
         return {}
@@ -240,7 +247,9 @@ def _load_stringing_sheet_config(input_dir: Optional[Path]) -> Dict[str, List[st
             )
             return {}
 
-        mapping: Dict[str, List[str]] = {}
+        line_idx = normalized_headers.index("stringing line names") if "stringing line names" in normalized_headers else None
+
+        mapping: Dict[str, List[Dict[str, str]]] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row is None:
                 continue
@@ -253,13 +262,28 @@ def _load_stringing_sheet_config(input_dir: Optional[Path]) -> Dict[str, List[st
             if raw_stringing in (None, ""):
                 mapping[project_key] = []
                 continue
+            raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
 
-            sheet_names: List[str] = []
-            for chunk in str(raw_stringing).split(","):
-                name = str(chunk).strip()
-                if name:
-                    sheet_names.append(name)
-            mapping[project_key] = sheet_names
+            sheet_count = len([chunk for chunk in str(raw_stringing).split(",") if str(chunk).strip()])
+            line_chunks = [str(chunk).strip() for chunk in str(raw_line_names).split(",")] if raw_line_names not in (None, "") else []
+            if line_chunks and len(line_chunks) != sheet_count:
+                print(
+                    "[pipeline] Stringing: warning: project "
+                    f"'{str(project_val).strip()}' has mismatched 'Stringing Line Names'; "
+                    "falling back to sheet-name inference."
+                )
+                raw_line_names = ""
+
+            entries = parse_sheet_line_entries(raw_stringing, raw_line_names, "stringing")
+            deduped_entries: List[Dict[str, str]] = []
+            seen_sheet_keys = set()
+            for entry in entries:
+                key = _normalize_space_only(entry.get("sheet_name"))
+                if not key or key in seen_sheet_keys:
+                    continue
+                seen_sheet_keys.add(key)
+                deduped_entries.append(entry)
+            mapping[project_key] = deduped_entries
         return mapping
     finally:
         wb.close()
@@ -575,7 +599,7 @@ def _write_stringing_artifacts(
     readme_df = pd.DataFrame([
         {
             "Note": "Compiled from DPR files: stringing sheet consolidation.",
-            "Rules": "Preserve raw columns; diagnostics include column presence and date parsing; PO start to F/S complete inclusive for daily expansion.",
+            "Rules": "Preserve raw columns; diagnostics include column presence and date parsing; configured stringing sheets are processed independently with per-sheet line identity before concatenation; PO start to F/S complete inclusive for daily expansion.",
         }
     ])
 
@@ -639,7 +663,7 @@ def compile_stringing_to_workbook(
         Tuple[
             Path,
             str,
-            Optional[List[str]],
+            Optional[Dict[str, str]],
             Optional[Dict[int, str]],
             Optional[str],
             Optional[str],
@@ -663,9 +687,10 @@ def compile_stringing_to_workbook(
             if not configured_sheets:
                 skipped_no_stringing += 1
                 continue
-            selected_candidates.append(
-                (candidate, project, configured_sheets, template_map, template_sheet_name, template_error)
-            )
+            for configured_sheet in configured_sheets:
+                selected_candidates.append(
+                    (candidate, project, configured_sheet, template_map, template_sheet_name, template_error)
+                )
         else:
             selected_candidates.append((candidate, project, None, template_map, template_sheet_name, template_error))
 
@@ -685,21 +710,31 @@ def compile_stringing_to_workbook(
     issue_rows: List[Dict[str, Any]] = []
     data_issue_rows: List[pd.DataFrame] = []
     today = pd.Timestamp.today().normalize()
+    template_error_logged: set[str] = set()
 
-    for f, project, project_sheet_candidates, template_map, template_sheet_name, template_error in selected_candidates:
+    for f, project, configured_sheet_entry, template_map, template_sheet_name, template_error in selected_candidates:
         found = None
         header_row = None
         header_labels: List[str] = []
         fallback_note = None
         df = None
         template_changes: List[str] = []
+        configured_sheet_name = str(configured_sheet_entry.get("sheet_name", "")).strip() if configured_sheet_entry else ""
+        line_name_override = normalize_line_name(configured_sheet_entry.get("line_name", "")) if configured_sheet_entry else ""
+        line_name_source = str(configured_sheet_entry.get("line_name_source", "")).strip() if configured_sheet_entry else ""
 
         if template_error:
+            if f.name in template_error_logged:
+                continue
+            template_error_logged.add(f.name)
             issue_rows.append(
                 {
                     "Workbook": f.name,
                     "Project": project,
                     "Sheet": "",
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name_override,
+                    "LineNameSource": line_name_source,
                     "Issue": f"TEMPLATE_CONFIG_ERROR: {template_error}",
                     "MissingColumns": "",
                     "Rows": 0,
@@ -711,6 +746,9 @@ def compile_stringing_to_workbook(
                     "Workbook": f.name,
                     "Project": project,
                     "Sheet": "",
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name_override,
+                    "LineNameSource": line_name_source,
                     "DetectedHeaderRow": "",
                     "ColumnsDetected": "",
                     "NormalizedColumnsOk": "",
@@ -730,7 +768,10 @@ def compile_stringing_to_workbook(
 
         try:
             with pd.ExcelFile(f) as xl:
-                found = _find_stringing_sheet_name(xl, preferred, project_sheet_candidates)
+                if configured_sheet_name:
+                    found = _find_stringing_sheet_name_from_list(list(xl.sheet_names), None, [configured_sheet_name])
+                else:
+                    found = _find_stringing_sheet_name(xl, preferred)
                 if not found:
                     raise ValueError("NO_TARGET_SHEET")
                 used_name = used_name or found
@@ -740,11 +781,20 @@ def compile_stringing_to_workbook(
                     df, header_row, header_labels = _extract_stringing_data_with_first_row_header(df_raw)
         except Exception:
             try:
-                selector = (
-                    lambda names, pref=preferred, candidates=project_sheet_candidates: _find_stringing_sheet_name_from_list(
-                        list(names), pref, candidates
+                if configured_sheet_name:
+                    selector = (
+                        lambda names, configured=configured_sheet_name: _find_stringing_sheet_name_from_list(
+                            list(names),
+                            None,
+                            [configured],
+                        )
                     )
-                )
+                else:
+                    selector = (
+                        lambda names, pref=preferred: _find_stringing_sheet_name_from_list(
+                            list(names), pref
+                        )
+                    )
                 df_raw, found, fallback_note = load_sheet_with_csv_fallback(
                     f,
                     selector,
@@ -767,6 +817,9 @@ def compile_stringing_to_workbook(
                             "Workbook": f.name,
                             "Project": project,
                             "Sheet": "",
+                            "ConfiguredSheet": configured_sheet_name,
+                            "LineName": line_name_override,
+                            "LineNameSource": line_name_source,
                             "Issue": "NO_TARGET_SHEET",
                             "MissingColumns": "",
                             "Rows": 0,
@@ -778,6 +831,9 @@ def compile_stringing_to_workbook(
                             "Workbook": f.name,
                             "Project": project,
                             "Sheet": "",
+                            "ConfiguredSheet": configured_sheet_name,
+                            "LineName": line_name_override,
+                            "LineNameSource": line_name_source,
                             "DetectedHeaderRow": "",
                             "ColumnsDetected": "",
                             "NormalizedColumnsOk": "",
@@ -799,6 +855,9 @@ def compile_stringing_to_workbook(
                             "Workbook": f.name,
                             "Project": project,
                             "Sheet": found or "",
+                            "ConfiguredSheet": configured_sheet_name,
+                            "LineName": line_name_override,
+                            "LineNameSource": line_name_source,
                             "Issue": "HEADER_NOT_FOUND",
                             "MissingColumns": "",
                             "Rows": 0,
@@ -810,6 +869,9 @@ def compile_stringing_to_workbook(
                             "Workbook": f.name,
                             "Project": project,
                             "Sheet": found or "",
+                            "ConfiguredSheet": configured_sheet_name,
+                            "LineName": line_name_override,
+                            "LineNameSource": line_name_source,
                             "DetectedHeaderRow": "",
                             "ColumnsDetected": "",
                             "NormalizedColumnsOk": "",
@@ -831,6 +893,9 @@ def compile_stringing_to_workbook(
                             "Workbook": f.name,
                             "Project": project,
                             "Sheet": found or "",
+                            "ConfiguredSheet": configured_sheet_name,
+                            "LineName": line_name_override,
+                            "LineNameSource": line_name_source,
                             "Issue": f"READ_FAIL: {type(fallback_exc).__name__}",
                             "MissingColumns": "",
                             "Rows": 0,
@@ -842,6 +907,9 @@ def compile_stringing_to_workbook(
                             "Workbook": f.name,
                             "Project": project,
                             "Sheet": found or "",
+                            "ConfiguredSheet": configured_sheet_name,
+                            "LineName": line_name_override,
+                            "LineNameSource": line_name_source,
                             "DetectedHeaderRow": "" if header_row is None else int(header_row),
                             "ColumnsDetected": ", ".join(header_labels),
                             "NormalizedColumnsOk": "",
@@ -865,6 +933,9 @@ def compile_stringing_to_workbook(
                     "Workbook": f.name,
                     "Project": project,
                     "Sheet": found or "",
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name_override,
+                    "LineNameSource": line_name_source,
                     "Issue": "EMPTY_SHEET",
                     "MissingColumns": "",
                     "Rows": 0,
@@ -876,6 +947,9 @@ def compile_stringing_to_workbook(
                     "Workbook": f.name,
                     "Project": project,
                     "Sheet": found or "",
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name_override,
+                    "LineNameSource": line_name_source,
                     "DetectedHeaderRow": "" if header_row is None else int(header_row),
                     "ColumnsDetected": ", ".join(header_labels),
                     "NormalizedColumnsOk": "",
@@ -900,7 +974,34 @@ def compile_stringing_to_workbook(
         df = _sanitize_stringing_columns(df)
         header_labels = [str(col) for col in df.columns]
         df = df.copy()
+        identity = parse_project_identity_from_filename(f.name)
+        file_line_name = normalize_line_name(identity.get("line_name", ""))
+        line_name = line_name_override or file_line_name
+        project_code_display = str(identity.get("project_code", "")).strip() or str(project or "").strip()
+        project_display = build_project_display(project_code_display, line_name, project or project_code_display)
+        project_scope_key = build_project_scope_key(project_code_display, line_name, project_display)
+        if "project_code" not in df.columns:
+            df["project_code"] = project_code_display
+        if "line_name" not in df.columns:
+            df["line_name"] = line_name
+        elif line_name:
+            df["line_name"] = line_name
+        if "project_name" not in df.columns:
+            df["project_name"] = project_display
+        elif line_name:
+            df["project_name"] = project_display
+        if "project_display" not in df.columns:
+            df["project_display"] = project_display
+        elif line_name:
+            df["project_display"] = project_display
+        if "project_scope_key" not in df.columns:
+            df["project_scope_key"] = project_scope_key
+        elif line_name:
+            df["project_scope_key"] = project_scope_key
+        if "project" not in df.columns:
+            df["project"] = df["project_name"]
         df["_source_file"] = f.name
+        df["source_sheet"] = found or ""
         compiled.append(df)
 
         try:
@@ -916,6 +1017,9 @@ def compile_stringing_to_workbook(
                     "Workbook": f.name,
                     "Project": project,
                     "Sheet": found,
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name,
+                    "LineNameSource": line_name_source,
                     "Issue": "MISSING_REQUIRED_COLUMNS",
                     "MissingColumns": ", ".join(missing_headers),
                     "Rows": int(len(df.index)),
@@ -1000,6 +1104,7 @@ def compile_stringing_to_workbook(
                     "length_km",
                     "po_km",
                     "_source_file",
+                    "source_sheet",
                 ]
                 for col in columns_for_issues:
                     if col not in work.columns:
@@ -1057,6 +1162,9 @@ def compile_stringing_to_workbook(
                     "Workbook": f.name,
                     "Project": project,
                     "Sheet": found,
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name,
+                    "LineNameSource": line_name_source,
                     "Issue": "NO_DAILY",
                     "MissingColumns": "",
                     "Rows": int(len(df.index)),
@@ -1070,6 +1178,9 @@ def compile_stringing_to_workbook(
                 "Workbook": f.name,
                 "Project": project,
                 "Sheet": found,
+                "ConfiguredSheet": configured_sheet_name,
+                "LineName": line_name,
+                "LineNameSource": line_name_source,
                 "DetectedHeaderRow": "" if header_row is None else int(header_row),
                 "ColumnsDetected": ", ".join(header_labels),
                 "NormalizedColumnsOk": bool(norm_report.get("normalized_columns_ok", False)),
@@ -1110,7 +1221,7 @@ def compile_stringing_to_workbook(
         output_path,
         all_df,
         used_name or preferred or "Stringing Compiled",
-        source_files=[path for path, _, _, _, _, _ in selected_candidates],
+        source_files=list(dict.fromkeys(path for path, _, _, _, _, _ in selected_candidates)),
         diagnostics_df=pd.DataFrame(diag_rows),
         issues_df=pd.DataFrame(issue_rows),
         data_issues_df=pd.concat(data_issue_rows, ignore_index=True) if data_issue_rows else pd.DataFrame(),

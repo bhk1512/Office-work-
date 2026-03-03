@@ -372,11 +372,26 @@ class DataSelector:
                 if token
             ]
             if normalized_tokens:
-                project_norm_expr = "regexp_replace(lower(coalesce(project_name, project, '')), '[^a-z0-9]', '')"
-                where_clauses.append(
-                    f"{project_norm_expr} IN ({', '.join('?' for _ in normalized_tokens)})"
-                )
-                params.extend(normalized_tokens)
+                project_columns = [
+                    column
+                    for column in (
+                        "project_scope_key",
+                        "project_display",
+                        "project_name",
+                        "project_code",
+                        "project_key",
+                    )
+                    if column in columns
+                ]
+                if project_columns:
+                    token_placeholders = ", ".join("?" for _ in normalized_tokens)
+                    project_predicates = [
+                        f"regexp_replace(lower(coalesce({column}, '')), '[^a-z0-9]', '') IN ({token_placeholders})"
+                        for column in project_columns
+                    ]
+                    where_clauses.append("(" + " OR ".join(project_predicates) + ")")
+                    for _ in project_columns:
+                        params.extend(normalized_tokens)
         _append_column_clause("gang_name", gangs)
 
         leftover_method: set[str] = set()

@@ -14,6 +14,7 @@ import hashlib
 import pandas as pd
 import numpy as np
 from .plan_utils import normalize_lower, compact_project_key
+from .project_identity import parse_project_identity_from_filename as _parse_project_identity
 
 
 # Exact headers expected from the source sheet mapped to snake_case names
@@ -173,9 +174,10 @@ def read_stringing_sheet_robust(path: str | bytes | "pathlike", sheet_name: str)
 
 
 def parse_project_code_from_filename(name: str) -> str:
-    m = re.search(r"\b(TA|TB)\s*[- ]?\s*(\d{3,4})\b", name.upper())
-    if m:
-        return f"{m.group(1)}{m.group(2)}"
+    identity = _parse_project_identity(str(name))
+    project_code = identity.get("project_code", "")
+    if project_code:
+        return compact_project_key(project_code).upper() if re.search(r"\bT[A-Z]\b", project_code) else project_code
     return re.sub(r"\s+", " ", str(name)).strip()
 
 

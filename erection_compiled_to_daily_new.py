@@ -36,6 +36,13 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
+from dashboard.project_identity import (
+    build_project_display,
+    build_project_scope_key,
+    parse_sheet_line_entries,
+    normalize_line_name,
+    parse_project_identity_from_filename,
+)
 
 logger = logging.getLogger("erection_compiled")
 
@@ -79,7 +86,11 @@ PER_DAY_COLUMNS = [
     "Tower Weight",
     "Tower Type",
     "Productivity",
+    "Project Code",
+    "Line Name",
     "Project Name",
+    "Project Display",
+    "Project Scope Key",
     "Location No.",
     "Status",
 ]
@@ -349,9 +360,12 @@ def _repair_ambiguous_non_positive_dates(work: pd.DataFrame) -> int:
 
 
 def parse_project_from_filename(name: str) -> str:
-    m = re.search(r"\b(TA|TB)\s*[- ]?\s*(\d{3,4})\b", name.upper())
-    if m:
-        return f"{m.group(1)}{m.group(2)}"
+    identity = parse_project_identity_from_filename(name)
+    project_code = str(identity.get("project_code", "")).strip()
+    if project_code:
+        compact = re.sub(r"[^A-Z0-9]+", "", project_code.upper())
+        if compact:
+            return compact
     return Path(name).stem
 
 
@@ -378,7 +392,7 @@ def _resolve_dpr_config_path(input_folder: Optional[Path]) -> Optional[Path]:
     return None
 
 
-def load_erection_sheet_config(input_folder: Optional[Path]) -> Dict[str, List[str]]:
+def load_erection_sheet_config(input_folder: Optional[Path]) -> Dict[str, List[Dict[str, str]]]:
     config_path = _resolve_dpr_config_path(input_folder)
     if config_path is None:
         return {}
@@ -409,7 +423,9 @@ def load_erection_sheet_config(input_folder: Optional[Path]) -> Dict[str, List[s
             )
             return {}
 
-        mapping: Dict[str, List[str]] = {}
+        line_idx = normalized_headers.index("erection line names") if "erection line names" in normalized_headers else None
+
+        mapping: Dict[str, List[Dict[str, str]]] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row is None:
                 continue
@@ -422,13 +438,27 @@ def load_erection_sheet_config(input_folder: Optional[Path]) -> Dict[str, List[s
             if raw_names in (None, ""):
                 mapping[project_key] = []
                 continue
+            raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
 
-            names: List[str] = []
-            for chunk in str(raw_names).split(","):
-                name = str(chunk).strip()
-                if name:
-                    names.append(name)
-            mapping[project_key] = names
+            sheet_count = len([chunk for chunk in str(raw_names).split(",") if str(chunk).strip()])
+            line_chunks = [str(chunk).strip() for chunk in str(raw_line_names).split(",")] if raw_line_names not in (None, "") else []
+            if line_chunks and len(line_chunks) != sheet_count:
+                logger.warning(
+                    "Erection config: project '%s' has mismatched 'Erection Line Names'; falling back to sheet-name inference.",
+                    str(project).strip(),
+                )
+                raw_line_names = ""
+
+            entries = parse_sheet_line_entries(raw_names, raw_line_names, "erection")
+            deduped_entries: List[Dict[str, str]] = []
+            seen_sheet_keys = set()
+            for entry in entries:
+                key = _normalize_space_only(entry.get("sheet_name"))
+                if not key or key in seen_sheet_keys:
+                    continue
+                seen_sheet_keys.add(key)
+                deduped_entries.append(entry)
+            mapping[project_key] = deduped_entries
         return mapping
     finally:
         wb.close()
@@ -864,7 +894,7 @@ def load_sheet_with_csv_fallback(
 # ---------- Core (per file) ----------
 def process_file(
     path: Path,
-    configured_sheet_names: Optional[List[str]] = None,
+    configured_sheet_names: Optional[List[Dict[str, str]]] = None,
     template_column_map: Optional[Dict[int, str]] = None,
     template_sheet_name: Optional[str] = None,
 ):
@@ -881,19 +911,41 @@ def process_file(
     per_erection_frames: List[pd.DataFrame] = []
     data_issue_frames: List[pd.DataFrame] = []
     diagnostics: List[dict] = []
-    project_name = parse_project_from_filename(path.name)
+    project_identity = parse_project_identity_from_filename(path.name)
+    project_code_display = str(project_identity.get("project_code", "")).strip()
+    file_line_name = normalize_line_name(project_identity.get("line_name", ""))
+    base_project_name = build_project_display(
+        project_code_display,
+        file_line_name,
+        parse_project_from_filename(path.name),
+    )
 
-    sheet_requests: List[Tuple[Optional[str], Callable[[List[str]], Optional[str]]]] = []
+    sheet_requests: List[Dict[str, object]] = []
     if configured_sheet_names:
         seen_keys = set()
-        for configured_name in configured_sheet_names:
+        for configured_entry in configured_sheet_names:
+            configured_name = str(configured_entry.get("sheet_name", "")).strip()
             key = _normalize_space_only(configured_name)
             if not key or key in seen_keys:
                 continue
             seen_keys.add(key)
-            sheet_requests.append((configured_name, build_exact_sheet_selector(configured_name)))
+            sheet_requests.append(
+                {
+                    "requested_name": configured_name,
+                    "selector": build_exact_sheet_selector(configured_name),
+                    "line_name": normalize_line_name(configured_entry.get("line_name", "")),
+                    "line_name_source": str(configured_entry.get("line_name_source", "")).strip(),
+                }
+            )
     if not sheet_requests:
-        sheet_requests = [(None, find_target_sheet)]
+        sheet_requests = [
+            {
+                "requested_name": None,
+                "selector": find_target_sheet,
+                "line_name": "",
+                "line_name_source": "",
+            }
+        ]
 
     def expand_per_day(source: pd.DataFrame) -> pd.DataFrame:
         if source.empty:
@@ -911,7 +963,11 @@ def process_file(
                         "Tower Weight": r["Tower Weight"],
                         "Tower Type": r["Tower Type"],
                         "Productivity": r["Productivity"],
+                        "Project Code": r["Project Code"],
+                        "Line Name": r["Line Name"],
                         "Project Name": r["Project Name"],
+                        "Project Display": r["Project Display"],
+                        "Project Scope Key": r["Project Scope Key"],
                         "Location No.": r["Location No."],
                         "Status": r["Status"],
                     }
@@ -927,7 +983,13 @@ def process_file(
         )
         return result.reindex(columns=PER_DAY_COLUMNS)
 
-    for requested_name, selector in sheet_requests:
+    for sheet_request in sheet_requests:
+        requested_name = sheet_request.get("requested_name")
+        selector = sheet_request["selector"]
+        sheet_line_name = normalize_line_name(sheet_request.get("line_name", "")) or file_line_name
+        line_name_source = str(sheet_request.get("line_name_source", "")).strip()
+        project_name = build_project_display(project_code_display, sheet_line_name, base_project_name)
+        project_scope_key = build_project_scope_key(project_code_display, sheet_line_name, project_name)
         try:
             df_raw, target, fallback_note = load_sheet_with_csv_fallback(
                 path,
@@ -995,6 +1057,8 @@ def process_file(
             "file": path.name,
             "project": project_name,
             "sheet": target,
+            "line_name": sheet_line_name,
+            "line_name_source": line_name_source,
             "detected_header_row": hdr_row,
             "columns_detected": ", ".join(cols[:20]),
         }
@@ -1065,7 +1129,11 @@ def process_file(
             )
         work["Gang name"] = work["gang name"].apply(normalize_gang_name)
         work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
+        work["Project Code"] = project_code_display or project_name
+        work["Line Name"] = sheet_line_name
         work["Project Name"] = project_name
+        work["Project Display"] = project_name
+        work["Project Scope Key"] = project_scope_key
         work["Location No."] = work["location no"].astype(object).map(
             lambda x: str(x).strip() if pd.notna(x) else pd.NA
         )
@@ -1102,7 +1170,11 @@ def process_file(
                         "Tower Weight",
                         "Tower Type",
                         "Productivity",
+                        "Project Code",
+                        "Line Name",
                         "Project Name",
+                        "Project Display",
+                        "Project Scope Key",
                         "Location No.",
                         "Status",
                     ],
@@ -1132,7 +1204,11 @@ def process_file(
                 "Tower Weight",
                 "Tower Type",
                 "Productivity",
+                "Project Code",
+                "Line Name",
                 "Project Name",
+                "Project Display",
+                "Project Scope Key",
                 "Location No.",
                 "Status",
             ]
@@ -1388,7 +1464,7 @@ def main(argv=None):
         "- Ambiguous numeric dates (e.g., 1/12/2025) that initially parse as Start > End are retried with month-first before being marked invalid.",
         "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
         f"- If 'Tower Weight' header is missing in a sheet, Tower Weight is assumed as {DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT for all rows in that sheet (noted in 'Issues').",
-        "- DPR_Config support: when multiple erection sheet names are configured for a project, each listed sheet is processed and combined.",
+        "- DPR_Config support: when multiple erection sheet names are configured for a project, each listed sheet is processed independently, assigned its own line identity, and then concatenated.",
         "- DPR_Config template mapping: for projects with discipline-specific template check marked Yes, column-wise mapping from the discipline template tab is applied before required-field validation.",
         "- Sheets:",
         "    â€¢ ProdDailyExpanded  : per-day expanded rows used by the dashboard",
