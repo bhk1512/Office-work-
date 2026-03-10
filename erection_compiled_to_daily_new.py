@@ -138,7 +138,12 @@ def normalize_tower_type_label(value: object) -> str:
     return compact
 
 
-def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Optional[int], Optional[list]]:
+def find_header_row(
+    df_raw: pd.DataFrame,
+    search_rows: int = 30,
+    *,
+    min_score: float = 3.0,
+) -> Tuple[Optional[int], Optional[list]]:
     best = None
     best_score = -1
     nrows = min(search_rows, df_raw.shape[0])
@@ -167,9 +172,18 @@ def find_header_row(df_raw: pd.DataFrame, search_rows: int = 30) -> Tuple[Option
             best = (r, cols)
             best_score = score
 
-    if best and best_score >= 3:
+    if best and best_score >= min_score:
         return best
     return None, None
+
+
+def _drop_duplicate_columns_keep_first(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    duplicated = pd.Index(df.columns).duplicated(keep="first")
+    if not duplicated.any():
+        return df, []
+    dup_names = [str(col) for col in pd.Index(df.columns)[duplicated]]
+    deduped = df.loc[:, ~duplicated].copy()
+    return deduped, dup_names
 
 
 def find_target_sheet(sheet_names: List[str]) -> Optional[str]:
@@ -323,6 +337,11 @@ def _repair_ambiguous_non_positive_dates(work: pd.DataFrame) -> int:
     required = {"starting date", "completion date", "Start Date", "Complete Date"}
     if not required.issubset(work.columns):
         return 0
+    if work.empty:
+        return 0
+
+    work["Start Date"] = pd.to_datetime(work["Start Date"], errors="coerce")
+    work["Complete Date"] = pd.to_datetime(work["Complete Date"], errors="coerce")
 
     missing_dt_mask = work["Start Date"].isna() | work["Complete Date"].isna()
     days = (work["Complete Date"] - work["Start Date"]).dt.days + 1
@@ -440,8 +459,8 @@ def load_erection_sheet_config(input_folder: Optional[Path]) -> Dict[str, List[D
                 continue
             raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
 
-            sheet_count = len([chunk for chunk in str(raw_names).split(",") if str(chunk).strip()])
-            line_chunks = [str(chunk).strip() for chunk in str(raw_line_names).split(",")] if raw_line_names not in (None, "") else []
+            sheet_count = len([chunk for chunk in re.split(r"[;,]", str(raw_names)) if str(chunk).strip()])
+            line_chunks = [str(chunk).strip() for chunk in re.split(r"[;,]", str(raw_line_names))] if raw_line_names not in (None, "") else []
             if line_chunks and len(line_chunks) != sheet_count:
                 logger.warning(
                     "Erection config: project '%s' has mismatched 'Erection Line Names'; falling back to sheet-name inference.",
@@ -470,6 +489,36 @@ def _resolve_named_template_sheet(wb, expected_name: str) -> Optional[str]:
         if _normalize_space_only(name) == expected_key:
             return name
     return None
+
+
+def _resolve_project_template_sheets(wb, project_name: object, discipline: str) -> List[str]:
+    project_text = str(project_name or "").strip()
+    if not project_text:
+        return []
+
+    resolved: List[str] = []
+    seen: set[str] = set()
+
+    for expected in (
+        f"{project_text} {discipline}",
+        f"{project_text} {discipline} Template Check",
+    ):
+        hit = _resolve_named_template_sheet(wb, expected)
+        if hit and hit not in seen:
+            seen.add(hit)
+            resolved.append(hit)
+
+    project_key = _normalize_space_only(project_text)
+    discipline_key = _normalize_space_only(discipline)
+    for name in wb.sheetnames:
+        key = _normalize_space_only(name)
+        if not key:
+            continue
+        if key.startswith(project_key) and key.endswith(discipline_key) and name not in seen:
+            seen.add(name)
+            resolved.append(name)
+
+    return resolved
 
 
 def _extract_template_column_map(ws) -> Dict[int, str]:
@@ -518,10 +567,13 @@ def load_erection_template_mapping_config(
             return {}, {}
 
         normalized_headers = [_normalize_space_only(v) for v in header_row]
-        try:
-            project_idx = normalized_headers.index("project code")
-            check_idx = normalized_headers.index("erection template check")
-        except ValueError:
+        project_idx = normalized_headers.index("project code") if "project code" in normalized_headers else None
+        check_idx = None
+        for candidate in ("erection template check", "erection"):
+            if candidate in normalized_headers:
+                check_idx = normalized_headers.index(candidate)
+                break
+        if project_idx is None or check_idx is None:
             return {}, {}
 
         mapping: Dict[str, Tuple[Dict[int, str], str]] = {}
@@ -538,22 +590,28 @@ def load_erection_template_mapping_config(
                 continue
 
             project_key = _normalize_project_code_key(project)
-            expected_tab_name = f"{str(project).strip()} Erection Template Check"
-            template_sheet = _resolve_named_template_sheet(wb, expected_tab_name)
-            if not template_sheet:
+            template_sheets = _resolve_project_template_sheets(wb, project, "Erection")
+            if not template_sheets:
                 errors[project_key] = (
-                    f"Erection Template Check is Yes but mapping tab '{expected_tab_name}' is missing."
+                    f"Erection Template Check is Yes but no mapping tab matching project '{str(project).strip()}' was found."
                 )
                 continue
 
-            col_map = _extract_template_column_map(wb[template_sheet])
-            if not col_map:
+            best_sheet = None
+            best_map: Dict[int, str] = {}
+            for sheet_name in template_sheets:
+                col_map = _extract_template_column_map(wb[sheet_name])
+                if len(col_map) > len(best_map):
+                    best_map = col_map
+                    best_sheet = sheet_name
+
+            if not best_map or not best_sheet:
                 errors[project_key] = (
-                    f"Erection template tab '{template_sheet}' has no usable 'To Map' mapping row."
+                    f"Erection template tab(s) for project '{str(project).strip()}' have no usable 'To Map' mapping row."
                 )
                 continue
 
-            mapping[project_key] = (col_map, template_sheet)
+            mapping[project_key] = (best_map, best_sheet)
         return mapping, errors
     finally:
         wb.close()
@@ -1024,7 +1082,11 @@ def process_file(
             logger.warning("Fallback note for '%s': %s", path.name, fallback_note)
             issues.append({"file": path.name, "sheet": target, "issue": fallback_note})
 
-        hdr_row, cols = find_header_row(df_raw, search_rows=30)
+        hdr_row, cols = find_header_row(
+            df_raw,
+            search_rows=30,
+            min_score=1.0 if template_column_map else 3.0,
+        )
         if hdr_row is None:
             issues.append(
                 {
@@ -1052,6 +1114,18 @@ def process_file(
                 if current != mapped_target:
                     applied_mapping.append(f"C{idx + 1}:{current}->{mapped_target}")
             df.columns = remapped_columns
+        df, duplicate_names = _drop_duplicate_columns_keep_first(df)
+        if duplicate_names:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": (
+                        "Duplicate columns detected after header mapping; kept first occurrence for: "
+                        + ", ".join(sorted(set(duplicate_names)))
+                    ),
+                }
+            )
 
         diag = {
             "file": path.name,
@@ -1118,6 +1192,8 @@ def process_file(
         work["Start Date"] = work["starting date"].apply(to_date)
         work["Complete Date"] = work["completion date"].apply(to_date)
         repaired_dates = _repair_ambiguous_non_positive_dates(work)
+        work["Start Date"] = pd.to_datetime(work["Start Date"], errors="coerce")
+        work["Complete Date"] = pd.to_datetime(work["Complete Date"], errors="coerce")
         diag["date_repairs_applied"] = int(repaired_dates)
         if repaired_dates:
             issues.append(

@@ -36,7 +36,7 @@ def _split_csv_tokens(value: object, *, keep_empty: bool) -> list[str]:
     text = str(value).strip()
     if not text or text.lower() == "nan":
         return []
-    parts = [str(part).strip() for part in text.split(",")]
+    parts = [str(part).strip() for part in re.split(r"[;,]", text)]
     if keep_empty:
         return parts
     return [part for part in parts if part]

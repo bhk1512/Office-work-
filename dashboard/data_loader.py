@@ -339,8 +339,8 @@ def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[dict[str, str
             mapping[project_key] = []
             continue
         raw_line_names = row.get(line_col) if line_col else None
-        sheet_count = len([chunk for chunk in str(raw_stringing).split(",") if str(chunk).strip()])
-        line_chunks = [str(chunk).strip() for chunk in str(raw_line_names).split(",")] if raw_line_names not in (None, "") and not pd.isna(raw_line_names) else []
+        sheet_count = len([chunk for chunk in re.split(r"[;,]", str(raw_stringing)) if str(chunk).strip()])
+        line_chunks = [str(chunk).strip() for chunk in re.split(r"[;,]", str(raw_line_names))] if raw_line_names not in (None, "") and not pd.isna(raw_line_names) else []
         if line_chunks and len(line_chunks) != sheet_count:
             LOGGER.warning(
                 "Stringing: project '%s' has mismatched 'Stringing Line Names'; falling back to sheet-name inference.",

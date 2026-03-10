@@ -264,8 +264,8 @@ def _load_stringing_sheet_config(input_dir: Optional[Path]) -> Dict[str, List[Di
                 continue
             raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
 
-            sheet_count = len([chunk for chunk in str(raw_stringing).split(",") if str(chunk).strip()])
-            line_chunks = [str(chunk).strip() for chunk in str(raw_line_names).split(",")] if raw_line_names not in (None, "") else []
+            sheet_count = len([chunk for chunk in re.split(r"[;,]", str(raw_stringing)) if str(chunk).strip()])
+            line_chunks = [str(chunk).strip() for chunk in re.split(r"[;,]", str(raw_line_names))] if raw_line_names not in (None, "") else []
             if line_chunks and len(line_chunks) != sheet_count:
                 print(
                     "[pipeline] Stringing: warning: project "
@@ -295,6 +295,36 @@ def _resolve_named_template_sheet(wb, expected_name: str) -> Optional[str]:
         if _normalize_space_only(name) == expected_key:
             return name
     return None
+
+
+def _resolve_project_template_sheets(wb, project_name: object, discipline: str) -> List[str]:
+    project_text = str(project_name or "").strip()
+    if not project_text:
+        return []
+
+    resolved: List[str] = []
+    seen: set[str] = set()
+
+    for expected in (
+        f"{project_text} {discipline}",
+        f"{project_text} {discipline} Template Check",
+    ):
+        hit = _resolve_named_template_sheet(wb, expected)
+        if hit and hit not in seen:
+            seen.add(hit)
+            resolved.append(hit)
+
+    project_key = _normalize_space_only(project_text)
+    discipline_key = _normalize_space_only(discipline)
+    for name in wb.sheetnames:
+        key = _normalize_space_only(name)
+        if not key:
+            continue
+        if key.startswith(project_key) and key.endswith(discipline_key) and name not in seen:
+            seen.add(name)
+            resolved.append(name)
+
+    return resolved
 
 
 def _extract_template_column_map(ws) -> Dict[int, str]:
@@ -344,10 +374,13 @@ def _load_stringing_template_mapping_config(
             return {}, {}
 
         normalized_headers = [_normalize_space_only(value) for value in header_row]
-        try:
-            project_idx = normalized_headers.index("project code")
-            check_idx = normalized_headers.index("stringing template check")
-        except ValueError:
+        project_idx = normalized_headers.index("project code") if "project code" in normalized_headers else None
+        check_idx = None
+        for candidate in ("stringing template check", "stringing"):
+            if candidate in normalized_headers:
+                check_idx = normalized_headers.index(candidate)
+                break
+        if project_idx is None or check_idx is None:
             return {}, {}
 
         mappings: Dict[str, Tuple[Dict[int, str], str]] = {}
@@ -364,22 +397,28 @@ def _load_stringing_template_mapping_config(
                 continue
 
             project_key = _normalize_project_code_key(project_val)
-            expected_tab = f"{str(project_val).strip()} Stringing Template Check"
-            template_sheet = _resolve_named_template_sheet(wb, expected_tab)
-            if template_sheet is None:
+            template_sheets = _resolve_project_template_sheets(wb, project_val, "Stringing")
+            if not template_sheets:
                 errors[project_key] = (
-                    f"Stringing Template Check is Yes but mapping tab '{expected_tab}' is missing."
+                    f"Stringing Template Check is Yes but no mapping tab matching project '{str(project_val).strip()}' was found."
                 )
                 continue
 
-            col_map = _extract_template_column_map(wb[template_sheet])
-            if not col_map:
+            best_sheet = None
+            best_map: Dict[int, str] = {}
+            for sheet_name in template_sheets:
+                col_map = _extract_template_column_map(wb[sheet_name])
+                if len(col_map) > len(best_map):
+                    best_map = col_map
+                    best_sheet = sheet_name
+
+            if not best_map or not best_sheet:
                 errors[project_key] = (
-                    f"Stringing template tab '{template_sheet}' has no usable 'To Map' mapping row."
+                    f"Stringing template tab(s) for project '{str(project_val).strip()}' have no usable 'To Map' mapping row."
                 )
                 continue
 
-            mappings[project_key] = (col_map, template_sheet)
+            mappings[project_key] = (best_map, best_sheet)
         return mappings, errors
     finally:
         wb.close()
