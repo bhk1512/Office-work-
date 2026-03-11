@@ -9,10 +9,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
-from openpyxl import load_workbook
 
-from erection_compiled_to_daily_new import run_pipeline, load_sheet_with_csv_fallback
+from erection_compiled_to_daily_new import run_pipeline
 from dashboard.config import AppConfig
+from dashboard import stringing_ingest as ingest
 from dashboard.stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
@@ -28,7 +28,6 @@ from microplan_compile import (
 from dashboard.project_identity import (
     build_project_display,
     build_project_scope_key,
-    parse_sheet_line_entries,
     normalize_line_name,
     parse_project_identity_from_filename,
 )
@@ -92,17 +91,85 @@ PARQUET_SHEETS: tuple[str, ...] = (
 
 
 def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
-    """Persist *df* to *destination* using DuckDB for consistent parquet output."""
+    """Persist *df* atomically to *destination* using DuckDB/pandas fallbacks."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        destination.unlink()
-    with duckdb.connect(database=":memory:") as con:
-        con.register("df_to_write", df)
-        con.execute(
-            "COPY df_to_write TO ? (FORMAT 'parquet', COMPRESSION 'zstd')",
-            [str(destination)],
-        )
+    if not isinstance(df, pd.DataFrame):
+        print(f"[pipeline] Warning: skipped parquet write for {destination} (input is not a dataframe).")
+        return
+    if len(df.columns) == 0:
+        print(f"[pipeline] Warning: skipped parquet write for {destination} (no columns).")
+        return
+
+    temp_path = destination.with_name(f"{destination.name}.tmp")
+    if temp_path.exists():
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
+
+    def _validate(path: Path) -> bool:
+        if not path.exists():
+            return False
+        try:
+            if path.stat().st_size < 12:
+                return False
+            with path.open("rb") as fh:
+                header = fh.read(4)
+                fh.seek(-4, 2)
+                trailer = fh.read(4)
+            if header != b"PAR1" or trailer != b"PAR1":
+                return False
+            with duckdb.connect(database=":memory:") as con:
+                con.execute("SELECT count(*) FROM read_parquet(?)", [str(path)])
+            return True
+        except Exception:
+            return False
+
+    write_ok = False
+    try:
+        with duckdb.connect(database=":memory:") as con:
+            con.register("df_to_write", df)
+            con.execute(
+                "COPY df_to_write TO ? (FORMAT 'parquet', COMPRESSION 'zstd')",
+                [str(temp_path)],
+            )
+        write_ok = _validate(temp_path)
+    except Exception as exc:
+        print(f"[pipeline] Warning: DuckDB parquet write failed for {destination}: {exc}")
+
+    if not write_ok:
+        try:
+            df.to_parquet(temp_path, compression="zstd", index=False)
+            write_ok = _validate(temp_path)
+        except Exception as exc:
+            print(f"[pipeline] Warning: pandas parquet write failed for {destination}: {exc}")
+            safe = df.copy()
+            for column in safe.select_dtypes(include="object").columns:
+                safe[column] = safe[column].astype(str)
+            try:
+                safe.to_parquet(temp_path, compression="zstd", index=False)
+                write_ok = _validate(temp_path)
+            except Exception as exc2:
+                print(f"[pipeline] Warning: string-coerced pandas parquet write failed for {destination}: {exc2}")
+                try:
+                    all_text = df.astype(str)
+                    all_text.to_parquet(temp_path, compression="zstd", index=False)
+                    write_ok = _validate(temp_path)
+                except Exception as exc3:
+                    print(f"[pipeline] Warning: full-string pandas parquet write failed for {destination}: {exc3}")
+                    write_ok = False
+
+    if not write_ok:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        print(f"[pipeline] Warning: skipped replacing parquet {destination}; temp artifact validation failed.")
+        return
+
+    temp_path.replace(destination)
 
 
 def export_workbook_to_parquet(workbook_path: Path, sheets: Iterable[str] | None = None) -> Path:
@@ -193,100 +260,21 @@ def _stringing_candidates(input_dir: Optional[Path], files: Optional[List[Path]]
 
 
 def _normalize_project_code_key(value: object) -> str:
-    if value is None:
-        return ""
-    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+    return ingest.normalize_project_code_key(value)
 
 
 def _normalize_space_only(value: object) -> str:
-    if value is None:
-        return ""
-    return re.sub(r"\s+", " ", str(value).strip().lower())
+    return ingest.normalize_space_only(value)
 
 
 def _resolve_dpr_config_path(input_dir: Optional[Path]) -> Optional[Path]:
-    if input_dir is not None:
-        candidate = input_dir.parent / "DPR_Config.xlsx"
-        if candidate.exists():
-            return candidate
-    fallback = BASE_DIR / "Raw Data" / "DPR_Config.xlsx"
-    if fallback.exists():
-        return fallback
-    return None
+    raw_root = input_dir if input_dir is not None else (BASE_DIR / "Raw Data" / "DPRs")
+    return ingest.resolve_dpr_config_path(raw_root, repo_root=BASE_DIR)
 
 
 def _load_stringing_sheet_config(input_dir: Optional[Path]) -> Dict[str, List[Dict[str, str]]]:
-    config_path = _resolve_dpr_config_path(input_dir)
-    if config_path is None:
-        return {}
-
-    try:
-        wb = load_workbook(config_path, data_only=True, read_only=True)
-    except Exception as exc:
-        print(f"[pipeline] Stringing: warning: failed to read DPR config {config_path}: {exc}")
-        return {}
-
-    try:
-        if "Sheet Names Check" not in wb.sheetnames:
-            print(f"[pipeline] Stringing: warning: 'Sheet Names Check' tab missing in {config_path}.")
-            return {}
-
-        ws = wb["Sheet Names Check"]
-        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        if not header_row:
-            return {}
-
-        normalized_headers = [_normalize_space_only(value) for value in header_row]
-        try:
-            project_idx = normalized_headers.index("project code")
-            stringing_idx = normalized_headers.index("stringing sheet names")
-        except ValueError:
-            print(
-                "[pipeline] Stringing: warning: DPR config is missing required columns "
-                "'Project Code' or 'Stringing Sheet Names'."
-            )
-            return {}
-
-        line_idx = normalized_headers.index("stringing line names") if "stringing line names" in normalized_headers else None
-
-        mapping: Dict[str, List[Dict[str, str]]] = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if row is None:
-                continue
-            project_val = row[project_idx] if project_idx < len(row) else None
-            if project_val in (None, ""):
-                continue
-
-            project_key = _normalize_project_code_key(project_val)
-            raw_stringing = row[stringing_idx] if stringing_idx < len(row) else None
-            if raw_stringing in (None, ""):
-                mapping[project_key] = []
-                continue
-            raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
-
-            sheet_count = len([chunk for chunk in re.split(r"[;,]", str(raw_stringing)) if str(chunk).strip()])
-            line_chunks = [str(chunk).strip() for chunk in re.split(r"[;,]", str(raw_line_names))] if raw_line_names not in (None, "") else []
-            if line_chunks and len(line_chunks) != sheet_count:
-                print(
-                    "[pipeline] Stringing: warning: project "
-                    f"'{str(project_val).strip()}' has mismatched 'Stringing Line Names'; "
-                    "falling back to sheet-name inference."
-                )
-                raw_line_names = ""
-
-            entries = parse_sheet_line_entries(raw_stringing, raw_line_names, "stringing")
-            deduped_entries: List[Dict[str, str]] = []
-            seen_sheet_keys = set()
-            for entry in entries:
-                key = _normalize_space_only(entry.get("sheet_name"))
-                if not key or key in seen_sheet_keys:
-                    continue
-                seen_sheet_keys.add(key)
-                deduped_entries.append(entry)
-            mapping[project_key] = deduped_entries
-        return mapping
-    finally:
-        wb.close()
+    raw_root = input_dir if input_dir is not None else (BASE_DIR / "Raw Data" / "DPRs")
+    return ingest.load_stringing_sheet_config(raw_root, repo_root=BASE_DIR)
 
 
 def _resolve_named_template_sheet(wb, expected_name: str) -> Optional[str]:
@@ -354,97 +342,15 @@ def _extract_template_column_map(ws) -> Dict[int, str]:
 def _load_stringing_template_mapping_config(
     input_dir: Optional[Path],
 ) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
-    config_path = _resolve_dpr_config_path(input_dir)
-    if config_path is None:
-        return {}, {}
-
-    try:
-        wb = load_workbook(config_path, data_only=True, read_only=True)
-    except Exception as exc:
-        print(f"[pipeline] Stringing: warning: failed to read DPR config {config_path}: {exc}")
-        return {}, {}
-
-    try:
-        if "Sheet Names Check" not in wb.sheetnames:
-            return {}, {}
-
-        ws = wb["Sheet Names Check"]
-        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        if not header_row:
-            return {}, {}
-
-        normalized_headers = [_normalize_space_only(value) for value in header_row]
-        project_idx = normalized_headers.index("project code") if "project code" in normalized_headers else None
-        check_idx = None
-        for candidate in ("stringing template check", "stringing"):
-            if candidate in normalized_headers:
-                check_idx = normalized_headers.index(candidate)
-                break
-        if project_idx is None or check_idx is None:
-            return {}, {}
-
-        mappings: Dict[str, Tuple[Dict[int, str], str]] = {}
-        errors: Dict[str, str] = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if row is None:
-                continue
-            project_val = row[project_idx] if project_idx < len(row) else None
-            if project_val in (None, ""):
-                continue
-
-            check_val = row[check_idx] if check_idx < len(row) else None
-            if _normalize_space_only(check_val) != "yes":
-                continue
-
-            project_key = _normalize_project_code_key(project_val)
-            template_sheets = _resolve_project_template_sheets(wb, project_val, "Stringing")
-            if not template_sheets:
-                errors[project_key] = (
-                    f"Stringing Template Check is Yes but no mapping tab matching project '{str(project_val).strip()}' was found."
-                )
-                continue
-
-            best_sheet = None
-            best_map: Dict[int, str] = {}
-            for sheet_name in template_sheets:
-                col_map = _extract_template_column_map(wb[sheet_name])
-                if len(col_map) > len(best_map):
-                    best_map = col_map
-                    best_sheet = sheet_name
-
-            if not best_map or not best_sheet:
-                errors[project_key] = (
-                    f"Stringing template tab(s) for project '{str(project_val).strip()}' have no usable 'To Map' mapping row."
-                )
-                continue
-
-            mappings[project_key] = (best_map, best_sheet)
-        return mappings, errors
-    finally:
-        wb.close()
+    raw_root = input_dir if input_dir is not None else (BASE_DIR / "Raw Data" / "DPRs")
+    return ingest.load_stringing_template_mapping_config(raw_root, repo_root=BASE_DIR)
 
 
 def _apply_template_column_mapping(
     df: pd.DataFrame,
     template_map: Dict[int, str],
 ) -> Tuple[pd.DataFrame, List[str]]:
-    if df is None or df.empty or not template_map:
-        return df, []
-    remapped = df.copy()
-    columns = list(remapped.columns)
-    changes: List[str] = []
-    for idx, mapped_name in sorted(template_map.items()):
-        if idx >= len(columns):
-            continue
-        current = str(columns[idx]).strip()
-        target = str(mapped_name).strip()
-        if not target:
-            continue
-        columns[idx] = target
-        if _normalize_space_only(current) != _normalize_space_only(target):
-            changes.append(f"C{idx + 1}:{current}->{target}")
-    remapped.columns = columns
-    return remapped, changes
+    return ingest.apply_template_column_mapping(df, template_map)
 
 
 def _clean_stringing_header_label(label: object) -> str:
@@ -642,9 +548,15 @@ def _write_stringing_artifacts(
         }
     ])
 
-    # Write workbook
+    # Write workbook atomically and keep last known-good output on failure.
+    temp_output = output_path.with_name(f"{output_path.name}.tmp")
+    if temp_output.exists():
+        try:
+            temp_output.unlink()
+        except Exception:
+            pass
     try:
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
             raw_df.to_excel(writer, sheet_name=sheet_name[:31] or "Stringing", index=False)
             diagnostics_df.to_excel(writer, sheet_name="Diagnostics", index=False)
             if data_issues_df is not None and not data_issues_df.empty:
@@ -652,33 +564,33 @@ def _write_stringing_artifacts(
             if issues_df is not None and not issues_df.empty:
                 issues_df.to_excel(writer, sheet_name="Issues", index=False)
             readme_df.to_excel(writer, sheet_name="README_Assumptions", index=False)
+        with pd.ExcelFile(temp_output) as probe:
+            _ = probe.sheet_names
+        temp_output.replace(output_path)
         print(f"[pipeline] Stringing: wrote workbook {output_path}")
     except Exception as exc:
+        if temp_output.exists():
+            try:
+                temp_output.unlink()
+            except Exception:
+                pass
         print(f"[pipeline] Warning: failed to write stringing workbook {output_path}: {exc}")
 
-    # Refresh parquet artifacts without deleting the just-written workbook.
+    # Refresh parquet artifacts using atomic parquet writes.
     parquet_dir.mkdir(parents=True, exist_ok=True)
     compiled_parquet = parquet_dir / "StringingCompiled.parquet"
-    if compiled_parquet.exists():
-        try:
-            compiled_parquet.unlink()
-        except Exception as exc:
-            print(f"[pipeline] Warning: failed to replace stringing parquet {compiled_parquet}: {exc}")
     compiled_ready = _normalize_stringing_dates_for_parquet(raw_df)
     _write_parquet(compiled_ready, compiled_parquet)
     print(f"[pipeline] Stringing: wrote compiled parquet {compiled_parquet}")
 
-    # Precompute daily parquet to mirror erection flow (optional speed-up)
+    # Precompute daily parquet to mirror dashboard artifact layout.
     try:
         daily = expand_stringing_to_daily(raw_df)
         if daily is not None and not daily.empty:
-            daily_dir = output_path.parent / "StringingDaily"
-            if daily_dir.exists():
-                shutil.rmtree(daily_dir)
-            daily_dir.mkdir(parents=True, exist_ok=True)
             daily_ready = _normalize_stringing_dates_for_parquet(daily)
-            _write_parquet(daily_ready, daily_dir / "stringing_daily.parquet")
-            print(f"[pipeline] Stringing: wrote daily parquet {daily_dir}")
+            daily_parquet = output_path.parent / "StringingDaily.parquet"
+            _write_parquet(daily_ready, daily_parquet)
+            print(f"[pipeline] Stringing: wrote daily parquet {daily_parquet}")
     except Exception as exc:
         print(f"[pipeline] Warning: failed to write stringing daily parquet: {exc}")
 
@@ -806,165 +718,61 @@ def compile_stringing_to_workbook(
             continue
 
         try:
-            with pd.ExcelFile(f) as xl:
-                if configured_sheet_name:
-                    found = _find_stringing_sheet_name_from_list(list(xl.sheet_names), None, [configured_sheet_name])
-                else:
-                    found = _find_stringing_sheet_name(xl, preferred)
-                if not found:
-                    raise ValueError("NO_TARGET_SHEET")
-                used_name = used_name or found
-                df_raw = xl.parse(sheet_name=found, header=None)
-                df, header_row, header_labels = _extract_stringing_data_with_detected_header(df_raw)
-                if df is None:
-                    df, header_row, header_labels = _extract_stringing_data_with_first_row_header(df_raw)
-        except Exception:
-            try:
-                if configured_sheet_name:
-                    selector = (
-                        lambda names, configured=configured_sheet_name: _find_stringing_sheet_name_from_list(
-                            list(names),
-                            None,
-                            [configured],
-                        )
-                    )
-                else:
-                    selector = (
-                        lambda names, pref=preferred: _find_stringing_sheet_name_from_list(
-                            list(names), pref
-                        )
-                    )
-                df_raw, found, fallback_note = load_sheet_with_csv_fallback(
-                    f,
-                    selector,
-                    read_excel_kwargs={"header": None},
-                    read_csv_kwargs={"header": None},
-                )
-                if found is None or df_raw is None or df_raw.empty:
-                    raise ValueError("NO_TARGET_SHEET")
-                used_name = used_name or found
-                df, header_row, header_labels = _extract_stringing_data_with_detected_header(df_raw)
-                if df is None:
-                    df, header_row, header_labels = _extract_stringing_data_with_first_row_header(df_raw)
-                    if df is None or df.empty:
-                        raise ValueError("HEADER_NOT_FOUND")
-            except Exception as fallback_exc:
-                if isinstance(fallback_exc, ValueError) and str(fallback_exc) == "NO_TARGET_SHEET":
-                    missing.append(f.name)
-                    issue_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": "",
-                            "ConfiguredSheet": configured_sheet_name,
-                            "LineName": line_name_override,
-                            "LineNameSource": line_name_source,
-                            "Issue": "NO_TARGET_SHEET",
-                            "MissingColumns": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                        }
-                    )
-                    diag_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": "",
-                            "ConfiguredSheet": configured_sheet_name,
-                            "LineName": line_name_override,
-                            "LineNameSource": line_name_source,
-                            "DetectedHeaderRow": "",
-                            "ColumnsDetected": "",
-                            "NormalizedColumnsOk": "",
-                            "PresentColumns": "",
-                            "MissingColumns": "",
-                            "AppliedMap": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                            "Status": "NO_TARGET_SHEET",
-                            "FallbackNote": "",
-                            "TemplateSheet": template_sheet_name or "",
-                            "TemplateApplied": "",
-                            "TemplateChanges": "",
-                        }
-                    )
-                elif isinstance(fallback_exc, ValueError) and str(fallback_exc) == "HEADER_NOT_FOUND":
-                    issue_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found or "",
-                            "ConfiguredSheet": configured_sheet_name,
-                            "LineName": line_name_override,
-                            "LineNameSource": line_name_source,
-                            "Issue": "HEADER_NOT_FOUND",
-                            "MissingColumns": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                        }
-                    )
-                    diag_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found or "",
-                            "ConfiguredSheet": configured_sheet_name,
-                            "LineName": line_name_override,
-                            "LineNameSource": line_name_source,
-                            "DetectedHeaderRow": "",
-                            "ColumnsDetected": "",
-                            "NormalizedColumnsOk": "",
-                            "PresentColumns": "",
-                            "MissingColumns": "",
-                            "AppliedMap": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                            "Status": "HEADER_NOT_FOUND",
-                            "FallbackNote": "",
-                            "TemplateSheet": template_sheet_name or "",
-                            "TemplateApplied": "",
-                            "TemplateChanges": "",
-                        }
-                    )
-                else:
-                    issue_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found or "",
-                            "ConfiguredSheet": configured_sheet_name,
-                            "LineName": line_name_override,
-                            "LineNameSource": line_name_source,
-                            "Issue": f"READ_FAIL: {type(fallback_exc).__name__}",
-                            "MissingColumns": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                        }
-                    )
-                    diag_rows.append(
-                        {
-                            "Workbook": f.name,
-                            "Project": project,
-                            "Sheet": found or "",
-                            "ConfiguredSheet": configured_sheet_name,
-                            "LineName": line_name_override,
-                            "LineNameSource": line_name_source,
-                            "DetectedHeaderRow": "" if header_row is None else int(header_row),
-                            "ColumnsDetected": ", ".join(header_labels),
-                            "NormalizedColumnsOk": "",
-                            "PresentColumns": "",
-                            "MissingColumns": "",
-                            "AppliedMap": "",
-                            "Rows": 0,
-                            "DailyRows": 0,
-                            "Status": "READ_FAIL",
-                            "FallbackNote": "",
-                            "TemplateSheet": template_sheet_name or "",
-                            "TemplateApplied": "",
-                            "TemplateChanges": "",
-                        }
-                    )
-                continue
+            load_result = ingest.load_stringing_sheet_frame(
+                f,
+                configured_sheet_name=configured_sheet_name,
+                preferred_sheet_name=preferred,
+            )
+            found = load_result.resolved_sheet
+            fallback_note = load_result.fallback_note
+            header_row = load_result.header_row
+            header_labels = list(load_result.header_labels)
+            df = load_result.frame
+            if found is None:
+                raise ValueError("NO_TARGET_SHEET")
+            used_name = used_name or found
+        except Exception as read_exc:
+            is_no_target = isinstance(read_exc, ValueError) and str(read_exc) == "NO_TARGET_SHEET"
+            if is_no_target:
+                missing.append(f.name)
+            issue_rows.append(
+                {
+                    "Workbook": f.name,
+                    "Project": project,
+                    "Sheet": found or "",
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name_override,
+                    "LineNameSource": line_name_source,
+                    "Issue": "NO_TARGET_SHEET" if is_no_target else f"READ_FAIL: {type(read_exc).__name__}",
+                    "MissingColumns": "",
+                    "Rows": 0,
+                    "DailyRows": 0,
+                }
+            )
+            diag_rows.append(
+                {
+                    "Workbook": f.name,
+                    "Project": project,
+                    "Sheet": found or "",
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name_override,
+                    "LineNameSource": line_name_source,
+                    "DetectedHeaderRow": "" if header_row is None else int(header_row),
+                    "ColumnsDetected": ", ".join(header_labels),
+                    "NormalizedColumnsOk": "",
+                    "PresentColumns": "",
+                    "MissingColumns": "",
+                    "AppliedMap": "",
+                    "Rows": 0,
+                    "DailyRows": 0,
+                    "Status": "NO_TARGET_SHEET" if is_no_target else "READ_FAIL",
+                    "FallbackNote": "",
+                    "TemplateSheet": template_sheet_name or "",
+                    "TemplateApplied": "",
+                    "TemplateChanges": "",
+                }
+            )
+            continue
 
         if df is None or df.empty:
             issue_rows.append(

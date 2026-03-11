@@ -143,6 +143,7 @@ _AGGREGATE_CACHE_MAX_ITEMS = 32
 _AGGREGATE_CACHE: "OrderedDict[str, _AggregateCacheEntry]" = OrderedDict()
 DATA_SELECTOR: DataSelector | None = None
 _PROJECT_INFO_PROVIDER: Callable[[], pd.DataFrame] | None = None
+_STRINGING_COVERAGE_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _REGISTERED_DASH_APPS: "WeakSet[Dash]" = WeakSet()
 
 _ANALYTICS_CACHE_TTL_SECONDS = 12 * 60 * 60
@@ -178,6 +179,18 @@ if TYPE_CHECKING:
 def _get_stringing_tse_lookup() -> tuple[dict[str, int], dict[str, str]]:
     """Fallback stub replaced inside register_callbacks."""
     return {}, {}
+
+
+def _get_stringing_coverage_frame() -> pd.DataFrame:
+    provider = _STRINGING_COVERAGE_PROVIDER
+    if provider is None:
+        return pd.DataFrame()
+    try:
+        frame = provider()
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    except Exception:
+        LOGGER.warning("Unable to load stringing coverage frame", exc_info=True)
+        return pd.DataFrame()
 
 
 def _default_stringing_method_values() -> list[str]:
@@ -2056,6 +2069,7 @@ def register_callbacks(
     idle_interval_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_idle_interval_provider: Callable[[], pd.DataFrame] | None = None,
     stringing_plan_summary_provider: Callable[[], pd.DataFrame] | None = None,
+    stringing_coverage_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
     responsibilities_provider: Callable[[], pd.DataFrame] | None = None,
@@ -2086,10 +2100,11 @@ def register_callbacks(
         duckdb_lock=duckdb_lock,
         logger=LOGGER,
     )
-    global DATA_SELECTOR, _PROJECT_INFO_PROVIDER
+    global DATA_SELECTOR, _PROJECT_INFO_PROVIDER, _STRINGING_COVERAGE_PROVIDER
     global _IDLE_INTERVAL_PROVIDER, _STRINGING_IDLE_INTERVAL_PROVIDER, _STRINGING_PLAN_SUMMARY_PROVIDER
     DATA_SELECTOR = data_selector
     _PROJECT_INFO_PROVIDER = project_info_provider
+    _STRINGING_COVERAGE_PROVIDER = stringing_coverage_provider
     _IDLE_INTERVAL_PROVIDER = idle_interval_provider
     _STRINGING_IDLE_INTERVAL_PROVIDER = stringing_idle_interval_provider
     _STRINGING_PLAN_SUMMARY_PROVIDER = stringing_plan_summary_provider
@@ -4561,23 +4576,36 @@ def register_callbacks(
     def update_project_options(scope_meta: dict[str, Any] | None) -> list[dict[str, str]]:
         try:
             scope = _scope_frame_from_store(scope_meta, "month")
-            if scope.empty:
-                return []
-            proj_col = "project_name" if "project_name" in scope.columns else ("project" if "project" in scope.columns else None)
-            if not proj_col:
-                return []
-            projects = (
-                scope[proj_col]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .replace("", pd.NA)
-                .dropna()
-                .unique()
-                .tolist()
-            )
-            projects = sorted({p for p in projects if p})
-            return [{"label": project, "value": project} for project in projects]
+            options_map: dict[str, str] = {}
+            if not scope.empty:
+                proj_col = "project_name" if "project_name" in scope.columns else ("project" if "project" in scope.columns else None)
+                if proj_col:
+                    projects = (
+                        scope[proj_col]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .replace("", pd.NA)
+                        .dropna()
+                        .unique()
+                        .tolist()
+                    )
+                    for project in sorted({p for p in projects if p}):
+                        options_map.setdefault(project, project)
+
+            coverage = _get_stringing_coverage_frame()
+            if not coverage.empty:
+                for _, row in coverage.iterrows():
+                    project_value = str(row.get("project_display") or row.get("project_code") or "").strip()
+                    if not project_value:
+                        continue
+                    status = str(row.get("status", "")).strip().upper()
+                    if project_value in options_map:
+                        continue
+                    label = project_value if status in {"", "OK"} else f"{project_value} [{status}]"
+                    options_map[project_value] = label
+
+            return [{"label": options_map[value], "value": value} for value in sorted(options_map)]
         except Exception as exc:
             LOGGER.exception("Failed to build project options: %s", exc)
             return []
@@ -4669,23 +4697,34 @@ def register_callbacks(
                 deployment_filter="all",
             )
             scope = frames.get("project_gang", pd.DataFrame())
-            if scope.empty:
-                return []
-            proj_col = "project_name" if "project_name" in scope.columns else ("project" if "project" in scope.columns else None)
-            if not proj_col:
-                return []
-            projects = (
-                scope[proj_col]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .replace("", pd.NA)
-                .dropna()
-                .unique()
-                .tolist()
-            )
-            projects = sorted({p for p in projects if p})
-            return [{"label": project, "value": project} for project in projects]
+            options_map: dict[str, str] = {}
+            if not scope.empty:
+                proj_col = "project_name" if "project_name" in scope.columns else ("project" if "project" in scope.columns else None)
+                if proj_col:
+                    projects = (
+                        scope[proj_col]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .replace("", pd.NA)
+                        .dropna()
+                        .unique()
+                        .tolist()
+                    )
+                    for project in sorted({p for p in projects if p}):
+                        options_map.setdefault(project, project)
+
+            coverage = _get_stringing_coverage_frame()
+            if not coverage.empty:
+                for _, row in coverage.iterrows():
+                    project_value = str(row.get("project_display") or row.get("project_code") or "").strip()
+                    if not project_value or project_value in options_map:
+                        continue
+                    status = str(row.get("status", "")).strip().upper()
+                    options_map[project_value] = (
+                        project_value if status in {"", "OK"} else f"{project_value} [{status}]"
+                    )
+            return [{"label": options_map[value], "value": value} for value in sorted(options_map)]
         except Exception as exc:
             LOGGER.exception("Failed to populate global performance project options: %s", exc)
             return []

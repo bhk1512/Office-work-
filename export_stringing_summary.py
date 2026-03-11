@@ -305,6 +305,283 @@ def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, d
     return lookup
 
 
+_COVERAGE_STATUS_PRIORITY = {
+    "READ_FAIL": 1,
+    "NO_TARGET_SHEET": 2,
+    "MISSING_REQUIRED_COLUMNS": 3,
+    "NO_DAILY": 4,
+    "SKIPPED_NO_STRINGING_CONFIG": 5,
+    "OK": 6,
+}
+
+
+def _build_coverage_registry(coverage_df: pd.DataFrame | None, project_info: pd.DataFrame | None) -> pd.DataFrame:
+    columns = ["project_key_norm", "project_code", "project_display", "pch_display", "status", "reason"]
+    if coverage_df is None or coverage_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    lookup = _build_project_meta_lookup(project_info)
+    records: dict[str, dict[str, object]] = {}
+
+    for _, row in coverage_df.iterrows():
+        project_code = str(row.get("project_code", "")).strip()
+        display_raw = str(row.get("project_display") or project_code).strip()
+        if not display_raw and not project_code:
+            continue
+
+        meta = None
+        for candidate in (project_code, display_raw):
+            key = compact_project_key(candidate)
+            if key and key in lookup:
+                meta = lookup[key]
+                break
+
+        project_display = (
+            str((meta or {}).get("project_display", "")).strip()
+            or display_raw
+            or project_code
+        )
+        key_norm = compact_project_key(project_display or project_code)
+        if not key_norm:
+            continue
+        pch_display = str((meta or {}).get("pch", "")).strip() or "Unassigned"
+        status = str(row.get("status", "")).strip().upper()
+        reason = str(row.get("reason", "")).strip()
+
+        candidate_record = {
+            "project_key_norm": key_norm,
+            "project_code": project_code,
+            "project_display": project_display,
+            "pch_display": pch_display,
+            "status": status,
+            "reason": reason,
+        }
+        existing = records.get(key_norm)
+        if existing is None:
+            records[key_norm] = candidate_record
+            continue
+
+        current_priority = _COVERAGE_STATUS_PRIORITY.get(str(existing.get("status", "")).upper(), 0)
+        candidate_priority = _COVERAGE_STATUS_PRIORITY.get(status, 0)
+        if candidate_priority >= current_priority:
+            merged_reason = "; ".join(
+                dict.fromkeys(
+                    part for part in [str(existing.get("reason", "")).strip(), reason] if part
+                )
+            )
+            candidate_record["reason"] = merged_reason
+            records[key_norm] = candidate_record
+        else:
+            merged_reason = "; ".join(
+                dict.fromkeys(
+                    part for part in [str(existing.get("reason", "")).strip(), reason] if part
+                )
+            )
+            existing["reason"] = merged_reason
+            records[key_norm] = existing
+
+    registry = pd.DataFrame(records.values(), columns=columns)
+    if registry.empty:
+        return registry
+    registry["project_display"] = registry["project_display"].fillna("").astype(str).str.strip()
+    registry = registry[registry["project_display"].astype(bool)]
+    registry = registry.drop_duplicates(subset=["project_key_norm"], keep="first")
+    return registry.sort_values(
+        ["pch_display", "project_display"],
+        key=lambda s: s.astype(str).str.lower(),
+    ).reset_index(drop=True)
+
+
+def _merge_project_rollup_with_coverage(
+    project_rollup: pd.DataFrame,
+    coverage_registry: pd.DataFrame,
+    *,
+    metric_columns: list[str],
+) -> pd.DataFrame:
+    if coverage_registry is None or coverage_registry.empty:
+        return project_rollup
+
+    base = (
+        coverage_registry[["pch_display", "project_display"]]
+        .rename(columns={"pch_display": "PCH", "project_display": "Project"})
+        .drop_duplicates()
+    )
+    if project_rollup is None or project_rollup.empty:
+        merged = base.copy()
+    else:
+        merged = base.merge(project_rollup, on=["PCH", "Project"], how="outer")
+
+    for column in metric_columns:
+        source = merged[column] if column in merged.columns else pd.Series(0.0, index=merged.index)
+        merged[column] = pd.to_numeric(source, errors="coerce").fillna(0.0)
+        if column in {"Gangs", "Spans"}:
+            merged[column] = merged[column].astype(int)
+        else:
+            merged[column] = merged[column].round(4)
+
+    merged["PCH"] = merged.get("PCH", "").fillna("").astype(str).str.strip().replace("", "Unassigned")
+    merged["Project"] = merged.get("Project", "").fillna("").astype(str).str.strip()
+    merged = merged[merged["Project"].astype(bool)]
+    merged = merged.sort_values(
+        ["PCH", "Project"],
+        key=lambda s: s.astype(str).str.lower(),
+    ).reset_index(drop=True)
+    return merged[["PCH", "Project", *metric_columns]]
+
+
+def _merge_monthly_project_with_coverage(
+    monthly_project: pd.DataFrame,
+    coverage_registry: pd.DataFrame,
+) -> pd.DataFrame:
+    if coverage_registry is None or coverage_registry.empty:
+        return monthly_project
+
+    base = (
+        coverage_registry[["pch_display", "project_display"]]
+        .rename(columns={"pch_display": "PCH", "project_display": "Project"})
+        .drop_duplicates()
+    )
+    if monthly_project is None or monthly_project.empty:
+        merged = base.copy()
+        ordered_columns = ["PCH", "Project"]
+    else:
+        ordered_columns = list(monthly_project.columns)
+        merged = base.merge(monthly_project, on=["PCH", "Project"], how="outer")
+
+    for column in merged.columns:
+        if column in {"PCH", "Project"}:
+            continue
+        numeric = pd.to_numeric(merged[column], errors="coerce").fillna(0.0)
+        if str(column).endswith("__gangs"):
+            merged[column] = numeric.astype(int)
+        else:
+            merged[column] = numeric.round(2)
+
+    merged["PCH"] = merged.get("PCH", "").fillna("").astype(str).str.strip().replace("", "Unassigned")
+    merged["Project"] = merged.get("Project", "").fillna("").astype(str).str.strip()
+    merged = merged[merged["Project"].astype(bool)]
+    merged = merged.sort_values(
+        ["PCH", "Project"],
+        key=lambda s: s.astype(str).str.lower(),
+    ).reset_index(drop=True)
+
+    final_columns = ordered_columns if monthly_project is not None and list(monthly_project.columns) else ["PCH", "Project"]
+    for column in final_columns:
+        if column not in merged.columns:
+            merged[column] = 0 if str(column).endswith("__gangs") else 0.0
+    return merged[final_columns]
+
+
+def _merge_vertical_project_tables_with_coverage(
+    tables: list[tuple[str, pd.DataFrame]],
+    coverage_registry: pd.DataFrame,
+) -> list[tuple[str, pd.DataFrame]]:
+    if coverage_registry is None or coverage_registry.empty:
+        return tables
+
+    base = (
+        coverage_registry[["project_display"]]
+        .rename(columns={"project_display": "Project"})
+        .drop_duplicates()
+    )
+    if base.empty:
+        return tables
+
+    merged_tables: list[tuple[str, pd.DataFrame]] = []
+    for month_label, month_table in tables:
+        table = month_table.copy() if isinstance(month_table, pd.DataFrame) else pd.DataFrame()
+        if "Project" not in table.columns:
+            table["Project"] = table.get("project_display", "")
+        if "Productivity" not in table.columns:
+            table["Productivity"] = 0.0
+        if "Total Stringing" not in table.columns:
+            table["Total Stringing"] = 0.0
+        merged = base.merge(
+            table[["Project", "Productivity", "Total Stringing"]],
+            on="Project",
+            how="outer",
+        )
+        merged["Productivity"] = pd.to_numeric(merged["Productivity"], errors="coerce").fillna(0.0).round(2)
+        merged["Total Stringing"] = pd.to_numeric(merged["Total Stringing"], errors="coerce").fillna(0.0).round(2)
+        merged["Project"] = merged["Project"].fillna("").astype(str).str.strip()
+        merged = merged[merged["Project"].astype(bool)]
+        merged = merged.sort_values("Project", key=lambda s: s.astype(str).str.lower()).reset_index(drop=True)
+        merged_tables.append((month_label, merged[["Project", "Productivity", "Total Stringing"]]))
+    return merged_tables
+
+
+def _build_coverage_issues_sheet(
+    coverage_df: pd.DataFrame | None,
+    coverage_registry: pd.DataFrame,
+) -> pd.DataFrame:
+    columns = [
+        "PCH",
+        "Project",
+        "Project Code",
+        "Status",
+        "Reason",
+        "Compiled Rows",
+        "Daily Rows",
+        "Workbook",
+        "Configured Sheet",
+        "Resolved Sheet",
+        "Fallback Used",
+    ]
+    if coverage_df is None or coverage_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = coverage_df.copy()
+    working["project_code"] = working.get("project_code", "").fillna("").astype(str).str.strip()
+    working["project_display"] = (
+        working.get("project_display", working["project_code"]).fillna("").astype(str).str.strip()
+    )
+    working["status"] = working.get("status", "").fillna("").astype(str).str.strip().str.upper()
+    working["reason"] = working.get("reason", "").fillna("").astype(str).str.strip()
+    working["compiled_rows"] = pd.to_numeric(working.get("compiled_rows", 0), errors="coerce").fillna(0).astype(int)
+    working["daily_rows"] = pd.to_numeric(working.get("daily_rows", 0), errors="coerce").fillna(0).astype(int)
+    working["workbook"] = working.get("workbook", "").fillna("").astype(str).str.strip()
+    working["configured_sheet"] = working.get("configured_sheet", "").fillna("").astype(str).str.strip()
+    working["resolved_sheet"] = working.get("resolved_sheet", "").fillna("").astype(str).str.strip()
+    working["fallback_used"] = working.get("fallback_used", False).fillna(False).astype(bool)
+
+    pch_lookup: dict[str, str] = {}
+    if coverage_registry is not None and not coverage_registry.empty:
+        pch_lookup = (
+            coverage_registry[["project_key_norm", "pch_display"]]
+            .dropna(subset=["project_key_norm"])
+            .drop_duplicates(subset=["project_key_norm"], keep="first")
+            .set_index("project_key_norm")["pch_display"]
+            .to_dict()
+        )
+    working["project_key_norm"] = working["project_display"].map(compact_project_key)
+    working["PCH"] = working["project_key_norm"].map(lambda key: pch_lookup.get(key, "Unassigned"))
+    working["PCH"] = working["PCH"].fillna("").astype(str).str.strip().replace("", "Unassigned")
+    working["has_issue"] = (
+        working["status"].ne("OK")
+        | working["reason"].astype(bool)
+        | (working["daily_rows"] == 0)
+    )
+
+    out = working.rename(
+        columns={
+            "project_display": "Project",
+            "project_code": "Project Code",
+            "status": "Status",
+            "reason": "Reason",
+            "compiled_rows": "Compiled Rows",
+            "daily_rows": "Daily Rows",
+            "workbook": "Workbook",
+            "configured_sheet": "Configured Sheet",
+            "resolved_sheet": "Resolved Sheet",
+            "fallback_used": "Fallback Used",
+        }
+    )
+    out["StatusRank"] = out["Status"].map(lambda value: _COVERAGE_STATUS_PRIORITY.get(str(value).upper(), 0))
+    out = out.sort_values(["has_issue", "StatusRank", "PCH", "Project"], ascending=[False, True, True, True])
+    out = out[columns].reset_index(drop=True)
+    return out
+
+
 def _prepare_stringing_scope(daily_df: pd.DataFrame, project_info: pd.DataFrame | None) -> pd.DataFrame:
     if daily_df is None or daily_df.empty:
         return pd.DataFrame()
@@ -562,8 +839,26 @@ def _build_rollup_tables(
     scope: pd.DataFrame,
     scope_tse: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    overall_rollup = _summarize_scope(scope)
-    overall_rollup = overall_rollup.rename(
+    overall_cols = [
+        "Overall Avg Productivity (KM/month)",
+        "TSE Avg Productivity (KM/month)",
+        "Total KM",
+        "Spans",
+        "Gangs",
+        "Projects",
+    ]
+    pch_cols = ["PCH", *overall_cols]
+    project_cols = [
+        "PCH",
+        "Project",
+        "Overall Avg Productivity (KM/month)",
+        "TSE Avg Productivity (KM/month)",
+        "Total KM",
+        "Spans",
+        "Gangs",
+    ]
+
+    overall_rollup = _summarize_scope(scope).rename(
         columns={
             "avg_km_month": "Overall Avg Productivity (KM/month)",
             "total_km": "Total KM",
@@ -572,27 +867,26 @@ def _build_rollup_tables(
             "projects": "Projects",
         }
     )
-    if scope_tse is None or scope_tse.empty:
-        overall_rollup["TSE Avg Productivity (KM/month)"] = 0.0
-    else:
-        tse_overall = _summarize_scope(scope_tse)
-        overall_rollup["TSE Avg Productivity (KM/month)"] = round(
-            float(tse_overall["avg_km_month"].iloc[0]) if not tse_overall.empty else 0.0,
-            4,
+    if overall_rollup.empty:
+        overall_rollup = pd.DataFrame(
+            [{col: 0 for col in overall_cols}],
+            columns=overall_cols,
         )
-    overall_rollup = overall_rollup[
-        [
-            "Overall Avg Productivity (KM/month)",
-            "TSE Avg Productivity (KM/month)",
-            "Total KM",
-            "Spans",
-            "Gangs",
-            "Projects",
-        ]
-    ]
+    else:
+        if scope_tse is None or scope_tse.empty:
+            overall_rollup["TSE Avg Productivity (KM/month)"] = 0.0
+        else:
+            tse_overall = _summarize_scope(scope_tse)
+            overall_rollup["TSE Avg Productivity (KM/month)"] = round(
+                float(tse_overall["avg_km_month"].iloc[0]) if not tse_overall.empty else 0.0,
+                4,
+            )
+        for col in overall_cols:
+            if col not in overall_rollup.columns:
+                overall_rollup[col] = 0.0
+        overall_rollup = overall_rollup[overall_cols]
 
-    pch_rollup = _summarize_scope(scope, group_columns=["pch_display"])
-    pch_rollup = pch_rollup.rename(
+    pch_rollup = _summarize_scope(scope, group_columns=["pch_display"]).rename(
         columns={
             "pch_display": "PCH",
             "avg_km_month": "Overall Avg Productivity (KM/month)",
@@ -602,39 +896,34 @@ def _build_rollup_tables(
             "projects": "Projects",
         }
     )
-    if scope_tse is not None and not scope_tse.empty:
-        tse_pch = _summarize_scope(scope_tse, group_columns=["pch_display"]).rename(
-            columns={
-                "pch_display": "PCH",
-                "avg_km_month": "TSE Avg Productivity (KM/month)",
-            }
+    if pch_rollup.empty:
+        pch_rollup = pd.DataFrame(columns=pch_cols)
+    else:
+        if scope_tse is not None and not scope_tse.empty:
+            tse_pch = _summarize_scope(scope_tse, group_columns=["pch_display"]).rename(
+                columns={
+                    "pch_display": "PCH",
+                    "avg_km_month": "TSE Avg Productivity (KM/month)",
+                }
+            )
+            pch_rollup = pch_rollup.merge(
+                tse_pch[["PCH", "TSE Avg Productivity (KM/month)"]],
+                on="PCH",
+                how="left",
+            )
+        pch_rollup["TSE Avg Productivity (KM/month)"] = (
+            pch_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
         )
-        pch_rollup = pch_rollup.merge(
-            tse_pch[["PCH", "TSE Avg Productivity (KM/month)"]],
-            on="PCH",
-            how="left",
-        )
-    pch_rollup["TSE Avg Productivity (KM/month)"] = (
-        pch_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
-    )
-    pch_rollup = pch_rollup[
-        [
-            "PCH",
-            "Overall Avg Productivity (KM/month)",
-            "TSE Avg Productivity (KM/month)",
-            "Total KM",
-            "Spans",
-            "Gangs",
-            "Projects",
-        ]
-    ]
+        for col in pch_cols:
+            if col not in pch_rollup.columns:
+                pch_rollup[col] = 0.0 if col != "PCH" else ""
+        pch_rollup = pch_rollup[pch_cols]
 
     project_rollup = _summarize_scope(
         scope,
         group_columns=["pch_display", "project_display"],
         include_project_count=False,
-    )
-    project_rollup = project_rollup.rename(
+    ).rename(
         columns={
             "pch_display": "PCH",
             "project_display": "Project",
@@ -644,37 +933,33 @@ def _build_rollup_tables(
             "gangs": "Gangs",
         }
     )
-    if scope_tse is not None and not scope_tse.empty:
-        tse_project = _summarize_scope(
-            scope_tse,
-            group_columns=["pch_display", "project_display"],
-            include_project_count=False,
-        ).rename(
-            columns={
-                "pch_display": "PCH",
-                "project_display": "Project",
-                "avg_km_month": "TSE Avg Productivity (KM/month)",
-            }
+    if project_rollup.empty:
+        project_rollup = pd.DataFrame(columns=project_cols)
+    else:
+        if scope_tse is not None and not scope_tse.empty:
+            tse_project = _summarize_scope(
+                scope_tse,
+                group_columns=["pch_display", "project_display"],
+                include_project_count=False,
+            ).rename(
+                columns={
+                    "pch_display": "PCH",
+                    "project_display": "Project",
+                    "avg_km_month": "TSE Avg Productivity (KM/month)",
+                }
+            )
+            project_rollup = project_rollup.merge(
+                tse_project[["PCH", "Project", "TSE Avg Productivity (KM/month)"]],
+                on=["PCH", "Project"],
+                how="left",
+            )
+        project_rollup["TSE Avg Productivity (KM/month)"] = (
+            project_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
         )
-        project_rollup = project_rollup.merge(
-            tse_project[["PCH", "Project", "TSE Avg Productivity (KM/month)"]],
-            on=["PCH", "Project"],
-            how="left",
-        )
-    project_rollup["TSE Avg Productivity (KM/month)"] = (
-        project_rollup.get("TSE Avg Productivity (KM/month)").fillna(0.0)
-    )
-    project_rollup = project_rollup[
-        [
-            "PCH",
-            "Project",
-            "Overall Avg Productivity (KM/month)",
-            "TSE Avg Productivity (KM/month)",
-            "Total KM",
-            "Spans",
-            "Gangs",
-        ]
-    ]
+        for col in project_cols:
+            if col not in project_rollup.columns:
+                project_rollup[col] = 0.0 if col not in {"PCH", "Project"} else ""
+        project_rollup = project_rollup[project_cols]
 
     return overall_rollup, pch_rollup, project_rollup
 
@@ -793,7 +1078,8 @@ def _build_monthly_group_summary_table(
         daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce").dt.normalize()
         daily = daily.dropna(subset=["date"])
         daily["month_key"] = daily["date"].dt.to_period("M").dt.to_timestamp()
-        daily["daily_km"] = pd.to_numeric(daily.get("daily_km"), errors="coerce")
+        daily_km_source = daily["daily_km"] if "daily_km" in daily.columns else pd.Series(0.0, index=daily.index)
+        daily["daily_km"] = pd.to_numeric(daily_km_source, errors="coerce")
         daily["gang_name"] = daily.get("gang_name", "").fillna("").astype(str).str.strip()
         for column in groups:
             if column not in daily.columns:
@@ -809,7 +1095,10 @@ def _build_monthly_group_summary_table(
             compiled["month_key"] = (
                 pd.to_datetime(compiled.get("fs_complete_date"), errors="coerce").dt.to_period("M").dt.to_timestamp()
             )
-        compiled["length_km"] = pd.to_numeric(compiled.get("length_km"), errors="coerce").fillna(0.0)
+        length_source = (
+            compiled["length_km"] if "length_km" in compiled.columns else pd.Series(0.0, index=compiled.index)
+        )
+        compiled["length_km"] = pd.to_numeric(length_source, errors="coerce").fillna(0.0)
         for column in groups:
             if column not in compiled.columns:
                 compiled[column] = ""
@@ -986,6 +1275,101 @@ def _build_monthly_rollup_tables(
         group_labels=["PCH", "Project"],
     )
     return overall, pch, project
+
+
+def _build_monthly_project_vertical_tables(
+    daily_scope: pd.DataFrame,
+    compiled_scope: pd.DataFrame,
+    *,
+    months: list[pd.Timestamp],
+    month_labels: list[str],
+) -> list[tuple[str, pd.DataFrame]]:
+    month_keys = [
+        pd.Timestamp(month).normalize().to_period("M").to_timestamp()
+        for month in months
+    ]
+    month_pairs = list(zip(month_keys, month_labels))
+    if not month_pairs:
+        return []
+
+    daily_grouped = pd.DataFrame(columns=["month_key", "project_display", "Productivity"])
+    if daily_scope is not None and not daily_scope.empty:
+        daily = daily_scope.copy()
+        daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce").dt.normalize()
+        daily = daily.dropna(subset=["date"])
+        daily["month_key"] = daily["date"].dt.to_period("M").dt.to_timestamp()
+        daily["project_display"] = daily.get(
+            "project_display",
+            daily.get("project_name", pd.Series("", index=daily.index)),
+        ).fillna("").astype(str).str.strip()
+        daily["daily_km"] = pd.to_numeric(daily.get("daily_km"), errors="coerce")
+        daily = daily[daily["project_display"].astype(bool)]
+        if not daily.empty:
+            daily_grouped = (
+                daily.groupby(["month_key", "project_display"], dropna=False)["daily_km"]
+                .mean()
+                .mul(_MONTH_PRODUCTIVITY_FACTOR)
+                .reset_index(name="Productivity")
+            )
+
+    compiled_grouped = pd.DataFrame(columns=["month_key", "project_display", "Total Stringing"])
+    if compiled_scope is not None and not compiled_scope.empty:
+        compiled = compiled_scope.copy()
+        if "month" in compiled.columns:
+            compiled["month_key"] = (
+                pd.to_datetime(compiled.get("month"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+            )
+        else:
+            compiled["month_key"] = (
+                pd.to_datetime(compiled.get("fs_complete_date"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+            )
+        compiled["project_display"] = compiled.get(
+            "project_display",
+            compiled.get("project_name", pd.Series("", index=compiled.index)),
+        ).fillna("").astype(str).str.strip()
+        compiled["length_km"] = pd.to_numeric(compiled.get("length_km"), errors="coerce").fillna(0.0)
+        compiled = compiled[compiled["project_display"].astype(bool)]
+        if not compiled.empty:
+            compiled_grouped = (
+                compiled.groupby(["month_key", "project_display"], dropna=False)["length_km"]
+                .sum()
+                .reset_index(name="Total Stringing")
+            )
+
+    tables: list[tuple[str, pd.DataFrame]] = []
+    for month_key, month_label in month_pairs:
+        month_daily = (
+            daily_grouped[daily_grouped["month_key"] == month_key][["project_display", "Productivity"]]
+            if not daily_grouped.empty
+            else pd.DataFrame(columns=["project_display", "Productivity"])
+        )
+        month_compiled = (
+            compiled_grouped[compiled_grouped["month_key"] == month_key][["project_display", "Total Stringing"]]
+            if not compiled_grouped.empty
+            else pd.DataFrame(columns=["project_display", "Total Stringing"])
+        )
+        if month_daily.empty and month_compiled.empty:
+            continue
+
+        month_table = month_daily.merge(month_compiled, on="project_display", how="outer")
+        if month_table.empty:
+            continue
+
+        month_table["Productivity"] = (
+            pd.to_numeric(month_table.get("Productivity"), errors="coerce").fillna(0.0).round(2)
+        )
+        month_table["Total Stringing"] = (
+            pd.to_numeric(month_table.get("Total Stringing"), errors="coerce").fillna(0.0).round(2)
+        )
+        month_table = month_table.rename(columns={"project_display": "Project"})
+        month_table = month_table[["Project", "Productivity", "Total Stringing"]]
+        month_table = month_table.sort_values(
+            "Project",
+            key=lambda series: series.astype(str).str.lower(),
+        ).reset_index(drop=True)
+        tables.append((month_label, month_table))
+
+    return tables
 
 
 def _write_scoped_table(
@@ -1895,6 +2279,9 @@ def main() -> int:
 
     # Stringing rollups (overall / PCH / project) and review format
     project_info = store.get_project_info()
+    stringing_coverage = store.get_stringing_coverage()
+    coverage_registry = _build_coverage_registry(stringing_coverage, project_info)
+    coverage_issues_df = _build_coverage_issues_sheet(stringing_coverage, coverage_registry)
     scope = _prepare_stringing_scope(overall_daily, project_info)
     method_series = scope.get("method", scope.get("method_norm", pd.Series("", index=scope.index)))
     method_norm = method_series.map(_normalize_method)
@@ -1902,7 +2289,8 @@ def main() -> int:
     scope_tse = scope[scope["method_group"] == "TSE"].copy()
     compiled_scope = _prepare_stringing_compiled_scope(stringing_compiled, project_info)
     method_summary = _build_method_summary(scope, issues)
-    months, month_labels = _build_month_windows_from_series(scope["date"], start_date, end_date)
+    month_source = scope["date"] if "date" in scope.columns else pd.Series(dtype="datetime64[ns]")
+    months, month_labels = _build_month_windows_from_series(month_source, start_date, end_date)
     monthly_labels = [month.strftime("%b-%y") for month in months]
     scope_label = _build_scope_label(scope, start_date, end_date)
 
@@ -1928,6 +2316,50 @@ def main() -> int:
         compiled_scope_tse,
         months=months,
         month_labels=monthly_labels,
+    )
+    monthly_project_vertical_overall = _build_monthly_project_vertical_tables(
+        scope,
+        compiled_scope,
+        months=months,
+        month_labels=monthly_labels,
+    )
+    monthly_project_vertical_tse = _build_monthly_project_vertical_tables(
+        scope_tse,
+        compiled_scope_tse,
+        months=months,
+        month_labels=monthly_labels,
+    )
+    project_rollup = _merge_project_rollup_with_coverage(
+        project_rollup,
+        coverage_registry,
+        metric_columns=[
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+        ],
+    )
+    tse_project_rollup = _merge_project_rollup_with_coverage(
+        tse_project_rollup,
+        coverage_registry,
+        metric_columns=[
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+        ],
+    )
+    monthly_project = _merge_monthly_project_with_coverage(monthly_project, coverage_registry)
+    monthly_tse_project = _merge_monthly_project_with_coverage(monthly_tse_project, coverage_registry)
+    monthly_project_vertical_overall = _merge_vertical_project_tables_with_coverage(
+        monthly_project_vertical_overall,
+        coverage_registry,
+    )
+    monthly_project_vertical_tse = _merge_vertical_project_tables_with_coverage(
+        monthly_project_vertical_tse,
+        coverage_registry,
     )
 
     review_table_raw = project_rollup.reindex(
@@ -2266,6 +2698,25 @@ def main() -> int:
         monthly_blocks.append(monthly_block)
         monthly_row += 2
         monthly_row = _write_labeled_table(
+            writer,
+            stringing_summary_monthly_sheet,
+            "TSE - Month-wise Project Table (Vertical)",
+            pd.DataFrame(),
+            startrow=monthly_row,
+        )
+        vertical_tse_tables = monthly_project_vertical_tse or [
+            ("No Data", pd.DataFrame(columns=["Project", "Productivity", "Total Stringing"]))
+        ]
+        for month_label, month_table in vertical_tse_tables:
+            monthly_row = _write_scoped_table(
+                writer,
+                stringing_summary_monthly_sheet,
+                month_table,
+                f"Month: {month_label}",
+                startrow=monthly_row,
+            )
+            monthly_row += 1
+        monthly_row = _write_labeled_table(
             writer, stringing_summary_monthly_sheet, "Overall", pd.DataFrame(), startrow=monthly_row
         )
         monthly_row, monthly_block = _write_monthly_scoped_table(
@@ -2290,7 +2741,7 @@ def main() -> int:
         )
         monthly_blocks.append(monthly_block)
         monthly_row += 2
-        _, monthly_block = _write_monthly_scoped_table(
+        monthly_row, monthly_block = _write_monthly_scoped_table(
             writer,
             stringing_summary_monthly_sheet,
             monthly_project,
@@ -2300,6 +2751,26 @@ def main() -> int:
             startrow=monthly_row,
         )
         monthly_blocks.append(monthly_block)
+        monthly_row += 2
+        monthly_row = _write_labeled_table(
+            writer,
+            stringing_summary_monthly_sheet,
+            "Overall - Month-wise Project Table (Vertical)",
+            pd.DataFrame(),
+            startrow=monthly_row,
+        )
+        vertical_overall_tables = monthly_project_vertical_overall or [
+            ("No Data", pd.DataFrame(columns=["Project", "Productivity", "Total Stringing"]))
+        ]
+        for month_label, month_table in vertical_overall_tables:
+            monthly_row = _write_scoped_table(
+                writer,
+                stringing_summary_monthly_sheet,
+                month_table,
+                f"Month: {month_label}",
+                startrow=monthly_row,
+            )
+            monthly_row += 1
         _style_monthly_summary_sheet(writer, stringing_summary_monthly_sheet, monthly_blocks)
         if review_table_one_groups or review_table_two_groups:
             current_row = 0
@@ -2321,6 +2792,7 @@ def main() -> int:
                 )
                 current_row += len(table) + (1 if include_header else 0) + 1
         readme_df.to_excel(writer, sheet_name="README", index=False)
+        coverage_issues_df.to_excel(writer, sheet_name="Coverage_Issues", index=False)
         if not issues_df.empty:
             issues_df.to_excel(writer, sheet_name="Data_Issues", index=False)
         for styled_sheet in writer.book.sheetnames:

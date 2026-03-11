@@ -23,6 +23,7 @@ from .data_loader import (
     load_project_details,
     load_stringing_daily as _load_stringing_daily,
     load_stringing_compiled_raw as _load_stringing_compiled_raw,
+    load_stringing_coverage as _load_stringing_coverage,
 )
 from .metrics import (
     calc_idle_and_loss,
@@ -109,6 +110,7 @@ class AppDataStore:
         self._daily: pd.DataFrame | None = None
         self._stringing_daily: pd.DataFrame | None = None
         self._stringing_compiled: pd.DataFrame | None = None
+        self._stringing_coverage: pd.DataFrame | None = None
         self._project_info: pd.DataFrame | None = None
 
         # Responsibilities
@@ -241,6 +243,18 @@ class AppDataStore:
             return (
                 self._stringing_compiled.copy()
                 if isinstance(self._stringing_compiled, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stringing_coverage(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._stringing_coverage = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_stringing_coverage(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._stringing_coverage.copy()
+                if isinstance(self._stringing_coverage, pd.DataFrame)
                 else pd.DataFrame()
             )
 
@@ -958,6 +972,13 @@ class AppDataStore:
         if not config.enable_stringing:
             LOGGER.info("Stringing disabled; skipping preload")
             return
+
+        try:
+            coverage_df = _load_stringing_coverage(config)
+        except Exception as exc:
+            LOGGER.warning("Stringing coverage preload failed: %s", exc)
+            coverage_df = pd.DataFrame()
+        self.set_stringing_coverage(coverage_df)
 
         compiled_df: pd.DataFrame | None = None
         try:

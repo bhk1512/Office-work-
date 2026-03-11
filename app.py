@@ -148,6 +148,10 @@ def get_df_stringing_compiled() -> pd.DataFrame:
     return DATA_STORE.get_stringing_compiled()
 
 
+def get_df_stringing_coverage() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_coverage()
+
+
 def load_daily(config_or_path) -> pd.DataFrame:  # type: ignore[override]
     """Compatibility wrapper around the refactored data loader."""
 
@@ -436,6 +440,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
         idle_interval_provider=lambda: DATA_STORE.get_idle_intervals("erection"),
         stringing_idle_interval_provider=lambda: DATA_STORE.get_idle_intervals("stringing"),
         stringing_plan_summary_provider=lambda: DATA_STORE.get_stringing_plan_summary(),
+        stringing_coverage_provider=get_df_stringing_coverage,
         project_info_provider=get_df_projinfo,
         project_baseline_provider=get_project_baselines_for_mode,
         responsibilities_provider=get_responsibilities_df,
