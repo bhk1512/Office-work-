@@ -1284,30 +1284,63 @@ def _read_prebuilt_stringing_artifacts(
         workbook_path = root / "StringingCompiled_Output.xlsx"
         compiled_df: pd.DataFrame | None = None
         daily_df: pd.DataFrame | None = None
+        compiled_from_workbook = False
+        daily_from_workbook = False
+        compiled_parquet_failed = False
+        daily_parquet_failed = False
 
         compiled_source = _find_parquet_source(root, "StringingCompiled") or _find_parquet_source(root, sheet_name)
         if compiled_source:
             try:
                 compiled_df = _read_parquet(compiled_source)
             except Exception as exc:  # pragma: no cover - defensive
+                compiled_parquet_failed = True
                 LOGGER.warning("Stringing: failed reading compiled parquet '%s': %s", compiled_source, exc)
 
         if compiled_df is None and workbook_path.exists():
             compiled_df = _try_read_excel_sheet(workbook_path, sheet_name)
+            compiled_from_workbook = True
 
         daily_source = _find_parquet_source(root, "StringingDaily")
         if daily_source:
             try:
                 daily_df = _read_parquet(daily_source)
             except Exception as exc:  # pragma: no cover - defensive
+                daily_parquet_failed = True
                 LOGGER.warning("Stringing: failed reading daily parquet '%s': %s", daily_source, exc)
 
         if daily_df is None and workbook_path.exists():
             try:
                 daily_df = pd.read_excel(workbook_path, sheet_name="Daily")
+                daily_from_workbook = True
             except Exception as exc:  # pragma: no cover - defensive
                 LOGGER.warning("Stringing: failed reading 'Daily' sheet from '%s': %s", workbook_path, exc)
                 daily_df = pd.DataFrame()
+                daily_from_workbook = True
+
+        if (compiled_parquet_failed or daily_parquet_failed) and compiled_df is not None and daily_df is not None:
+            repaired = True
+            if compiled_parquet_failed:
+                if compiled_from_workbook:
+                    _write_parquet(compiled_df, root / "StringingCompiled.parquet")
+                else:
+                    repaired = False
+            if daily_parquet_failed:
+                if daily_from_workbook:
+                    _write_parquet(daily_df, root / "StringingDaily.parquet")
+                else:
+                    repaired = False
+            if repaired:
+                LOGGER.warning(
+                    "Stringing: repaired unreadable cached parquet artifact(s) in %s using workbook fallback.",
+                    root,
+                )
+            else:
+                LOGGER.warning(
+                    "Stringing: unreadable cached parquet artifact(s) in %s and no workbook fallback; forcing rebuild.",
+                    root,
+                )
+                continue
 
         if compiled_df is not None and daily_df is not None:
             missing_parts: list[str] = []
@@ -1400,12 +1433,29 @@ def _parquet_dataset_available(path: Path) -> bool:
     if not path.exists():
         return False
     if path.is_file():
-        return path.suffix.lower() in PARQUET_SUFFIXES
+        return _is_probably_parquet_file(path)
     for suffix in PARQUET_SUFFIXES:
         iterator = path.rglob(f"*{suffix}")
-        if next(iterator, None) is not None:
+        if next((candidate for candidate in iterator if _is_probably_parquet_file(candidate)), None) is not None:
             return True
     return False
+
+
+def _is_probably_parquet_file(path: Path) -> bool:
+    """Return True when *path* looks like a readable parquet file."""
+
+    if not path.is_file() or path.suffix.lower() not in PARQUET_SUFFIXES:
+        return False
+    try:
+        if path.stat().st_size < 12:
+            return False
+        with path.open("rb") as fh:
+            header = fh.read(4)
+            fh.seek(-4, 2)
+            trailer = fh.read(4)
+        return header == b"PAR1" and trailer == b"PAR1"
+    except OSError:
+        return False
 
 
 def _candidate_stems(name: str) -> list[str]:
@@ -1443,7 +1493,12 @@ def _find_parquet_source(path: Path, table: str | None) -> str | None:
     path = Path(path)
     lower_table = table.lower()
 
-    if path.is_file() and path.suffix.lower() in PARQUET_SUFFIXES and path.stem.lower() == lower_table:
+    if (
+        path.is_file()
+        and path.suffix.lower() in PARQUET_SUFFIXES
+        and path.stem.lower() == lower_table
+        and _is_probably_parquet_file(path)
+    ):
         return str(path)
 
     root = _resolve_search_root(path)
@@ -1452,14 +1507,15 @@ def _find_parquet_source(path: Path, table: str | None) -> str | None:
     for stem in stems:
         for suffix in PARQUET_SUFFIXES:
             candidate = root / f"{stem}{suffix}"
-            if candidate.exists():
+            if candidate.exists() and _is_probably_parquet_file(candidate):
                 return str(candidate)
 
     for stem in stems:
         directory = root / stem
         if directory.is_dir():
             for suffix in PARQUET_SUFFIXES:
-                if any(directory.glob(f"*{suffix}")):
+                files = list(directory.glob(f"*{suffix}"))
+                if files and all(_is_probably_parquet_file(file) for file in files):
                     return str(directory / f"*{suffix}")
 
     if root.is_dir():
@@ -1468,7 +1524,7 @@ def _find_parquet_source(path: Path, table: str | None) -> str | None:
                 (
                     candidate
                     for candidate in root.glob(f"**/*{suffix}")
-                    if candidate.stem.lower() == lower_table
+                    if candidate.stem.lower() == lower_table and _is_probably_parquet_file(candidate)
                 ),
                 None,
             )
@@ -1548,7 +1604,8 @@ def _find_stringing_parquet_source(root: Path, sheet_name: str, probe_dirs: tupl
         candidate_dir = search_root / dirname
         if candidate_dir.is_dir():
             for suffix in PARQUET_SUFFIXES:
-                if any(candidate_dir.glob(f"*{suffix}")):
+                files = list(candidate_dir.glob(f"*{suffix}"))
+                if files and all(_is_probably_parquet_file(file) for file in files):
                     return str(candidate_dir / f"*{suffix}")
 
     # 3) Fallback: search recursively for a matching stem based on sheet name variants
@@ -1558,7 +1615,7 @@ def _find_stringing_parquet_source(root: Path, sheet_name: str, probe_dirs: tupl
         for suffix in PARQUET_SUFFIXES:
             for candidate in search_root.glob(f"**/*{suffix}"):
                 lowered = candidate.stem.lower()
-                if any(stem.lower() == lowered for stem in stems):
+                if any(stem.lower() == lowered for stem in stems) and _is_probably_parquet_file(candidate):
                     return str(candidate)
     return None
 

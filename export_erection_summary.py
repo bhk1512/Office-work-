@@ -151,13 +151,30 @@ def _load_project_pch_mapping(mapping_path: Path | None) -> pd.DataFrame:
         )
         return pd.DataFrame()
 
+    region_col = None
+    for column in frame.columns:
+        label = str(column).strip().lower()
+        if "region" in label or "zone" in label:
+            region_col = column
+            break
+
     working = (
-        frame[[project_col, pch_col]]
-        .rename(columns={project_col: "project_code", pch_col: "pch"})
+        frame[[col for col in (project_col, pch_col, region_col) if col is not None]]
+        .rename(
+            columns={
+                project_col: "project_code",
+                pch_col: "pch",
+                **({region_col: "region"} if region_col is not None else {}),
+            }
+        )
         .copy()
     )
     working["project_code"] = working["project_code"].fillna("").astype(str).str.strip()
     working["pch"] = working["pch"].fillna("").astype(str).str.strip()
+    if "region" in working.columns:
+        working["region"] = working["region"].fillna("").astype(str).str.strip()
+    else:
+        working["region"] = ""
     working = working[(working["project_code"].astype(bool)) & (working["pch"].astype(bool))]
     if working.empty:
         LOGGER.warning(

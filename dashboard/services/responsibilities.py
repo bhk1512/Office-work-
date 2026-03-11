@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Tuple
 import time
+from zipfile import BadZipFile
 
 import pandas as pd
 
@@ -82,6 +83,33 @@ _CACHE_TTL_SECONDS = _CONFIG.cache_ttl_seconds
 _RESP_CACHE: dict[Tuple[str, str], tuple[ResponsibilitiesSnapshot, float]] = {}
 
 
+def _load_daily_parquet_candidate(path: Path, config: AppConfig) -> pd.DataFrame | None:
+    candidates = [config.preferred_sheet, "ProdDailyExpandedSingles", "ProdDailyExpanded"]
+    for candidate in [c for c in candidates if c]:
+        source = find_parquet_source(path, candidate)
+        if not source:
+            continue
+        try:
+            return read_parquet_table(source)
+        except Exception as exc:
+            LOGGER.warning("Failed to load daily dataset '%s': %s", candidate, exc)
+    return None
+
+
+def _try_load_responsibilities_parquet(path: Path, config: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame | None] | None:
+    try:
+        resp_source = find_parquet_source(path, "MicroPlanResponsibilities")
+    except Exception:
+        resp_source = None
+
+    if not resp_source:
+        return None
+
+    df_atomic = read_parquet_table(resp_source)
+    df_daily = _load_daily_parquet_candidate(path, config)
+    return df_atomic, df_daily
+
+
 def load_responsibilities_snapshot(config: AppConfig) -> ResponsibilitiesSnapshot:
     """Load Micro Plan responsibilities atomic sheet plus completion metadata."""
 
@@ -97,16 +125,7 @@ def load_responsibilities_snapshot(config: AppConfig) -> ResponsibilitiesSnapsho
 
     if is_parquet_dataset(path):
         try:
-            resp_source = find_parquet_source(path, "MicroPlanResponsibilities")
-        except Exception:
-            resp_source = None
-
-        if not resp_source:
-            LOGGER.warning("Sheet '%s' missing in parquet dataset", "MicroPlanResponsibilities")
-            return ResponsibilitiesSnapshot.empty("No Micro Plan data found in the compiled dataset.")
-
-        try:
-            df_atomic = read_parquet_table(resp_source)
+            loaded = _try_load_responsibilities_parquet(path, config)
         except FileNotFoundError:
             LOGGER.warning("Responsibilities parquet not found near: %s", path)
             return ResponsibilitiesSnapshot.empty("No Micro Plan data found in the compiled dataset.")
@@ -114,16 +133,10 @@ def load_responsibilities_snapshot(config: AppConfig) -> ResponsibilitiesSnapsho
             LOGGER.exception("Failed to load responsibilities parquet: %s", exc)
             return ResponsibilitiesSnapshot(None, set(), "Unable to load Micro Plan data.")
 
-        candidates = [config.preferred_sheet, "ProdDailyExpandedSingles", "ProdDailyExpanded"]
-        for candidate in [c for c in candidates if c]:
-            source = find_parquet_source(path, candidate)
-            if not source:
-                continue
-            try:
-                df_daily = read_parquet_table(source)
-                break
-            except Exception as exc:
-                LOGGER.warning("Failed to load daily dataset '%s': %s", candidate, exc)
+        if loaded is None:
+            LOGGER.warning("Sheet '%s' missing in parquet dataset", "MicroPlanResponsibilities")
+            return ResponsibilitiesSnapshot.empty("No Micro Plan data found in the compiled dataset.")
+        df_atomic, df_daily = loaded
     else:
         try:
             with pd.ExcelFile(path) as workbook:
@@ -143,6 +156,34 @@ def load_responsibilities_snapshot(config: AppConfig) -> ResponsibilitiesSnapsho
                         df_daily = pd.read_excel(workbook, sheet_name=daily_sheet, usecols=None)
                     except Exception as exc:
                         LOGGER.warning("Failed to load daily sheet '%s': %s", daily_sheet, exc)
+        except BadZipFile as exc:
+            LOGGER.warning(
+                "Responsibilities workbook '%s' is corrupted (%s); attempting parquet fallback.",
+                path,
+                exc,
+            )
+            try:
+                loaded = _try_load_responsibilities_parquet(path, config)
+            except FileNotFoundError:
+                loaded = None
+            except Exception as fallback_exc:
+                LOGGER.exception(
+                    "Responsibilities: parquet fallback failed after workbook corruption: %s",
+                    fallback_exc,
+                )
+                return ResponsibilitiesSnapshot(None, set(), "Unable to load Micro Plan data.")
+
+            if loaded is None:
+                return ResponsibilitiesSnapshot(
+                    None,
+                    set(),
+                    "Compiled workbook is corrupted and no parquet fallback was found.",
+                )
+            df_atomic, df_daily = loaded
+            LOGGER.warning(
+                "Responsibilities: using parquet fallback near '%s' because workbook is corrupted.",
+                path,
+            )
         except FileNotFoundError:
             LOGGER.warning("Responsibilities workbook not found: %s", config.data_path)
             return ResponsibilitiesSnapshot(None, set(), "Compiled workbook not found.")

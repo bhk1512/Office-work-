@@ -72,6 +72,27 @@ def _generate_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) ->
     return [f"Week {idx}" for idx in range(1, week_count + 1)]
 
 
+def _normalize_region(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    lowered = text.lower()
+    if lowered in {"", "nan", "none", "null"}:
+        return "Unassigned"
+    return text
+
+
+def _generate_quarter_keys(month_start: pd.Timestamp, month_end: pd.Timestamp) -> list[pd.Timestamp]:
+    if month_start > month_end:
+        return []
+    start_q = month_start.to_period("Q")
+    end_q = month_end.to_period("Q")
+    return [period.start_time.normalize() for period in pd.period_range(start_q, end_q, freq="Q")]
+
+
+def _format_quarter_label(quarter_start: pd.Timestamp) -> str:
+    period = pd.Timestamp(quarter_start).to_period("Q")
+    return f"Q{period.quarter}-{period.year}"
+
+
 def _generate_quarter_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) -> list[str]:
     """Generate week labels for a quarter split into 4 weeks per month."""
     if month_start > month_end:
@@ -812,12 +833,23 @@ def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, d
     else:
         info["pch_value"] = info[pch_col]
 
+    region_col = None
+    for candidate in ("region", "Region", "zone", "Zone"):
+        if candidate in info.columns:
+            region_col = candidate
+            break
+    if region_col is None:
+        info["region_value"] = ""
+    else:
+        info["region_value"] = info[region_col]
+
     lookup: dict[str, dict[str, str]] = {}
     for _, row in info.iterrows():
         entry = {
             "project_code": str(row.get("project_code_value", "")).strip(),
             "project_display": str(row.get("project_display_value", "")).strip(),
             "pch": normalize_pch(row.get("pch_value", "")),
+            "region": _normalize_region(row.get("region_value", "")),
         }
         keys = {
             _compact_project_key(row.get("project_code_value")),
@@ -986,6 +1018,16 @@ def _prepare_month_scope(
         scope["project_scope_key_norm"].astype(bool),
         scope["project_name"].map(_compact_project_key),
     )
+    region_source = None
+    for candidate in ("region_display", "region", "Region", "zone", "Zone"):
+        region_candidate = scope.get(candidate)
+        if isinstance(region_candidate, pd.Series):
+            region_source = region_candidate
+            break
+    if isinstance(region_source, pd.Series):
+        region_fallback = region_source.fillna("").astype(str).str.strip()
+    else:
+        region_fallback = pd.Series("", index=scope.index, dtype="object")
 
     def _lookup_meta(value: object) -> dict[str, str] | None:
         if not meta_lookup:
@@ -1012,13 +1054,20 @@ def _prepare_month_scope(
             scope["project_display"].astype(bool), "(Unlabeled Project)"
         )
         scope["pch_display"] = meta_series.map(lambda rec: rec.get("pch", "") if isinstance(rec, dict) else "")
+        scope["region_display"] = meta_series.map(lambda rec: rec.get("region", "") if isinstance(rec, dict) else "")
     else:
         scope["pch_display"] = ""
+        scope["region_display"] = ""
 
     scope["pch_display"] = scope["pch_display"].where(scope["pch_display"].astype(bool), scope.get("pch", ""))
     scope["pch_display"] = scope["pch_display"].fillna("").astype(str)
     scope["pch_display"] = scope["pch_display"].map(normalize_pch)
     scope["pch_display"] = scope["pch_display"].where(scope["pch_display"].astype(bool), "Unassigned")
+    scope["region_display"] = scope["region_display"].where(
+        scope["region_display"].astype(bool),
+        region_fallback,
+    )
+    scope["region_display"] = scope["region_display"].map(_normalize_region)
 
     scope["location_no"] = scope.get("location_no", "").fillna("").astype(str).str.strip()
     scope["completion_date"] = pd.to_datetime(scope.get("completion_date"), errors="coerce").dt.normalize()
@@ -1823,6 +1872,340 @@ def _build_monthly_productivity_tables(
         group_labels=["PCH", "Project"],
     )
     return overall_summary, pch_summary, project_summary, month_labels
+
+
+def _build_quarterly_group_productivity_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    quarter_keys: Sequence[pd.Timestamp],
+    quarter_labels: Sequence[str],
+    group_columns: Sequence[str],
+    group_labels: Sequence[str],
+) -> pd.DataFrame:
+    ordered_columns, _, _ = _monthly_column_layout(quarter_labels, group_labels=group_labels)
+    if scope is None or scope.empty:
+        return pd.DataFrame(columns=ordered_columns)
+
+    working_scope = scope.copy()
+    working_scope["date"] = pd.to_datetime(working_scope.get("date"), errors="coerce").dt.normalize()
+    working_scope["daily_prod_mt"] = pd.to_numeric(working_scope.get("daily_prod_mt"), errors="coerce")
+    working_scope = working_scope.dropna(subset=["date"])
+    if working_scope.empty:
+        return pd.DataFrame(columns=ordered_columns)
+    working_scope["quarter_key"] = working_scope["date"].dt.to_period("Q").dt.start_time.dt.normalize()
+
+    groups = list(group_columns)
+    rename_map = {source: label for source, label in zip(group_columns, group_labels)}
+
+    def _quarter_avg_key(label: str) -> str:
+        return _monthly_avg_column(label)
+
+    def _quarter_count_key(label: str) -> str:
+        return _monthly_count_column(label)
+
+    def _quarter_mt_key(label: str) -> str:
+        return _monthly_mt_column(label)
+
+    overall_avg_key = _quarter_avg_key("Overall")
+    overall_count_key = _quarter_count_key("Overall")
+    overall_mt_key = _quarter_mt_key("Overall")
+    numeric_columns = [overall_avg_key, overall_count_key, overall_mt_key]
+
+    if not groups:
+        row: dict[str, object] = {}
+        for quarter_key, quarter_label in zip(quarter_keys, quarter_labels):
+            quarter_scope = working_scope[working_scope["quarter_key"] == quarter_key]
+            avg_value = quarter_scope["daily_prod_mt"].dropna().mean() if not quarter_scope.empty else 0.0
+            row[_quarter_avg_key(quarter_label)] = round(float(avg_value) if not pd.isna(avg_value) else 0.0, 2)
+            row[_quarter_count_key(quarter_label)] = 0
+            row[_quarter_mt_key(quarter_label)] = 0.0
+            numeric_columns.extend(
+                [_quarter_avg_key(quarter_label), _quarter_count_key(quarter_label), _quarter_mt_key(quarter_label)]
+            )
+
+        overall_avg_value = working_scope["daily_prod_mt"].dropna().mean()
+        row[overall_avg_key] = round(float(overall_avg_value) if not pd.isna(overall_avg_value) else 0.0, 2)
+        row[overall_count_key] = 0
+        row[overall_mt_key] = 0.0
+
+        if isinstance(completions, pd.DataFrame) and not completions.empty:
+            completion_scope = completions.copy()
+            completion_scope["completion_date"] = pd.to_datetime(
+                completion_scope.get("completion_date"), errors="coerce"
+            ).dt.normalize()
+            completion_scope = completion_scope.dropna(subset=["completion_date"])
+            if not completion_scope.empty:
+                completion_scope["quarter_key"] = (
+                    completion_scope["completion_date"].dt.to_period("Q").dt.start_time.dt.normalize()
+                )
+                completion_scope["_tower_weight"] = _coerce_numeric_series(
+                    completion_scope, "tower_weight"
+                ).fillna(0.0)
+                for quarter_key, quarter_label in zip(quarter_keys, quarter_labels):
+                    quarter_comp = completion_scope[completion_scope["quarter_key"] == quarter_key]
+                    row[_quarter_count_key(quarter_label)] = int(len(quarter_comp))
+                    row[_quarter_mt_key(quarter_label)] = round(float(quarter_comp["_tower_weight"].sum()), 2)
+                row[overall_count_key] = int(len(completion_scope))
+                row[overall_mt_key] = round(float(completion_scope["_tower_weight"].sum()), 2)
+
+        result = pd.DataFrame([row], columns=ordered_columns).fillna(0.0)
+        for quarter_label in quarter_labels:
+            count_key = _quarter_count_key(quarter_label)
+            if count_key in result.columns:
+                result[count_key] = pd.to_numeric(result[count_key], errors="coerce").fillna(0).astype(int)
+            mt_key = _quarter_mt_key(quarter_label)
+            if mt_key in result.columns:
+                result[mt_key] = pd.to_numeric(result[mt_key], errors="coerce").fillna(0.0).round(2)
+        result[overall_count_key] = pd.to_numeric(result[overall_count_key], errors="coerce").fillna(0).astype(int)
+        result[overall_mt_key] = pd.to_numeric(result[overall_mt_key], errors="coerce").fillna(0.0).round(2)
+        return result
+
+    for column in groups:
+        if column not in working_scope.columns:
+            working_scope[column] = ""
+        working_scope[column] = working_scope[column].fillna("").astype(str).str.strip()
+
+    summary = working_scope[groups].drop_duplicates().reset_index(drop=True)
+    overall_avg = (
+        working_scope.groupby(groups, dropna=False)["daily_prod_mt"]
+        .mean()
+        .reset_index(name=overall_avg_key)
+    )
+    summary = summary.merge(overall_avg, on=groups, how="left")
+
+    for quarter_key, quarter_label in zip(quarter_keys, quarter_labels):
+        avg_key = _quarter_avg_key(quarter_label)
+        quarter_avg = (
+            working_scope[working_scope["quarter_key"] == quarter_key]
+            .groupby(groups, dropna=False)["daily_prod_mt"]
+            .mean()
+            .reset_index(name=avg_key)
+        )
+        summary = summary.merge(quarter_avg, on=groups, how="left")
+        numeric_columns.append(avg_key)
+
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        completion_scope = completions.copy()
+        completion_scope["completion_date"] = pd.to_datetime(
+            completion_scope.get("completion_date"), errors="coerce"
+        ).dt.normalize()
+        completion_scope = completion_scope.dropna(subset=["completion_date"])
+        if not completion_scope.empty:
+            for column in groups:
+                if column not in completion_scope.columns:
+                    completion_scope[column] = ""
+                completion_scope[column] = completion_scope[column].fillna("").astype(str).str.strip()
+            completion_scope["quarter_key"] = (
+                completion_scope["completion_date"].dt.to_period("Q").dt.start_time.dt.normalize()
+            )
+
+            counts_overall = (
+                completion_scope.groupby(groups, dropna=False)
+                .size()
+                .reset_index(name=overall_count_key)
+            )
+            summary = summary.merge(counts_overall, on=groups, how="left")
+            weights_overall = (
+                completion_scope.assign(
+                    _tower_weight=_coerce_numeric_series(completion_scope, "tower_weight").fillna(0.0)
+                )
+                .groupby(groups, dropna=False)["_tower_weight"]
+                .sum()
+                .reset_index(name=overall_mt_key)
+            )
+            summary = summary.merge(weights_overall, on=groups, how="left")
+            for quarter_key, quarter_label in zip(quarter_keys, quarter_labels):
+                count_key = _quarter_count_key(quarter_label)
+                mt_key = _quarter_mt_key(quarter_label)
+                quarter_counts = (
+                    completion_scope[completion_scope["quarter_key"] == quarter_key]
+                    .groupby(groups, dropna=False)
+                    .size()
+                    .reset_index(name=count_key)
+                )
+                summary = summary.merge(quarter_counts, on=groups, how="left")
+                quarter_weights = (
+                    completion_scope[completion_scope["quarter_key"] == quarter_key]
+                    .assign(
+                        _tower_weight=lambda frame: _coerce_numeric_series(frame, "tower_weight").fillna(0.0)
+                    )
+                    .groupby(groups, dropna=False)["_tower_weight"]
+                    .sum()
+                    .reset_index(name=mt_key)
+                )
+                summary = summary.merge(quarter_weights, on=groups, how="left")
+                numeric_columns.append(count_key)
+                numeric_columns.append(mt_key)
+        else:
+            summary[overall_count_key] = 0
+            summary[overall_mt_key] = 0.0
+            for quarter_label in quarter_labels:
+                summary[_quarter_count_key(quarter_label)] = 0
+                summary[_quarter_mt_key(quarter_label)] = 0.0
+    else:
+        summary[overall_count_key] = 0
+        summary[overall_mt_key] = 0.0
+        for quarter_label in quarter_labels:
+            summary[_quarter_count_key(quarter_label)] = 0
+            summary[_quarter_mt_key(quarter_label)] = 0.0
+
+    summary = summary.rename(columns=rename_map)
+    for quarter_label in quarter_labels:
+        count_key = _quarter_count_key(quarter_label)
+        if count_key not in summary.columns:
+            summary[count_key] = 0
+        mt_key = _quarter_mt_key(quarter_label)
+        if mt_key not in summary.columns:
+            summary[mt_key] = 0.0
+        numeric_columns.append(count_key)
+        numeric_columns.append(mt_key)
+
+    for key in set(numeric_columns):
+        if key not in summary.columns:
+            summary[key] = 0.0
+        if key.endswith("__count"):
+            summary[key] = pd.to_numeric(summary[key], errors="coerce").fillna(0).astype(int)
+        else:
+            summary[key] = pd.to_numeric(summary[key], errors="coerce").fillna(0.0).round(2)
+
+    summary = summary.reindex(columns=ordered_columns)
+
+    if group_labels == ["PCH"]:
+        summary = _sort_pch_frame(summary, column="PCH")
+    elif group_labels == ["PCH", "Project"] and not summary.empty:
+        order_components = summary["PCH"].map(_pch_sort_components)
+        summary = summary.assign(
+            _pch_order_bucket=order_components.map(lambda pair: pair[0]),
+            _pch_order_value=order_components.map(lambda pair: pair[1]),
+            _project_order=summary["Project"].astype(str).str.lower(),
+        )
+        summary = (
+            summary.sort_values(by=["_pch_order_bucket", "_pch_order_value", "_project_order"])
+            .drop(columns=["_pch_order_bucket", "_pch_order_value", "_project_order"])
+            .reset_index(drop=True)
+        )
+    return summary
+
+
+def _build_quarterly_productivity_tables(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    quarter_keys: Sequence[pd.Timestamp],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    normalized_quarters = [
+        pd.Timestamp(quarter).normalize().to_period("Q").start_time.normalize()
+        for quarter in quarter_keys
+    ]
+    quarter_keys_clean = sorted(dict.fromkeys(normalized_quarters))
+    quarter_labels = [_format_quarter_label(quarter) for quarter in quarter_keys_clean]
+    overall_summary = _build_quarterly_group_productivity_table(
+        scope,
+        completions,
+        quarter_keys=quarter_keys_clean,
+        quarter_labels=quarter_labels,
+        group_columns=[],
+        group_labels=[],
+    )
+    pch_summary = _build_quarterly_group_productivity_table(
+        scope,
+        completions,
+        quarter_keys=quarter_keys_clean,
+        quarter_labels=quarter_labels,
+        group_columns=["pch_display"],
+        group_labels=["PCH"],
+    )
+    project_summary = _build_quarterly_group_productivity_table(
+        scope,
+        completions,
+        quarter_keys=quarter_keys_clean,
+        quarter_labels=quarter_labels,
+        group_columns=["pch_display", "project_display"],
+        group_labels=["PCH", "Project"],
+    )
+    return overall_summary, pch_summary, project_summary, quarter_labels
+
+
+def _build_regional_quarterly_productivity_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    quarter_keys: Sequence[pd.Timestamp],
+    quarter_labels: Sequence[str],
+) -> pd.DataFrame:
+    columns = [
+        "Region",
+        *quarter_labels,
+        "Overall Avg Productivity (MT/day)",
+        "No. of Erections",
+        "MT Erected",
+    ]
+    if scope is None or scope.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = scope.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"])
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    region_series = working.get("region_display")
+    if isinstance(region_series, pd.Series):
+        working["region_display"] = region_series.map(_normalize_region)
+    else:
+        working["region_display"] = "Unassigned"
+    working["daily_prod_mt"] = pd.to_numeric(working.get("daily_prod_mt"), errors="coerce")
+    working["quarter_key"] = working["date"].dt.to_period("Q").dt.start_time.dt.normalize()
+
+    regions = sorted(working["region_display"].dropna().astype(str).unique())
+    summary = pd.DataFrame({"Region": regions})
+    if summary.empty:
+        return pd.DataFrame(columns=columns)
+
+    for quarter_key, quarter_label in zip(quarter_keys, quarter_labels):
+        quarter_scope = working[working["quarter_key"] == pd.Timestamp(quarter_key).normalize()]
+        quarter_avg = (
+            quarter_scope.groupby("region_display", dropna=False)["daily_prod_mt"].mean()
+            if not quarter_scope.empty
+            else pd.Series(dtype="float64")
+        )
+        summary[quarter_label] = summary["Region"].map(quarter_avg).fillna(0.0).round(2)
+
+    overall_avg = (
+        working.groupby("region_display", dropna=False)["daily_prod_mt"].mean()
+        if not working.empty
+        else pd.Series(dtype="float64")
+    )
+    summary["Overall Avg Productivity (MT/day)"] = (
+        summary["Region"].map(overall_avg).fillna(0.0).round(2)
+    )
+
+    comp_counts = pd.Series(dtype="int64")
+    comp_mt = pd.Series(dtype="float64")
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        comp = completions.copy()
+        comp_region = comp.get("region_display")
+        if isinstance(comp_region, pd.Series):
+            comp["region_display"] = comp_region.map(_normalize_region)
+        else:
+            comp["region_display"] = "Unassigned"
+        comp["_tower_weight"] = _coerce_numeric_series(comp, "tower_weight").fillna(0.0)
+        comp_counts = comp.groupby("region_display", dropna=False).size()
+        comp_mt = comp.groupby("region_display", dropna=False)["_tower_weight"].sum()
+
+    summary["No. of Erections"] = (
+        summary["Region"].map(comp_counts).fillna(0).astype(int)
+    )
+    summary["MT Erected"] = (
+        summary["Region"].map(comp_mt).fillna(0.0).round(2)
+    )
+
+    summary = summary.sort_values(
+        by=["Overall Avg Productivity (MT/day)", "Region"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
+    return summary.reindex(columns=columns)
 
 
 def _sort_project_gang_export_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -3381,12 +3764,17 @@ def export_erection_productivity_summary(
     base_sheet_name = str(sheet_name or _DEFAULT_SHEET_NAME).strip() or _DEFAULT_SHEET_NAME
     weekly_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Weekly")
     monthly_summary_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Monthly")
+    trends_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Trends")
     if not weekly_sheet_label:
         weekly_sheet_label = _sanitize_sheet_name(f"{_DEFAULT_SHEET_NAME} Weekly")
     if not monthly_summary_sheet_label:
         monthly_summary_sheet_label = _sanitize_sheet_name(f"{_DEFAULT_SHEET_NAME} Monthly")
+    if not trends_sheet_label:
+        trends_sheet_label = _sanitize_sheet_name(f"{_DEFAULT_SHEET_NAME} Trends")
     if monthly_summary_sheet_label == weekly_sheet_label:
         monthly_summary_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Monthwise")
+    if trends_sheet_label in {weekly_sheet_label, monthly_summary_sheet_label}:
+        trends_sheet_label = _sanitize_sheet_name(f"{base_sheet_name} Scope Trends")
     review_sheet_label = _sanitize_sheet_name("Review_Format")
     gangs_sheet_label = _sanitize_sheet_name("Project Gang Rankings")
     gang_level_sheet_label = _sanitize_sheet_name("Gang Level Productivity")
@@ -3413,6 +3801,23 @@ def export_erection_productivity_summary(
         scope,
         completions,
         months=months,
+    )
+    quarter_keys = _generate_quarter_keys(month_start, month_end)
+    (
+        quarterly_overall_summary,
+        quarterly_pch_summary,
+        quarterly_project_summary,
+        quarterly_summary_labels,
+    ) = _build_quarterly_productivity_tables(
+        scope,
+        completions,
+        quarter_keys=quarter_keys,
+    )
+    regional_quarterly_summary = _build_regional_quarterly_productivity_table(
+        scope,
+        completions,
+        quarter_keys=quarter_keys,
+        quarter_labels=quarterly_summary_labels,
     )
     scope_label = _build_scope_label_from_data(
         scope,
@@ -3728,6 +4133,72 @@ def export_erection_productivity_summary(
             worksheet.row_dimensions[top_row].height = 22
             worksheet.row_dimensions[bottom_row].height = 22
 
+    def _style_trends_region_table(
+        writer: pd.ExcelWriter,
+        sheet: str,
+        *,
+        header_row: int,
+        data_start_row: int,
+        data_end_row: int,
+        start_col: int,
+        column_count: int,
+    ) -> None:
+        worksheet = writer.sheets.get(sheet)
+        if worksheet is None or column_count <= 0:
+            return
+
+        thin = Side(style="thin", color="D9E2EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        header_font = Font(bold=True, color="1F2937")
+        data_font = Font(color="111827")
+        header_fill = PatternFill(fill_type="solid", fgColor="F3F7FB")
+        zebra_fill = PatternFill(fill_type="solid", fgColor="FAFCFF")
+        center = Alignment(horizontal="center", vertical="center")
+        left = Alignment(horizontal="left", vertical="center")
+
+        first_col = start_col + 1
+        last_col = start_col + column_count
+        header_row_idx = header_row + 1
+        data_start_idx = data_start_row + 1
+        data_end_idx = data_end_row + 1
+
+        for col in range(first_col, last_col + 1):
+            col_letter = get_column_letter(col)
+            existing_width = float(worksheet.column_dimensions[col_letter].width or 0)
+            if col == first_col:
+                worksheet.column_dimensions[col_letter].width = max(existing_width, 26)
+            else:
+                worksheet.column_dimensions[col_letter].width = max(existing_width, 18)
+
+            header_cell = worksheet.cell(row=header_row_idx, column=col)
+            header_cell.font = header_font
+            header_cell.fill = header_fill
+            header_cell.alignment = center
+            header_cell.border = border
+
+        if data_end_idx < data_start_idx:
+            return
+
+        headers = {
+            col: str(worksheet.cell(row=header_row_idx, column=col).value or "").strip()
+            for col in range(first_col, last_col + 1)
+        }
+        for row in range(data_start_idx, data_end_idx + 1):
+            shade = (row - data_start_idx) % 2 == 1
+            for col in range(first_col, last_col + 1):
+                cell = worksheet.cell(row=row, column=col)
+                cell.font = data_font
+                cell.border = border
+                cell.alignment = left if col == first_col else center
+                if shade:
+                    cell.fill = zebra_fill
+                if col == first_col:
+                    continue
+                if headers.get(col) == "No. of Erections":
+                    cell.number_format = "#,##0"
+                else:
+                    cell.number_format = "#,##0.00"
+
     def _style_clean_sheet(writer: pd.ExcelWriter, sheet: str) -> None:
         worksheet = writer.sheets.get(sheet)
         if worksheet is None:
@@ -3875,6 +4346,124 @@ def export_erection_productivity_summary(
         )
         monthly_blocks.append(monthly_block)
         _style_monthly_summary_sheet(writer, monthly_summary_sheet_label, monthly_blocks)
+
+        trends_row = 0
+        pd.DataFrame([["Monthly Productivity Tables"]]).to_excel(
+            writer,
+            sheet_name=trends_sheet_label,
+            index=False,
+            header=False,
+            startrow=trends_row,
+        )
+        trends_row += 2
+        trends_blocks: list[dict[str, int]] = []
+        trends_row, trends_block = _write_monthly_scoped_table(
+            writer,
+            trends_sheet_label,
+            monthly_overall_summary,
+            scope_label,
+            month_headers=monthly_summary_labels,
+            group_headers=[],
+            startrow=trends_row,
+        )
+        trends_blocks.append(trends_block)
+        trends_row += gap_rows
+        trends_row, trends_block = _write_monthly_scoped_table(
+            writer,
+            trends_sheet_label,
+            monthly_pch_summary,
+            scope_label,
+            month_headers=monthly_summary_labels,
+            group_headers=["PCH"],
+            startrow=trends_row,
+        )
+        trends_blocks.append(trends_block)
+        trends_row += gap_rows
+        trends_row, trends_block = _write_monthly_scoped_table(
+            writer,
+            trends_sheet_label,
+            monthly_project_summary,
+            scope_label,
+            month_headers=monthly_summary_labels,
+            group_headers=["PCH", "Project"],
+            startrow=trends_row,
+        )
+        trends_blocks.append(trends_block)
+
+        trends_row += gap_rows
+        pd.DataFrame([["Quarterly Productivity Tables"]]).to_excel(
+            writer,
+            sheet_name=trends_sheet_label,
+            index=False,
+            header=False,
+            startrow=trends_row,
+        )
+        trends_row += 2
+        trends_row, trends_block = _write_monthly_scoped_table(
+            writer,
+            trends_sheet_label,
+            quarterly_overall_summary,
+            scope_label,
+            month_headers=quarterly_summary_labels,
+            group_headers=[],
+            startrow=trends_row,
+        )
+        trends_blocks.append(trends_block)
+        trends_row += gap_rows
+        trends_row, trends_block = _write_monthly_scoped_table(
+            writer,
+            trends_sheet_label,
+            quarterly_pch_summary,
+            scope_label,
+            month_headers=quarterly_summary_labels,
+            group_headers=["PCH"],
+            startrow=trends_row,
+        )
+        trends_blocks.append(trends_block)
+        trends_row += gap_rows
+        trends_row, trends_block = _write_monthly_scoped_table(
+            writer,
+            trends_sheet_label,
+            quarterly_project_summary,
+            scope_label,
+            month_headers=quarterly_summary_labels,
+            group_headers=["PCH", "Project"],
+            startrow=trends_row,
+        )
+        trends_blocks.append(trends_block)
+        _style_monthly_summary_sheet(writer, trends_sheet_label, trends_blocks)
+
+        trends_row += gap_rows
+        pd.DataFrame([["Regional Productivity Averages (Quarter-wise + Overall)"]]).to_excel(
+            writer,
+            sheet_name=trends_sheet_label,
+            index=False,
+            header=False,
+            startrow=trends_row,
+        )
+        trends_row += 1
+        trends_row = _write_scope_row(
+            writer,
+            trends_sheet_label,
+            scope_label,
+            startrow=trends_row,
+        )
+        region_header_row = trends_row
+        regional_quarterly_summary.to_excel(
+            writer,
+            sheet_name=trends_sheet_label,
+            index=False,
+            startrow=region_header_row,
+        )
+        _style_trends_region_table(
+            writer,
+            trends_sheet_label,
+            header_row=region_header_row,
+            data_start_row=region_header_row + 1,
+            data_end_row=region_header_row + len(regional_quarterly_summary),
+            start_col=0,
+            column_count=len(regional_quarterly_summary.columns),
+        )
 
         current_row = 0
         current_row = _write_scope_row(writer, review_sheet_label, scope_label, startrow=current_row)
@@ -4120,6 +4709,7 @@ def export_erection_productivity_summary(
         used_sheet_names: set[str] = {
             weekly_sheet_label,
             monthly_summary_sheet_label,
+            trends_sheet_label,
             review_sheet_label,
             gangs_sheet_label,
             gang_level_sheet_label,
@@ -4196,7 +4786,7 @@ def export_erection_productivity_summary(
                         current_row += group_gap_rows
 
         for styled_sheet in sorted(used_sheet_names):
-            if styled_sheet == monthly_summary_sheet_label:
+            if styled_sheet in {monthly_summary_sheet_label, trends_sheet_label}:
                 continue
             _style_clean_sheet(writer, styled_sheet)
         for pch_sheet_name in pch_sheet_names_written:
