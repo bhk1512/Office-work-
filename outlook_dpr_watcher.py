@@ -55,6 +55,28 @@ def _normalize_attachment_key(value: str, *, drop_digits: bool = False) -> str:
         text = re.sub(r"\d+", "", text)
     return text
 
+_ATTACHMENT_TOKEN_STOPWORDS = {"and", "of", "the", "for", "to", "in", "on", "at", "with"}
+
+
+def _tokenize_attachment_key(value: str, *, drop_digits: bool = False) -> list[str]:
+    """
+    Tokenize attachment text for resilient contains checks where extra words may
+    exist between expected phrases.
+    """
+    text = str(value or "")
+    text = os.path.splitext(text)[0]
+    text = text.lower()
+    raw_tokens = re.findall(r"[a-z0-9]+", text)
+    tokens: list[str] = []
+    for token in raw_tokens:
+        if drop_digits:
+            token = re.sub(r"\d+", "", token)
+        token = token.strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+
 def _split_possible_subjects(value) -> list[str]:
     if value is None:
         return []
@@ -99,6 +121,7 @@ def _build_attachment_rules(row) -> list[dict]:
             {
                 "match_text": attachment_name,
                 "match_key": _normalize_attachment_key(attachment_name, drop_digits=True),
+                "match_tokens": _tokenize_attachment_key(attachment_name, drop_digits=True),
                 "line_name": normalize_line_name(line_name),
                 "line_key": _normalize_for_contains(line_name),
                 "row_index": idx,
@@ -197,7 +220,7 @@ def extract_project_code(text: str) -> str | None:
             return f"{prefix} {num}"
     return None
 
-def derive_project_code(mail, attachment=None) -> str | None:
+def derive_project_code(mail, attachment=None, *, include_other_attachments: bool = True) -> str | None:
     """
     Try multiple sources (current attachment, subject, all attachment names)
     to determine the TA/TB style project identifier.
@@ -218,7 +241,7 @@ def derive_project_code(mail, attachment=None) -> str | None:
     push(getattr(mail, "Subject", None))
 
     atts = getattr(mail, "Attachments", None)
-    if atts:
+    if include_other_attachments and atts:
         try:
             for i in range(1, atts.Count + 1):
                 other = atts.Item(i)
@@ -355,28 +378,49 @@ def _resolve_attachment_match(name: str, sender_cfgs: list[dict]) -> dict | None
     normalized = _normalize_attachment_key(name, drop_digits=True)
     if not normalized:
         return None
+    attachment_tokens = set(_tokenize_attachment_key(name, drop_digits=True))
 
     best: dict | None = None
     for entry in sender_cfgs:
         for rule_order, rule in enumerate(entry.get("attachment_rules", [])):
             match_key = rule.get("match_key") or ""
-            if not match_key or match_key not in normalized:
+            rule_tokens = [str(t).strip() for t in (rule.get("match_tokens") or []) if str(t).strip()]
+            rule_tokens = list(dict.fromkeys(rule_tokens))
+            required_tokens = [t for t in rule_tokens if t not in _ATTACHMENT_TOKEN_STOPWORDS]
+            if not required_tokens:
+                required_tokens = rule_tokens
+
+            substring_match = bool(match_key) and match_key in normalized
+            token_match = bool(required_tokens) and all(t in attachment_tokens for t in required_tokens)
+            if not substring_match and not token_match:
                 continue
+            match_type_rank = 2 if substring_match else 1
+            match_strength = len(match_key) if substring_match else len(required_tokens)
             candidate = {
                 "project_code": entry.get("project_code", "") or "",
                 "line_name": rule.get("line_name", "") or "",
                 "rule_matched": True,
-                "match_len": len(match_key),
+                "match_len": match_strength,
+                "match_type_rank": match_type_rank,
                 "config_row_index": int(entry.get("config_row_index", 0)),
                 "rule_index": int(rule_order),
             }
             if best is None:
                 best = candidate
                 continue
-            if candidate["match_len"] > best["match_len"]:
+            if candidate["match_type_rank"] > best["match_type_rank"]:
                 best = candidate
                 continue
-            if candidate["match_len"] == best["match_len"]:
+            if (
+                candidate["match_type_rank"] == best["match_type_rank"]
+                and candidate["match_len"] > best["match_len"]
+            ):
+                best = candidate
+                continue
+            if (
+                candidate["match_type_rank"] == best["match_type_rank"]
+                and candidate["match_len"] == best["match_len"]
+            ):
                 if (candidate["config_row_index"], candidate["rule_index"]) < (
                     best["config_row_index"],
                     best["rule_index"],
@@ -384,6 +428,11 @@ def _resolve_attachment_match(name: str, sender_cfgs: list[dict]) -> dict | None
                     best = candidate
     if best is not None:
         return best
+
+    # If sender has explicit attachment rules, never fallback to sender-level project
+    # because that can mis-assign non-DPR attachments.
+    if any(entry.get("attachment_rules") for entry in sender_cfgs):
+        return None
 
     for entry in sender_cfgs:
         project_code = entry.get("project_code", "") or ""
@@ -417,9 +466,9 @@ def save_latest_for_mail(mail) -> list[str]:
             continue
         normalized_for_patterns = norm(name)
         resolved_match = _resolve_attachment_match(name, sender_cfgs)
-        fallback_match = resolved_match is not None and bool(resolved_match.get("project_code"))
-        # must be a DPR file unless fallback hint matched
-        if (not fallback_match) and (not all(re.search(pat, normalized_for_patterns, flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN)):
+        config_rule_match = resolved_match is not None and bool(resolved_match.get("rule_matched"))
+        # must be a DPR-like file unless it matched a configured attachment rule
+        if (not config_rule_match) and (not all(re.search(pat, normalized_for_patterns, flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN)):
             continue
 
         project = ""
@@ -428,9 +477,9 @@ def save_latest_for_mail(mail) -> list[str]:
             project = str(resolved_match.get("project_code") or "").strip()
             line_name = normalize_line_name(resolved_match.get("line_name"))
             if not project:
-                project = derive_project_code(mail, att) or ""
+                project = derive_project_code(mail, att, include_other_attachments=False) or ""
         else:
-            project = derive_project_code(mail, att) or ""
+            project = derive_project_code(mail, att, include_other_attachments=False) or ""
             if not project and resolved_match:
                 project = str(resolved_match.get("project_code") or "").strip()
                 line_name = normalize_line_name(resolved_match.get("line_name"))

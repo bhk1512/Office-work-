@@ -12,6 +12,14 @@ _CANONICAL_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _LINE_TOKEN_RE = re.compile(r"\[(?P<line>[^\[\]]+)\]")
+_GENERIC_LINE_TOKENS = {
+    "compiled",
+    "compilled",
+    "compliled",
+    "compile",
+    "stringing",
+    "erection",
+}
 
 
 def _compact(value: object) -> str:
@@ -65,6 +73,11 @@ def infer_line_name_from_sheet_name(sheet_name: object, mode: str = "") -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return ""
+    compact = re.sub(r"[^a-z0-9]+", "", text.lower())
+    if compact in {"compiled", "compilled", "compliled", "compile"}:
+        return ""
+    if normalize_line_name(text).lower() in _GENERIC_LINE_TOKENS:
+        return ""
     return text
 
 
@@ -72,6 +85,8 @@ def parse_sheet_line_entries(
     raw_sheet_names: object,
     raw_line_names: object,
     mode: str,
+    *,
+    infer_from_sheet_name: bool = True,
 ) -> list[dict[str, str]]:
     sheet_names = _split_csv_tokens(raw_sheet_names, keep_empty=False)
     if not sheet_names:
@@ -83,9 +98,11 @@ def parse_sheet_line_entries(
         override = line_overrides[idx] if idx < len(line_overrides) else ""
         line_name = normalize_line_name(override)
         source = "config" if line_name else "inferred"
-        if not line_name:
+        if not line_name and infer_from_sheet_name:
             line_name = infer_line_name_from_sheet_name(sheet_name, mode=mode)
             source = "inferred" if line_name else ""
+        elif not line_name:
+            source = ""
         entries.append(
             {
                 "sheet_name": sheet_name,

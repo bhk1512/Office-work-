@@ -28,6 +28,12 @@ def normalize_space_only(value: object) -> str:
     return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
+def normalize_sheet_key(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
 def resolve_dpr_config_path(raw_root: Path, *, repo_root: Path | None = None) -> Path | None:
     candidate = raw_root.parent / "DPR_Config.xlsx"
     if candidate.exists():
@@ -77,7 +83,12 @@ def load_stringing_sheet_config(raw_root: Path, *, repo_root: Path | None = None
                 continue
 
             raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
-            entries = parse_sheet_line_entries(raw_stringing, raw_line_names, "stringing")
+            entries = parse_sheet_line_entries(
+                raw_stringing,
+                raw_line_names,
+                "stringing",
+                infer_from_sheet_name=False,
+            )
             deduped_entries: list[dict[str, str]] = []
             seen_sheet_keys: set[str] = set()
             for entry in entries:
@@ -152,6 +163,7 @@ def load_stringing_template_mapping_config(
     raw_root: Path,
     *,
     repo_root: Path | None = None,
+    include_unchecked: bool = False,
 ) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
     config_path = resolve_dpr_config_path(raw_root, repo_root=repo_root)
     if config_path is None:
@@ -177,7 +189,7 @@ def load_stringing_template_mapping_config(
             if candidate in headers:
                 check_idx = headers.index(candidate)
                 break
-        if project_idx is None or check_idx is None:
+        if project_idx is None or (check_idx is None and not include_unchecked):
             return {}, {}
 
         mappings: Dict[str, Tuple[Dict[int, str], str]] = {}
@@ -188,16 +200,18 @@ def load_stringing_template_mapping_config(
             project_val = row[project_idx] if project_idx < len(row) else None
             if project_val in (None, ""):
                 continue
-            check_val = row[check_idx] if check_idx < len(row) else None
-            if normalize_space_only(check_val) != "yes":
+            check_val = row[check_idx] if check_idx is not None and check_idx < len(row) else None
+            check_enabled = normalize_space_only(check_val) == "yes"
+            if not check_enabled and not include_unchecked:
                 continue
 
             project_key = normalize_project_code_key(project_val)
             template_sheets = _resolve_project_template_sheets(wb, project_val, "Stringing")
             if not template_sheets:
-                errors[project_key] = (
-                    f"Stringing Template Check is Yes but no mapping tab matching project '{str(project_val).strip()}' was found."
-                )
+                if check_enabled:
+                    errors[project_key] = (
+                        f"Stringing Template Check is Yes but no mapping tab matching project '{str(project_val).strip()}' was found."
+                    )
                 continue
 
             best_sheet = None
@@ -208,14 +222,32 @@ def load_stringing_template_mapping_config(
                     best_map = col_map
                     best_sheet = sheet_name
             if not best_map or not best_sheet:
-                errors[project_key] = (
-                    f"Stringing template tab(s) for project '{str(project_val).strip()}' have no usable 'To Map' mapping row."
-                )
+                if check_enabled:
+                    errors[project_key] = (
+                        f"Stringing template tab(s) for project '{str(project_val).strip()}' have no usable 'To Map' mapping row."
+                    )
                 continue
             mappings[project_key] = (best_map, best_sheet)
         return mappings, errors
     finally:
         wb.close()
+
+
+def resolve_template_fallback_for_project(
+    raw_root: Path,
+    project_value: object,
+    *,
+    repo_root: Path | None = None,
+) -> tuple[dict[int, str], str] | None:
+    project_key = normalize_project_code_key(project_value)
+    if not project_key:
+        return None
+    mappings, _ = load_stringing_template_mapping_config(
+        raw_root,
+        repo_root=repo_root,
+        include_unchecked=True,
+    )
+    return mappings.get(project_key)
 
 
 def apply_template_column_mapping(df: pd.DataFrame, template_map: Dict[int, str]) -> Tuple[pd.DataFrame, List[str]]:
@@ -240,12 +272,20 @@ def apply_template_column_mapping(df: pd.DataFrame, template_map: Dict[int, str]
 
 def resolve_project_sheet_name(sheet_names: Iterable[str], project_candidates: list[str]) -> str | None:
     by_space_key: dict[str, str] = {}
+    by_sheet_key: dict[str, str] = {}
     for name in sheet_names:
-        key = normalize_space_only(name)
+        sheet_name = str(name)
+        key = normalize_space_only(sheet_name)
         if key and key not in by_space_key:
-            by_space_key[key] = str(name)
+            by_space_key[key] = sheet_name
+        compact_key = normalize_sheet_key(sheet_name)
+        if compact_key and compact_key not in by_sheet_key:
+            by_sheet_key[compact_key] = sheet_name
     for candidate in project_candidates:
         hit = by_space_key.get(normalize_space_only(candidate))
+        if hit:
+            return hit
+        hit = by_sheet_key.get(normalize_sheet_key(candidate))
         if hit:
             return hit
     return None
@@ -267,12 +307,19 @@ def find_stringing_sheet_name_from_list(
         return None
     if project_candidates:
         by_space_key: Dict[str, str] = {}
+        by_sheet_key: Dict[str, str] = {}
         for name in names:
             key = normalize_space_only(name)
             if key and key not in by_space_key:
                 by_space_key[key] = name
+            compact_key = normalize_sheet_key(name)
+            if compact_key and compact_key not in by_sheet_key:
+                by_sheet_key[compact_key] = name
         for candidate in project_candidates:
             hit = by_space_key.get(normalize_space_only(candidate))
+            if hit:
+                return hit
+            hit = by_sheet_key.get(normalize_sheet_key(candidate))
             if hit:
                 return hit
         return None
@@ -336,13 +383,23 @@ def _make_unique_headers(labels: List[str]) -> List[str]:
     return unique
 
 
-def materialize_stringing_data(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, int | None, list[str]]:
+def materialize_stringing_data(
+    df_raw: pd.DataFrame,
+    *,
+    min_columns: int | None = None,
+) -> tuple[pd.DataFrame, int | None, list[str]]:
     if df_raw is None or df_raw.empty:
         return pd.DataFrame(), None, []
     header_row, header_labels = find_stringing_header_row(df_raw)
+    keep_min = int(min_columns or 0)
     if header_row is None or header_labels is None:
         labels = list(df_raw.iloc[0, :].values)
         data = df_raw.iloc[1:].copy()
+        if keep_min > 0 and data.shape[1] < keep_min:
+            missing = keep_min - data.shape[1]
+            for _ in range(missing):
+                data[data.shape[1]] = pd.NA
+                labels.append("")
         clean_labels = _make_unique_headers([_clean_header_label(label) for label in labels])
         data.columns = clean_labels
         return data.reset_index(drop=True), 0, clean_labels
@@ -352,8 +409,17 @@ def materialize_stringing_data(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, int 
     labels_series = pd.Series(labels)
     last_non_empty = labels_series.replace("", pd.NA).last_valid_index()
     if last_non_empty is not None:
-        data = data.iloc[:, : last_non_empty + 1]
-        labels_series = labels_series.iloc[: last_non_empty + 1]
+        target_cols = last_non_empty + 1
+        if keep_min > 0:
+            target_cols = max(target_cols, keep_min)
+        if data.shape[1] < target_cols:
+            missing = target_cols - data.shape[1]
+            for _ in range(missing):
+                data[data.shape[1]] = pd.NA
+        if labels_series.shape[0] < target_cols:
+            labels_series = labels_series.reindex(range(target_cols), fill_value="")
+        data = data.iloc[:, :target_cols]
+        labels_series = labels_series.iloc[:target_cols]
     clean_labels = _make_unique_headers([_clean_header_label(label) for label in labels_series.values])
     data.columns = clean_labels
     return data.reset_index(drop=True), int(header_row), clean_labels
@@ -373,6 +439,7 @@ def load_stringing_sheet_frame(
     *,
     configured_sheet_name: str = "",
     preferred_sheet_name: str = "",
+    min_columns: int | None = None,
 ) -> StringingSheetLoadResult:
     selector = (
         (lambda names: find_stringing_sheet_name_from_list(list(names), None, [configured_sheet_name]))
@@ -386,7 +453,7 @@ def load_stringing_sheet_frame(
             if not found:
                 raise ValueError("NO_TARGET_SHEET")
             df_raw = xl.parse(sheet_name=found, header=None)
-            frame, header_row, header_labels = materialize_stringing_data(df_raw)
+            frame, header_row, header_labels = materialize_stringing_data(df_raw, min_columns=min_columns)
             return StringingSheetLoadResult(
                 frame=frame,
                 resolved_sheet=found,
@@ -403,7 +470,7 @@ def load_stringing_sheet_frame(
         )
         if found is None or df_raw is None or df_raw.empty:
             raise ValueError("NO_TARGET_SHEET")
-        frame, header_row, header_labels = materialize_stringing_data(df_raw)
+        frame, header_row, header_labels = materialize_stringing_data(df_raw, min_columns=min_columns)
         return StringingSheetLoadResult(
             frame=frame,
             resolved_sheet=found,

@@ -155,13 +155,21 @@ def _ensure_project_fields(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     working = df.copy()
+    if "project_code" not in working.columns:
+        working["project_code"] = ""
+    working["project_code"] = working["project_code"].fillna("").astype(str).str.strip()
     if "project_name" not in working.columns:
         working["project_name"] = working.get("project", "")
     if "project" not in working.columns:
         working["project"] = working.get("project_name", "")
     working["project_name"] = working["project_name"].fillna("").astype(str).str.strip()
+    preferred_key = working["project_code"].where(working["project_code"].astype(bool), working["project_name"])
     if "project_key_norm" not in working.columns:
-        working["project_key_norm"] = working["project_name"].map(compact_project_key)
+        working["project_key_norm"] = preferred_key.map(compact_project_key)
+    else:
+        existing = working["project_key_norm"].fillna("").astype(str)
+        fallback = preferred_key.map(compact_project_key).fillna("")
+        working["project_key_norm"] = existing.where(existing.astype(bool), fallback)
     working["project_key_norm"] = working["project_key_norm"].fillna("").astype(str)
     return working
 
@@ -308,15 +316,16 @@ def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, d
 _COVERAGE_STATUS_PRIORITY = {
     "READ_FAIL": 1,
     "NO_TARGET_SHEET": 2,
-    "MISSING_REQUIRED_COLUMNS": 3,
-    "NO_DAILY": 4,
-    "SKIPPED_NO_STRINGING_CONFIG": 5,
-    "OK": 6,
+    "ATTACHMENT_MISMATCH": 3,
+    "MISSING_REQUIRED_COLUMNS": 4,
+    "NO_DAILY": 5,
+    "SKIPPED_NO_STRINGING_CONFIG": 6,
+    "OK": 7,
 }
 
 
 def _build_coverage_registry(coverage_df: pd.DataFrame | None, project_info: pd.DataFrame | None) -> pd.DataFrame:
-    columns = ["project_key_norm", "project_code", "project_display", "pch_display", "status", "reason"]
+    columns = ["project_key_norm", "project_code", "project_display", "pch_display", "status", "reason_code", "reason"]
     if coverage_df is None or coverage_df.empty:
         return pd.DataFrame(columns=columns)
 
@@ -341,12 +350,19 @@ def _build_coverage_registry(coverage_df: pd.DataFrame | None, project_info: pd.
             or display_raw
             or project_code
         )
-        key_norm = compact_project_key(project_display or project_code)
+        key_norm = compact_project_key(project_code) or compact_project_key(project_display)
         if not key_norm:
             continue
         pch_display = str((meta or {}).get("pch", "")).strip() or "Unassigned"
         status = str(row.get("status", "")).strip().upper()
+        reason_code = str(row.get("reason_code", status)).strip().upper() or status
         reason = str(row.get("reason", "")).strip()
+        if project_code and pch_display == "Unassigned":
+            LOGGER.warning(
+                "Coverage registry: project code '%s' has no mapped PCH (display='%s').",
+                project_code,
+                project_display,
+            )
 
         candidate_record = {
             "project_key_norm": key_norm,
@@ -354,6 +370,7 @@ def _build_coverage_registry(coverage_df: pd.DataFrame | None, project_info: pd.
             "project_display": project_display,
             "pch_display": pch_display,
             "status": status,
+            "reason_code": reason_code,
             "reason": reason,
         }
         existing = records.get(key_norm)
@@ -361,8 +378,8 @@ def _build_coverage_registry(coverage_df: pd.DataFrame | None, project_info: pd.
             records[key_norm] = candidate_record
             continue
 
-        current_priority = _COVERAGE_STATUS_PRIORITY.get(str(existing.get("status", "")).upper(), 0)
-        candidate_priority = _COVERAGE_STATUS_PRIORITY.get(status, 0)
+        current_priority = _COVERAGE_STATUS_PRIORITY.get(str(existing.get("reason_code", existing.get("status", ""))).upper(), 0)
+        candidate_priority = _COVERAGE_STATUS_PRIORITY.get(reason_code, 0)
         if candidate_priority >= current_priority:
             merged_reason = "; ".join(
                 dict.fromkeys(
@@ -519,13 +536,18 @@ def _build_coverage_issues_sheet(
         "Project",
         "Project Code",
         "Status",
+        "Reason Code",
         "Reason",
         "Compiled Rows",
         "Daily Rows",
         "Workbook",
         "Configured Sheet",
         "Resolved Sheet",
+        "Available Sheets",
         "Fallback Used",
+        "Template Fallback Used",
+        "Method Inference Rows",
+        "Assumption Notes",
     ]
     if coverage_df is None or coverage_df.empty:
         return pd.DataFrame(columns=columns)
@@ -536,13 +558,18 @@ def _build_coverage_issues_sheet(
         working.get("project_display", working["project_code"]).fillna("").astype(str).str.strip()
     )
     working["status"] = working.get("status", "").fillna("").astype(str).str.strip().str.upper()
+    working["reason_code"] = working.get("reason_code", working["status"]).fillna("").astype(str).str.strip().str.upper()
     working["reason"] = working.get("reason", "").fillna("").astype(str).str.strip()
     working["compiled_rows"] = pd.to_numeric(working.get("compiled_rows", 0), errors="coerce").fillna(0).astype(int)
     working["daily_rows"] = pd.to_numeric(working.get("daily_rows", 0), errors="coerce").fillna(0).astype(int)
     working["workbook"] = working.get("workbook", "").fillna("").astype(str).str.strip()
     working["configured_sheet"] = working.get("configured_sheet", "").fillna("").astype(str).str.strip()
     working["resolved_sheet"] = working.get("resolved_sheet", "").fillna("").astype(str).str.strip()
+    working["available_sheets"] = working.get("available_sheets", "").fillna("").astype(str).str.strip()
     working["fallback_used"] = working.get("fallback_used", False).fillna(False).astype(bool)
+    working["template_fallback_used"] = working.get("template_fallback_used", False).fillna(False).astype(bool)
+    working["method_inference_rows"] = pd.to_numeric(working.get("method_inference_rows", 0), errors="coerce").fillna(0).astype(int)
+    working["assumption_notes"] = working.get("assumption_notes", "").fillna("").astype(str).str.strip()
 
     pch_lookup: dict[str, str] = {}
     if coverage_registry is not None and not coverage_registry.empty:
@@ -553,7 +580,9 @@ def _build_coverage_issues_sheet(
             .set_index("project_key_norm")["pch_display"]
             .to_dict()
         )
-    working["project_key_norm"] = working["project_display"].map(compact_project_key)
+    working["project_key_norm"] = working["project_code"].map(compact_project_key)
+    fallback_key = working["project_display"].map(compact_project_key)
+    working["project_key_norm"] = working["project_key_norm"].where(working["project_key_norm"].astype(bool), fallback_key)
     working["PCH"] = working["project_key_norm"].map(lambda key: pch_lookup.get(key, "Unassigned"))
     working["PCH"] = working["PCH"].fillna("").astype(str).str.strip().replace("", "Unassigned")
     working["has_issue"] = (
@@ -567,16 +596,21 @@ def _build_coverage_issues_sheet(
             "project_display": "Project",
             "project_code": "Project Code",
             "status": "Status",
+            "reason_code": "Reason Code",
             "reason": "Reason",
             "compiled_rows": "Compiled Rows",
             "daily_rows": "Daily Rows",
             "workbook": "Workbook",
             "configured_sheet": "Configured Sheet",
             "resolved_sheet": "Resolved Sheet",
+            "available_sheets": "Available Sheets",
             "fallback_used": "Fallback Used",
+            "template_fallback_used": "Template Fallback Used",
+            "method_inference_rows": "Method Inference Rows",
+            "assumption_notes": "Assumption Notes",
         }
     )
-    out["StatusRank"] = out["Status"].map(lambda value: _COVERAGE_STATUS_PRIORITY.get(str(value).upper(), 0))
+    out["StatusRank"] = out["Reason Code"].map(lambda value: _COVERAGE_STATUS_PRIORITY.get(str(value).upper(), 0))
     out = out.sort_values(["has_issue", "StatusRank", "PCH", "Project"], ascending=[False, True, True, True])
     out = out[columns].reset_index(drop=True)
     return out
@@ -591,7 +625,11 @@ def _prepare_stringing_scope(daily_df: pd.DataFrame, project_info: pd.DataFrame 
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
     working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
     working["project_name"] = working.get("project_name", working.get("project", "")).fillna("").astype(str).str.strip()
-    working["project_key_norm"] = working.get("project_key_norm", "").fillna("").astype(str)
+    project_code = working.get("project_code", pd.Series("", index=working.index)).fillna("").astype(str).str.strip()
+    existing_norm = working.get("project_key_norm", pd.Series("", index=working.index)).fillna("").astype(str)
+    fallback_norm = project_code.map(compact_project_key)
+    fallback_norm = fallback_norm.where(fallback_norm.astype(bool), working["project_name"].map(compact_project_key))
+    working["project_key_norm"] = existing_norm.where(existing_norm.astype(bool), fallback_norm)
 
     lookup = _build_project_meta_lookup(project_info)
     if lookup:
@@ -630,7 +668,11 @@ def _prepare_stringing_compiled_scope(compiled_df: pd.DataFrame, project_info: p
     normalized["month"] = normalized["fs_complete_date"].dt.to_period("M").dt.to_timestamp()
     normalized["gang_name"] = normalized.get("gang_name", "").fillna("").astype(str).str.strip()
     normalized["project_name"] = normalized.get("project_name", normalized.get("project", "")).fillna("").astype(str).str.strip()
-    normalized["project_key_norm"] = normalized.get("project_key_norm", "").fillna("").astype(str)
+    project_code = normalized.get("project_code", pd.Series("", index=normalized.index)).fillna("").astype(str).str.strip()
+    existing_norm = normalized.get("project_key_norm", pd.Series("", index=normalized.index)).fillna("").astype(str)
+    fallback_norm = project_code.map(compact_project_key)
+    fallback_norm = fallback_norm.where(fallback_norm.astype(bool), normalized["project_name"].map(compact_project_key))
+    normalized["project_key_norm"] = existing_norm.where(existing_norm.astype(bool), fallback_norm)
 
     lookup = _build_project_meta_lookup(project_info)
     if lookup:
@@ -2464,6 +2506,18 @@ def main() -> int:
         for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
             if col not in issues_df.columns:
                 issues_df[col] = pd.NaT
+    method_inferred_total = int(
+        pd.to_numeric(
+            stringing_coverage.get("method_inference_rows", pd.Series(0)),
+            errors="coerce",
+        ).fillna(0).sum()
+    ) if isinstance(stringing_coverage, pd.DataFrame) and not stringing_coverage.empty else 0
+    template_fallback_projects = int(
+        pd.Series(stringing_coverage.get("template_fallback_used", pd.Series(dtype=bool))).fillna(False).astype(bool).sum()
+    ) if isinstance(stringing_coverage, pd.DataFrame) and not stringing_coverage.empty else 0
+    attachment_mismatch_projects = int(
+        pd.Series(stringing_coverage.get("reason_code", pd.Series(dtype=object))).fillna("").astype(str).str.upper().eq("ATTACHMENT_MISMATCH").sum()
+    ) if isinstance(stringing_coverage, pd.DataFrame) and not stringing_coverage.empty else 0
 
     readme_rows = [
         {
@@ -2513,6 +2567,22 @@ def main() -> int:
         {
             "Assumption": "Method split",
             "Details": "Method is read from the stringing daily data (method/method_norm). Rows without method are logged in Data_Issues. Summary groups into TSE, Manual, and Other.",
+        },
+        {
+            "Assumption": "Method fallback (inference)",
+            "Details": (
+                "When Method is missing, inference uses erection span depth: "
+                "erection_locations<=2 => manual, >2 => tse, unresolved => tse fallback. "
+                f"Current export inferred rows={method_inferred_total}."
+            ),
+        },
+        {
+            "Assumption": "Template fallback usage",
+            "Details": f"Projects where unchecked template fallback was applied in this export scope: {template_fallback_projects}.",
+        },
+        {
+            "Assumption": "Attachment mismatch",
+            "Details": f"Projects flagged with ATTACHMENT_MISMATCH in this export scope: {attachment_mismatch_projects}.",
         },
         {
             "Assumption": "Pareto analysis",

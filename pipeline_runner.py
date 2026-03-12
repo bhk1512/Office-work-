@@ -16,10 +16,12 @@ from dashboard import stringing_ingest as ingest
 from dashboard.stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
+    classify_stringing_missing_headers,
     summarize_date_parsing,
     add_length_units,
     parse_project_code_from_filename,
     find_stringing_header_row,
+    infer_missing_methods_from_erection,
 )
 from microplan_compile import (
     compile_microplans_to_workbook,
@@ -259,6 +261,33 @@ def _stringing_candidates(input_dir: Optional[Path], files: Optional[List[Path]]
     return []
 
 
+def _load_erection_daily_reference() -> pd.DataFrame:
+    candidates = [
+        (BASE_DIR / "Parquets" / "Erection" / "ProdDailyExpanded.parquet").resolve(),
+        (BASE_DIR / "Parquets" / "Erection" / "ProdDailyExpandedSingles.parquet").resolve(),
+    ]
+    for parquet_path in candidates:
+        if not parquet_path.exists():
+            continue
+        try:
+            with duckdb.connect(database=":memory:") as con:
+                return con.execute("SELECT * FROM read_parquet(?)", [str(parquet_path)]).df()
+        except Exception:
+            continue
+    workbook = (BASE_DIR / "Parquets" / "Erection" / "ErectionCompiled_Output.xlsx").resolve()
+    if workbook.exists():
+        try:
+            with pd.ExcelFile(workbook) as xl:
+                for sheet in ("ProdDailyExpanded", "ProdDailyExpandedSingles"):
+                    if sheet in xl.sheet_names:
+                        frame = xl.parse(sheet_name=sheet)
+                        if isinstance(frame, pd.DataFrame) and not frame.empty:
+                            return frame
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
 def _normalize_project_code_key(value: object) -> str:
     return ingest.normalize_project_code_key(value)
 
@@ -341,9 +370,15 @@ def _extract_template_column_map(ws) -> Dict[int, str]:
 
 def _load_stringing_template_mapping_config(
     input_dir: Optional[Path],
+    *,
+    include_unchecked: bool = False,
 ) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
     raw_root = input_dir if input_dir is not None else (BASE_DIR / "Raw Data" / "DPRs")
-    return ingest.load_stringing_template_mapping_config(raw_root, repo_root=BASE_DIR)
+    return ingest.load_stringing_template_mapping_config(
+        raw_root,
+        repo_root=BASE_DIR,
+        include_unchecked=include_unchecked,
+    )
 
 
 def _apply_template_column_mapping(
@@ -541,12 +576,27 @@ def _write_stringing_artifacts(
                 }
             ])
 
-    readme_df = pd.DataFrame([
-        {
-            "Note": "Compiled from DPR files: stringing sheet consolidation.",
-            "Rules": "Preserve raw columns; diagnostics include column presence and date parsing; configured stringing sheets are processed independently with per-sheet line identity before concatenation; PO start to F/S complete inclusive for daily expansion.",
-        }
-    ])
+    method_inferred_rows = 0
+    if isinstance(diagnostics_df, pd.DataFrame) and "MethodInferenceRows" in diagnostics_df.columns:
+        method_inferred_rows = int(
+            pd.to_numeric(diagnostics_df["MethodInferenceRows"], errors="coerce").fillna(0).sum()
+        )
+    readme_df = pd.DataFrame(
+        [
+            {
+                "Note": "Compiled from DPR files: stringing sheet consolidation.",
+                "Rules": "Preserve raw columns; diagnostics include column presence and date parsing; configured stringing sheets are processed independently with per-sheet line identity before concatenation; PO start to F/S complete inclusive for daily expansion.",
+            },
+            {
+                "Note": "Method fallback assumption",
+                "Rules": (
+                    "If Method is missing, infer using erection span depth: "
+                    "erection_locations<=2 => manual, >2 => tse, unresolved => tse fallback. "
+                    f"Current inferred rows: {method_inferred_rows}."
+                ),
+            },
+        ]
+    )
 
     # Write workbook atomically and keep last known-good output on failure.
     temp_output = output_path.with_name(f"{output_path.name}.tmp")
@@ -610,6 +660,8 @@ def compile_stringing_to_workbook(
 
     stringing_sheet_config = _load_stringing_sheet_config(input_dir)
     stringing_template_config, stringing_template_errors = _load_stringing_template_mapping_config(input_dir)
+    stringing_template_all_config, _ = _load_stringing_template_mapping_config(input_dir, include_unchecked=True)
+    erection_daily_reference = _load_erection_daily_reference()
     selected_candidates: List[
         Tuple[
             Path,
@@ -673,6 +725,14 @@ def compile_stringing_to_workbook(
         configured_sheet_name = str(configured_sheet_entry.get("sheet_name", "")).strip() if configured_sheet_entry else ""
         line_name_override = normalize_line_name(configured_sheet_entry.get("line_name", "")) if configured_sheet_entry else ""
         line_name_source = str(configured_sheet_entry.get("line_name_source", "")).strip() if configured_sheet_entry else ""
+        project_key = _normalize_project_code_key(project)
+        fallback_template_pair = stringing_template_all_config.get(project_key)
+        fallback_template_map = fallback_template_pair[0] if fallback_template_pair else None
+        fallback_template_sheet = fallback_template_pair[1] if fallback_template_pair else ""
+        min_columns = (max((template_map or fallback_template_map).keys()) + 1) if (template_map or fallback_template_map) else None
+        template_applied = False
+        template_fallback_used = False
+        template_sheet_used = template_sheet_name or ""
 
         if template_error:
             if f.name in template_error_logged:
@@ -722,6 +782,7 @@ def compile_stringing_to_workbook(
                 f,
                 configured_sheet_name=configured_sheet_name,
                 preferred_sheet_name=preferred,
+                min_columns=min_columns,
             )
             found = load_result.resolved_sheet
             fallback_note = load_result.fallback_note
@@ -817,6 +878,8 @@ def compile_stringing_to_workbook(
         if template_map:
             df, template_changes = _apply_template_column_mapping(df, template_map)
             header_labels = [str(col) for col in df.columns]
+            template_applied = True
+            template_sheet_used = template_sheet_name or template_sheet_used
 
         df = _sanitize_stringing_columns(df)
         header_labels = [str(col) for col in df.columns]
@@ -849,16 +912,36 @@ def compile_stringing_to_workbook(
             df["project"] = df["project_name"]
         df["_source_file"] = f.name
         df["source_sheet"] = found or ""
-        compiled.append(df)
 
         try:
             compiled_norm, norm_report = normalize_stringing_columns(df)
         except Exception:
             compiled_norm = df.copy()
             norm_report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
+        classification = classify_stringing_missing_headers(norm_report)
+        critical_missing = list(classification.get("critical_missing", []))
+        non_critical_missing = list(classification.get("non_critical_missing", []))
+        if critical_missing and fallback_template_map and not template_applied:
+            fallback_df, fallback_changes = _apply_template_column_mapping(df, fallback_template_map)
+            try:
+                fallback_norm, fallback_report = normalize_stringing_columns(fallback_df)
+            except Exception:
+                fallback_norm = fallback_df.copy()
+                fallback_report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
+            fallback_classification = classify_stringing_missing_headers(fallback_report)
+            fallback_critical = list(fallback_classification.get("critical_missing", []))
+            if len(fallback_critical) < len(critical_missing):
+                compiled_norm = fallback_norm
+                norm_report = fallback_report
+                classification = fallback_classification
+                critical_missing = fallback_critical
+                non_critical_missing = list(fallback_classification.get("non_critical_missing", []))
+                template_fallback_used = True
+                template_changes = fallback_changes
+                template_sheet_used = fallback_template_sheet or template_sheet_used
 
         missing_headers = list(norm_report.get("missing", []))
-        if missing_headers:
+        if critical_missing:
             issue_rows.append(
                 {
                     "Workbook": f.name,
@@ -868,11 +951,33 @@ def compile_stringing_to_workbook(
                     "LineName": line_name,
                     "LineNameSource": line_name_source,
                     "Issue": "MISSING_REQUIRED_COLUMNS",
-                    "MissingColumns": ", ".join(missing_headers),
+                    "MissingColumns": ", ".join(critical_missing),
                     "Rows": int(len(df.index)),
                     "DailyRows": 0,
                 }
             )
+        elif non_critical_missing:
+            issue_rows.append(
+                {
+                    "Workbook": f.name,
+                    "Project": project,
+                    "Sheet": found,
+                    "ConfiguredSheet": configured_sheet_name,
+                    "LineName": line_name,
+                    "LineNameSource": line_name_source,
+                    "Issue": "MISSING_NONCRITICAL_COLUMNS",
+                    "MissingColumns": ", ".join(non_critical_missing),
+                    "Rows": int(len(df.index)),
+                    "DailyRows": 0,
+                }
+            )
+
+        compiled_norm, method_inference_summary = infer_missing_methods_from_erection(
+            compiled_norm,
+            erection_daily_reference,
+        )
+        method_inference_rows = int(method_inference_summary.get("method_inferred_rows", 0) or 0)
+        compiled.append(compiled_norm)
 
         try:
             work = compiled_norm.copy()
@@ -1003,7 +1108,7 @@ def compile_stringing_to_workbook(
         except Exception:
             daily_rows = 0
 
-        if daily_rows == 0:
+        if daily_rows == 0 and not critical_missing:
             issue_rows.append(
                 {
                     "Workbook": f.name,
@@ -1019,7 +1124,12 @@ def compile_stringing_to_workbook(
                 }
             )
 
-        status = "NO_DAILY" if daily_rows == 0 else ("FALLBACK" if fallback_note else "OK")
+        if critical_missing:
+            status = "MISSING_REQUIRED_COLUMNS"
+        elif daily_rows == 0:
+            status = "NO_DAILY"
+        else:
+            status = "FALLBACK" if (fallback_note or template_fallback_used) else "OK"
         diag_rows.append(
             {
                 "Workbook": f.name,
@@ -1036,13 +1146,15 @@ def compile_stringing_to_workbook(
                 "AppliedMap": ", ".join(
                     [f"{key}->{value}" for key, value in norm_report.get("applied_map", {}).items()]
                 ),
-                "Rows": int(len(df.index)),
+                "Rows": int(len(compiled_norm.index)),
                 "DailyRows": daily_rows,
                 "Status": status,
                 "FallbackNote": fallback_note or "",
-                "TemplateSheet": template_sheet_name or "",
-                "TemplateApplied": bool(template_map),
+                "TemplateSheet": template_sheet_used or "",
+                "TemplateApplied": bool(template_applied or template_fallback_used),
+                "TemplateFallbackUsed": bool(template_fallback_used),
                 "TemplateChanges": "; ".join(template_changes),
+                "MethodInferenceRows": int(method_inference_rows),
             }
         )
 

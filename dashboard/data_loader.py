@@ -19,11 +19,13 @@ from . import stringing_ingest as ingest
 from .stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
+    classify_stringing_missing_headers,
     summarize_date_parsing,
     add_length_units,
     read_stringing_sheet_robust,
     parse_project_code_from_filename,
     extract_stringing_number_of_tse,
+    infer_missing_methods_from_erection,
 )
 from .plan_utils import infer_project_hint, prepare_stringing_plan_frame
 from .project_identity import (
@@ -295,8 +297,14 @@ def _load_stringing_sheet_config(raw_root: Path) -> dict[str, list[dict[str, str
 
 def _load_stringing_template_mapping_config(
     raw_root: Path,
+    *,
+    include_unchecked: bool = False,
 ) -> tuple[dict[str, tuple[dict[int, str], str]], dict[str, str]]:
-    return ingest.load_stringing_template_mapping_config(raw_root, repo_root=_repo_root_from(Path(__file__)))
+    return ingest.load_stringing_template_mapping_config(
+        raw_root,
+        repo_root=_repo_root_from(Path(__file__)),
+        include_unchecked=include_unchecked,
+    )
 
 
 def _resolve_project_sheet_name(sheet_names: Iterable[str], project_candidates: list[str]) -> str | None:
@@ -343,7 +351,7 @@ def _stringing_root(base: Path) -> Path:
 def _iter_excel_candidates(raw_root: Path) -> list[Path]:
     """Recursively find all Excel files under RAW DPR root (matches runner)."""
     raw_root = raw_root.resolve()
-    return sorted([p for p in raw_root.rglob("*.xls*") if p.is_file()])
+    return sorted([p for p in raw_root.rglob("*.xls*") if p.is_file() and not p.name.startswith("~$")])
 
 def _list_excel_sheet_names(xlsx_path: Path | str) -> tuple[list[str], str | None]:
     return ingest.list_excel_sheet_names(xlsx_path)
@@ -464,6 +472,124 @@ def _load_precompiled_stringing_microplan(out_root: Path) -> tuple[pd.DataFrame,
     issues_df = sheets.get("MicroPlanDataIssues", pd.DataFrame())
     return responsibilities, index_df, issues_df
 
+
+def _sheet_tokens(value: object) -> set[str]:
+    text = str(value or "").strip().lower()
+    if not text:
+        return set()
+    return {token for token in re.findall(r"[a-z0-9]+", text) if token}
+
+
+def _sheet_match_score(configured_sheet: str, workbook_sheet: str) -> tuple[int, int, int]:
+    """Score a configured/workbook sheet pair.
+
+    Priority order:
+    1) exact normalized-space match
+    2) exact alnum-only match
+    3) token overlap count
+    """
+
+    configured = str(configured_sheet or "").strip()
+    workbook = str(workbook_sheet or "").strip()
+    if not configured or not workbook:
+        return (0, 0, 0)
+    if ingest.normalize_space_only(configured) == ingest.normalize_space_only(workbook):
+        return (1, 0, 0)
+    if ingest.normalize_sheet_key(configured) == ingest.normalize_sheet_key(workbook):
+        return (0, 1, 0)
+    c_tokens = _sheet_tokens(configured)
+    w_tokens = _sheet_tokens(workbook)
+    if not c_tokens or not w_tokens:
+        return (0, 0, 0)
+    overlap = len(c_tokens.intersection(w_tokens))
+    return (0, 0, overlap)
+
+
+def _pick_best_project_workbook(
+    workbooks: list[Path],
+    configured_sheets: list[dict[str, str]] | None,
+    workbook_sheets: dict[str, list[str]],
+) -> Path | None:
+    if not workbooks:
+        return None
+    if not configured_sheets:
+        newest = sorted(
+            workbooks,
+            key=lambda p: (p.stat().st_mtime if p.exists() else 0.0, p.name.lower()),
+            reverse=True,
+        )
+        return newest[0] if newest else None
+
+    scored: list[tuple[tuple[int, int, int, float], Path]] = []
+    configured_names = [str(item.get("sheet_name", "")).strip() for item in configured_sheets if str(item.get("sheet_name", "")).strip()]
+    for workbook in workbooks:
+        names = workbook_sheets.get(str(workbook.resolve()), [])
+        exact = 0
+        compact = 0
+        token = 0
+        for configured_name in configured_names:
+            best = (0, 0, 0)
+            for candidate_sheet in names:
+                score = _sheet_match_score(configured_name, candidate_sheet)
+                if score > best:
+                    best = score
+            exact += best[0]
+            compact += best[1]
+            token += best[2]
+        mtime = workbook.stat().st_mtime if workbook.exists() else 0.0
+        scored.append(((exact, compact, token, mtime), workbook))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _load_erection_daily_reference() -> pd.DataFrame:
+    """Best-effort erection daily frame for method inference fallback logic."""
+
+    try:
+        candidate_paths: list[Path] = []
+        config_data_path = Path(CONFIG.data_path).expanduser().resolve()
+        candidate_paths.append(config_data_path)
+        candidate_paths.append(config_data_path.parent)
+        repo_root = _repo_root_from(Path(__file__))
+        candidate_paths.append((repo_root / "Parquets" / "Erection").resolve())
+
+        for root in candidate_paths:
+            source = _find_parquet_source(root, "ProdDailyExpanded")
+            if source is None:
+                source = _find_parquet_source(root, "ProdDailyExpandedSingles")
+            if source:
+                try:
+                    frame = _read_parquet(source)
+                    if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        return frame
+                except Exception:
+                    continue
+
+        for root in candidate_paths:
+            workbook = root if root.suffix.lower().endswith("xlsx") else root / "ErectionCompiled_Output.xlsx"
+            if not workbook.exists():
+                continue
+            try:
+                with pd.ExcelFile(workbook) as xl:
+                    target = None
+                    for name in ("ProdDailyExpanded", "ProdDailyExpandedSingles"):
+                        if name in xl.sheet_names:
+                            target = name
+                            break
+                    if target:
+                        frame = xl.parse(sheet_name=target)
+                        if isinstance(frame, pd.DataFrame) and not frame.empty:
+                            return frame
+            except Exception:
+                continue
+    except Exception:
+        return pd.DataFrame()
+    return pd.DataFrame()
+
+
 def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
     """
     1) Resolve RAW DPRs root from pipeline_config.json (like erection flow)
@@ -482,6 +608,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     candidates = _iter_excel_candidates(raw_root)
     stringing_sheet_config = _load_stringing_sheet_config(raw_root)
     stringing_template_config, stringing_template_errors = _load_stringing_template_mapping_config(raw_root)
+    stringing_template_all_config, _ = _load_stringing_template_mapping_config(raw_root, include_unchecked=True)
     has_stringing_config = bool(stringing_sheet_config)
     skipped_no_stringing = 0
     skipped_not_in_config = 0
@@ -496,7 +623,11 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     dpr_issue_rows: list[dict[str, Any]] = []
     configured_codes: set[str] = set(stringing_sheet_config.keys())
     files_by_project: dict[str, list[str]] = {}
+    workbooks_by_project: dict[str, list[Path]] = {}
+    workbook_sheet_cache: dict[str, list[str]] = {}
     coverage_attempt_rows: list[dict[str, Any]] = []
+    selected_workbook_by_project: dict[str, Path] = {}
+    erection_daily_reference = _load_erection_daily_reference()
 
     def _append_plan_index_entry(
         *,
@@ -619,6 +750,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         project_code: str,
         project_display: str,
         status: str,
+        reason_code: str = "",
         reason: str = "",
         workbook: str = "",
         configured_sheet: str = "",
@@ -626,12 +758,17 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         compiled_rows: int = 0,
         daily_rows: int = 0,
         fallback_used: bool = False,
+        template_fallback_used: bool = False,
+        method_inference_rows: int = 0,
+        assumption_notes: str = "",
+        available_sheets: str = "",
     ) -> None:
         coverage_attempt_rows.append(
             {
                 "project_code": project_code,
                 "project_display": project_display or project_code,
                 "status": status,
+                "reason_code": reason_code or status,
                 "reason": reason,
                 "workbook": workbook,
                 "configured_sheet": configured_sheet,
@@ -639,6 +776,10 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "compiled_rows": int(compiled_rows),
                 "daily_rows": int(daily_rows),
                 "fallback_used": bool(fallback_used),
+                "template_fallback_used": bool(template_fallback_used),
+                "method_inference_rows": int(method_inference_rows),
+                "assumption_notes": assumption_notes,
+                "available_sheets": available_sheets,
             }
         )
 
@@ -646,14 +787,34 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         proj = _project_from_filename(wb.name) or "UNKNOWN"
         key = _normalize_project_code_key(proj)
         files_by_project.setdefault(key, []).append(wb.name)
+        workbooks_by_project.setdefault(key, []).append(wb)
+        try:
+            sheet_names, _ = _list_excel_sheet_names(wb)
+            workbook_sheet_cache[str(wb.resolve())] = list(sheet_names or [])
+        except Exception:
+            workbook_sheet_cache[str(wb.resolve())] = []
+
+    for project_key, project_workbooks in workbooks_by_project.items():
+        configured_entries = stringing_sheet_config.get(project_key)
+        best = _pick_best_project_workbook(project_workbooks, configured_entries, workbook_sheet_cache)
+        if best is not None:
+            selected_workbook_by_project[project_key] = best
+
+    today = pd.Timestamp.today().normalize()
 
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
         project_key = _normalize_project_code_key(proj)
         project_sheet_candidates = stringing_sheet_config.get(project_key)
+        selected_wb = selected_workbook_by_project.get(project_key)
+        if selected_wb is not None and wb.resolve() != selected_wb.resolve():
+            continue
         template_pair = stringing_template_config.get(project_key)
         template_map = template_pair[0] if template_pair else None
         template_sheet_name = template_pair[1] if template_pair else ""
+        fallback_template_pair = stringing_template_all_config.get(project_key)
+        fallback_template_map = fallback_template_pair[0] if fallback_template_pair else None
+        fallback_template_sheet = fallback_template_pair[1] if fallback_template_pair else ""
         template_error = stringing_template_errors.get(project_key, "")
         if has_stringing_config and project_sheet_candidates is None:
             skipped_not_in_config += 1
@@ -664,12 +825,16 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 project_code=proj,
                 project_display=proj,
                 status="SKIPPED_NO_STRINGING_CONFIG",
+                reason_code="SKIPPED_NO_STRINGING_CONFIG",
                 reason="Project has blank Stringing Sheet Names in DPR_Config.",
                 workbook=wb.name,
             )
             continue
-        today = pd.Timestamp.today().normalize()
-        workbook_sheet_names, sheet_names_error = _list_excel_sheet_names(wb)
+        workbook_sheet_names = list(workbook_sheet_cache.get(str(wb.resolve()), []))
+        sheet_names_error = None
+        if not workbook_sheet_names:
+            workbook_sheet_names, sheet_names_error = _list_excel_sheet_names(wb)
+        available_sheet_text = "; ".join(workbook_sheet_names)
         if project_sheet_candidates:
             sheet_requests: list[dict[str, str]] = []
             for sheet_entry in project_sheet_candidates:
@@ -694,9 +859,11 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     project_code=proj,
                     project_display=project_display,
                     status="READ_FAIL",
+                    reason_code="READ_FAIL",
                     reason=f"TEMPLATE_CONFIG_ERROR: {template_error}",
                     workbook=wb.name,
                     configured_sheet=configured_name,
+                    available_sheets=available_sheet_text,
                 )
                 _log_dpr_diag(
                     wb,
@@ -718,9 +885,11 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     project_code=proj,
                     project_display=project_display,
                     status="NO_TARGET_SHEET",
+                    reason_code="NO_TARGET_SHEET",
                     reason="Configured sheet name not found in workbook.",
                     workbook=wb.name,
                     configured_sheet=configured_name,
+                    available_sheets=available_sheet_text,
                 )
                 _log_dpr_diag(
                     wb,
@@ -735,11 +904,15 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 )
                 continue
 
+            template_for_preserve = template_map or fallback_template_map
+            min_columns = (max(template_for_preserve.keys()) + 1) if template_for_preserve else None
+
             try:
                 load_result = ingest.load_stringing_sheet_frame(
                     wb,
                     configured_sheet_name=configured_name,
                     preferred_sheet_name=sheet_name,
+                    min_columns=min_columns,
                 )
                 df_raw = load_result.frame
                 actual_sheet = load_result.resolved_sheet or actual_sheet
@@ -759,10 +932,12 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     project_code=proj,
                     project_display=project_display,
                     status="NO_TARGET_SHEET" if status == "NO_TARGET_SHEET" else "READ_FAIL",
+                    reason_code="NO_TARGET_SHEET" if status == "NO_TARGET_SHEET" else "READ_FAIL",
                     reason=str(exc),
                     workbook=wb.name,
                     configured_sheet=configured_name,
                     resolved_sheet=actual_sheet or "",
+                    available_sheets=available_sheet_text,
                 )
                 _log_dpr_diag(
                     wb,
@@ -783,10 +958,12 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     project_code=proj,
                     project_display=project_display,
                     status="READ_FAIL",
+                    reason_code="READ_FAIL",
                     reason="Resolved sheet is empty.",
                     workbook=wb.name,
                     configured_sheet=configured_name,
                     resolved_sheet=actual_sheet or "",
+                    available_sheets=available_sheet_text,
                 )
                 _log_dpr_diag(
                     wb,
@@ -803,9 +980,15 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 )
                 continue
 
+            template_applied = False
+            template_fallback_used = False
+            template_sheet_used = template_sheet_name
+            template_changes: list[str] = []
+
             if template_map:
-                df_raw, _template_changes = ingest.apply_template_column_mapping(df_raw, template_map)
+                df_raw, template_changes = ingest.apply_template_column_mapping(df_raw, template_map)
                 header_labels = [str(col).strip() for col in df_raw.columns]
+                template_applied = True
 
             tse_value = extract_stringing_number_of_tse(str(wb), actual_sheet)
 
@@ -813,15 +996,39 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 compiled_norm, norm_report = normalize_stringing_columns(df_raw)
             except Exception:
                 compiled_norm = df_raw.copy()
-                norm_report = {"missing": []}
+                norm_report = {"missing": [], "present": [], "normalized_columns_ok": False, "applied_map": {}}
+
+            classification = classify_stringing_missing_headers(norm_report)
+            critical_missing = list(classification.get("critical_missing", []))
+            non_critical_missing = list(classification.get("non_critical_missing", []))
+
+            if critical_missing and fallback_template_map and not template_applied:
+                fallback_df, fallback_changes = ingest.apply_template_column_mapping(df_raw, fallback_template_map)
+                try:
+                    fallback_norm, fallback_report = normalize_stringing_columns(fallback_df)
+                except Exception:
+                    fallback_norm = fallback_df.copy()
+                    fallback_report = {"missing": [], "present": [], "normalized_columns_ok": False, "applied_map": {}}
+                fallback_classification = classify_stringing_missing_headers(fallback_report)
+                fallback_critical_missing = list(fallback_classification.get("critical_missing", []))
+                if len(fallback_critical_missing) < len(critical_missing):
+                    compiled_norm = fallback_norm
+                    norm_report = fallback_report
+                    classification = fallback_classification
+                    critical_missing = fallback_critical_missing
+                    non_critical_missing = list(fallback_classification.get("non_critical_missing", []))
+                    template_fallback_used = True
+                    template_changes = fallback_changes
+                    template_sheet_used = fallback_template_sheet or template_sheet_used
 
             missing_headers = list(norm_report.get("missing", []))
-            if missing_headers:
+
+            if critical_missing:
                 LOGGER.warning(
-                    "Stringing: workbook '%s' sheet '%s' missing required headers: %s",
+                    "Stringing: workbook '%s' sheet '%s' missing critical headers: %s",
                     wb.name,
                     actual_sheet,
-                    ", ".join(missing_headers),
+                    ", ".join(critical_missing),
                 )
                 _append_dpr_issue(
                     wb,
@@ -831,7 +1038,20 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     line_name=line_name_override,
                     line_name_source=line_name_source,
                     issue="MISSING_REQUIRED_COLUMNS",
-                    missing_columns=missing_headers,
+                    missing_columns=critical_missing,
+                    rows=int(len(df_raw.index)),
+                    daily_rows=0,
+                )
+            elif non_critical_missing:
+                _append_dpr_issue(
+                    wb,
+                    proj,
+                    sheet_name=actual_sheet,
+                    configured_sheet=configured_name,
+                    line_name=line_name_override,
+                    line_name_source=line_name_source,
+                    issue="MISSING_NONCRITICAL_COLUMNS",
+                    missing_columns=non_critical_missing,
                     rows=int(len(df_raw.index)),
                     daily_rows=0,
                 )
@@ -867,6 +1087,21 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 compiled_norm["number_of_tse"] = int(tse_value)
 
             effective_line_name = str(compiled_norm.get("line_name", pd.Series([""])).iloc[0])
+
+            compiled_norm, method_inference_summary = infer_missing_methods_from_erection(
+                compiled_norm,
+                erection_daily_reference,
+            )
+            method_inference_rows = int(method_inference_summary.get("method_inferred_rows", 0) or 0)
+            method_assumption = ""
+            if method_inference_rows > 0:
+                method_assumption = (
+                    "Method inferred via erection span depth: "
+                    f"rows={method_inference_rows}, "
+                    f"manual={int(method_inference_summary.get('method_inferred_manual_rows', 0) or 0)}, "
+                    f"tse={int(method_inference_summary.get('method_inferred_tse_rows', 0) or 0)}, "
+                    f"unresolved={int(method_inference_summary.get('method_inferred_unresolved_rows', 0) or 0)}."
+                )
 
             try:
                 work = compiled_norm.copy()
@@ -983,6 +1218,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                         return "; ".join(messages)
 
                     issue_rows = work.loc[any_issue, columns_for_issues].copy()
+                    issue_rows = issue_rows.loc[:, ~issue_rows.columns.duplicated()].copy()
                     issue_rows["Issues"] = issue_rows.apply(_mk_issue, axis=1)
                     data_issue_rows.append(issue_rows)
             except Exception:
@@ -994,6 +1230,17 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 daily = pd.DataFrame()
 
             compiled_frames.append(compiled_norm)
+            missing_summary_parts: list[str] = []
+            if critical_missing:
+                missing_summary_parts.append(f"Critical missing headers: {', '.join(critical_missing)}")
+            if non_critical_missing:
+                missing_summary_parts.append(f"Non-critical missing headers: {', '.join(non_critical_missing)}")
+            if template_fallback_used:
+                missing_summary_parts.append(f"Template fallback applied from '{template_sheet_used}'.")
+            if method_assumption:
+                missing_summary_parts.append(method_assumption)
+            reason_summary = " ".join(missing_summary_parts).strip()
+
             if not daily.empty:
                 if "source_file" not in daily.columns:
                     daily["source_file"] = wb.name
@@ -1010,12 +1257,13 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 if "project" not in daily.columns:
                     daily["project"] = daily["project_name"]
                 daily_frames.append(daily)
+                diag_status = "MISSING_REQUIRED_COLUMNS" if critical_missing else "OK"
                 _log_dpr_diag(
                     wb,
                     proj,
                     int(len(compiled_norm)),
                     int(len(daily)),
-                    "OK",
+                    diag_status,
                     sheet_name=actual_sheet,
                     configured_sheet=configured_name,
                     line_name=effective_line_name,
@@ -1031,22 +1279,31 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     project_code=proj,
                     project_display=str(compiled_norm.get("project_display", pd.Series([project_display])).iloc[0])
                     or project_display,
-                    status="OK" if not missing_headers else "MISSING_REQUIRED_COLUMNS",
-                    reason="" if not missing_headers else f"Missing headers: {', '.join(missing_headers)}",
+                    status="MISSING_REQUIRED_COLUMNS" if critical_missing else "OK",
+                    reason_code="MISSING_REQUIRED_COLUMNS" if critical_missing else "OK",
+                    reason=reason_summary,
                     workbook=wb.name,
                     configured_sheet=configured_name,
                     resolved_sheet=actual_sheet or "",
                     compiled_rows=int(len(compiled_norm)),
                     daily_rows=int(len(daily)),
                     fallback_used=bool(fallback_note),
+                    template_fallback_used=template_fallback_used,
+                    method_inference_rows=method_inference_rows,
+                    assumption_notes=method_assumption,
+                    available_sheets=available_sheet_text,
                 )
             else:
+                status_value = "MISSING_REQUIRED_COLUMNS" if critical_missing else "NO_DAILY"
+                reason_code_value = status_value
+                if not reason_summary:
+                    reason_summary = "No valid PO-start to FS-complete ranges expanded to daily rows."
                 _log_dpr_diag(
                     wb,
                     proj,
                     int(len(compiled_norm)),
                     0,
-                    "NO_DAILY",
+                    status_value,
                     sheet_name=actual_sheet,
                     configured_sheet=configured_name,
                     line_name=effective_line_name,
@@ -1058,24 +1315,23 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     missing_columns=list(norm_report.get("missing", [])),
                     applied_map=dict(norm_report.get("applied_map", {})),
                 )
-                status_value = "MISSING_REQUIRED_COLUMNS" if missing_headers else "NO_DAILY"
-                reason_value = (
-                    f"Missing headers: {', '.join(missing_headers)}"
-                    if missing_headers
-                    else "No valid PO-start to FS-complete ranges expanded to daily rows."
-                )
                 _append_coverage_attempt(
                     project_code=proj,
                     project_display=str(compiled_norm.get("project_display", pd.Series([project_display])).iloc[0])
                     or project_display,
                     status=status_value,
-                    reason=reason_value,
+                    reason_code=reason_code_value,
+                    reason=reason_summary,
                     workbook=wb.name,
                     configured_sheet=configured_name,
                     resolved_sheet=actual_sheet or "",
                     compiled_rows=int(len(compiled_norm)),
                     daily_rows=0,
                     fallback_used=bool(fallback_note),
+                    template_fallback_used=template_fallback_used,
+                    method_inference_rows=method_inference_rows,
+                    assumption_notes=method_assumption,
+                    available_sheets=available_sheet_text,
                 )
 
     if skipped_no_stringing:
@@ -1089,19 +1345,24 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             skipped_not_in_config,
         )
 
-    attempted_codes = {str(row.get("project_code", "")).strip() for row in coverage_attempt_rows}
+    attempted_codes = {
+        _normalize_project_code_key(row.get("project_code", ""))
+        for row in coverage_attempt_rows
+        if _normalize_project_code_key(row.get("project_code", ""))
+    }
     status_priority = {
         "SKIPPED_NO_STRINGING_CONFIG": 1,
         "READ_FAIL": 2,
         "NO_TARGET_SHEET": 3,
-        "MISSING_REQUIRED_COLUMNS": 4,
-        "NO_DAILY": 5,
-        "OK": 6,
+        "ATTACHMENT_MISMATCH": 4,
+        "MISSING_REQUIRED_COLUMNS": 5,
+        "NO_DAILY": 6,
+        "OK": 7,
     }
     for project_key in sorted(configured_codes):
         project_code = str(project_key).upper()
         pretty = re.sub(r"^([A-Z]{2})(\d+)$", r"\1 \2", project_code)
-        if pretty in attempted_codes:
+        if project_key in attempted_codes:
             continue
         mapped = stringing_sheet_config.get(project_key, [])
         if mapped == []:
@@ -1114,6 +1375,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             project_code=pretty,
             project_display=pretty,
             status=status,
+            reason_code=status,
             reason=reason,
             workbook="; ".join(files_by_project.get(project_key, [])),
         )
@@ -1125,7 +1387,9 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             if group.empty:
                 continue
             ranked = group.copy()
-            ranked["__priority"] = ranked["status"].map(status_priority).fillna(0)
+            ranked["reason_code"] = ranked.get("reason_code", ranked.get("status", "")).fillna("").astype(str).str.upper()
+            ranked["status"] = ranked.get("status", "").fillna("").astype(str).str.upper()
+            ranked["__priority"] = ranked["reason_code"].map(status_priority).fillna(0)
             ranked["__daily"] = pd.to_numeric(ranked["daily_rows"], errors="coerce").fillna(0)
             ranked["__compiled"] = pd.to_numeric(ranked["compiled_rows"], errors="coerce").fillna(0)
             ranked = ranked.sort_values(["__priority", "__daily", "__compiled"], ascending=[False, False, False])
@@ -1133,19 +1397,43 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             workbook_list = sorted({str(v).strip() for v in group["workbook"].tolist() if str(v).strip()})
             configured_list = sorted({str(v).strip() for v in group["configured_sheet"].tolist() if str(v).strip()})
             resolved_list = sorted({str(v).strip() for v in group["resolved_sheet"].tolist() if str(v).strip()})
+            available_sheet_list = sorted({str(v).strip() for v in group.get("available_sheets", pd.Series(dtype=object)).tolist() if str(v).strip()})
             reason_texts = [str(v).strip() for v in group["reason"].tolist() if str(v).strip()]
+            reason_codes = {
+                str(value).strip().upper()
+                for value in group.get("reason_code", pd.Series(dtype=object)).tolist()
+                if str(value).strip()
+            }
+            status_value = str(best.get("status", "")).strip().upper()
+            reason_code_value = str(best.get("reason_code", status_value)).strip().upper()
+            has_stringing_named_sheet = any("stringing" in str(value).lower() for value in available_sheet_list)
+            if reason_codes and reason_codes.issubset({"NO_TARGET_SHEET"}) and workbook_list and not has_stringing_named_sheet:
+                status_value = "ATTACHMENT_MISMATCH"
+                reason_code_value = "ATTACHMENT_MISMATCH"
+                configured_text = ", ".join(configured_list) if configured_list else "(none configured)"
+                sheets_text = "; ".join(available_sheet_list) if available_sheet_list else "(no readable sheets)"
+                reason_texts.append(
+                    "No workbook under configured DPR root contains configured stringing sheet(s). "
+                    f"Configured={configured_text}. AvailableSheets={sheets_text}."
+                )
+            assumption_notes = [str(v).strip() for v in group.get("assumption_notes", pd.Series(dtype=object)).tolist() if str(v).strip()]
             coverage_rows.append(
                 {
                     "project_code": str(project_code).strip(),
                     "project_display": str(best.get("project_display", "")).strip() or str(project_code).strip(),
-                    "status": str(best.get("status", "")).strip(),
+                    "status": status_value,
+                    "reason_code": reason_code_value,
                     "reason": "; ".join(dict.fromkeys(reason_texts)),
                     "workbook": "; ".join(workbook_list),
                     "configured_sheet": "; ".join(configured_list),
                     "resolved_sheet": "; ".join(resolved_list),
+                    "available_sheets": "; ".join(available_sheet_list),
                     "compiled_rows": int(pd.to_numeric(best.get("compiled_rows", 0), errors="coerce") or 0),
                     "daily_rows": int(pd.to_numeric(best.get("daily_rows", 0), errors="coerce") or 0),
                     "fallback_used": bool(group.get("fallback_used", pd.Series(False)).fillna(False).astype(bool).any()),
+                    "template_fallback_used": bool(group.get("template_fallback_used", pd.Series(False)).fillna(False).astype(bool).any()),
+                    "method_inference_rows": int(pd.to_numeric(group.get("method_inference_rows", pd.Series(0)).fillna(0), errors="coerce").sum()),
+                    "assumption_notes": "; ".join(dict.fromkeys(assumption_notes)),
                 }
             )
     coverage_df = pd.DataFrame(coverage_rows)
@@ -1155,13 +1443,18 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "project_code",
                 "project_display",
                 "status",
+                "reason_code",
                 "reason",
                 "workbook",
                 "configured_sheet",
                 "resolved_sheet",
+                "available_sheets",
                 "compiled_rows",
                 "daily_rows",
                 "fallback_used",
+                "template_fallback_used",
+                "method_inference_rows",
+                "assumption_notes",
             ]
         )
 
@@ -1351,6 +1644,31 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                 "Issues",
             ]
         )
+    method_inferred_total = int(
+        pd.to_numeric(coverage_df.get("method_inference_rows", pd.Series(0)), errors="coerce").fillna(0).sum()
+    ) if isinstance(coverage_df, pd.DataFrame) and not coverage_df.empty else 0
+    readme_rows = [
+        {
+            "Assumption": "Coverage policy",
+            "Details": "Configured projects remain visible in dashboard/export even when ingestion fails or expands to zero daily rows.",
+        },
+        {
+            "Assumption": "Template fallback",
+            "Details": "If critical headers are missing, template mapping fallback is attempted from project template tabs even when template check is blank.",
+        },
+        {
+            "Assumption": "Method fallback",
+            "Details": (
+                "Rows with missing Method infer deployment from erection span depth: "
+                "erection_locations<=2 => manual, >2 => tse, unresolved spans => tse fallback."
+            ),
+        },
+        {
+            "Assumption": "Method fallback usage",
+            "Details": f"Inferred method rows in current build: {method_inferred_total}.",
+        },
+    ]
+    readme_df = pd.DataFrame(readme_rows)
 
     # Combined Excel (fallback/log) — always write; Diagnostics includes *all* files scanned
     workbook_path = out_root / "StringingCompiled_Output.xlsx"
@@ -1376,6 +1694,7 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             plan_responsibilities.to_excel(xw, sheet_name="MicroPlanResponsibilities", index=False)
             plan_index_df.to_excel(xw, sheet_name="MicroPlanIndex", index=False)
             plan_issue_sheet.to_excel(xw, sheet_name="MicroPlanDataIssues", index=False)
+            readme_df.to_excel(xw, sheet_name="README_Assumptions", index=False)
         try:
             with pd.ExcelFile(temp_workbook) as _probe:
                 _ = _probe.sheet_names
@@ -2112,15 +2431,66 @@ def _empty_stringing_coverage_frame() -> pd.DataFrame:
             "project_code",
             "project_display",
             "status",
+            "reason_code",
             "reason",
             "workbook",
             "configured_sheet",
             "resolved_sheet",
+            "available_sheets",
             "compiled_rows",
             "daily_rows",
             "fallback_used",
+            "template_fallback_used",
+            "method_inference_rows",
+            "assumption_notes",
         ]
     )
+
+
+def _normalize_stringing_coverage_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame):
+        return _empty_stringing_coverage_frame()
+    out = df.copy()
+    defaults: dict[str, object] = {
+        "project_code": "",
+        "project_display": "",
+        "status": "",
+        "reason_code": "",
+        "reason": "",
+        "workbook": "",
+        "configured_sheet": "",
+        "resolved_sheet": "",
+        "available_sheets": "",
+        "compiled_rows": 0,
+        "daily_rows": 0,
+        "fallback_used": False,
+        "template_fallback_used": False,
+        "method_inference_rows": 0,
+        "assumption_notes": "",
+    }
+    for column, default_value in defaults.items():
+        if column not in out.columns:
+            out[column] = default_value
+    out["compiled_rows"] = pd.to_numeric(out["compiled_rows"], errors="coerce").fillna(0).astype(int)
+    out["daily_rows"] = pd.to_numeric(out["daily_rows"], errors="coerce").fillna(0).astype(int)
+    out["method_inference_rows"] = pd.to_numeric(out["method_inference_rows"], errors="coerce").fillna(0).astype(int)
+    for column in ("fallback_used", "template_fallback_used"):
+        out[column] = out[column].fillna(False).astype(bool)
+    for column in (
+        "project_code",
+        "project_display",
+        "status",
+        "reason_code",
+        "reason",
+        "workbook",
+        "configured_sheet",
+        "resolved_sheet",
+        "available_sheets",
+        "assumption_notes",
+    ):
+        out[column] = out[column].fillna("").astype(str).str.strip()
+    ordered = list(_empty_stringing_coverage_frame().columns)
+    return out[ordered]
 
 
 def _load_stringing_coverage_cached(data_path: str, sheet_name: str, probe_dirs: tuple[str, ...]) -> pd.DataFrame:
@@ -2131,7 +2501,7 @@ def _load_stringing_coverage_cached(data_path: str, sheet_name: str, probe_dirs:
         try:
             df = _read_parquet(parquet_source)
             if isinstance(df, pd.DataFrame):
-                return df
+                return _normalize_stringing_coverage_frame(df)
         except Exception as exc:
             LOGGER.warning("Stringing: failed reading coverage parquet '%s': %s", parquet_source, exc)
 
@@ -2145,7 +2515,7 @@ def _load_stringing_coverage_cached(data_path: str, sheet_name: str, probe_dirs:
                         _write_parquet(df, artifact_root / "StringingCoverage.parquet")
                     except Exception:
                         pass
-                return df
+                return _normalize_stringing_coverage_frame(df)
         except Exception as exc:
             LOGGER.warning("Stringing: failed reading coverage sheet from '%s': %s", workbook_path, exc)
 
@@ -2168,7 +2538,7 @@ def load_stringing_coverage(config_or_path: AppConfig | Path | str) -> pd.DataFr
     )
     if not isinstance(df, pd.DataFrame):
         return _empty_stringing_coverage_frame()
-    return df.copy()
+    return _normalize_stringing_coverage_frame(df)
 
 
 load_stringing_coverage.cache_clear = _load_stringing_artifacts_cached.cache_clear  # type: ignore[attr-defined]

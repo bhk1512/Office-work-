@@ -33,6 +33,28 @@ _STRINGING_COLUMN_MAP: Dict[str, str] = {
     "Gang Name": "gang_name",
 }
 _STRINGING_OPTIONAL_HEADERS: set[str] = {"Status"}
+_STRINGING_HEADER_ALIASES: Dict[str, str] = {
+    "from": "From AP",
+    "to": "To AP",
+    "typeofsections": "Method",
+    "sectiontype": "Method",
+    "payingoutrsag": "P/O",
+    "payingout": "P/O",
+    "nameofgang": "Gang Name",
+    "gang": "Gang Name",
+    "sectionlength": "Length",
+    "sectionlengthm": "Length",
+    "spanm": "Length",
+    "span": "Length",
+    "lengthm": "Length",
+}
+_STRINGING_CRITICAL_HEADERS: tuple[str, ...] = (
+    "From AP",
+    "To AP",
+    "P/O Starting Date",
+    "F/S/ Completion Date",
+)
+_STRINGING_LENGTH_SOURCE_HEADERS: tuple[str, ...] = ("Length", "P/O")
 
 
 # --- Header detection utilities (tolerant like erection) ---
@@ -255,6 +277,7 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
     ]
 
     expected_by_key = {_canon_key(k): v for k, v in _STRINGING_COLUMN_MAP.items()}
+    alias_by_key = {_canon_key(k): v for k, v in _STRINGING_HEADER_ALIASES.items()}
     recognized_keys: set[str] = set()
     applied_map: Dict[str, str] = {}
 
@@ -267,6 +290,13 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
         if key in expected_by_key and col not in applied_map:
             applied_map[col] = expected_by_key[key]
             recognized_keys.add(key)
+            continue
+        alias_target = alias_by_key.get(key)
+        if alias_target and col not in applied_map:
+            mapped = _STRINGING_COLUMN_MAP.get(alias_target)
+            if mapped:
+                applied_map[col] = mapped
+                recognized_keys.add(_canon_key(alias_target))
 
     present: List[str] = [
         header for header in tracked_headers if _canon_key(header) in recognized_keys
@@ -284,6 +314,31 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
         "applied_map": applied_map,
     }
     return normalized, report
+
+
+def classify_stringing_missing_headers(report: Mapping[str, object] | None) -> Dict[str, object]:
+    """Split missing headers into critical vs. non-critical groups."""
+
+    missing = [str(v).strip() for v in list((report or {}).get("missing", []) or []) if str(v).strip()]
+    present = {str(v).strip() for v in list((report or {}).get("present", []) or []) if str(v).strip()}
+    missing_set = set(missing)
+
+    critical_missing: list[str] = [header for header in _STRINGING_CRITICAL_HEADERS if header in missing_set]
+    has_length_source = any(header in present for header in _STRINGING_LENGTH_SOURCE_HEADERS)
+    if not has_length_source:
+        critical_missing.append("Length")
+
+    non_critical_missing: list[str] = [
+        header
+        for header in missing
+        if header not in set(_STRINGING_CRITICAL_HEADERS) and header not in set(_STRINGING_LENGTH_SOURCE_HEADERS)
+    ]
+    return {
+        "critical_missing": critical_missing,
+        "non_critical_missing": non_critical_missing,
+        "has_length_source": has_length_source,
+        "is_critical_complete": len(critical_missing) == 0,
+    }
 
 
 def _to_datetime_normalize(value: object) -> pd.Timestamp | None:
@@ -448,6 +503,205 @@ def _empty_stage_frame() -> pd.DataFrame:
     )
 
 
+_LOCATION_RE = re.compile(r"^\s*(\d+)([A-Za-z]+)?(?:\s*/\s*(\d+))?\s*$")
+_AP_PREFIX_RE = re.compile(r"^\s*ap[\s\-_/]*", flags=re.IGNORECASE)
+_GANTRY_RE = re.compile(r"\b(gantry|gty)\b", flags=re.IGNORECASE)
+
+
+def _normalize_location_text(value: object) -> str:
+    text = "" if value is None else str(value).replace("\u00a0", " ").strip()
+    lowered = text.lower()
+    if lowered in {"", "nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _strip_ap_prefix(value: object) -> str:
+    return _AP_PREFIX_RE.sub("", _normalize_location_text(value)).strip()
+
+
+def _is_gantry_label(value: object) -> bool:
+    text = _normalize_location_text(value)
+    if not text:
+        return False
+    cleaned = re.sub(r"[^a-z]+", " ", text.lower()).strip()
+    return bool(_GANTRY_RE.search(cleaned))
+
+
+def _letter_rank(value: str) -> int:
+    rank = 0
+    for ch in value.upper():
+        if "A" <= ch <= "Z":
+            rank = (rank * 26) + (ord(ch) - ord("A") + 1)
+    return rank
+
+
+def _location_order_key(value: object) -> int | None:
+    text = _strip_ap_prefix(value)
+    if not text:
+        return None
+    match = _LOCATION_RE.match(text)
+    if not match:
+        return None
+    main = int(match.group(1))
+    letters = match.group(2) or ""
+    sub = int(match.group(3) or 0)
+    return (main * 1_000_000) + (_letter_rank(letters) * 1_000) + sub
+
+
+def _resolve_project_key_norm(frame: pd.DataFrame) -> pd.Series:
+    source = frame.get("project_code")
+    if source is None:
+        source = frame.get("project_name")
+    if source is None:
+        source = frame.get("project")
+    if source is None:
+        source = pd.Series("", index=frame.index)
+    source = source.fillna("").astype(str).str.strip()
+    fallback = frame.get("project_name", frame.get("project", pd.Series("", index=frame.index)))
+    fallback = fallback.fillna("").astype(str).str.strip()
+    resolved = source.where(source.astype(bool), fallback)
+    return resolved.map(compact_project_key)
+
+
+def _build_erection_location_map(erection_daily: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if not isinstance(erection_daily, pd.DataFrame) or erection_daily.empty:
+        return {}
+    work = erection_daily.copy()
+    if "location_no" not in work.columns:
+        return {}
+    completion = work.get("completion_date")
+    if completion is None:
+        completion = work.get("date")
+    if completion is None:
+        return {}
+    work["completion_date"] = pd.to_datetime(completion, errors="coerce").dt.normalize()
+    work["location_no_norm"] = work["location_no"].map(_normalize_location_text)
+    work["loc_order"] = work["location_no_norm"].map(_location_order_key)
+    work["project_key_norm"] = _resolve_project_key_norm(work)
+    work = work[
+        work["project_key_norm"].astype(bool)
+        & work["location_no_norm"].astype(bool)
+        & work["loc_order"].notna()
+        & work["completion_date"].notna()
+    ]
+    if work.empty:
+        return {}
+
+    work = (
+        work.sort_values(["project_key_norm", "loc_order", "completion_date"])
+        .drop_duplicates(subset=["project_key_norm", "location_no_norm", "loc_order"], keep="last")
+    )
+    location_map: dict[str, pd.DataFrame] = {}
+    for project_key, group in work.groupby("project_key_norm"):
+        location_map[str(project_key)] = group[["location_no_norm", "loc_order", "completion_date"]].copy()
+    return location_map
+
+
+def infer_missing_methods_from_erection(
+    compiled_df: pd.DataFrame,
+    erection_daily: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, Dict[str, int]]:
+    """Fill missing method values using erection span depth assumptions."""
+
+    if compiled_df is None or compiled_df.empty:
+        return compiled_df.copy() if isinstance(compiled_df, pd.DataFrame) else pd.DataFrame(), {
+            "method_inferred_rows": 0,
+            "method_inferred_manual_rows": 0,
+            "method_inferred_tse_rows": 0,
+            "method_inferred_unresolved_rows": 0,
+        }
+
+    work = compiled_df.copy()
+    for col in ("from_ap", "to_ap", "method"):
+        if col not in work.columns:
+            work[col] = ""
+    work["method"] = work["method"].fillna("").astype(str).str.strip()
+    missing_method = work["method"].str.lower().isin({"", "nan", "none", "null"})
+    work["method_inferred"] = False
+    work["method_inference_reason"] = ""
+    work["erection_locations_for_method"] = pd.NA
+    if not missing_method.any():
+        return work, {
+            "method_inferred_rows": 0,
+            "method_inferred_manual_rows": 0,
+            "method_inferred_tse_rows": 0,
+            "method_inferred_unresolved_rows": 0,
+        }
+
+    location_map = _build_erection_location_map(erection_daily if isinstance(erection_daily, pd.DataFrame) else pd.DataFrame())
+    project_key_norm = _resolve_project_key_norm(work)
+
+    inferred_rows = 0
+    manual_rows = 0
+    tse_rows = 0
+    unresolved_rows = 0
+
+    for idx in work.index[missing_method]:
+        project_key = str(project_key_norm.loc[idx] or "").strip()
+        from_ap = work.at[idx, "from_ap"]
+        to_ap = work.at[idx, "to_ap"]
+        project_df = location_map.get(project_key)
+        method_value = "tse"
+        reason = "SPAN_UNRESOLVED_TSE_FALLBACK"
+        loc_count = 0
+
+        if project_df is not None and not project_df.empty:
+            from_is_gantry = _is_gantry_label(from_ap)
+            to_is_gantry = _is_gantry_label(to_ap)
+            from_order = _location_order_key(from_ap)
+            to_order = _location_order_key(to_ap)
+            try:
+                if from_is_gantry and to_is_gantry:
+                    span_df = pd.DataFrame()
+                elif to_is_gantry and from_order is not None:
+                    lo = int(from_order)
+                    hi = int(project_df["loc_order"].max())
+                    span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
+                elif from_is_gantry and to_order is not None:
+                    lo = int(project_df["loc_order"].min())
+                    hi = int(to_order)
+                    span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
+                elif from_order is not None and to_order is not None:
+                    lo = min(int(from_order), int(to_order))
+                    hi = max(int(from_order), int(to_order))
+                    span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
+                else:
+                    span_df = pd.DataFrame()
+            except Exception:
+                span_df = pd.DataFrame()
+
+            if not span_df.empty:
+                loc_count = int(span_df["location_no_norm"].nunique())
+                if loc_count <= 2:
+                    method_value = "manual"
+                    reason = "NO_INTERMEDIATE_TOWERS_MANUAL"
+                    manual_rows += 1
+                else:
+                    method_value = "tse"
+                    reason = "INTERMEDIATE_TOWERS_TSE"
+                    tse_rows += 1
+            else:
+                unresolved_rows += 1
+                tse_rows += 1
+        else:
+            unresolved_rows += 1
+            tse_rows += 1
+
+        work.at[idx, "method"] = method_value
+        work.at[idx, "method_inferred"] = True
+        work.at[idx, "method_inference_reason"] = reason
+        work.at[idx, "erection_locations_for_method"] = int(loc_count)
+        inferred_rows += 1
+
+    return work, {
+        "method_inferred_rows": int(inferred_rows),
+        "method_inferred_manual_rows": int(manual_rows),
+        "method_inferred_tse_rows": int(tse_rows),
+        "method_inferred_unresolved_rows": int(unresolved_rows),
+    }
+
+
 def _expand_stringing_stage_to_daily(
     df: pd.DataFrame,
     *,
@@ -517,6 +771,8 @@ def _expand_stringing_stage_to_daily(
         "from_ap",
         "to_ap",
         "method",
+        "method_inferred",
+        "method_inference_reason",
         "section_readiness",
         "po",
         "status",
@@ -541,6 +797,8 @@ def _expand_stringing_stage_to_daily(
                 "from_ap": r["from_ap"],
                 "to_ap": r["to_ap"],
                 "method": r["method"],
+                "method_inferred": bool(r.get("method_inferred", False)),
+                "method_inference_reason": r.get("method_inference_reason", ""),
                 "section_readiness": r["section_readiness"],
                 "po_id": r["po"],
                 "fs_start_date": r.get("fs_starting_date", r.get(start_col, pd.NA)),
@@ -581,6 +839,8 @@ def _expand_stringing_stage_to_daily(
         "from_ap",
         "to_ap",
         "method",
+        "method_inferred",
+        "method_inference_reason",
         "section_readiness",
         "po_id",
         "fs_start_date",
