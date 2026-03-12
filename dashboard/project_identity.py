@@ -125,6 +125,44 @@ def _normalize_project_code(value: object) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def extract_base_project_code(value: object) -> str:
+    """Return canonical base project code (e.g., 'TB 501') when present."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    match = _PROJECT_CODE_RE.search(text)
+    if not match:
+        return ""
+    return f"{match.group(1).upper()} {int(match.group(2))}"
+
+
+def build_project_rollup_identity(
+    project_code: object,
+    project_display: object = "",
+    project_name: object = "",
+) -> dict[str, str]:
+    """Return consolidated project identity for rollup-level reporting."""
+    code = extract_base_project_code(project_code)
+    if not code:
+        code = extract_base_project_code(project_display)
+    if not code:
+        code = extract_base_project_code(project_name)
+
+    display = re.sub(r"\s+", " ", str(project_display or "").strip())
+    name = re.sub(r"\s+", " ", str(project_name or "").strip())
+    fallback = display or name or _normalize_project_code(project_code)
+    rollup_display = code or fallback
+    variant_display = display or name or code or fallback
+    return {
+        "project_rollup_display": rollup_display,
+        "project_rollup_key": _compact(rollup_display),
+        "project_variant_display": variant_display,
+        "project_base_code": code,
+    }
+
+
 def _sanitize_line_for_filename(value: object) -> str:
     text = normalize_line_name(value)
     if not text:

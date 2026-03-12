@@ -21,7 +21,12 @@ from .metrics import (
     compute_project_baseline_maps_for,
 )
 from .pch_normalizer import CANONICAL_PCH_PRIMARY, normalize_pch
-from .project_identity import build_project_display, build_project_scope_key, normalize_line_name
+from .project_identity import (
+    build_project_display,
+    build_project_rollup_identity,
+    build_project_scope_key,
+    normalize_line_name,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .state import AppDataStore
@@ -740,6 +745,54 @@ def _compact_project_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
 
 
+def _apply_project_rollup_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    working = df.copy()
+    project_code = working.get("project_code", pd.Series("", index=working.index)).fillna("").astype(str).str.strip()
+    project_display = working.get(
+        "project_display",
+        working.get("project_name", pd.Series("", index=working.index)),
+    ).fillna("").astype(str).str.strip()
+    project_name = working.get(
+        "project_name",
+        working.get("project", pd.Series("", index=working.index)),
+    ).fillna("").astype(str).str.strip()
+    identities = [
+        build_project_rollup_identity(code, display, name)
+        for code, display, name in zip(project_code, project_display, project_name)
+    ]
+    working["project_rollup_display"] = pd.Series(
+        [identity.get("project_rollup_display", "") for identity in identities],
+        index=working.index,
+        dtype="object",
+    ).fillna("").astype(str).str.strip()
+    working["project_rollup_display"] = working["project_rollup_display"].where(
+        working["project_rollup_display"].astype(bool),
+        project_display.where(project_display.astype(bool), project_name),
+    )
+    working["project_rollup_key"] = pd.Series(
+        [identity.get("project_rollup_key", "") for identity in identities],
+        index=working.index,
+        dtype="object",
+    ).fillna("").astype(str).str.strip()
+    fallback_key = working["project_rollup_display"].map(_compact_project_key)
+    working["project_rollup_key"] = working["project_rollup_key"].where(
+        working["project_rollup_key"].astype(bool),
+        fallback_key,
+    )
+    working["project_variant_display"] = pd.Series(
+        [identity.get("project_variant_display", "") for identity in identities],
+        index=working.index,
+        dtype="object",
+    ).fillna("").astype(str).str.strip()
+    working["project_variant_display"] = working["project_variant_display"].where(
+        working["project_variant_display"].astype(bool),
+        project_display.where(project_display.astype(bool), project_name),
+    )
+    return working
+
+
 def _prepare_project_voltage_lookup(project_kv: pd.DataFrame | None) -> dict[str, str]:
     if project_kv is None or project_kv.empty:
         return {}
@@ -1073,7 +1126,7 @@ def _prepare_month_scope(
     scope["completion_date"] = pd.to_datetime(scope.get("completion_date"), errors="coerce").dt.normalize()
     scope["week_index"] = _assign_week_bucket(scope["date"], month_start, week_labels)
 
-    return scope
+    return _apply_project_rollup_columns(scope)
 
 
 def _prepare_completion_scope(
@@ -1156,7 +1209,15 @@ def _build_excluded_data_audit_tables(
             return pd.Series("", index=frame.index, dtype="object")
         return series.fillna("").astype(str).str.strip()
 
-    project_display = _safe_text_series(working, "project_display", "project_name")
+    project_display = _safe_text_series(
+        working,
+        "project_rollup_display",
+        "project_display",
+    )
+    project_display = project_display.where(
+        project_display.astype(bool),
+        _safe_text_series(working, "project_name"),
+    )
     project_code = _safe_text_series(working, "project_code")
     project_display = project_display.where(project_display.astype(bool), project_code)
     project_display = project_display.where(project_display.astype(bool), "(Unlabeled Project)")
@@ -1372,7 +1433,11 @@ def _compute_weekly_productivity_maps(scope: pd.DataFrame, week_labels: Sequence
     maps = {label: {} for label in week_labels}
     if scope.empty:
         return maps
-    group_col = "project_scope_key" if "project_scope_key" in scope.columns else "project_name"
+    group_col = (
+        "project_rollup_key"
+        if "project_rollup_key" in scope.columns
+        else "project_scope_key" if "project_scope_key" in scope.columns else "project_name"
+    )
     for week_idx, label in enumerate(week_labels, start=1):
         week_scope = scope[scope.get("week_index") == week_idx]
         if week_scope.empty:
@@ -1454,11 +1519,21 @@ def _build_productivity_tables(
         )
         return empty_overall, empty_pch, empty_project
 
-    project_group_col = "project_scope_key" if "project_scope_key" in scope.columns else "project_name"
+    project_group_col = (
+        "project_rollup_key"
+        if "project_rollup_key" in scope.columns
+        else "project_scope_key" if "project_scope_key" in scope.columns else "project_name"
+    )
+    project_display_col = (
+        "project_rollup_display"
+        if "project_rollup_display" in scope.columns
+        else "project_display"
+    )
     project_meta = (
-        scope[["pch_display", project_group_col, "project_display"]]
+        scope[["pch_display", project_group_col, project_display_col]]
         .dropna(subset=[project_group_col])
         .drop_duplicates(subset=["pch_display", project_group_col])
+        .rename(columns={project_display_col: "project_display"})
         .reset_index(drop=True)
     )
     week_maps = _compute_weekly_productivity_maps(scope, week_labels)
@@ -1868,10 +1943,362 @@ def _build_monthly_productivity_tables(
         completions,
         month_keys=month_keys,
         month_labels=month_labels,
-        group_columns=["pch_display", "project_display"],
+        group_columns=["pch_display", "project_rollup_display"],
         group_labels=["PCH", "Project"],
     )
     return overall_summary, pch_summary, project_summary, month_labels
+
+
+def _build_monthly_consolidated_summary_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    months: Sequence[pd.Timestamp],
+    month_labels: Sequence[str],
+) -> pd.DataFrame:
+    columns = [
+        "Month",
+        "Avg Productivity",
+        "MT Erected",
+        "No. of Gangs",
+        "Number of Projects Active",
+        "Projects Active (List)",
+    ]
+    month_keys = [
+        pd.Timestamp(month).normalize().to_period("M").to_timestamp()
+        for month in months
+    ]
+    month_pairs = list(zip(month_keys, month_labels))
+    if not month_pairs:
+        return pd.DataFrame(columns=columns)
+
+    working_scope = pd.DataFrame()
+    if scope is not None and not scope.empty:
+        working_scope = scope.copy()
+        working_scope["date"] = pd.to_datetime(working_scope.get("date"), errors="coerce").dt.normalize()
+        working_scope = working_scope.dropna(subset=["date"])
+        working_scope["month_key"] = working_scope["date"].dt.to_period("M").dt.to_timestamp()
+        working_scope["daily_prod_mt"] = pd.to_numeric(working_scope.get("daily_prod_mt"), errors="coerce")
+        working_scope["gang_name"] = working_scope.get("gang_name", "").fillna("").astype(str).str.strip()
+        working_scope["project_rollup_display"] = working_scope.get(
+            "project_rollup_display",
+            working_scope.get("project_display", pd.Series("", index=working_scope.index)),
+        ).fillna("").astype(str).str.strip()
+        working_scope["project_display"] = working_scope.get(
+            "project_rollup_display",
+            working_scope.get("project_name", pd.Series("", index=working_scope.index)),
+        ).fillna("").astype(str).str.strip()
+        working_scope["project_display"] = working_scope["project_display"].where(
+            working_scope["project_display"].astype(bool),
+            working_scope.get("project_name", pd.Series("", index=working_scope.index)).fillna("").astype(str).str.strip(),
+        )
+        if "project_rollup_key" not in working_scope.columns:
+            working_scope["project_rollup_key"] = working_scope["project_display"].map(_compact_project_key)
+        working_scope["project_rollup_key"] = (
+            working_scope["project_rollup_key"].fillna("").astype(str).str.strip()
+        )
+
+    working_completions = pd.DataFrame()
+    if completions is not None and not completions.empty:
+        working_completions = completions.copy()
+        working_completions["completion_date"] = pd.to_datetime(
+            working_completions.get("completion_date"), errors="coerce"
+        ).dt.normalize()
+        working_completions = working_completions.dropna(subset=["completion_date"])
+        working_completions["month_key"] = working_completions["completion_date"].dt.to_period("M").dt.to_timestamp()
+        working_completions["_tower_weight"] = _coerce_numeric_series(
+            working_completions, "tower_weight"
+        ).fillna(0.0)
+        working_completions["project_rollup_display"] = working_completions.get(
+            "project_rollup_display",
+            working_completions.get("project_display", pd.Series("", index=working_completions.index)),
+        ).fillna("").astype(str).str.strip()
+        working_completions["project_display"] = working_completions.get(
+            "project_rollup_display",
+            working_completions.get("project_name", pd.Series("", index=working_completions.index)),
+        ).fillna("").astype(str).str.strip()
+        working_completions["project_display"] = working_completions["project_display"].where(
+            working_completions["project_display"].astype(bool),
+            working_completions.get("project_name", pd.Series("", index=working_completions.index)).fillna("").astype(str).str.strip(),
+        )
+        if "project_rollup_key" not in working_completions.columns:
+            working_completions["project_rollup_key"] = working_completions["project_display"].map(
+                _compact_project_key
+            )
+        working_completions["project_rollup_key"] = (
+            working_completions["project_rollup_key"].fillna("").astype(str).str.strip()
+        )
+
+    rows: list[dict[str, object]] = []
+    for month_key, month_label in month_pairs:
+        month_scope = (
+            working_scope[working_scope["month_key"] == month_key]
+            if not working_scope.empty
+            else pd.DataFrame()
+        )
+        month_completions = (
+            working_completions[working_completions["month_key"] == month_key]
+            if not working_completions.empty
+            else pd.DataFrame()
+        )
+
+        avg_prod = (
+            float(month_scope["daily_prod_mt"].dropna().mean())
+            if not month_scope.empty
+            else 0.0
+        )
+        mt_erected = (
+            float(month_completions["_tower_weight"].sum())
+            if not month_completions.empty
+            else 0.0
+        )
+        gangs = (
+            int(month_scope[month_scope["gang_name"].astype(bool)]["gang_name"].nunique())
+            if not month_scope.empty
+            else 0
+        )
+        scope_project_keys = set(
+            month_scope.loc[
+                month_scope["project_rollup_key"].astype(bool),
+                "project_rollup_key",
+            ].astype(str)
+        ) if not month_scope.empty else set()
+        completion_project_keys = set(
+            month_completions.loc[
+                month_completions["project_rollup_key"].astype(bool),
+                "project_rollup_key",
+            ].astype(str)
+        ) if not month_completions.empty else set()
+        all_project_keys = scope_project_keys | completion_project_keys
+
+        scope_project_names = set(
+            month_scope.loc[month_scope["project_display"].astype(bool), "project_display"].astype(str)
+        ) if not month_scope.empty else set()
+        completion_project_names = set(
+            month_completions.loc[
+                month_completions["project_display"].astype(bool),
+                "project_display",
+            ].astype(str)
+        ) if not month_completions.empty else set()
+        all_project_names = scope_project_names | completion_project_names
+        project_count = len(all_project_keys) if all_project_keys else len(all_project_names)
+        project_list = ", ".join(sorted(all_project_names, key=str.lower))
+
+        rows.append(
+            {
+                "Month": month_label,
+                "Avg Productivity": round(avg_prod if not pd.isna(avg_prod) else 0.0, 2),
+                "MT Erected": round(mt_erected, 2),
+                "No. of Gangs": gangs,
+                "Number of Projects Active": int(project_count),
+                "Projects Active (List)": project_list,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _build_quarterly_consolidated_summary_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    quarter_keys: Sequence[pd.Timestamp],
+    quarter_labels: Sequence[str],
+) -> pd.DataFrame:
+    columns = [
+        "Quarter",
+        "Avg Productivity",
+        "MT Erected",
+        "No. of Gangs",
+        "Number of Projects Active",
+        "Projects Active (List)",
+    ]
+    clean_quarter_keys = [
+        pd.Timestamp(quarter).normalize().to_period("Q").start_time.normalize()
+        for quarter in quarter_keys
+    ]
+    quarter_pairs = list(zip(clean_quarter_keys, quarter_labels))
+    if not quarter_pairs:
+        return pd.DataFrame(columns=columns)
+
+    working_scope = pd.DataFrame()
+    if scope is not None and not scope.empty:
+        working_scope = scope.copy()
+        working_scope["date"] = pd.to_datetime(working_scope.get("date"), errors="coerce").dt.normalize()
+        working_scope = working_scope.dropna(subset=["date"])
+        working_scope["quarter_key"] = working_scope["date"].dt.to_period("Q").dt.start_time.dt.normalize()
+        working_scope["daily_prod_mt"] = pd.to_numeric(working_scope.get("daily_prod_mt"), errors="coerce")
+        working_scope["gang_name"] = working_scope.get("gang_name", "").fillna("").astype(str).str.strip()
+        working_scope["project_rollup_display"] = working_scope.get(
+            "project_rollup_display",
+            working_scope.get("project_display", pd.Series("", index=working_scope.index)),
+        ).fillna("").astype(str).str.strip()
+        working_scope["project_display"] = working_scope.get(
+            "project_rollup_display",
+            working_scope.get("project_name", pd.Series("", index=working_scope.index)),
+        ).fillna("").astype(str).str.strip()
+        working_scope["project_display"] = working_scope["project_display"].where(
+            working_scope["project_display"].astype(bool),
+            working_scope.get("project_name", pd.Series("", index=working_scope.index)).fillna("").astype(str).str.strip(),
+        )
+        if "project_rollup_key" not in working_scope.columns:
+            working_scope["project_rollup_key"] = working_scope["project_display"].map(_compact_project_key)
+        working_scope["project_rollup_key"] = (
+            working_scope["project_rollup_key"].fillna("").astype(str).str.strip()
+        )
+
+    working_completions = pd.DataFrame()
+    if completions is not None and not completions.empty:
+        working_completions = completions.copy()
+        working_completions["completion_date"] = pd.to_datetime(
+            working_completions.get("completion_date"), errors="coerce"
+        ).dt.normalize()
+        working_completions = working_completions.dropna(subset=["completion_date"])
+        working_completions["quarter_key"] = (
+            working_completions["completion_date"].dt.to_period("Q").dt.start_time.dt.normalize()
+        )
+        working_completions["_tower_weight"] = _coerce_numeric_series(
+            working_completions, "tower_weight"
+        ).fillna(0.0)
+        working_completions["project_rollup_display"] = working_completions.get(
+            "project_rollup_display",
+            working_completions.get("project_display", pd.Series("", index=working_completions.index)),
+        ).fillna("").astype(str).str.strip()
+        working_completions["project_display"] = working_completions.get(
+            "project_rollup_display",
+            working_completions.get("project_name", pd.Series("", index=working_completions.index)),
+        ).fillna("").astype(str).str.strip()
+        working_completions["project_display"] = working_completions["project_display"].where(
+            working_completions["project_display"].astype(bool),
+            working_completions.get("project_name", pd.Series("", index=working_completions.index)).fillna("").astype(str).str.strip(),
+        )
+        if "project_rollup_key" not in working_completions.columns:
+            working_completions["project_rollup_key"] = working_completions["project_display"].map(
+                _compact_project_key
+            )
+        working_completions["project_rollup_key"] = (
+            working_completions["project_rollup_key"].fillna("").astype(str).str.strip()
+        )
+
+    rows: list[dict[str, object]] = []
+    for quarter_key, quarter_label in quarter_pairs:
+        quarter_scope = (
+            working_scope[working_scope["quarter_key"] == quarter_key]
+            if not working_scope.empty
+            else pd.DataFrame()
+        )
+        quarter_completions = (
+            working_completions[working_completions["quarter_key"] == quarter_key]
+            if not working_completions.empty
+            else pd.DataFrame()
+        )
+
+        avg_prod = (
+            float(quarter_scope["daily_prod_mt"].dropna().mean())
+            if not quarter_scope.empty
+            else 0.0
+        )
+        mt_erected = (
+            float(quarter_completions["_tower_weight"].sum())
+            if not quarter_completions.empty
+            else 0.0
+        )
+        gangs = (
+            int(quarter_scope[quarter_scope["gang_name"].astype(bool)]["gang_name"].nunique())
+            if not quarter_scope.empty
+            else 0
+        )
+        scope_project_keys = set(
+            quarter_scope.loc[
+                quarter_scope["project_rollup_key"].astype(bool),
+                "project_rollup_key",
+            ].astype(str)
+        ) if not quarter_scope.empty else set()
+        completion_project_keys = set(
+            quarter_completions.loc[
+                quarter_completions["project_rollup_key"].astype(bool),
+                "project_rollup_key",
+            ].astype(str)
+        ) if not quarter_completions.empty else set()
+        all_project_keys = scope_project_keys | completion_project_keys
+
+        scope_project_names = set(
+            quarter_scope.loc[quarter_scope["project_display"].astype(bool), "project_display"].astype(str)
+        ) if not quarter_scope.empty else set()
+        completion_project_names = set(
+            quarter_completions.loc[
+                quarter_completions["project_display"].astype(bool),
+                "project_display",
+            ].astype(str)
+        ) if not quarter_completions.empty else set()
+        all_project_names = scope_project_names | completion_project_names
+        project_count = len(all_project_keys) if all_project_keys else len(all_project_names)
+        project_list = ", ".join(sorted(all_project_names, key=str.lower))
+
+        rows.append(
+            {
+                "Quarter": quarter_label,
+                "Avg Productivity": round(avg_prod if not pd.isna(avg_prod) else 0.0, 2),
+                "MT Erected": round(mt_erected, 2),
+                "No. of Gangs": gangs,
+                "Number of Projects Active": int(project_count),
+                "Projects Active (List)": project_list,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _build_project_variants_table(
+    scope: pd.DataFrame,
+    completions: pd.DataFrame,
+    *,
+    scope_name: str = "Overall",
+) -> pd.DataFrame:
+    columns = ["Scope", "PCH", "Project (Consolidated)", "Variant", "Variant Presence Count"]
+    frames: list[pd.DataFrame] = []
+    for frame in (scope, completions):
+        if frame is None or frame.empty:
+            continue
+        working = frame.copy()
+        working["pch_display"] = working.get("pch_display", "").fillna("").astype(str).str.strip()
+        working["pch_display"] = working["pch_display"].where(working["pch_display"].astype(bool), "Unassigned")
+        working["project_rollup_display"] = working.get(
+            "project_rollup_display",
+            working.get("project_display", pd.Series("", index=working.index)),
+        ).fillna("").astype(str).str.strip()
+        working["project_variant_display"] = working.get(
+            "project_variant_display",
+            working.get("project_display", pd.Series("", index=working.index)),
+        ).fillna("").astype(str).str.strip()
+        working = working[
+            working["project_rollup_display"].astype(bool)
+            & working["project_variant_display"].astype(bool)
+        ]
+        if working.empty:
+            continue
+        working["Scope"] = scope_name
+        frames.append(
+            working.rename(
+                columns={
+                    "pch_display": "PCH",
+                    "project_rollup_display": "Project (Consolidated)",
+                    "project_variant_display": "Variant",
+                }
+            )[["Scope", "PCH", "Project (Consolidated)", "Variant"]]
+        )
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    variants = pd.concat(frames, ignore_index=True)
+    variants = (
+        variants.groupby(["Scope", "PCH", "Project (Consolidated)", "Variant"], dropna=False)
+        .size()
+        .reset_index(name="Variant Presence Count")
+    )
+    return variants.sort_values(
+        ["Scope", "PCH", "Project (Consolidated)", "Variant"],
+        key=lambda series: series.astype(str).str.lower(),
+    ).reset_index(drop=True)
 
 
 def _build_quarterly_group_productivity_table(
@@ -2121,7 +2548,7 @@ def _build_quarterly_productivity_tables(
         completions,
         quarter_keys=quarter_keys_clean,
         quarter_labels=quarter_labels,
-        group_columns=["pch_display", "project_display"],
+        group_columns=["pch_display", "project_rollup_display"],
         group_labels=["PCH", "Project"],
     )
     return overall_summary, pch_summary, project_summary, quarter_labels
@@ -2237,11 +2664,22 @@ def _build_project_gang_metrics(
     *,
     loss_max_gap_days: int | None = None,
 ) -> pd.DataFrame:
-    project_group_col = "project_scope_key" if isinstance(scope, pd.DataFrame) and "project_scope_key" in scope.columns else "project_name"
+    project_group_col = (
+        "project_rollup_key"
+        if isinstance(scope, pd.DataFrame) and "project_rollup_key" in scope.columns
+        else "project_scope_key"
+        if isinstance(scope, pd.DataFrame) and "project_scope_key" in scope.columns
+        else "project_name"
+    )
+    project_display_col = (
+        "project_rollup_display"
+        if isinstance(scope, pd.DataFrame) and "project_rollup_display" in scope.columns
+        else "project_display"
+    )
     columns = [
         "pch_display",
         project_group_col,
-        "project_display",
+        project_display_col,
         "gang_name",
         AVG_PRODUCTIVITY_COLUMN,
         ACTIVE_DAYS_COLUMN,
@@ -2265,12 +2703,12 @@ def _build_project_gang_metrics(
     working["daily_prod_mt"] = pd.to_numeric(working.get("daily_prod_mt"), errors="coerce").fillna(0.0)
     if "pch_display" not in working.columns:
         working["pch_display"] = "Unassigned"
-    if "project_display" not in working.columns:
-        working["project_display"] = working.get("project_name", "").fillna("").astype(str).str.strip()
+    if project_display_col not in working.columns:
+        working[project_display_col] = working.get("project_name", "").fillna("").astype(str).str.strip()
     if project_group_col not in working.columns:
         working[project_group_col] = working.get("project_name", "").fillna("").astype(str).str.strip()
 
-    group_cols = ["pch_display", project_group_col, "project_display", "gang_name"]
+    group_cols = ["pch_display", project_group_col, project_display_col, "gang_name"]
     daily_metrics = (
         working.groupby(group_cols, dropna=False)
         .agg(
@@ -2300,8 +2738,8 @@ def _build_project_gang_metrics(
         comp = comp[comp["gang_name"].astype(bool)]
         if "pch_display" not in comp.columns:
             comp["pch_display"] = "Unassigned"
-        if "project_display" not in comp.columns:
-            comp["project_display"] = comp.get("project_name", "").fillna("").astype(str).str.strip()
+        if project_display_col not in comp.columns:
+            comp[project_display_col] = comp.get("project_name", "").fillna("").astype(str).str.strip()
         if project_group_col not in comp.columns:
             comp[project_group_col] = comp.get("project_name", "").fillna("").astype(str).str.strip()
         if not comp.empty:
@@ -2335,7 +2773,7 @@ def _build_project_gang_metrics(
 
     resolved_gap_days = int(loss_max_gap_days) if loss_max_gap_days is not None else int(AppConfig().loss_max_gap_days)
     idle_rows: list[pd.DataFrame] = []
-    project_keys = ["pch_display", project_group_col, "project_display"]
+    project_keys = ["pch_display", project_group_col, project_display_col]
     for project_key, project_scope in working.groupby(project_keys, dropna=False):
         project_idle = compute_idle_intervals_per_gang(project_scope, loss_max_gap_days=resolved_gap_days)
         if project_idle.empty or "gang_name" not in project_idle.columns:
@@ -2348,8 +2786,8 @@ def _build_project_gang_metrics(
         )
         idle_summary["pch_display"] = project_key[0]
         idle_summary[project_group_col] = project_key[1]
-        idle_summary["project_display"] = project_key[2]
-        idle_rows.append(idle_summary[["pch_display", project_group_col, "project_display", "gang_name", IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN]])
+        idle_summary[project_display_col] = project_key[2]
+        idle_rows.append(idle_summary[["pch_display", project_group_col, project_display_col, "gang_name", IDLE_DAYS_COLUMN, IDLE_INTERVALS_COLUMN]])
 
     if idle_rows:
         idle_metrics = pd.concat(idle_rows, ignore_index=True)
@@ -2368,7 +2806,11 @@ def _build_project_gang_metrics(
         )
     merged[IDLE_SEVERITY_COLUMN] = pd.to_numeric(merged[IDLE_SEVERITY_COLUMN], errors="coerce").fillna(0.0).round(2)
 
-    return merged.reindex(columns=columns)
+    if project_display_col != "project_display":
+        merged = merged.rename(columns={project_display_col: "project_display"})
+    return merged.reindex(
+        columns=[col if col != project_display_col else "project_display" for col in columns]
+    )
 
 
 def _build_project_gang_rankings(
@@ -2405,7 +2847,11 @@ def _build_project_gang_rankings(
         empty = pd.DataFrame(columns=columns)
         return empty, empty
 
-    project_group_col = "project_scope_key" if "project_scope_key" in metrics.columns else "project_name"
+    project_group_col = (
+        "project_rollup_key"
+        if "project_rollup_key" in metrics.columns
+        else "project_scope_key" if "project_scope_key" in metrics.columns else "project_name"
+    )
     eligible = metrics[metrics[TOTAL_COUNT_COLUMN] >= int(min_erections)].copy()
     if eligible.empty:
         empty = pd.DataFrame(columns=columns)
@@ -2479,7 +2925,11 @@ def _build_gang_level_productivity_table(
 
 
 def _collapse_project_metrics_for_display(project_metrics: pd.DataFrame) -> pd.DataFrame:
-    project_group_col = "project_scope_key" if "project_scope_key" in project_metrics.columns else "project_name"
+    project_group_col = (
+        "project_rollup_key"
+        if "project_rollup_key" in project_metrics.columns
+        else "project_scope_key" if "project_scope_key" in project_metrics.columns else "project_name"
+    )
     columns = [
         "pch_display",
         project_group_col,
@@ -2736,7 +3186,7 @@ def _extract_completion_rows(daily_df: pd.DataFrame | None) -> pd.DataFrame:
     ]
     if dedup_cols:
         completions = completions.drop_duplicates(subset=dedup_cols, keep="last")
-    return completions
+    return _apply_project_rollup_columns(completions)
 
 
 def _build_completion_counts_by_gang(completions: pd.DataFrame | None) -> dict[str, int]:
@@ -2786,11 +3236,15 @@ def _build_gang_project_code_map(completions: pd.DataFrame | None) -> dict[str, 
 
     working["project_code"] = working.get("project_code", "").fillna("").astype(str).str.strip()
     working["project_name"] = working.get("project_name", "").fillna("").astype(str).str.strip()
-    project_display_series = working.get("project_display")
+    project_display_series = working.get("project_rollup_display")
     if isinstance(project_display_series, pd.Series):
         working["project_display"] = project_display_series.fillna("").astype(str).str.strip()
     else:
-        working["project_display"] = ""
+        project_display_series = working.get("project_display")
+        if isinstance(project_display_series, pd.Series):
+            working["project_display"] = project_display_series.fillna("").astype(str).str.strip()
+        else:
+            working["project_display"] = ""
     working["project_label"] = working["project_display"].where(
         working["project_display"].astype(bool),
         working["project_code"].where(
@@ -3032,11 +3486,15 @@ def _build_monthly_gang_production_buckets(
         completion_rows["project_name"] = (
             completion_rows.get("project_name", "").fillna("").astype(str).str.strip()
         )
-        project_display_series = completion_rows.get("project_display")
+        project_display_series = completion_rows.get("project_rollup_display")
         if isinstance(project_display_series, pd.Series):
             completion_rows["project_display"] = project_display_series.fillna("").astype(str).str.strip()
         else:
-            completion_rows["project_display"] = ""
+            project_display_series = completion_rows.get("project_display")
+            if isinstance(project_display_series, pd.Series):
+                completion_rows["project_display"] = project_display_series.fillna("").astype(str).str.strip()
+            else:
+                completion_rows["project_display"] = ""
         completion_rows["project_label"] = completion_rows["project_display"].where(
             completion_rows["project_display"].astype(bool),
             completion_rows["project_code"].where(
@@ -3190,7 +3648,7 @@ def _count_unique_nonempty(series: pd.Series | None) -> int:
 def _resolve_project_series(df: pd.DataFrame | None) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype="object")
-    for column in ("project_code", "project_display", "project_name", "project"):
+    for column in ("project_rollup_display", "project_code", "project_display", "project_name", "project"):
         if column not in df.columns:
             continue
         series = df[column]
@@ -3778,6 +4236,7 @@ def export_erection_productivity_summary(
     review_sheet_label = _sanitize_sheet_name("Review_Format")
     gangs_sheet_label = _sanitize_sheet_name("Project Gang Rankings")
     gang_level_sheet_label = _sanitize_sheet_name("Gang Level Productivity")
+    variants_sheet_label = _sanitize_sheet_name("Project_Variants")
     idle_sheet_label = _sanitize_sheet_name("Idle Intervals")
     idle_bucket_sheet_label = _sanitize_sheet_name("Idle Days Buckets")
     monthly_bucket_sheet_label = _sanitize_sheet_name("Monthly Gang Buckets")
@@ -3802,6 +4261,12 @@ def export_erection_productivity_summary(
         completions,
         months=months,
     )
+    monthly_consolidated_summary = _build_monthly_consolidated_summary_table(
+        scope,
+        completions,
+        months=months,
+        month_labels=monthly_summary_labels,
+    )
     quarter_keys = _generate_quarter_keys(month_start, month_end)
     (
         quarterly_overall_summary,
@@ -3813,11 +4278,22 @@ def export_erection_productivity_summary(
         completions,
         quarter_keys=quarter_keys,
     )
+    quarterly_consolidated_summary = _build_quarterly_consolidated_summary_table(
+        scope,
+        completions,
+        quarter_keys=quarter_keys,
+        quarter_labels=quarterly_summary_labels,
+    )
     regional_quarterly_summary = _build_regional_quarterly_productivity_table(
         scope,
         completions,
         quarter_keys=quarter_keys,
         quarter_labels=quarterly_summary_labels,
+    )
+    project_variants_table = _build_project_variants_table(
+        scope,
+        completions,
+        scope_name="Overall",
     )
     scope_label = _build_scope_label_from_data(
         scope,
@@ -4335,7 +4811,7 @@ def export_erection_productivity_summary(
         )
         monthly_blocks.append(monthly_block)
         monthly_summary_row += gap_rows
-        _, monthly_block = _write_monthly_scoped_table(
+        monthly_summary_row, monthly_block = _write_monthly_scoped_table(
             writer,
             monthly_summary_sheet_label,
             monthly_project_summary,
@@ -4345,6 +4821,22 @@ def export_erection_productivity_summary(
             startrow=monthly_summary_row,
         )
         monthly_blocks.append(monthly_block)
+        monthly_summary_row += gap_rows
+        monthly_summary_row = _write_scoped_table(
+            writer,
+            monthly_summary_sheet_label,
+            monthly_consolidated_summary,
+            "Monthly Consolidated Summary",
+            startrow=monthly_summary_row,
+        )
+        monthly_summary_row += gap_rows
+        _write_scoped_table(
+            writer,
+            monthly_summary_sheet_label,
+            quarterly_consolidated_summary,
+            "Quarterly Consolidated Summary",
+            startrow=monthly_summary_row,
+        )
         _style_monthly_summary_sheet(writer, monthly_summary_sheet_label, monthly_blocks)
 
         trends_row = 0
@@ -4705,6 +5197,13 @@ def export_erection_productivity_summary(
         excluded_detail.to_excel(
             writer, sheet_name=excluded_sheet_label, index=False, startrow=audit_row
         )
+        _write_scoped_table(
+            writer,
+            variants_sheet_label,
+            project_variants_table,
+            "Project Variants Mapping",
+            startrow=0,
+        )
 
         used_sheet_names: set[str] = {
             weekly_sheet_label,
@@ -4713,6 +5212,7 @@ def export_erection_productivity_summary(
             review_sheet_label,
             gangs_sheet_label,
             gang_level_sheet_label,
+            variants_sheet_label,
             idle_sheet_label,
             idle_bucket_sheet_label,
             monthly_bucket_sheet_label,
@@ -4751,7 +5251,12 @@ def export_erection_productivity_summary(
                 pch_table_two_overall.to_excel(writer, sheet_name=pch_sheet_name, index=False, startrow=current_row)
                 current_row += len(pch_table_two_overall) + 1 + group_gap_rows
 
-                if "project_display" in pch_scope.columns:
+                project_label_col = (
+                    "project_rollup_display"
+                    if "project_rollup_display" in pch_scope.columns
+                    else "project_display"
+                )
+                if project_label_col in pch_scope.columns:
                     project_names = (
                         pch_table_one["Project"]
                         .dropna()
@@ -4762,7 +5267,7 @@ def export_erection_productivity_summary(
                     for project_name in project_names:
                         if not project_name or project_name == "Total":
                             continue
-                        project_scope = pch_scope[pch_scope["project_display"] == project_name]
+                        project_scope = pch_scope[pch_scope[project_label_col] == project_name]
                         header_row = {"Erection productivity": f"Project: {project_name}"}
                         for label in month_labels:
                             header_row[label] = ""
