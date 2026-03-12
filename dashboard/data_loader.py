@@ -1751,6 +1751,25 @@ def _read_prebuilt_stringing_artifacts(
                 roots.append(candidate)
         return roots
 
+    def _latest_raw_input_mtime() -> float:
+        try:
+            base = Path(raw_root)
+            if not base.exists() or not base.is_dir():
+                return 0.0
+            latest = 0.0
+            for candidate in base.rglob("*.xls*"):
+                if not candidate.is_file() or candidate.name.startswith("~$"):
+                    continue
+                try:
+                    latest = max(latest, float(candidate.stat().st_mtime))
+                except Exception:
+                    continue
+            return latest
+        except Exception:
+            return 0.0
+
+    latest_input_mtime = _latest_raw_input_mtime()
+
     for root in _candidate_roots():
         workbook_path = root / "StringingCompiled_Output.xlsx"
         compiled_df: pd.DataFrame | None = None
@@ -1826,6 +1845,25 @@ def _read_prebuilt_stringing_artifacts(
                 pass
 
         if compiled_df is not None and daily_df is not None:
+            latest_artifact_mtime = 0.0
+            for artifact in (
+                workbook_path,
+                root / "StringingCompiled.parquet",
+                root / "StringingDaily.parquet",
+                root / "StringingCoverage.parquet",
+            ):
+                if artifact.exists():
+                    try:
+                        latest_artifact_mtime = max(latest_artifact_mtime, float(artifact.stat().st_mtime))
+                    except Exception:
+                        continue
+            if latest_input_mtime and latest_artifact_mtime and latest_input_mtime > (latest_artifact_mtime + 1.0):
+                LOGGER.info(
+                    "Stringing: cached artifacts in %s are stale vs newer DPR input files; forcing rebuild.",
+                    root,
+                )
+                continue
+
             missing_parts: list[str] = []
             if isinstance(compiled_df, pd.DataFrame) and not compiled_df.empty:
                 if not _stringing_frame_has_project_metadata(compiled_df):
