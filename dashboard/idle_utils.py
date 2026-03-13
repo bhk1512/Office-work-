@@ -77,6 +77,52 @@ def compute_active_months(dates: list[date]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Deployment window helpers
+# ---------------------------------------------------------------------------
+
+def compute_deployment_days(
+    dates: list[date],
+    off_system_threshold: int = IDLE_OFF_SYSTEM_GAP_DAYS,
+    min_days: int = 1,
+) -> float:
+    """
+    Compute in-play deployment days by removing confirmed off-system gaps.
+
+    Deployment days = full first-to-last span minus each internal gap strictly
+    greater than `off_system_threshold`. Result is clamped to at least
+    `min_days` to keep downstream denominators stable.
+    """
+    if not dates:
+        return float(max(1, int(min_days)))
+
+    unique_sorted = sorted(set(dates))
+    if len(unique_sorted) == 1:
+        return float(max(1, int(min_days)))
+
+    total_days = (unique_sorted[-1] - unique_sorted[0]).days + 1
+    for i in range(1, len(unique_sorted)):
+        gap_days = (unique_sorted[i] - unique_sorted[i - 1]).days - 1
+        if gap_days > int(off_system_threshold):
+            total_days -= gap_days
+
+    return float(max(int(total_days), int(min_days), 1))
+
+
+def compute_deployment_months(
+    dates: list[date],
+    off_system_threshold: int = IDLE_OFF_SYSTEM_GAP_DAYS,
+    min_days: int = 1,
+) -> float:
+    """Deployment days converted to months via IDLE_NORM_DAYS_PER_MONTH."""
+    deployment_days = compute_deployment_days(
+        dates=dates,
+        off_system_threshold=off_system_threshold,
+        min_days=min_days,
+    )
+    return deployment_days / IDLE_NORM_DAYS_PER_MONTH
+
+
+# ---------------------------------------------------------------------------
 # Gang-level summary from intervals
 # ---------------------------------------------------------------------------
 
@@ -97,6 +143,8 @@ def summarize_gang_intervals(
         scope_days              : int
         scope_months            : float   (scope_days / IDLE_NORM_DAYS_PER_MONTH)
         active_months           : float   (distinct months with work)
+        deployment_days         : float   (scope days minus confirmed off-system gaps)
+        deployment_months       : float   (deployment_days / IDLE_NORM_DAYS_PER_MONTH)
         idle_windows            : int     (count of non-skipped intervals)
         idle_days_capped        : int     (sum of capped_gap_days)
         idle_days_raw           : int     (sum of raw_gap_days for non-skipped)
@@ -107,6 +155,8 @@ def summarize_gang_intervals(
         idle_days_per_month     : float
         idle_windows_per_active_month : float
         idle_days_per_active_month    : float
+        idle_windows_per_deployment_month : float
+        idle_days_per_deployment_month    : float
 
         --- LOSS ESTIMATION ---
         lost_mt                 : float   (baseline x idle_days_capped)
@@ -115,7 +165,10 @@ def summarize_gang_intervals(
     """
     scope_days = (scope_end - scope_start).days + 1
     scope_months = scope_days / IDLE_NORM_DAYS_PER_MONTH
-    active_months = compute_active_months(all_work_dates or [])
+    work_dates = all_work_dates or []
+    active_months = compute_active_months(work_dates)
+    deployment_days = compute_deployment_days(work_dates)
+    deployment_months = deployment_days / IDLE_NORM_DAYS_PER_MONTH
 
     valid = [iv for iv in intervals if not iv["skipped"]]
 
@@ -128,6 +181,12 @@ def summarize_gang_intervals(
     idle_days_per_month    = idle_days_capped / scope_months if scope_months > 0 else 0.0
     idle_windows_per_active_month = idle_windows / active_months if active_months > 0 else 0.0
     idle_days_per_active_month = idle_days_capped / active_months if active_months > 0 else 0.0
+    idle_windows_per_deployment_month = (
+        idle_windows / deployment_months if deployment_months > 0 else 0.0
+    )
+    idle_days_per_deployment_month = (
+        idle_days_capped / deployment_months if deployment_months > 0 else 0.0
+    )
 
     lost_mt = baseline_mt_per_day * idle_days_capped
 
@@ -138,6 +197,8 @@ def summarize_gang_intervals(
         "scope_days":            scope_days,
         "scope_months":          round(scope_months, 3),
         "active_months":         round(active_months, 3),
+        "deployment_days":       round(deployment_days, 3),
+        "deployment_months":     round(deployment_months, 3),
         "idle_windows":          idle_windows,
         "idle_days_capped":      idle_days_capped,
         "idle_days_raw":         idle_days_raw,
@@ -146,6 +207,8 @@ def summarize_gang_intervals(
         "idle_days_per_month":   round(idle_days_per_month, 3),
         "idle_windows_per_active_month": round(idle_windows_per_active_month, 3),
         "idle_days_per_active_month": round(idle_days_per_active_month, 3),
+        "idle_windows_per_deployment_month": round(idle_windows_per_deployment_month, 3),
+        "idle_days_per_deployment_month": round(idle_days_per_deployment_month, 3),
         "lost_mt":               round(lost_mt, 2),
         "baseline_mt_per_day":   baseline_mt_per_day,
     }

@@ -54,6 +54,10 @@ SCOPE_MONTHS_COLUMN = "Scope (months)"
 ACTIVE_MONTHS_COLUMN = "Active Months"
 IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN = "Idle Windows / Active Month"
 IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN = "Idle Days / Active Month"
+DEPLOYMENT_DAYS_COLUMN = "Deployment Days"
+DEPLOYMENT_MONTHS_COLUMN = "Deployment Months"
+IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN = "Idle Windows / Deployment Month"
+IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN = "Idle Days / Deployment Month"
 ACTIVE_DAYS_COLUMN = "Active Days"
 DELIVERED_MT_COLUMN = "Delivered MT"
 IDLE_SEVERITY_COLUMN = "Idle Severity"
@@ -2704,6 +2708,10 @@ def _build_project_gang_metrics(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
         IDLE_SEVERITY_COLUMN,
     ]
     if scope is None or scope.empty or "gang_name" not in scope.columns:
@@ -2811,6 +2819,10 @@ def _build_project_gang_metrics(
             ("active_months", 0.0),
             ("idle_windows_per_active_month", 0.0),
             ("idle_days_per_active_month", 0.0),
+            ("deployment_days", 0.0),
+            ("deployment_months", 0.0),
+            ("idle_windows_per_deployment_month", 0.0),
+            ("idle_days_per_deployment_month", 0.0),
         ):
             if column not in idle_work.columns:
                 idle_work[column] = default
@@ -2827,6 +2839,10 @@ def _build_project_gang_metrics(
                     ACTIVE_MONTHS_COLUMN: ("active_months", "mean"),
                     IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN: ("idle_windows_per_active_month", "mean"),
                     IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN: ("idle_days_per_active_month", "mean"),
+                    DEPLOYMENT_DAYS_COLUMN: ("deployment_days", "mean"),
+                    DEPLOYMENT_MONTHS_COLUMN: ("deployment_months", "mean"),
+                    IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN: ("idle_windows_per_deployment_month", "mean"),
+                    IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN: ("idle_days_per_deployment_month", "mean"),
                 }
             )
             .reset_index()
@@ -2850,6 +2866,10 @@ def _build_project_gang_metrics(
                     ACTIVE_MONTHS_COLUMN,
                     IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
                     IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+                    DEPLOYMENT_DAYS_COLUMN,
+                    DEPLOYMENT_MONTHS_COLUMN,
+                    IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+                    IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
                 ]
             ]
         )
@@ -2867,6 +2887,10 @@ def _build_project_gang_metrics(
         merged[ACTIVE_MONTHS_COLUMN] = 0.0
         merged[IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN] = 0.0
         merged[IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN] = 0.0
+        merged[DEPLOYMENT_DAYS_COLUMN] = 0.0
+        merged[DEPLOYMENT_MONTHS_COLUMN] = 0.0
+        merged[IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN] = 0.0
+        merged[IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN] = 0.0
 
     merged[IDLE_DAYS_COLUMN] = pd.to_numeric(merged[IDLE_DAYS_COLUMN], errors="coerce").fillna(0.0).round(2)
     merged[IDLE_INTERVALS_COLUMN] = pd.to_numeric(merged[IDLE_INTERVALS_COLUMN], errors="coerce").fillna(0).astype(int)
@@ -2888,6 +2912,18 @@ def _build_project_gang_metrics(
     )
     merged[IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN] = (
         pd.to_numeric(merged[IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    merged[DEPLOYMENT_DAYS_COLUMN] = (
+        pd.to_numeric(merged[DEPLOYMENT_DAYS_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    merged[DEPLOYMENT_MONTHS_COLUMN] = (
+        pd.to_numeric(merged[DEPLOYMENT_MONTHS_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    merged[IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN] = (
+        pd.to_numeric(merged[IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    merged[IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN] = (
+        pd.to_numeric(merged[IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN], errors="coerce").fillna(0.0).round(2)
     )
     merged[IDLE_SEVERITY_COLUMN] = 0.0
     idle_mask = merged[IDLE_INTERVALS_COLUMN] > 0
@@ -2931,6 +2967,10 @@ def _build_project_gang_rankings(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     ]
     metrics = (
         project_gang_metrics.copy()
@@ -3007,6 +3047,10 @@ def _build_gang_level_productivity_table(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     ]
     metrics = (
         project_gang_metrics.copy()
@@ -3035,6 +3079,14 @@ def _collapse_project_metrics_for_display(project_metrics: pd.DataFrame) -> pd.D
     if MAX_RAW_GAP_COLUMN not in project_metrics.columns:
         project_metrics = project_metrics.copy()
         project_metrics[MAX_RAW_GAP_COLUMN] = 0
+    for column in (
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
+    ):
+        if column not in project_metrics.columns:
+            project_metrics[column] = 0.0
     project_group_col = (
         "project_rollup_key"
         if "project_rollup_key" in project_metrics.columns
@@ -3059,6 +3111,10 @@ def _collapse_project_metrics_for_display(project_metrics: pd.DataFrame) -> pd.D
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
         IDLE_SEVERITY_COLUMN,
     ]
     if project_metrics.empty:
@@ -3082,6 +3138,10 @@ def _collapse_project_metrics_for_display(project_metrics: pd.DataFrame) -> pd.D
                 ACTIVE_MONTHS_COLUMN: (ACTIVE_MONTHS_COLUMN, "mean"),
                 IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN: (IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN, "mean"),
                 IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN: (IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN, "mean"),
+                DEPLOYMENT_DAYS_COLUMN: (DEPLOYMENT_DAYS_COLUMN, "mean"),
+                DEPLOYMENT_MONTHS_COLUMN: (DEPLOYMENT_MONTHS_COLUMN, "mean"),
+                IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN: (IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN, "mean"),
+                IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN: (IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN, "mean"),
             }
         )
         .reset_index()
@@ -3128,6 +3188,18 @@ def _collapse_project_metrics_for_display(project_metrics: pd.DataFrame) -> pd.D
     )
     collapsed[IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN] = (
         pd.to_numeric(collapsed[IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    collapsed[DEPLOYMENT_DAYS_COLUMN] = (
+        pd.to_numeric(collapsed[DEPLOYMENT_DAYS_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    collapsed[DEPLOYMENT_MONTHS_COLUMN] = (
+        pd.to_numeric(collapsed[DEPLOYMENT_MONTHS_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    collapsed[IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN] = (
+        pd.to_numeric(collapsed[IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN], errors="coerce").fillna(0.0).round(2)
+    )
+    collapsed[IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN] = (
+        pd.to_numeric(collapsed[IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN], errors="coerce").fillna(0.0).round(2)
     )
     collapsed[IDLE_SEVERITY_COLUMN] = 0.0
     idle_mask = collapsed[IDLE_INTERVALS_COLUMN] > 0
@@ -3405,11 +3477,19 @@ def build_bucket_table(
     df["idle_days_per_month"] = pd.to_numeric(df.get("idle_days_per_month"), errors="coerce").fillna(0.0)
     df["scope_months"] = pd.to_numeric(df.get("scope_months"), errors="coerce").fillna(s_months)
     df["active_months"] = pd.to_numeric(df.get("active_months"), errors="coerce").fillna(0.0)
+    df["deployment_days"] = pd.to_numeric(df.get("deployment_days"), errors="coerce").fillna(0.0)
+    df["deployment_months"] = pd.to_numeric(df.get("deployment_months"), errors="coerce").fillna(0.0)
     df["idle_windows_per_active_month"] = pd.to_numeric(
         df.get("idle_windows_per_active_month"), errors="coerce"
     ).fillna(0.0)
     df["idle_days_per_active_month"] = pd.to_numeric(
         df.get("idle_days_per_active_month"), errors="coerce"
+    ).fillna(0.0)
+    df["idle_windows_per_deployment_month"] = pd.to_numeric(
+        df.get("idle_windows_per_deployment_month"), errors="coerce"
+    ).fillna(0.0)
+    df["idle_days_per_deployment_month"] = pd.to_numeric(
+        df.get("idle_days_per_deployment_month"), errors="coerce"
     ).fillna(0.0)
     df["lost_mt"] = pd.to_numeric(df.get("lost_mt"), errors="coerce").fillna(0.0)
 
@@ -3433,8 +3513,12 @@ def build_bucket_table(
             avg_idle_days_per_month=("idle_days_per_month", "mean"),
             scope_months=("scope_months", "mean"),
             active_months=("active_months", "mean"),
+            deployment_days=("deployment_days", "mean"),
+            deployment_months=("deployment_months", "mean"),
             avg_idle_windows_per_active_month=("idle_windows_per_active_month", "mean"),
             avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
+            avg_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", "mean"),
+            avg_idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
             total_lost_mt=("lost_mt", "sum"),
             avg_lost_mt_per_gang=("lost_mt", "mean"),
         )
@@ -3453,13 +3537,16 @@ def build_bucket_table(
 def segment_by_tenure(gang_summaries: pd.DataFrame) -> pd.DataFrame:
     """
     Split each productivity bucket into short/long tenure bands.
-    Short: scope_months < 6
-    Long:  scope_months >= 6
+    Short: deployment_months < 6
+    Long:  deployment_months >= 6
     """
     columns = [
         "bucket_label",
         "tenure_band",
         "gang_count",
+        "avg_idle_days_per_deployment_month",
+        "p75_idle_days_per_deployment_month",
+        "avg_deployment_months",
         "avg_idle_days_per_active_month",
         "p75_idle_days_per_active_month",
         "avg_idle_days_per_month",
@@ -3471,7 +3558,15 @@ def segment_by_tenure(gang_summaries: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
     df = gang_summaries.copy()
-    for col in ("bucket_label", "idle_days_per_month", "scope_months", "idle_days_per_active_month", "active_months"):
+    for col in (
+        "bucket_label",
+        "idle_days_per_month",
+        "scope_months",
+        "idle_days_per_active_month",
+        "active_months",
+        "idle_days_per_deployment_month",
+        "deployment_months",
+    ):
         if col not in df.columns:
             df[col] = pd.NA
 
@@ -3494,12 +3589,16 @@ def segment_by_tenure(gang_summaries: pd.DataFrame) -> pd.DataFrame:
         df["idle_days_per_active_month"], errors="coerce"
     ).fillna(0.0)
     df["active_months"] = pd.to_numeric(df["active_months"], errors="coerce").fillna(0.0)
+    df["idle_days_per_deployment_month"] = pd.to_numeric(
+        df["idle_days_per_deployment_month"], errors="coerce"
+    ).fillna(0.0)
+    df["deployment_months"] = pd.to_numeric(df["deployment_months"], errors="coerce").fillna(0.0)
     df["bucket_label"] = df["bucket_label"].fillna("").astype(str).str.strip()
     df = df[df["bucket_label"].astype(bool)]
     if df.empty:
         return pd.DataFrame(columns=columns)
 
-    df["tenure_band"] = df["scope_months"].map(
+    df["tenure_band"] = df["deployment_months"].map(
         lambda months: "Short (<6mo)" if float(months) < 6 else "Long (6mo+)"
     )
     gang_id_col = "gang_id" if "gang_id" in df.columns else "gang_name" if "gang_name" in df.columns else None
@@ -3511,6 +3610,9 @@ def segment_by_tenure(gang_summaries: pd.DataFrame) -> pd.DataFrame:
         df.groupby(["bucket_label", "tenure_band"], dropna=False)
         .agg(
             gang_count=(gang_id_col, "count"),
+            avg_idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
+            p75_idle_days_per_deployment_month=("idle_days_per_deployment_month", lambda values: values.quantile(0.75)),
+            avg_deployment_months=("deployment_months", "mean"),
             avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
             p75_idle_days_per_active_month=("idle_days_per_active_month", lambda values: values.quantile(0.75)),
             avg_idle_days_per_month=("idle_days_per_month", "mean"),
@@ -3540,8 +3642,10 @@ def _build_tenure_segment_input(
     productivity_map: dict[str, float],
     idle_days_per_month_map: dict[str, float],
     idle_days_per_active_month_map: dict[str, float],
+    idle_days_per_deployment_month_map: dict[str, float],
     scope_months_map: dict[str, float],
     active_months_map: dict[str, float],
+    deployment_months_map: dict[str, float],
     erection_counts: dict[str, int],
     max_raw_gap_map: dict[str, int] | None = None,
     threshold: int = 3,
@@ -3563,8 +3667,10 @@ def _build_tenure_segment_input(
                 "bucket_label": bucket_label,
                 "idle_days_per_month": float(idle_days_per_month_map.get(gang, 0.0)),
                 "idle_days_per_active_month": float(idle_days_per_active_month_map.get(gang, 0.0)),
+                "idle_days_per_deployment_month": float(idle_days_per_deployment_month_map.get(gang, 0.0)),
                 "scope_months": float(scope_months_map.get(gang, 0.0)),
                 "active_months": float(active_months_map.get(gang, 0.0)),
+                "deployment_months": float(deployment_months_map.get(gang, 0.0)),
                 "max_raw_gap_days": int(raw_gap_lookup.get(gang, 0)),
             }
         )
@@ -3631,6 +3737,10 @@ def _build_idle_days_bucket_tables(
     active_months_map: dict[str, float] | None = None,
     idle_windows_per_active_month_map: dict[str, float] | None = None,
     idle_days_per_active_month_map: dict[str, float] | None = None,
+    deployment_days_map: dict[str, float] | None = None,
+    deployment_months_map: dict[str, float] | None = None,
+    idle_windows_per_deployment_month_map: dict[str, float] | None = None,
+    idle_days_per_deployment_month_map: dict[str, float] | None = None,
     daily_weight_map: dict[str, float] | None = None,
     tower_weight_map: dict[str, float] | None = None,
     thresholds: Sequence[int] = (1, 2, 3),
@@ -3650,6 +3760,10 @@ def _build_idle_days_bucket_tables(
     effective_active_months = active_months_map or {}
     effective_idle_windows_per_active_month = idle_windows_per_active_month_map or {}
     effective_idle_days_per_active_month = idle_days_per_active_month_map or {}
+    effective_deployment_days = deployment_days_map or {}
+    effective_deployment_months = deployment_months_map or {}
+    effective_idle_windows_per_deployment_month = idle_windows_per_deployment_month_map or {}
+    effective_idle_days_per_deployment_month = idle_days_per_deployment_month_map or {}
     effective_daily_weight_map = daily_weight_map or {}
     effective_tower_weight_map = tower_weight_map or {}
 
@@ -3658,10 +3772,14 @@ def _build_idle_days_bucket_tables(
         "Avg Idle Days (Magnitude)",
         "Idle windows per gang (Frequency)",
         "Avg max raw gap days",
-        "Idle windows per active month (normalized, primary)",
-        "Idle days per active month (normalized, primary)",
+        "Idle windows per deployment month (normalized, primary)",
+        "Idle days per deployment month (normalized, primary)",
+        "Deployment months (avg)",
+        "Deployment days (avg)",
         "Idle windows per month (normalized)",
         "Idle days per month (normalized)",
+        "Idle windows per active month (normalized, diagnostic)",
+        "Idle days per active month (normalized, diagnostic)",
         "Active months (avg)",
         "Scope months (avg)",
         "Gang Count",
@@ -3715,6 +3833,22 @@ def _build_idle_days_bucket_tables(
                 sum(float(effective_idle_days_per_active_month.get(gang, 0.0)) for gang in gangs) / gang_count
                 if gang_count else 0.0
             )
+            avg_deployment_days = (
+                sum(float(effective_deployment_days.get(gang, 0.0)) for gang in gangs) / gang_count
+                if gang_count else 0.0
+            )
+            avg_deployment_months = (
+                sum(float(effective_deployment_months.get(gang, 0.0)) for gang in gangs) / gang_count
+                if gang_count else 0.0
+            )
+            avg_idle_windows_per_deployment_month = (
+                sum(float(effective_idle_windows_per_deployment_month.get(gang, 0.0)) for gang in gangs) / gang_count
+                if gang_count else 0.0
+            )
+            avg_idle_days_per_deployment_month = (
+                sum(float(effective_idle_days_per_deployment_month.get(gang, 0.0)) for gang in gangs) / gang_count
+                if gang_count else 0.0
+            )
             avg_active_months = (
                 sum(float(effective_active_months.get(gang, 0.0)) for gang in gangs) / gang_count
                 if gang_count else 0.0
@@ -3730,10 +3864,18 @@ def _build_idle_days_bucket_tables(
             rows["Avg Idle Days (Magnitude)"][bucket_label] = round(avg_idle_days, 2)
             rows["Idle windows per gang (Frequency)"][bucket_label] = round(avg_idle_windows, 2)
             rows["Avg max raw gap days"][bucket_label] = round(avg_max_raw_gap, 2)
-            rows["Idle windows per active month (normalized, primary)"][bucket_label] = round(
+            rows["Idle windows per deployment month (normalized, primary)"][bucket_label] = round(
+                avg_idle_windows_per_deployment_month, 2
+            )
+            rows["Idle days per deployment month (normalized, primary)"][bucket_label] = round(
+                avg_idle_days_per_deployment_month, 2
+            )
+            rows["Deployment months (avg)"][bucket_label] = round(avg_deployment_months, 2)
+            rows["Deployment days (avg)"][bucket_label] = round(avg_deployment_days, 2)
+            rows["Idle windows per active month (normalized, diagnostic)"][bucket_label] = round(
                 avg_idle_windows_per_active_month, 2
             )
-            rows["Idle days per active month (normalized, primary)"][bucket_label] = round(
+            rows["Idle days per active month (normalized, diagnostic)"][bucket_label] = round(
                 avg_idle_days_per_active_month, 2
             )
             rows["Idle windows per month (normalized)"][bucket_label] = round(avg_idle_windows_per_month, 2)
@@ -3767,6 +3909,10 @@ def _build_idle_days_bucket_audit(
     active_months_map: dict[str, float] | None,
     idle_windows_per_active_month_map: dict[str, float] | None,
     idle_days_per_active_month_map: dict[str, float] | None,
+    deployment_days_map: dict[str, float] | None,
+    deployment_months_map: dict[str, float] | None,
+    idle_windows_per_deployment_month_map: dict[str, float] | None,
+    idle_days_per_deployment_month_map: dict[str, float] | None,
     daily_weight_map: dict[str, float] | None,
     tower_weight_map: dict[str, float] | None,
     completions: pd.DataFrame | None,
@@ -3780,6 +3926,10 @@ def _build_idle_days_bucket_audit(
         "Idle Intervals",
         MAX_RAW_GAP_COLUMN,
         "Idle Days per Interval",
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
         ACTIVE_MONTHS_COLUMN,
@@ -3803,6 +3953,10 @@ def _build_idle_days_bucket_audit(
     active_months_lookup = active_months_map or {}
     idle_windows_per_active_month = idle_windows_per_active_month_map or {}
     idle_days_per_active_month = idle_days_per_active_month_map or {}
+    deployment_days_lookup = deployment_days_map or {}
+    deployment_months_lookup = deployment_months_map or {}
+    idle_windows_per_deployment_month = idle_windows_per_deployment_month_map or {}
+    idle_days_per_deployment_month = idle_days_per_deployment_month_map or {}
     daily_weights = daily_weight_map or {}
     tower_weights = tower_weight_map or {}
     project_codes = _build_gang_project_code_map(completions)
@@ -3829,6 +3983,14 @@ def _build_idle_days_bucket_audit(
                 "Idle Intervals": int(interval_count),
                 MAX_RAW_GAP_COLUMN: int(max_raw_gap_lookup.get(gang, 0)),
                 "Idle Days per Interval": round(idle_per_interval, 2),
+                IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN: round(
+                    float(idle_windows_per_deployment_month.get(gang, 0.0)), 2
+                ),
+                IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN: round(
+                    float(idle_days_per_deployment_month.get(gang, 0.0)), 2
+                ),
+                DEPLOYMENT_MONTHS_COLUMN: round(float(deployment_months_lookup.get(gang, 0.0)), 2),
+                DEPLOYMENT_DAYS_COLUMN: round(float(deployment_days_lookup.get(gang, 0.0)), 2),
                 IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN: round(
                     float(idle_windows_per_active_month.get(gang, 0.0)), 2
                 ),
@@ -4522,6 +4684,10 @@ def export_erection_productivity_summary(
     active_months_by_gang: dict[str, float] = {}
     idle_windows_per_active_month_by_gang: dict[str, float] = {}
     idle_days_per_active_month_by_gang: dict[str, float] = {}
+    deployment_days_by_gang: dict[str, float] = {}
+    deployment_months_by_gang: dict[str, float] = {}
+    idle_windows_per_deployment_month_by_gang: dict[str, float] = {}
+    idle_days_per_deployment_month_by_gang: dict[str, float] = {}
     if not idle_intervals.empty and "gang_name" in idle_intervals.columns:
         idle_work = idle_intervals.copy()
         start_dt = pd.to_datetime(idle_work.get("interval_start"), errors="coerce")
@@ -4601,6 +4767,38 @@ def export_erection_productivity_summary(
                 .fillna(0.0)
                 .to_dict()
             )
+        if "deployment_days" in idle_work.columns:
+            deployment_days_by_gang = (
+                pd.to_numeric(idle_work["deployment_days"], errors="coerce")
+                .groupby(idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
+        if "deployment_months" in idle_work.columns:
+            deployment_months_by_gang = (
+                pd.to_numeric(idle_work["deployment_months"], errors="coerce")
+                .groupby(idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
+        if "idle_windows_per_deployment_month" in idle_work.columns:
+            idle_windows_per_deployment_month_by_gang = (
+                pd.to_numeric(idle_work["idle_windows_per_deployment_month"], errors="coerce")
+                .groupby(idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
+        if "idle_days_per_deployment_month" in idle_work.columns:
+            idle_days_per_deployment_month_by_gang = (
+                pd.to_numeric(idle_work["idle_days_per_deployment_month"], errors="coerce")
+                .groupby(idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
     overall_idle_days_by_gang: dict[str, int] = {}
     overall_idle_interval_counts_by_gang: dict[str, int] = {}
     overall_max_raw_gap_by_gang: dict[str, int] = {}
@@ -4610,6 +4808,10 @@ def export_erection_productivity_summary(
     overall_active_months_by_gang: dict[str, float] = {}
     overall_idle_windows_per_active_month_by_gang: dict[str, float] = {}
     overall_idle_days_per_active_month_by_gang: dict[str, float] = {}
+    overall_deployment_days_by_gang: dict[str, float] = {}
+    overall_deployment_months_by_gang: dict[str, float] = {}
+    overall_idle_windows_per_deployment_month_by_gang: dict[str, float] = {}
+    overall_idle_days_per_deployment_month_by_gang: dict[str, float] = {}
     if not overall_idle_intervals.empty and "gang_name" in overall_idle_intervals.columns:
         overall_idle_work = overall_idle_intervals.copy()
         start_dt = pd.to_datetime(overall_idle_work.get("interval_start"), errors="coerce")
@@ -4689,6 +4891,38 @@ def export_erection_productivity_summary(
                 .fillna(0.0)
                 .to_dict()
             )
+        if "deployment_days" in overall_idle_work.columns:
+            overall_deployment_days_by_gang = (
+                pd.to_numeric(overall_idle_work["deployment_days"], errors="coerce")
+                .groupby(overall_idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
+        if "deployment_months" in overall_idle_work.columns:
+            overall_deployment_months_by_gang = (
+                pd.to_numeric(overall_idle_work["deployment_months"], errors="coerce")
+                .groupby(overall_idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
+        if "idle_windows_per_deployment_month" in overall_idle_work.columns:
+            overall_idle_windows_per_deployment_month_by_gang = (
+                pd.to_numeric(overall_idle_work["idle_windows_per_deployment_month"], errors="coerce")
+                .groupby(overall_idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
+        if "idle_days_per_deployment_month" in overall_idle_work.columns:
+            overall_idle_days_per_deployment_month_by_gang = (
+                pd.to_numeric(overall_idle_work["idle_days_per_deployment_month"], errors="coerce")
+                .groupby(overall_idle_work["gang_name"])
+                .mean()
+                .fillna(0.0)
+                .to_dict()
+            )
 
     if AVG_PRODUCTIVITY_OVERALL_COLUMN not in gang_level_summary.columns:
         gang_level_summary[AVG_PRODUCTIVITY_OVERALL_COLUMN] = pd.Series(
@@ -4718,6 +4952,10 @@ def export_erection_productivity_summary(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     ]
     gang_level_summary = gang_level_summary.reindex(
         columns=[column for column in gang_level_columns if column in gang_level_summary.columns]
@@ -4733,6 +4971,10 @@ def export_erection_productivity_summary(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     ):
         if column in gang_level_summary.columns:
             gang_level_summary[column] = pd.to_numeric(
@@ -4770,6 +5012,10 @@ def export_erection_productivity_summary(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     ]
     top_gangs = _apply_overall_productivity(top_gangs)
     bottom_gangs = _apply_overall_productivity(bottom_gangs)
@@ -4788,6 +5034,10 @@ def export_erection_productivity_summary(
         ACTIVE_MONTHS_COLUMN,
         IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        DEPLOYMENT_DAYS_COLUMN,
+        DEPLOYMENT_MONTHS_COLUMN,
+        IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     ):
         if column in top_gangs.columns:
             top_gangs[column] = pd.to_numeric(top_gangs[column], errors="coerce").fillna(0.0).round(2)
@@ -4830,6 +5080,10 @@ def export_erection_productivity_summary(
         active_months_map=active_months_by_gang,
         idle_windows_per_active_month_map=idle_windows_per_active_month_by_gang,
         idle_days_per_active_month_map=idle_days_per_active_month_by_gang,
+        deployment_days_map=deployment_days_by_gang,
+        deployment_months_map=deployment_months_by_gang,
+        idle_windows_per_deployment_month_map=idle_windows_per_deployment_month_by_gang,
+        idle_days_per_deployment_month_map=idle_days_per_deployment_month_by_gang,
         daily_weight_map=mtd_total_mt_by_gang,
         tower_weight_map=mtd_tower_weight_by_gang,
     )
@@ -4845,6 +5099,10 @@ def export_erection_productivity_summary(
         active_months_map=overall_active_months_by_gang,
         idle_windows_per_active_month_map=overall_idle_windows_per_active_month_by_gang,
         idle_days_per_active_month_map=overall_idle_days_per_active_month_by_gang,
+        deployment_days_map=overall_deployment_days_by_gang,
+        deployment_months_map=overall_deployment_months_by_gang,
+        idle_windows_per_deployment_month_map=overall_idle_windows_per_deployment_month_by_gang,
+        idle_days_per_deployment_month_map=overall_idle_days_per_deployment_month_by_gang,
         daily_weight_map=overall_total_mt_by_gang,
         tower_weight_map=overall_tower_weight_by_gang,
     )
@@ -4865,6 +5123,10 @@ def export_erection_productivity_summary(
             active_months_map=active_months_by_gang,
             idle_windows_per_active_month_map=idle_windows_per_active_month_by_gang,
             idle_days_per_active_month_map=idle_days_per_active_month_by_gang,
+            deployment_days_map=deployment_days_by_gang,
+            deployment_months_map=deployment_months_by_gang,
+            idle_windows_per_deployment_month_map=idle_windows_per_deployment_month_by_gang,
+            idle_days_per_deployment_month_map=idle_days_per_deployment_month_by_gang,
             daily_weight_map=mtd_total_mt_by_gang,
             tower_weight_map=mtd_tower_weight_by_gang,
             completions=completions,
@@ -4882,6 +5144,10 @@ def export_erection_productivity_summary(
             active_months_map=overall_active_months_by_gang,
             idle_windows_per_active_month_map=overall_idle_windows_per_active_month_by_gang,
             idle_days_per_active_month_map=overall_idle_days_per_active_month_by_gang,
+            deployment_days_map=overall_deployment_days_by_gang,
+            deployment_months_map=overall_deployment_months_by_gang,
+            idle_windows_per_deployment_month_map=overall_idle_windows_per_deployment_month_by_gang,
+            idle_days_per_deployment_month_map=overall_idle_days_per_deployment_month_by_gang,
             daily_weight_map=overall_total_mt_by_gang,
             tower_weight_map=overall_tower_weight_by_gang,
             completions=overall_completions,
@@ -4891,8 +5157,10 @@ def export_erection_productivity_summary(
             productivity_map=month_gang_productivity,
             idle_days_per_month_map=idle_days_per_month_by_gang,
             idle_days_per_active_month_map=idle_days_per_active_month_by_gang,
+            idle_days_per_deployment_month_map=idle_days_per_deployment_month_by_gang,
             scope_months_map=scope_months_by_gang,
             active_months_map=active_months_by_gang,
+            deployment_months_map=deployment_months_by_gang,
             erection_counts=mtd_erection_counts,
             max_raw_gap_map=max_raw_gap_by_gang,
             threshold=threshold,
@@ -4901,8 +5169,10 @@ def export_erection_productivity_summary(
             productivity_map=overall_gang_productivity,
             idle_days_per_month_map=overall_idle_days_per_month_by_gang,
             idle_days_per_active_month_map=overall_idle_days_per_active_month_by_gang,
+            idle_days_per_deployment_month_map=overall_idle_days_per_deployment_month_by_gang,
             scope_months_map=overall_scope_months_by_gang,
             active_months_map=overall_active_months_by_gang,
+            deployment_months_map=overall_deployment_months_by_gang,
             erection_counts=overall_erection_counts,
             max_raw_gap_map=overall_max_raw_gap_by_gang,
             threshold=threshold,
@@ -5091,15 +5361,35 @@ def export_erection_productivity_summary(
         "idle_days_capped": IDLE_DAYS_COLUMN,
         "scope_months": SCOPE_MONTHS_COLUMN,
         "active_months": ACTIVE_MONTHS_COLUMN,
+        "deployment_days": DEPLOYMENT_DAYS_COLUMN,
+        "deployment_months": DEPLOYMENT_MONTHS_COLUMN,
         "idle_windows_per_month": IDLE_WINDOWS_PER_MONTH_COLUMN,
         "idle_days_per_month": IDLE_DAYS_PER_MONTH_COLUMN,
         "idle_windows_per_active_month": IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
         "idle_days_per_active_month": IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+        "idle_windows_per_deployment_month": IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+        "idle_days_per_deployment_month": IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
     }
     if idle_intervals.empty:
         idle_export = pd.DataFrame(columns=list(idle_export_columns.values()))
     else:
         idle_export = idle_intervals.copy()
+        for column, default in (
+            ("raw_gap_days", 0),
+            ("idle_days_capped", 0.0),
+            ("scope_months", 0.0),
+            ("active_months", 0.0),
+            ("deployment_days", 0.0),
+            ("deployment_months", 0.0),
+            ("idle_windows_per_month", 0.0),
+            ("idle_days_per_month", 0.0),
+            ("idle_windows_per_active_month", 0.0),
+            ("idle_days_per_active_month", 0.0),
+            ("idle_windows_per_deployment_month", 0.0),
+            ("idle_days_per_deployment_month", 0.0),
+        ):
+            if column not in idle_export.columns:
+                idle_export[column] = default
         for col in ("interval_start", "interval_end"):
             if col in idle_export.columns:
                 idle_export[col] = pd.to_datetime(idle_export[col], errors="coerce")
@@ -5111,10 +5401,14 @@ def export_erection_productivity_summary(
                     idle_days_capped=("idle_days_capped", "sum"),
                     scope_months=("scope_months", "mean"),
                     active_months=("active_months", "mean"),
+                    deployment_days=("deployment_days", "mean"),
+                    deployment_months=("deployment_months", "mean"),
                     idle_windows_per_month=("idle_windows_per_month", "mean"),
                     idle_days_per_month=("idle_days_per_month", "mean"),
                     idle_windows_per_active_month=("idle_windows_per_active_month", "mean"),
                     idle_days_per_active_month=("idle_days_per_active_month", "mean"),
+                    idle_windows_per_deployment_month=("idle_windows_per_deployment_month", "mean"),
+                    idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
                 )
                 .reset_index()
             )
@@ -5136,10 +5430,14 @@ def export_erection_productivity_summary(
         for col in (
             SCOPE_MONTHS_COLUMN,
             ACTIVE_MONTHS_COLUMN,
+            DEPLOYMENT_DAYS_COLUMN,
+            DEPLOYMENT_MONTHS_COLUMN,
             IDLE_WINDOWS_PER_MONTH_COLUMN,
             IDLE_DAYS_PER_MONTH_COLUMN,
             IDLE_WINDOWS_PER_ACTIVE_MONTH_COLUMN,
             IDLE_DAYS_PER_ACTIVE_MONTH_COLUMN,
+            IDLE_WINDOWS_PER_DEPLOYMENT_MONTH_COLUMN,
+            IDLE_DAYS_PER_DEPLOYMENT_MONTH_COLUMN,
         ):
             if col in idle_export.columns:
                 idle_export[col] = pd.to_numeric(idle_export[col], errors="coerce").fillna(0.0).round(3)

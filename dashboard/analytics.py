@@ -14,7 +14,14 @@ from .config import (
     IDLE_MIN_COMPLETIONS_FOR_TIER,
     IDLE_NORM_DAYS_PER_MONTH,
 )
-from .idle_utils import compute_intervals_for_dates, derive_scope_bounds, summarize_gang_intervals
+from .idle_utils import (
+    compute_active_months,
+    compute_deployment_days,
+    compute_deployment_months,
+    compute_intervals_for_dates,
+    derive_scope_bounds,
+    summarize_gang_intervals,
+)
 
 
 # Analytics tuning notes:
@@ -169,6 +176,9 @@ def compute_tier_summary(analytics_df: pd.DataFrame) -> pd.DataFrame:
                 "avg_idle_days_per_month",
                 "avg_idle_windows_per_active_month",
                 "avg_idle_days_per_active_month",
+                "avg_idle_windows_per_deployment_month",
+                "avg_idle_days_per_deployment_month",
+                "avg_deployment_months",
                 "avg_raw_gap_days",
                 "avg_productivity",
             ]
@@ -185,6 +195,9 @@ def compute_tier_summary(analytics_df: pd.DataFrame) -> pd.DataFrame:
         "idle_days_per_month",
         "idle_windows_per_active_month",
         "idle_days_per_active_month",
+        "idle_windows_per_deployment_month",
+        "idle_days_per_deployment_month",
+        "deployment_months",
     ):
         if column not in eligible.columns:
             eligible[column] = 0.0
@@ -199,6 +212,9 @@ def compute_tier_summary(analytics_df: pd.DataFrame) -> pd.DataFrame:
                 "avg_idle_days_per_month",
                 "avg_idle_windows_per_active_month",
                 "avg_idle_days_per_active_month",
+                "avg_idle_windows_per_deployment_month",
+                "avg_idle_days_per_deployment_month",
+                "avg_deployment_months",
                 "avg_raw_gap_days",
                 "avg_productivity",
             ]
@@ -214,6 +230,9 @@ def compute_tier_summary(analytics_df: pd.DataFrame) -> pd.DataFrame:
             avg_idle_days_per_month=("idle_days_per_month", "mean"),
             avg_idle_windows_per_active_month=("idle_windows_per_active_month", "mean"),
             avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
+            avg_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", "mean"),
+            avg_idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
+            avg_deployment_months=("deployment_months", "mean"),
             avg_raw_gap_days=("avg_raw_gap_days", "mean"),
             avg_productivity=("avg_productivity", "mean"),
         )
@@ -511,6 +530,10 @@ def _compute_gang_metrics(
     if date_work.empty:
         scope_months_by_gang = pd.Series(0.0, index=gang_metrics["gang_name"], dtype="float64")
         active_months_by_gang = pd.Series(0.0, index=gang_metrics["gang_name"], dtype="float64")
+        deployment_days_by_gang = pd.Series(1.0, index=gang_metrics["gang_name"], dtype="float64")
+        deployment_months_by_gang = pd.Series(
+            1.0 / IDLE_NORM_DAYS_PER_MONTH, index=gang_metrics["gang_name"], dtype="float64"
+        )
     else:
         scope_bounds = date_work.groupby("gang_name")["__date"].agg(["min", "max"])
         scope_months_by_gang = (
@@ -518,7 +541,17 @@ def _compute_gang_metrics(
         )
         active_months_by_gang = (
             date_work.groupby("gang_name")["__date"]
-            .apply(lambda values: values.dt.to_period("M").nunique())
+            .apply(lambda values: compute_active_months(values.dt.date.tolist()))
+            .astype(float)
+        )
+        deployment_days_by_gang = (
+            date_work.groupby("gang_name")["__date"]
+            .apply(lambda values: compute_deployment_days(values.dt.date.tolist()))
+            .astype(float)
+        )
+        deployment_months_by_gang = (
+            date_work.groupby("gang_name")["__date"]
+            .apply(lambda values: compute_deployment_months(values.dt.date.tolist()))
             .astype(float)
         )
 
@@ -528,9 +561,16 @@ def _compute_gang_metrics(
     gang_metrics["active_months"] = (
         gang_metrics["gang_name"].map(active_months_by_gang).fillna(0.0).round(3)
     )
+    gang_metrics["deployment_days"] = (
+        gang_metrics["gang_name"].map(deployment_days_by_gang).fillna(1.0).round(3)
+    )
+    gang_metrics["deployment_months"] = (
+        gang_metrics["gang_name"].map(deployment_months_by_gang).fillna(1.0 / IDLE_NORM_DAYS_PER_MONTH).round(3)
+    )
 
     scope_den = gang_metrics["scope_months"].replace(0, np.nan)
     active_den = gang_metrics["active_months"].replace(0, np.nan)
+    deployment_den = gang_metrics["deployment_months"].replace(0, np.nan)
     gang_metrics["idle_windows_per_month"] = (
         gang_metrics["idle_windows"].astype(float) / scope_den
     )
@@ -543,6 +583,12 @@ def _compute_gang_metrics(
     gang_metrics["idle_days_per_active_month"] = (
         gang_metrics["idle_days_capped"].astype(float) / active_den
     )
+    gang_metrics["idle_windows_per_deployment_month"] = (
+        gang_metrics["idle_windows"].astype(float) / deployment_den
+    )
+    gang_metrics["idle_days_per_deployment_month"] = (
+        gang_metrics["idle_days_capped"].astype(float) / deployment_den
+    )
     gang_metrics["idle_windows_per_month"] = pd.to_numeric(
         gang_metrics["idle_windows_per_month"], errors="coerce"
     ).fillna(0.0).round(3)
@@ -554,6 +600,12 @@ def _compute_gang_metrics(
     ).fillna(0.0).round(3)
     gang_metrics["idle_days_per_active_month"] = pd.to_numeric(
         gang_metrics["idle_days_per_active_month"], errors="coerce"
+    ).fillna(0.0).round(3)
+    gang_metrics["idle_windows_per_deployment_month"] = pd.to_numeric(
+        gang_metrics["idle_windows_per_deployment_month"], errors="coerce"
+    ).fillna(0.0).round(3)
+    gang_metrics["idle_days_per_deployment_month"] = pd.to_numeric(
+        gang_metrics["idle_days_per_deployment_month"], errors="coerce"
     ).fillna(0.0).round(3)
     return gang_metrics
 
@@ -600,6 +652,9 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
                 "avg_idle_days_per_month": [0.0, 0.0, 0.0],
                 "avg_idle_windows_per_active_month": [0.0, 0.0, 0.0],
                 "avg_idle_days_per_active_month": [0.0, 0.0, 0.0],
+                "avg_idle_windows_per_deployment_month": [0.0, 0.0, 0.0],
+                "avg_idle_days_per_deployment_month": [0.0, 0.0, 0.0],
+                "avg_deployment_months": [0.0, 0.0, 0.0],
                 "gangs": [0, 0, 0],
             }
         )
@@ -610,6 +665,9 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
         "idle_days_per_month",
         "idle_windows_per_active_month",
         "idle_days_per_active_month",
+        "idle_windows_per_deployment_month",
+        "idle_days_per_deployment_month",
+        "deployment_months",
     ):
         if column not in frame.columns:
             frame[column] = 0.0
@@ -622,6 +680,9 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
             avg_idle_days_per_month=("idle_days_per_month", "mean"),
             avg_idle_windows_per_active_month=("idle_windows_per_active_month", "mean"),
             avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
+            avg_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", "mean"),
+            avg_idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
+            avg_deployment_months=("deployment_months", "mean"),
             gangs=("gang_name", "nunique"),
         )
         .reset_index()
@@ -633,6 +694,9 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
     summary["avg_idle_days_per_month"] = summary["avg_idle_days_per_month"].astype(float)
     summary["avg_idle_windows_per_active_month"] = summary["avg_idle_windows_per_active_month"].astype(float)
     summary["avg_idle_days_per_active_month"] = summary["avg_idle_days_per_active_month"].astype(float)
+    summary["avg_idle_windows_per_deployment_month"] = summary["avg_idle_windows_per_deployment_month"].astype(float)
+    summary["avg_idle_days_per_deployment_month"] = summary["avg_idle_days_per_deployment_month"].astype(float)
+    summary["avg_deployment_months"] = summary["avg_deployment_months"].astype(float)
     summary["gangs"] = summary["gangs"].astype(int)
     return summary
 
