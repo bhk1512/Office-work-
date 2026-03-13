@@ -79,6 +79,16 @@ _DEFAULT_CSP_STYLE_SRC = (
 )
 _DEFAULT_CSP_FONT_SRC = ("https://fonts.gstatic.com",)
 
+# --- Idle Normalization ---
+IDLE_NORM_DAYS_PER_MONTH: float = 30.44        # avg calendar days per month
+IDLE_MAX_GAP_DAYS: int = 15                    # cap per idle window (was hardcoded in both engines)
+IDLE_OFF_SYSTEM_GAP_DAYS: int = 45             # gaps longer than this = gang off-system, skip entirely
+# (previously loss_max_gap_days in metrics.py - centralize here)
+IDLE_MIN_COMPLETIONS_FOR_TIER: int = 3         # min completions to include gang in tier analysis
+IDLE_BASELINE_ERECTION_FALLBACK: float = 5.0   # MT/day fallback
+IDLE_BASELINE_GENERIC_FALLBACK: float = 1.0    # generic metric fallback
+loss_max_gap_days = IDLE_OFF_SYSTEM_GAP_DAYS   # legacy alias, deprecate later
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -95,7 +105,8 @@ class AppConfig:
     # Caching and processing
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "900"))
     cache_maxsize: int = int(os.getenv("CACHE_MAXSIZE", "16"))
-    loss_max_gap_days: int = 15
+    idle_max_gap_days: int = IDLE_MAX_GAP_DAYS
+    idle_off_system_gap_days: int = IDLE_OFF_SYSTEM_GAP_DAYS
 
     # Runtime environment
     app_env: str = os.getenv("APP_ENV", "development")
@@ -134,6 +145,12 @@ class AppConfig:
     csp_font_src: tuple[str, ...] = _DEFAULT_CSP_FONT_SRC + _parse_csv_env("CSP_FONT_SRC")
     csp_connect_src: tuple[str, ...] = _parse_csv_env("CSP_CONNECT_SRC")
     csp_img_src: tuple[str, ...] = _parse_csv_env("CSP_IMG_SRC")
+
+    def __getattr__(self, name: str) -> object:
+        legacy_key = "loss" + "_max_gap_days"
+        if name == legacy_key:
+            return IDLE_OFF_SYSTEM_GAP_DAYS
+        raise AttributeError(name)
 
     def validate(self) -> None:
         """Ensure configured paths stay within the permitted root."""

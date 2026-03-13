@@ -1,21 +1,30 @@
 """Analytics computations for the erection dashboard."""
 from __future__ import annotations
 
+from datetime import date
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
+from .config import (
+    IDLE_BASELINE_ERECTION_FALLBACK,
+    IDLE_BASELINE_GENERIC_FALLBACK,
+    IDLE_MAX_GAP_DAYS,
+    IDLE_MIN_COMPLETIONS_FOR_TIER,
+    IDLE_NORM_DAYS_PER_MONTH,
+)
+from .idle_utils import compute_intervals_for_dates, derive_scope_bounds, summarize_gang_intervals
 
 
 # Analytics tuning notes:
 # - PRODUCTIVITY_TIER_LOW / PRODUCTIVITY_TIER_HIGH control tier thresholds (<4 / 4-6 / >6).
-# - IDLE_CAP_DAYS caps idle days per gap at 15.
+# - IDLE_CAP_DAYS caps idle days per gap at IDLE_MAX_GAP_DAYS.
 # - MIN_ERECTIONS_FOR_TIERS excludes gangs with fewer than 3 completions from tier stats.
 PRODUCTIVITY_TIER_LOW = 4.0
 PRODUCTIVITY_TIER_HIGH = 6.0
-IDLE_CAP_DAYS = 15
-MIN_ERECTIONS_FOR_TIERS = 3
+IDLE_CAP_DAYS = IDLE_MAX_GAP_DAYS
+MIN_ERECTIONS_FOR_TIERS = IDLE_MIN_COMPLETIONS_FOR_TIER
 HISTOGRAM_MAX_BIN = 13
 
 
@@ -41,6 +50,176 @@ class AnalyticsPayload:
             "pareto": self.pareto,
             "whatif": self.whatif,
         }
+
+
+def compute_analytics_idle_summary(
+    df: pd.DataFrame,
+    scope_start: Optional[date] = None,
+    scope_end: Optional[date] = None,
+    baseline_map: Optional[dict] = None,
+    metric_path: str = "erection",
+) -> pd.DataFrame:
+    """
+    Analytics tab idle summary.
+    Returns one row per gang with tier, hotspot, and normalized idle metrics.
+    """
+    frame = _prepare_daily_frame(df)
+    if frame.empty:
+        return pd.DataFrame()
+
+    metric_col = "daily_prod_mt" if metric_path == "erection" else "metric"
+    if metric_col not in frame.columns:
+        metric_col = "daily_prod_mt" if "daily_prod_mt" in frame.columns else metric_col
+    fallback = (
+        IDLE_BASELINE_ERECTION_FALLBACK if metric_path == "erection"
+        else IDLE_BASELINE_GENERIC_FALLBACK
+    )
+
+    records: list[dict[str, object]] = []
+    baseline_lookup = baseline_map or {}
+    for gang_name, group in frame.groupby("gang_name"):
+        completions = (
+            pd.to_datetime(group.get("completion_date"), errors="coerce").notna().sum()
+            if "completion_date" in group.columns
+            else 0
+        )
+        tier_eligible = completions >= IDLE_MIN_COMPLETIONS_FOR_TIER
+
+        dates = (
+            pd.to_datetime(group.get("date"), errors="coerce")
+            .dropna()
+            .dt.date
+            .drop_duplicates()
+            .sort_values()
+            .tolist()
+        )
+        if len(dates) < 2:
+            continue
+        gang_scope_start = dates[0]
+        gang_scope_end = dates[-1]
+        if scope_start is not None:
+            gang_scope_start = max(gang_scope_start, scope_start)
+        if scope_end is not None:
+            gang_scope_end = min(gang_scope_end, scope_end)
+        if gang_scope_end < gang_scope_start:
+            continue
+
+        baseline = baseline_lookup.get(gang_name)
+        metric_series = pd.to_numeric(group.get(metric_col), errors="coerce")
+        if baseline is None:
+            metric_mean = metric_series.mean()
+            baseline = float(metric_mean) if not pd.isna(metric_mean) and metric_mean > 0 else fallback
+
+        intervals = compute_intervals_for_dates(dates, skip_off_system=False)
+        summary = summarize_gang_intervals(
+            intervals=intervals,
+            scope_start=gang_scope_start,
+            scope_end=gang_scope_end,
+            gang_id=str(gang_name),
+            baseline_mt_per_day=float(baseline),
+            all_work_dates=dates,
+        )
+
+        avg_productivity = float(metric_series.mean()) if metric_series.notna().any() else 0.0
+        if avg_productivity < PRODUCTIVITY_TIER_LOW:
+            tier = "Low"
+        elif avg_productivity <= PRODUCTIVITY_TIER_HIGH:
+            tier = "Mid"
+        else:
+            tier = "High"
+
+        if "completion_date" in group.columns:
+            completion_dates = pd.to_datetime(group["completion_date"], errors="coerce").dt.normalize()
+            work_dates = pd.to_datetime(group["date"], errors="coerce").dt.normalize()
+            tower_count = int((completion_dates.notna() & work_dates.notna() & completion_dates.eq(work_dates)).sum())
+        else:
+            tower_count = 0
+        idle_days_per_100 = (
+            (summary["idle_days_capped"] / tower_count * 100) if tower_count > 0 else None
+        )
+
+        records.append(
+            {
+                **summary,
+                "gang_name": str(gang_name),
+                "avg_productivity": round(avg_productivity, 2),
+                "tier": tier,
+                "tier_eligible": bool(tier_eligible),
+                "tower_count": int(tower_count),
+                "idle_days_per_100": round(idle_days_per_100, 2) if idle_days_per_100 is not None else None,
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def compute_tier_summary(analytics_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate per-gang analytics into tier-level summary.
+    Includes normalized columns avg_idle_windows_per_month, avg_idle_days_per_month.
+    """
+    if analytics_df is None or analytics_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "tier",
+                "gang_count",
+                "avg_idle_windows",
+                "avg_idle_days",
+                "avg_idle_windows_per_month",
+                "avg_idle_days_per_month",
+                "avg_idle_windows_per_active_month",
+                "avg_idle_days_per_active_month",
+                "avg_raw_gap_days",
+                "avg_productivity",
+            ]
+        )
+
+    if "tier_eligible" in analytics_df.columns:
+        eligible = analytics_df[analytics_df["tier_eligible"]].copy()
+    else:
+        eligible = analytics_df.copy()
+    for column in (
+        "idle_windows",
+        "idle_days_capped",
+        "idle_windows_per_month",
+        "idle_days_per_month",
+        "idle_windows_per_active_month",
+        "idle_days_per_active_month",
+    ):
+        if column not in eligible.columns:
+            eligible[column] = 0.0
+    if eligible.empty:
+        return pd.DataFrame(
+            columns=[
+                "tier",
+                "gang_count",
+                "avg_idle_windows",
+                "avg_idle_days",
+                "avg_idle_windows_per_month",
+                "avg_idle_days_per_month",
+                "avg_idle_windows_per_active_month",
+                "avg_idle_days_per_active_month",
+                "avg_raw_gap_days",
+                "avg_productivity",
+            ]
+        )
+
+    return (
+        eligible.groupby("tier")
+        .agg(
+            gang_count=("gang_name", "count"),
+            avg_idle_windows=("idle_windows", "mean"),
+            avg_idle_days=("idle_days_capped", "mean"),
+            avg_idle_windows_per_month=("idle_windows_per_month", "mean"),
+            avg_idle_days_per_month=("idle_days_per_month", "mean"),
+            avg_idle_windows_per_active_month=("idle_windows_per_active_month", "mean"),
+            avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
+            avg_raw_gap_days=("avg_raw_gap_days", "mean"),
+            avg_productivity=("avg_productivity", "mean"),
+        )
+        .round(2)
+        .reset_index()
+    )
 
 
 def build_analytics_payload(
@@ -243,25 +422,25 @@ def _compute_idle_intervals(frame: pd.DataFrame, *, idle_cap_days: int) -> pd.Da
         dates = (
             pd.to_datetime(gang_df["date"], errors="coerce")
             .dropna()
+            .dt.date
             .drop_duplicates()
             .sort_values()
             .tolist()
         )
         if len(dates) < 2:
             continue
-        for idx in range(1, len(dates)):
-            gap = (dates[idx] - dates[idx - 1]).days - 1
-            if gap <= 0:
+        intervals = compute_intervals_for_dates(dates, skip_off_system=False)
+        for interval in intervals:
+            raw_gap = int(interval["raw_gap_days"])
+            if raw_gap <= 0:
                 continue
-            interval_start = (dates[idx - 1] + pd.Timedelta(days=1)).normalize()
-            interval_end = (dates[idx] - pd.Timedelta(days=1)).normalize()
             rows.append(
                 {
                     "gang_name": gang_name,
-                    "interval_start": interval_start,
-                    "interval_end": interval_end,
-                    "raw_gap_days": int(gap),
-                    "idle_days_capped": int(min(gap, idle_cap_days)),
+                    "interval_start": pd.Timestamp(interval["interval_start"]).normalize(),
+                    "interval_end": pd.Timestamp(interval["interval_end"]).normalize(),
+                    "raw_gap_days": raw_gap,
+                    "idle_days_capped": int(min(raw_gap, idle_cap_days)),
                 }
             )
     return pd.DataFrame(rows)
@@ -322,6 +501,60 @@ def _compute_gang_metrics(
             "project_count": 0,
         }
     )
+    if "date" in frame.columns and not frame.empty:
+        date_work = frame[["gang_name", "date"]].copy()
+        date_work["__date"] = pd.to_datetime(date_work["date"], errors="coerce").dt.normalize()
+        date_work = date_work.dropna(subset=["__date"])
+    else:
+        date_work = pd.DataFrame(columns=["gang_name", "__date"])
+
+    if date_work.empty:
+        scope_months_by_gang = pd.Series(0.0, index=gang_metrics["gang_name"], dtype="float64")
+        active_months_by_gang = pd.Series(0.0, index=gang_metrics["gang_name"], dtype="float64")
+    else:
+        scope_bounds = date_work.groupby("gang_name")["__date"].agg(["min", "max"])
+        scope_months_by_gang = (
+            ((scope_bounds["max"] - scope_bounds["min"]).dt.days + 1).astype(float) / IDLE_NORM_DAYS_PER_MONTH
+        )
+        active_months_by_gang = (
+            date_work.groupby("gang_name")["__date"]
+            .apply(lambda values: values.dt.to_period("M").nunique())
+            .astype(float)
+        )
+
+    gang_metrics["scope_months"] = (
+        gang_metrics["gang_name"].map(scope_months_by_gang).fillna(0.0).round(3)
+    )
+    gang_metrics["active_months"] = (
+        gang_metrics["gang_name"].map(active_months_by_gang).fillna(0.0).round(3)
+    )
+
+    scope_den = gang_metrics["scope_months"].replace(0, np.nan)
+    active_den = gang_metrics["active_months"].replace(0, np.nan)
+    gang_metrics["idle_windows_per_month"] = (
+        gang_metrics["idle_windows"].astype(float) / scope_den
+    )
+    gang_metrics["idle_days_per_month"] = (
+        gang_metrics["idle_days_capped"].astype(float) / scope_den
+    )
+    gang_metrics["idle_windows_per_active_month"] = (
+        gang_metrics["idle_windows"].astype(float) / active_den
+    )
+    gang_metrics["idle_days_per_active_month"] = (
+        gang_metrics["idle_days_capped"].astype(float) / active_den
+    )
+    gang_metrics["idle_windows_per_month"] = pd.to_numeric(
+        gang_metrics["idle_windows_per_month"], errors="coerce"
+    ).fillna(0.0).round(3)
+    gang_metrics["idle_days_per_month"] = pd.to_numeric(
+        gang_metrics["idle_days_per_month"], errors="coerce"
+    ).fillna(0.0).round(3)
+    gang_metrics["idle_windows_per_active_month"] = pd.to_numeric(
+        gang_metrics["idle_windows_per_active_month"], errors="coerce"
+    ).fillna(0.0).round(3)
+    gang_metrics["idle_days_per_active_month"] = pd.to_numeric(
+        gang_metrics["idle_days_per_active_month"], errors="coerce"
+    ).fillna(0.0).round(3)
     return gang_metrics
 
 
@@ -363,14 +596,32 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
                 "tier": tiers,
                 "avg_idle_windows": [0.0, 0.0, 0.0],
                 "avg_idle_days": [0.0, 0.0, 0.0],
+                "avg_idle_windows_per_month": [0.0, 0.0, 0.0],
+                "avg_idle_days_per_month": [0.0, 0.0, 0.0],
+                "avg_idle_windows_per_active_month": [0.0, 0.0, 0.0],
+                "avg_idle_days_per_active_month": [0.0, 0.0, 0.0],
                 "gangs": [0, 0, 0],
             }
         )
+    for column in (
+        "idle_windows",
+        "idle_days_capped",
+        "idle_windows_per_month",
+        "idle_days_per_month",
+        "idle_windows_per_active_month",
+        "idle_days_per_active_month",
+    ):
+        if column not in frame.columns:
+            frame[column] = 0.0
     summary = (
         frame.groupby("tier")
         .agg(
             avg_idle_windows=("idle_windows", "mean"),
             avg_idle_days=("idle_days_capped", "mean"),
+            avg_idle_windows_per_month=("idle_windows_per_month", "mean"),
+            avg_idle_days_per_month=("idle_days_per_month", "mean"),
+            avg_idle_windows_per_active_month=("idle_windows_per_active_month", "mean"),
+            avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
             gangs=("gang_name", "nunique"),
         )
         .reset_index()
@@ -378,6 +629,10 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
     summary = summary.set_index("tier").reindex(tiers, fill_value=0.0).reset_index()
     summary["avg_idle_windows"] = summary["avg_idle_windows"].astype(float)
     summary["avg_idle_days"] = summary["avg_idle_days"].astype(float)
+    summary["avg_idle_windows_per_month"] = summary["avg_idle_windows_per_month"].astype(float)
+    summary["avg_idle_days_per_month"] = summary["avg_idle_days_per_month"].astype(float)
+    summary["avg_idle_windows_per_active_month"] = summary["avg_idle_windows_per_active_month"].astype(float)
+    summary["avg_idle_days_per_active_month"] = summary["avg_idle_days_per_active_month"].astype(float)
     summary["gangs"] = summary["gangs"].astype(int)
     return summary
 

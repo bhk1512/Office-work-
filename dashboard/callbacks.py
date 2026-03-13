@@ -48,7 +48,7 @@ from .charts import (
     build_responsibilities_chart,
     build_empty_responsibilities_figure,
 )
-from .config import AppConfig, resolve_log_level
+from .config import AppConfig, IDLE_MAX_GAP_DAYS, resolve_log_level
 from .data_loader import (
     load_stringing_compiled_raw as _load_stringing_compiled_raw,
     _resolve_stringing_microplan_root,
@@ -65,11 +65,13 @@ from .metrics import (
 from .workbook import make_trace_workbook_bytes
 from .analytics import (
     build_analytics_payload,
+    compute_analytics_idle_summary,
     IDLE_CAP_DAYS,
     MIN_ERECTIONS_FOR_TIERS,
     PRODUCTIVITY_TIER_HIGH,
     PRODUCTIVITY_TIER_LOW,
 )
+from .idle_utils import derive_scope_bounds, recovery_mt_estimate
 from .stringing_analytics import build_stringing_analytics_payload
 from .callback_utils import DataSelector, ResponsibilitiesAccessor, ResponsibilitiesPayload
 from .plan_utils import (
@@ -3622,7 +3624,7 @@ def register_callbacks(
         baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
         baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
 
-        loss_token = f"loss::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}"
+        loss_token = f"loss::{metric_col}::{IDLE_MAX_GAP_DAYS}::{is_stringing}::{meta_signature}"
 
         def _compute_loss_rows() -> list[dict[str, Any]]:
             rows: list[dict[str, Any]] = []
@@ -3636,7 +3638,7 @@ def register_callbacks(
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss_for_column(
                         gang_df,
                         metric_column=metric_col,
-                        loss_max_gap_days=config.loss_max_gap_days,
+                        idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                         baseline_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
                         idle_intervals=idle_table,
@@ -3645,7 +3647,7 @@ def register_callbacks(
                 else:
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
                         gang_df,
-                        loss_max_gap_days=config.loss_max_gap_days,
+                        idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                         baseline_mt_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
                         idle_intervals=idle_table,
@@ -5648,7 +5650,7 @@ def register_callbacks(
         baseline_overall_map = {g: proj_overall_all.get(p) for g, p in gang_to_project.items()}
         baseline_monthly_map = {g: proj_monthly.get(p, {}) for g, p in gang_to_project.items()}
 
-        loss_token = f"loss::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}"
+        loss_token = f"loss::{metric_col}::{IDLE_MAX_GAP_DAYS}::{is_stringing}::{meta_signature}"
 
         def _compute_loss_rows() -> list[dict[str, Any]]:
             rows: list[dict[str, Any]] = []
@@ -5662,7 +5664,7 @@ def register_callbacks(
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss_for_column(
                         gang_df,
                         metric_column=metric_col,
-                        loss_max_gap_days=config.loss_max_gap_days,
+                        idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                         baseline_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
                         idle_intervals=idle_table,
@@ -5671,7 +5673,7 @@ def register_callbacks(
                 else:
                     idle, baseline, loss_mt, delivered, potential = calc_idle_and_loss(
                         gang_df,
-                        loss_max_gap_days=config.loss_max_gap_days,
+                        idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                         baseline_mt_per_day=overall_baseline,
                         baseline_by_month=baseline_monthly_map.get(gang_name),
                         idle_intervals=idle_table,
@@ -6340,14 +6342,19 @@ def register_callbacks(
         if idle_source.empty:
             idle_source = scoped if not scoped.empty else base_scope
 
-        idle_token = f"idle::{metric_col}::{config.loss_max_gap_days}::{is_stringing}::{meta_signature}::{gang_focus or '*'}"
+        idle_token = f"idle::{metric_col}::{IDLE_MAX_GAP_DAYS}::{is_stringing}::{meta_signature}::{gang_focus or '*'}"
 
         def _compute_idle_df() -> pd.DataFrame:
             if idle_source.empty:
                 return pd.DataFrame()
+            scope_start, scope_end = derive_scope_bounds(idle_source, date_col="date")
             return compute_idle_intervals_per_gang(
-                idle_source,
-                loss_max_gap_days=config.loss_max_gap_days,
+                data=idle_source,
+                scope_start=scope_start,
+                scope_end=scope_end,
+                baseline_map=overall_baseline_map,
+                metric_path="generic" if is_stringing else "erection",
+                idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                 baseline_month_lookup=monthly_baseline_map,
                 baseline_fallback_map=overall_baseline_map,
             )
@@ -7635,7 +7642,7 @@ def register_callbacks(
                         _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss_for_column(
                             gdf,
                             metric_column=metric_col,
-                            loss_max_gap_days=config.loss_max_gap_days,
+                            idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                             baseline_per_day=baseline_value,
                             baseline_by_month=monthly_lookup,
                             idle_intervals=idle_table_local,
@@ -7644,7 +7651,7 @@ def register_callbacks(
                     else:
                         _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss(
                             gdf,
-                            loss_max_gap_days=config.loss_max_gap_days,
+                            idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                             baseline_mt_per_day=baseline_value,
                             baseline_by_month=monthly_lookup,
                             idle_intervals=idle_table_local,
@@ -8268,7 +8275,7 @@ def register_callbacks(
                                 _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss_for_column(
                                     gdf,
                                     metric_column=metric_col,
-                                    loss_max_gap_days=config.loss_max_gap_days,
+                                    idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                                     baseline_per_day=ov,
                                     baseline_by_month=mm,
                                     idle_intervals=idle_table_stringing,
@@ -9302,7 +9309,7 @@ def register_callbacks(
                         try:
                             _idle, _baseline, loss_val, _deliv, _pot = calc_idle_and_loss(
                                 gdf,
-                                loss_max_gap_days=config.loss_max_gap_days,
+                                idle_max_gap_days=IDLE_MAX_GAP_DAYS,
                                 baseline_mt_per_day=ov,
                                 baseline_by_month=mm,
                                 idle_intervals=idle_table_erection,
@@ -10799,7 +10806,7 @@ def register_callbacks(
                 df["idle_days_capped"] = pd.to_numeric(df["idle_days_capped"], errors="coerce").round(1)
             definition = (
                 "Tiers use average MT/day per gang over the selected period. "
-                "Idle windows count gaps between work dates; idle days are capped at 15."
+                f"Idle windows count gaps between work dates; idle days are capped at {IDLE_MAX_GAP_DAYS}."
             )
             return columns, df.to_dict("records"), definition
 
@@ -10863,7 +10870,7 @@ def register_callbacks(
             ]
             definition = (
                 "Idle window = gap between consecutive work dates. "
-                "Idle days per window are capped at 15."
+                f"Idle days per window are capped at {IDLE_MAX_GAP_DAYS}."
             )
             return columns, df.to_dict("records"), definition
 
@@ -10965,8 +10972,62 @@ def register_callbacks(
             idle_cap_days=IDLE_CAP_DAYS,
             min_erections=MIN_ERECTIONS_FOR_TIERS,
         )
-        scope_start = pd.to_datetime(scoped.get("date"), errors="coerce").min() if "date" in scoped.columns else pd.NaT
-        scope_end = pd.to_datetime(scoped.get("date"), errors="coerce").max() if "date" in scoped.columns else pd.NaT
+        if isinstance(scoped, pd.DataFrame) and not scoped.empty and "date" in scoped.columns:
+            scope_start_date, scope_end_date = derive_scope_bounds(scoped, date_col="date")
+            scope_start = pd.Timestamp(scope_start_date)
+            scope_end = pd.Timestamp(scope_end_date)
+        else:
+            scope_start = pd.NaT
+            scope_end = pd.NaT
+
+        baseline_map = (
+            pd.to_numeric(scoped.get("daily_prod_mt"), errors="coerce")
+            .groupby(scoped.get("gang_name"))
+            .mean()
+            .dropna()
+            .to_dict()
+            if isinstance(scoped, pd.DataFrame)
+            and not scoped.empty
+            and "gang_name" in scoped.columns
+            and "daily_prod_mt" in scoped.columns
+            else {}
+        )
+
+        if pd.notna(scope_start) and pd.notna(scope_end):
+            metrics_summary = compute_idle_intervals_per_gang(
+                data=scoped,
+                scope_start=scope_start.date(),
+                scope_end=scope_end.date(),
+                baseline_map=baseline_map,
+                metric_path="erection",
+                idle_max_gap_days=IDLE_MAX_GAP_DAYS,
+            )
+            analytics_idle_summary = compute_analytics_idle_summary(
+                df=scoped,
+                scope_start=scope_start.date(),
+                scope_end=scope_end.date(),
+                baseline_map=baseline_map,
+                metric_path="erection",
+            )
+        else:
+            metrics_summary = pd.DataFrame()
+            analytics_idle_summary = pd.DataFrame()
+
+        recovery_input = metrics_summary
+        if not recovery_input.empty and "gang_name" in recovery_input.columns:
+            recovery_input = recovery_input.sort_values("gang_name").drop_duplicates(subset=["gang_name"], keep="first")
+        recovery = recovery_mt_estimate(
+            gangs_summary=recovery_input.to_dict("records") if isinstance(recovery_input, pd.DataFrame) else [],
+            reduction_days_per_month=0.5,
+        )
+        payload["recovery_mt"] = recovery.get("total_recovery_mt", 0.0)
+        payload["recovery_assumptions"] = recovery.get("assumptions", [])
+        payload["analytics_idle_summary"] = (
+            analytics_idle_summary.to_dict("records")
+            if isinstance(analytics_idle_summary, pd.DataFrame)
+            else []
+        )
+
         scope_projects = int(scoped["project_name"].nunique()) if "project_name" in scoped.columns else 0
         scope_gangs = int(scoped["gang_name"].nunique()) if "gang_name" in scoped.columns else 0
         scope_gang_months = int((payload.get("whatif_base_inputs") or {}).get("total_gang_months", 0))
