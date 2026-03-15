@@ -13,6 +13,7 @@ from .config import (
     IDLE_MAX_GAP_DAYS,
     IDLE_MIN_COMPLETIONS_FOR_TIER,
     IDLE_NORM_DAYS_PER_MONTH,
+    IDLE_OFF_SYSTEM_GAP_DAYS,
 )
 from .idle_utils import (
     compute_active_months,
@@ -278,6 +279,15 @@ def build_analytics_payload(
     )
     pareto = _compute_pareto_metrics(gang_month_rows)
     whatif_inputs = _compute_whatif_inputs(gang_month_rows)
+    h1_crosswalk = compute_idle_definition_crosswalk(frame)
+    row_cooccurrence = compute_project_month_idle_cooccurrence(frame)
+    erec_frame = _build_erection_event_frame(frame)
+    h3_consolidation = compute_stint_consolidation_scenario(erec_frame, reference_pct=75)
+    h3_stint_diagnostics = _compute_stint_diagnostics(erec_frame)
+    h2_underutilization = _compute_h2_idle_underutilization(
+        gang_metrics,
+        min_erections=min_erections,
+    )
 
     kpis = _build_kpis(
         gang_month_summary,
@@ -319,7 +329,868 @@ def build_analytics_payload(
     result["hotspot_top10_df"] = result["hotspot"]["top10"]
     result["pareto_metrics"] = result["pareto"]
     result["whatif_base_inputs"] = result["whatif"]
+    result["hypothesis"] = {
+        "h1_crosswalk": {
+            "by_gang_crosswalk": _serialize_frame(
+                h1_crosswalk.get("by_gang_crosswalk", pd.DataFrame()),
+                month_cols=(),
+            ),
+            "definition_summary": _serialize_frame(
+                h1_crosswalk.get("definition_summary", pd.DataFrame()),
+                month_cols=(),
+            ),
+            "bucket_imbalance": _serialize_frame(
+                h1_crosswalk.get("bucket_imbalance", pd.DataFrame()),
+                month_cols=(),
+            ),
+        },
+        "h2_idle_underutilization": {
+            "tiers": _serialize_frame(
+                h2_underutilization.get("tiers", pd.DataFrame()),
+                month_cols=(),
+            ),
+            "delta_high_vs_low": h2_underutilization.get("delta_high_vs_low", {}),
+        },
+        "h3_stint_diagnostics": h3_stint_diagnostics,
+        "h3_consolidation_scenario": {
+            "per_stint_scenario": _serialize_frame(
+                h3_consolidation.get("per_stint_scenario", pd.DataFrame()),
+                month_cols=(),
+                date_cols=("start_date", "completion_date", "next_start_date"),
+            ),
+            "scenario_summary": h3_consolidation.get("scenario_summary", {}),
+        },
+        "row_cooccurrence_proxy": {
+            "project_month_summary": _serialize_frame(
+                row_cooccurrence.get("project_month_summary", pd.DataFrame()),
+                month_cols=("month",),
+                date_cols=("date",),
+            ),
+            "proxy_summary": row_cooccurrence.get("proxy_summary", {}),
+        },
+    }
     return result
+
+
+def compute_idle_definition_crosswalk(gang_frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Compare idle definitions side-by-side per gang and in aggregate."""
+    by_gang_columns = [
+        "gang_name",
+        "raw_idle_all_days",
+        "capped_idle_all_days",
+        "offsystem_gap_count",
+        "offsystem_raw_idle_days",
+        "capped_idle_excl_offsystem_days",
+        "idle_windows_all",
+        "idle_windows_excl_offsystem",
+        "scope_months",
+        "active_months",
+        "deployment_months",
+        "raw_idle_all_days_per_deployment_month",
+        "capped_idle_all_days_per_deployment_month",
+        "capped_idle_excl_offsystem_days_per_deployment_month",
+    ]
+    summary_columns = [
+        "definition_name",
+        "idle_days_total",
+        "idle_days_per_deployment_month_mean",
+        "median_per_gang",
+        "delta_vs_current_pct",
+    ]
+    bucket_columns = [
+        "bucket_label",
+        "gang_months",
+        "mt_total",
+        "gang_month_share",
+        "mt_share",
+        "avg_mt_day",
+        "avg_active_days",
+        "imbalance_ratio",
+    ]
+
+    frame = _prepare_daily_frame(gang_frame)
+    if frame.empty:
+        return {
+            "by_gang_crosswalk": pd.DataFrame(columns=by_gang_columns),
+            "definition_summary": pd.DataFrame(columns=summary_columns),
+            "bucket_imbalance": pd.DataFrame(columns=bucket_columns),
+        }
+
+    gang_dates = (
+        frame[["gang_name", "date"]]
+        .dropna(subset=["gang_name", "date"])
+        .drop_duplicates()
+        .copy()
+    )
+    rows: list[dict[str, object]] = []
+    for gang_name, gang_df in gang_dates.groupby("gang_name"):
+        dates = (
+            pd.to_datetime(gang_df["date"], errors="coerce")
+            .dropna()
+            .dt.date
+            .sort_values()
+            .tolist()
+        )
+        if not dates:
+            continue
+
+        intervals_all = compute_intervals_for_dates(dates, skip_off_system=False)
+        intervals_excl = compute_intervals_for_dates(dates, skip_off_system=True)
+        valid_excl = [interval for interval in intervals_excl if not bool(interval.get("skipped"))]
+
+        raw_idle_all_days = float(sum(int(interval.get("raw_gap_days", 0) or 0) for interval in intervals_all))
+        capped_idle_all_days = float(
+            sum(min(int(interval.get("raw_gap_days", 0) or 0), IDLE_MAX_GAP_DAYS) for interval in intervals_all)
+        )
+        offsystem_gap_count = int(
+            sum(
+                1
+                for interval in intervals_all
+                if int(interval.get("raw_gap_days", 0) or 0) > IDLE_OFF_SYSTEM_GAP_DAYS
+            )
+        )
+        offsystem_raw_idle_days = float(
+            sum(
+                int(interval.get("raw_gap_days", 0) or 0)
+                for interval in intervals_all
+                if int(interval.get("raw_gap_days", 0) or 0) > IDLE_OFF_SYSTEM_GAP_DAYS
+            )
+        )
+        capped_idle_excl_offsystem_days = float(
+            sum(int(interval.get("capped_gap_days", 0) or 0) for interval in valid_excl)
+        )
+
+        idle_windows_all = int(len(intervals_all))
+        idle_windows_excl_offsystem = int(len(valid_excl))
+
+        active_months = float(compute_active_months(dates))
+        deployment_months = float(compute_deployment_months(dates))
+        scope_months = (
+            float(((dates[-1] - dates[0]).days + 1) / IDLE_NORM_DAYS_PER_MONTH)
+            if len(dates) > 1
+            else (1.0 / IDLE_NORM_DAYS_PER_MONTH)
+        )
+
+        denom = deployment_months if deployment_months > 0 else np.nan
+        rows.append(
+            {
+                "gang_name": str(gang_name),
+                "raw_idle_all_days": raw_idle_all_days,
+                "capped_idle_all_days": capped_idle_all_days,
+                "offsystem_gap_count": offsystem_gap_count,
+                "offsystem_raw_idle_days": offsystem_raw_idle_days,
+                "capped_idle_excl_offsystem_days": capped_idle_excl_offsystem_days,
+                "idle_windows_all": idle_windows_all,
+                "idle_windows_excl_offsystem": idle_windows_excl_offsystem,
+                "scope_months": scope_months,
+                "active_months": active_months,
+                "deployment_months": deployment_months,
+                "raw_idle_all_days_per_deployment_month": (
+                    raw_idle_all_days / denom if pd.notna(denom) else 0.0
+                ),
+                "capped_idle_all_days_per_deployment_month": (
+                    capped_idle_all_days / denom if pd.notna(denom) else 0.0
+                ),
+                "capped_idle_excl_offsystem_days_per_deployment_month": (
+                    capped_idle_excl_offsystem_days / denom if pd.notna(denom) else 0.0
+                ),
+            }
+        )
+
+    by_gang_crosswalk = pd.DataFrame(rows, columns=by_gang_columns)
+    if by_gang_crosswalk.empty:
+        definition_summary = pd.DataFrame(columns=summary_columns)
+    else:
+        current_total = float(by_gang_crosswalk["capped_idle_excl_offsystem_days"].sum())
+        definition_rows: list[dict[str, float | str]] = []
+        definition_map = (
+            ("raw_idle_all", "raw_idle_all_days", "raw_idle_all_days_per_deployment_month"),
+            ("capped_idle_all", "capped_idle_all_days", "capped_idle_all_days_per_deployment_month"),
+            (
+                "capped_idle_excl_offsystem",
+                "capped_idle_excl_offsystem_days",
+                "capped_idle_excl_offsystem_days_per_deployment_month",
+            ),
+        )
+        for definition_name, value_col, rate_col in definition_map:
+            total_value = float(pd.to_numeric(by_gang_crosswalk[value_col], errors="coerce").fillna(0.0).sum())
+            rate_mean = float(pd.to_numeric(by_gang_crosswalk[rate_col], errors="coerce").fillna(0.0).mean())
+            median_value = float(pd.to_numeric(by_gang_crosswalk[value_col], errors="coerce").fillna(0.0).median())
+            if definition_name == "capped_idle_excl_offsystem" or current_total <= 0:
+                delta_pct = 0.0
+            else:
+                delta_pct = (total_value - current_total) / current_total * 100.0
+            definition_rows.append(
+                {
+                    "definition_name": definition_name,
+                    "idle_days_total": total_value,
+                    "idle_days_per_deployment_month_mean": rate_mean,
+                    "median_per_gang": median_value,
+                    "delta_vs_current_pct": delta_pct,
+                }
+            )
+        definition_summary = pd.DataFrame(definition_rows, columns=summary_columns)
+
+    bucket_summary, _ = _compute_gang_month_buckets(frame)
+    if bucket_summary.empty:
+        bucket_imbalance = pd.DataFrame(columns=bucket_columns)
+    else:
+        bucket_imbalance = bucket_summary[
+            [
+                "bucket_label",
+                "gang_months",
+                "mt_total",
+                "gang_month_share",
+                "mt_share",
+                "avg_mt_day",
+                "avg_active_days",
+            ]
+        ].copy()
+        bucket_imbalance["imbalance_ratio"] = np.where(
+            pd.to_numeric(bucket_imbalance["mt_share"], errors="coerce").fillna(0.0) > 0,
+            pd.to_numeric(bucket_imbalance["gang_month_share"], errors="coerce").fillna(0.0)
+            / pd.to_numeric(bucket_imbalance["mt_share"], errors="coerce").fillna(0.0),
+            np.nan,
+        )
+
+    return {
+        "by_gang_crosswalk": by_gang_crosswalk,
+        "definition_summary": definition_summary,
+        "bucket_imbalance": bucket_imbalance,
+    }
+
+
+def compute_project_month_idle_cooccurrence(gang_frame: pd.DataFrame) -> dict[str, object]:
+    """Estimate project-month idle co-occurrence and a likely-ROW proxy."""
+    project_month_columns = [
+        "project_name",
+        "month",
+        "active_gangs_month",
+        "peak_idle_gangs_same_day",
+        "peak_idle_share",
+        "mean_idle_share",
+        "days_idle_share_gt50",
+        "likely_row",
+        "idle_gang_days_total",
+        "idle_gang_days_likely_row",
+        "row_proxy_share",
+        "non_row_proxy_share",
+    ]
+    frame = _prepare_daily_frame(gang_frame)
+    if frame.empty:
+        return {
+            "project_month_summary": pd.DataFrame(columns=project_month_columns),
+            "proxy_summary": {
+                "idle_gang_days_total": 0.0,
+                "idle_gang_days_likely_row": 0.0,
+                "row_proxy_share": 0.0,
+                "non_row_proxy_share": 0.0,
+                "project_months": 0,
+                "likely_row_project_months": 0,
+            },
+        }
+
+    month_project = (
+        frame.groupby(["gang_name", "month", "project_name"], dropna=False)
+        .agg(
+            mt_rows=("daily_prod_mt", "size"),
+            mt_total=("daily_prod_mt", "sum"),
+        )
+        .reset_index()
+    )
+    month_project = month_project.sort_values(
+        ["gang_name", "month", "mt_rows", "mt_total", "project_name"],
+        ascending=[True, True, False, False, True],
+    )
+    dominant_project = month_project.drop_duplicates(subset=["gang_name", "month"], keep="first")[
+        ["gang_name", "month", "project_name"]
+    ].copy()
+    dominant_project["project_name"] = dominant_project["project_name"].fillna("").astype(str).str.strip()
+    dominant_project = dominant_project[dominant_project["project_name"].astype(bool)]
+
+    active_gangs = (
+        dominant_project.groupby(["project_name", "month"], dropna=False)["gang_name"]
+        .nunique()
+        .rename("active_gangs_month")
+        .reset_index()
+    )
+    if active_gangs.empty:
+        return {
+            "project_month_summary": pd.DataFrame(columns=project_month_columns),
+            "proxy_summary": {
+                "idle_gang_days_total": 0.0,
+                "idle_gang_days_likely_row": 0.0,
+                "row_proxy_share": 0.0,
+                "non_row_proxy_share": 0.0,
+                "project_months": 0,
+                "likely_row_project_months": 0,
+            },
+        }
+
+    gang_dates = frame[["gang_name", "date"]].drop_duplicates()
+    idle_rows: list[dict[str, object]] = []
+    for gang_name, gang_df in gang_dates.groupby("gang_name"):
+        dates = (
+            pd.to_datetime(gang_df["date"], errors="coerce")
+            .dropna()
+            .dt.date
+            .sort_values()
+            .tolist()
+        )
+        if len(dates) < 2:
+            continue
+        intervals = compute_intervals_for_dates(dates, skip_off_system=True)
+        for interval in intervals:
+            if bool(interval.get("skipped")):
+                continue
+            start = pd.Timestamp(interval["interval_start"]).normalize()
+            end = pd.Timestamp(interval["interval_end"]).normalize()
+            if pd.isna(start) or pd.isna(end) or end < start:
+                continue
+            for day in pd.date_range(start, end, freq="D"):
+                idle_rows.append(
+                    {
+                        "gang_name": str(gang_name),
+                        "date": day.normalize(),
+                    }
+                )
+
+    if idle_rows:
+        idle_days = pd.DataFrame(idle_rows).drop_duplicates()
+    else:
+        idle_days = pd.DataFrame(columns=["gang_name", "date"])
+    if idle_days.empty:
+        project_month_summary = active_gangs.copy()
+        project_month_summary["peak_idle_gangs_same_day"] = 0.0
+        project_month_summary["peak_idle_share"] = 0.0
+        project_month_summary["mean_idle_share"] = 0.0
+        project_month_summary["days_idle_share_gt50"] = 0
+        project_month_summary["likely_row"] = False
+        project_month_summary["idle_gang_days_total"] = 0.0
+        project_month_summary["idle_gang_days_likely_row"] = 0.0
+        project_month_summary["row_proxy_share"] = 0.0
+        project_month_summary["non_row_proxy_share"] = 1.0
+        project_month_summary = project_month_summary[project_month_columns]
+        return {
+            "project_month_summary": project_month_summary,
+            "proxy_summary": {
+                "idle_gang_days_total": 0.0,
+                "idle_gang_days_likely_row": 0.0,
+                "row_proxy_share": 0.0,
+                "non_row_proxy_share": 0.0,
+                "project_months": int(len(project_month_summary.index)),
+                "likely_row_project_months": 0,
+            },
+        }
+
+    idle_days["month"] = pd.to_datetime(idle_days["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    idle_assigned = idle_days.merge(
+        dominant_project,
+        on=["gang_name", "month"],
+        how="inner",
+    )
+    idle_day_counts = (
+        idle_assigned.groupby(["project_name", "month", "date"], dropna=False)["gang_name"]
+        .nunique()
+        .rename("idle_gangs_day")
+        .reset_index()
+    )
+
+    daily_frames: list[pd.DataFrame] = []
+    for row in active_gangs.itertuples(index=False):
+        project_name = str(getattr(row, "project_name", "")).strip()
+        month_value = pd.Timestamp(getattr(row, "month"))
+        active_count = int(getattr(row, "active_gangs_month") or 0)
+        if not project_name or pd.isna(month_value) or active_count <= 0:
+            continue
+        month_start = month_value.to_period("M").to_timestamp()
+        month_end = month_start + pd.offsets.MonthEnd(1)
+        daily_frames.append(
+            pd.DataFrame(
+                {
+                    "project_name": project_name,
+                    "month": month_start,
+                    "date": pd.date_range(month_start, month_end, freq="D"),
+                    "active_gangs_month": active_count,
+                }
+            )
+        )
+
+    if not daily_frames:
+        project_month_summary = pd.DataFrame(columns=project_month_columns)
+        proxy_summary = {
+            "idle_gang_days_total": 0.0,
+            "idle_gang_days_likely_row": 0.0,
+            "row_proxy_share": 0.0,
+            "non_row_proxy_share": 0.0,
+            "project_months": 0,
+            "likely_row_project_months": 0,
+        }
+        return {
+            "project_month_summary": project_month_summary,
+            "proxy_summary": proxy_summary,
+        }
+
+    daily = pd.concat(daily_frames, ignore_index=True)
+    daily = daily.merge(
+        idle_day_counts,
+        on=["project_name", "month", "date"],
+        how="left",
+    )
+    daily["idle_gangs_day"] = pd.to_numeric(daily["idle_gangs_day"], errors="coerce").fillna(0.0)
+    daily["idle_gangs_day"] = np.minimum(
+        daily["idle_gangs_day"],
+        pd.to_numeric(daily["active_gangs_month"], errors="coerce").fillna(0.0),
+    )
+    daily["idle_share_day"] = np.where(
+        pd.to_numeric(daily["active_gangs_month"], errors="coerce").fillna(0.0) > 0,
+        daily["idle_gangs_day"] / pd.to_numeric(daily["active_gangs_month"], errors="coerce").fillna(0.0),
+        0.0,
+    )
+    daily["is_likely_row_day"] = daily["idle_share_day"] > 0.5
+    daily["idle_gangs_likely_row"] = np.where(daily["is_likely_row_day"], daily["idle_gangs_day"], 0.0)
+
+    project_month_summary = (
+        daily.groupby(["project_name", "month", "active_gangs_month"], dropna=False)
+        .agg(
+            peak_idle_gangs_same_day=("idle_gangs_day", "max"),
+            peak_idle_share=("idle_share_day", "max"),
+            mean_idle_share=("idle_share_day", "mean"),
+            days_idle_share_gt50=("is_likely_row_day", "sum"),
+            idle_gang_days_total=("idle_gangs_day", "sum"),
+            idle_gang_days_likely_row=("idle_gangs_likely_row", "sum"),
+        )
+        .reset_index()
+    )
+    project_month_summary["likely_row"] = project_month_summary["days_idle_share_gt50"].astype(int) >= 1
+    project_month_summary["row_proxy_share"] = np.where(
+        pd.to_numeric(project_month_summary["idle_gang_days_total"], errors="coerce").fillna(0.0) > 0,
+        pd.to_numeric(project_month_summary["idle_gang_days_likely_row"], errors="coerce").fillna(0.0)
+        / pd.to_numeric(project_month_summary["idle_gang_days_total"], errors="coerce").fillna(0.0),
+        0.0,
+    )
+    project_month_summary["non_row_proxy_share"] = 1.0 - project_month_summary["row_proxy_share"]
+    project_month_summary = project_month_summary[project_month_columns]
+
+    idle_gang_days_total = float(pd.to_numeric(daily["idle_gangs_day"], errors="coerce").fillna(0.0).sum())
+    idle_gang_days_likely_row = float(
+        pd.to_numeric(daily.loc[daily["is_likely_row_day"], "idle_gangs_day"], errors="coerce")
+        .fillna(0.0)
+        .sum()
+    )
+    row_proxy_share = (
+        idle_gang_days_likely_row / idle_gang_days_total
+        if idle_gang_days_total > 0
+        else 0.0
+    )
+    proxy_summary = {
+        "idle_gang_days_total": idle_gang_days_total,
+        "idle_gang_days_likely_row": idle_gang_days_likely_row,
+        "row_proxy_share": row_proxy_share,
+        "non_row_proxy_share": 1.0 - row_proxy_share,
+        "project_months": int(len(project_month_summary.index)),
+        "likely_row_project_months": int(project_month_summary["likely_row"].sum()),
+    }
+    return {
+        "project_month_summary": project_month_summary,
+        "proxy_summary": proxy_summary,
+    }
+
+
+def compute_stint_consolidation_scenario(
+    erec_frame: pd.DataFrame,
+    reference_pct: float = 75,
+) -> dict[str, object]:
+    """Estimate consolidation upside for one-and-done stints with immediate continuation."""
+    scenario_columns = [
+        "gang_name",
+        "stint_id",
+        "project_name",
+        "start_date",
+        "completion_date",
+        "next_start_date",
+        "observed_gap_days",
+        "days_saved",
+        "next_rate",
+        "effective_rate",
+        "mt_recovered",
+        "gang_months_avoided",
+        "no_next_assignment",
+        "right_censored",
+        "eligible",
+    ]
+    empty_summary = {
+        "reference_pct": float(reference_pct),
+        "rate_cap": 0.0,
+        "stints_total": 0,
+        "one_and_done_total": 0,
+        "eligible_stints": 0,
+        "censored_stints": 0,
+        "days_saved_total": 0.0,
+        "mt_recovered_total": 0.0,
+        "gang_months_avoided_total": 0.0,
+    }
+
+    events = _build_erection_event_frame(erec_frame)
+    if events.empty:
+        return {
+            "per_stint_scenario": pd.DataFrame(columns=scenario_columns),
+            "scenario_summary": empty_summary,
+        }
+
+    stitched = _attach_stint_columns(events)
+    if stitched.empty:
+        return {
+            "per_stint_scenario": pd.DataFrame(columns=scenario_columns),
+            "scenario_summary": empty_summary,
+        }
+
+    dataset_end = pd.to_datetime(stitched["completion_date"], errors="coerce").max()
+    if pd.isna(dataset_end):
+        dataset_end = pd.to_datetime(stitched["start_date"], errors="coerce").max()
+    one_and_done_mask = stitched["stint_size"].astype(int) == 1
+    stitched["no_next_assignment"] = pd.to_datetime(stitched["next_start_date"], errors="coerce").isna()
+    if pd.notna(dataset_end):
+        stitched["days_to_dataset_end"] = (
+            dataset_end - pd.to_datetime(stitched["completion_date"], errors="coerce")
+        ).dt.days
+    else:
+        stitched["days_to_dataset_end"] = np.nan
+    stitched["right_censored"] = (
+        stitched["no_next_assignment"]
+        & pd.to_numeric(stitched["days_to_dataset_end"], errors="coerce").fillna(np.inf).le(IDLE_OFF_SYSTEM_GAP_DAYS)
+    )
+    stitched["eligible"] = (
+        one_and_done_mask
+        & (~stitched["no_next_assignment"])
+        & pd.to_numeric(stitched["observed_gap_days"], errors="coerce").fillna(-1).gt(IDLE_OFF_SYSTEM_GAP_DAYS)
+        & pd.to_numeric(stitched["next_rate"], errors="coerce").notna()
+    )
+
+    eligible_rates = pd.to_numeric(
+        stitched.loc[stitched["eligible"], "next_rate"],
+        errors="coerce",
+    ).dropna()
+    pct = min(max(float(reference_pct), 0.0), 100.0)
+    if not eligible_rates.empty:
+        rate_cap = float(np.nanpercentile(eligible_rates, pct))
+    else:
+        rate_cap = 0.0
+
+    stitched["effective_rate"] = np.where(
+        stitched["eligible"],
+        np.minimum(
+            pd.to_numeric(stitched["next_rate"], errors="coerce").fillna(0.0),
+            rate_cap if rate_cap > 0 else pd.to_numeric(stitched["next_rate"], errors="coerce").fillna(0.0),
+        ),
+        0.0,
+    )
+    stitched["days_saved"] = np.where(
+        stitched["eligible"],
+        pd.to_numeric(stitched["observed_gap_days"], errors="coerce").fillna(0.0).clip(lower=0.0),
+        0.0,
+    )
+    stitched["mt_recovered"] = stitched["days_saved"] * pd.to_numeric(stitched["effective_rate"], errors="coerce").fillna(0.0)
+    stitched["gang_months_avoided"] = stitched["days_saved"] / IDLE_NORM_DAYS_PER_MONTH
+
+    per_stint = stitched.loc[one_and_done_mask, scenario_columns].copy()
+    per_stint["project_name"] = per_stint.get("project_name", "").fillna("").astype(str).str.strip()
+    per_stint["eligible"] = per_stint["eligible"].fillna(False).astype(bool)
+    per_stint["no_next_assignment"] = per_stint["no_next_assignment"].fillna(False).astype(bool)
+    per_stint["right_censored"] = per_stint["right_censored"].fillna(False).astype(bool)
+
+    scenario_summary = {
+        "reference_pct": pct,
+        "rate_cap": float(rate_cap),
+        "stints_total": int(stitched[["gang_name", "stint_id"]].drop_duplicates().shape[0]),
+        "one_and_done_total": int(one_and_done_mask.sum()),
+        "eligible_stints": int(per_stint["eligible"].sum()),
+        "censored_stints": int(per_stint["right_censored"].sum()),
+        "days_saved_total": float(pd.to_numeric(per_stint["days_saved"], errors="coerce").fillna(0.0).sum()),
+        "mt_recovered_total": float(pd.to_numeric(per_stint["mt_recovered"], errors="coerce").fillna(0.0).sum()),
+        "gang_months_avoided_total": float(
+            pd.to_numeric(per_stint["gang_months_avoided"], errors="coerce").fillna(0.0).sum()
+        ),
+    }
+    return {
+        "per_stint_scenario": per_stint,
+        "scenario_summary": scenario_summary,
+    }
+
+
+def _build_erection_event_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Collapse daily rows into unique erection events using start/end signatures."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    required = {"gang_name", "start_date", "completion_date", "daily_prod_mt"}
+    if not required.issubset(frame.columns):
+        return pd.DataFrame()
+
+    work = frame.copy()
+    work["gang_name"] = work["gang_name"].fillna("").astype(str).str.strip()
+    work["start_date"] = pd.to_datetime(work["start_date"], errors="coerce").dt.normalize()
+    work["completion_date"] = pd.to_datetime(work["completion_date"], errors="coerce").dt.normalize()
+    work["daily_prod_mt"] = pd.to_numeric(work["daily_prod_mt"], errors="coerce")
+    work = work.dropna(subset=["gang_name", "start_date", "completion_date", "daily_prod_mt"]).copy()
+    work = work[work["gang_name"].astype(bool)]
+    if work.empty:
+        return pd.DataFrame()
+
+    if "project_name" not in work.columns:
+        work["project_name"] = ""
+    if "location_no" not in work.columns:
+        work["location_no"] = ""
+    if "tower_weight" not in work.columns:
+        work["tower_weight"] = np.nan
+    if "tower_type" not in work.columns:
+        work["tower_type"] = ""
+
+    key_columns = ["gang_name", "start_date", "completion_date", "project_name", "location_no"]
+    events = (
+        work.groupby(key_columns, dropna=False)
+        .agg(
+            daily_prod_mt=("daily_prod_mt", "mean"),
+            tower_weight=("tower_weight", "mean"),
+            tower_type=("tower_type", "last"),
+        )
+        .reset_index()
+    )
+    events = events.sort_values(["gang_name", "start_date", "completion_date"]).reset_index(drop=True)
+    return events
+
+
+def _attach_stint_columns(events: pd.DataFrame) -> pd.DataFrame:
+    """Attach stint identifiers and successor metadata on an erection-event frame."""
+    if events is None or events.empty:
+        return pd.DataFrame()
+    work = events.copy()
+    work["start_date"] = pd.to_datetime(work["start_date"], errors="coerce").dt.normalize()
+    work["completion_date"] = pd.to_datetime(work["completion_date"], errors="coerce").dt.normalize()
+    work["daily_prod_mt"] = pd.to_numeric(work["daily_prod_mt"], errors="coerce")
+    work = work.dropna(subset=["gang_name", "start_date", "completion_date", "daily_prod_mt"]).copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    work = work.sort_values(["gang_name", "start_date", "completion_date"]).reset_index(drop=True)
+    work["prev_complete"] = pd.to_datetime(work["completion_date"], errors="coerce").groupby(work["gang_name"]).shift(1)
+    work["gap_from_prev_end"] = (
+        pd.to_datetime(work["start_date"], errors="coerce") - pd.to_datetime(work["prev_complete"], errors="coerce")
+    ).dt.days - 1
+    work["new_stint"] = work["prev_complete"].isna() | (
+        pd.to_numeric(work["gap_from_prev_end"], errors="coerce").fillna(-1) > IDLE_OFF_SYSTEM_GAP_DAYS
+    )
+    work["stint_id"] = work.groupby("gang_name")["new_stint"].cumsum().astype(int)
+    work["stint_size"] = work.groupby(["gang_name", "stint_id"])["stint_id"].transform("size").astype(int)
+    work["pos_in_stint"] = work.groupby(["gang_name", "stint_id"]).cumcount() + 1
+    work["next_start_date"] = pd.to_datetime(work["start_date"], errors="coerce").groupby(work["gang_name"]).shift(-1)
+    work["next_rate"] = pd.to_numeric(work["daily_prod_mt"], errors="coerce").groupby(work["gang_name"]).shift(-1)
+    work["observed_gap_days"] = (
+        pd.to_datetime(work["next_start_date"], errors="coerce")
+        - pd.to_datetime(work["completion_date"], errors="coerce")
+    ).dt.days - 1
+    return work
+
+
+def _compute_stint_diagnostics(erec_frame: pd.DataFrame) -> dict[str, float | int]:
+    """Summarize first-erection behavior and one-and-done stint patterns."""
+    empty = {
+        "stints_total": 0,
+        "one_and_done_count": 0,
+        "one_and_done_share_pct": 0.0,
+        "one_and_done_confirmed_offsystem_count": 0,
+        "one_and_done_confirmed_offsystem_pct": 0.0,
+        "right_censored_one_and_done_count": 0,
+        "first_prod_mean": 0.0,
+        "follow_prod_mean": 0.0,
+        "follow_minus_first_abs": 0.0,
+        "follow_minus_first_pct_of_first": 0.0,
+        "first_slower_count": 0,
+        "first_slower_pct": 0.0,
+        "median_rest_minus_first": 0.0,
+        "mean_rest_minus_first": 0.0,
+    }
+    events = _build_erection_event_frame(erec_frame)
+    if events.empty:
+        return empty
+
+    stitched = _attach_stint_columns(events)
+    if stitched.empty:
+        return empty
+
+    dataset_end = pd.to_datetime(stitched["completion_date"], errors="coerce").max()
+    one_and_done = stitched[stitched["stint_size"] == 1].copy()
+    first_rows = stitched[stitched["pos_in_stint"] == 1].copy()
+    follow_rows = stitched[stitched["pos_in_stint"] > 1].copy()
+
+    if pd.notna(dataset_end) and not one_and_done.empty:
+        days_to_end = (dataset_end - pd.to_datetime(one_and_done["completion_date"], errors="coerce")).dt.days
+        one_and_done["right_censored"] = days_to_end.le(IDLE_OFF_SYSTEM_GAP_DAYS)
+        one_and_done["confirmed_offsystem"] = (
+            pd.to_datetime(one_and_done["next_start_date"], errors="coerce").notna()
+            | days_to_end.gt(IDLE_OFF_SYSTEM_GAP_DAYS)
+        )
+    else:
+        one_and_done["right_censored"] = False
+        one_and_done["confirmed_offsystem"] = pd.to_datetime(one_and_done.get("next_start_date"), errors="coerce").notna()
+
+    first_prod = pd.to_numeric(first_rows["daily_prod_mt"], errors="coerce").dropna()
+    follow_prod = pd.to_numeric(follow_rows["daily_prod_mt"], errors="coerce").dropna()
+    first_mean = float(first_prod.mean()) if not first_prod.empty else 0.0
+    follow_mean = float(follow_prod.mean()) if not follow_prod.empty else 0.0
+    follow_minus_first = follow_mean - first_mean
+    follow_minus_first_pct = (follow_minus_first / first_mean * 100.0) if first_mean > 0 else 0.0
+
+    stint_keys = ["gang_name", "stint_id"]
+    size_df = (
+        stitched.groupby(stint_keys, dropna=False)
+        .size()
+        .rename("size")
+        .reset_index()
+    )
+    first_df = (
+        stitched[stitched["pos_in_stint"] == 1][stint_keys + ["daily_prod_mt"]]
+        .rename(columns={"daily_prod_mt": "first_prod"})
+    )
+    rest_df = (
+        stitched[stitched["pos_in_stint"] > 1]
+        .groupby(stint_keys, dropna=False)["daily_prod_mt"]
+        .mean()
+        .rename("rest_mean")
+        .reset_index()
+    )
+    stint_compare = (
+        size_df.merge(first_df, on=stint_keys, how="left")
+        .merge(rest_df, on=stint_keys, how="left")
+    )
+    stint_compare = stint_compare[stint_compare["size"] >= 2].dropna(subset=["rest_mean"]).copy()
+    if stint_compare.empty:
+        first_slower_count = 0
+        first_slower_pct = 0.0
+        median_delta = 0.0
+        mean_delta = 0.0
+    else:
+        deltas = pd.to_numeric(stint_compare["rest_mean"], errors="coerce").fillna(0.0) - pd.to_numeric(
+            stint_compare["first_prod"], errors="coerce"
+        ).fillna(0.0)
+        first_slower_mask = deltas > 0
+        first_slower_count = int(first_slower_mask.sum())
+        first_slower_pct = float(first_slower_mask.mean() * 100.0)
+        median_delta = float(deltas.median())
+        mean_delta = float(deltas.mean())
+
+    stints_total = int(stitched[["gang_name", "stint_id"]].drop_duplicates().shape[0])
+    one_and_done_count = int(len(one_and_done.index))
+    return {
+        "stints_total": stints_total,
+        "one_and_done_count": one_and_done_count,
+        "one_and_done_share_pct": (
+            float(one_and_done_count / stints_total * 100.0) if stints_total > 0 else 0.0
+        ),
+        "one_and_done_confirmed_offsystem_count": int(one_and_done["confirmed_offsystem"].sum()),
+        "one_and_done_confirmed_offsystem_pct": (
+            float(one_and_done["confirmed_offsystem"].mean() * 100.0) if one_and_done_count > 0 else 0.0
+        ),
+        "right_censored_one_and_done_count": int(one_and_done["right_censored"].sum()),
+        "first_prod_mean": first_mean,
+        "follow_prod_mean": follow_mean,
+        "follow_minus_first_abs": float(follow_minus_first),
+        "follow_minus_first_pct_of_first": float(follow_minus_first_pct),
+        "first_slower_count": int(first_slower_count),
+        "first_slower_pct": float(first_slower_pct),
+        "median_rest_minus_first": float(median_delta),
+        "mean_rest_minus_first": float(mean_delta),
+    }
+
+
+def _compute_h2_idle_underutilization(
+    gang_metrics: pd.DataFrame,
+    *,
+    min_erections: int,
+) -> dict[str, object]:
+    """Summarize deployment-normalized idle behavior by productivity tier."""
+    tiers_columns = [
+        "tier",
+        "gangs",
+        "avg_idle_windows_per_deployment_month",
+        "avg_idle_days_per_deployment_month",
+        "p50_idle_windows_per_deployment_month",
+        "p75_idle_windows_per_deployment_month",
+        "p90_idle_windows_per_deployment_month",
+        "p50_idle_days_per_deployment_month",
+        "p75_idle_days_per_deployment_month",
+        "p90_idle_days_per_deployment_month",
+    ]
+    empty = {
+        "tiers": pd.DataFrame(columns=tiers_columns),
+        "delta_high_vs_low": {
+            "windows_per_deployment_delta": 0.0,
+            "days_per_deployment_delta": 0.0,
+            "windows_delta_pct_vs_low": 0.0,
+            "days_delta_pct_vs_low": 0.0,
+        },
+    }
+    if gang_metrics is None or gang_metrics.empty:
+        return empty
+
+    frame = gang_metrics.copy()
+    if "tier" not in frame.columns and "avg_prod_mt_day" in frame.columns:
+        frame["tier"] = frame["avg_prod_mt_day"].map(_assign_tier)
+    if "tier" not in frame.columns:
+        frame["tier"] = "Unknown"
+    if "erections_completed" in frame.columns:
+        frame = frame[pd.to_numeric(frame["erections_completed"], errors="coerce").fillna(0).ge(min_erections)]
+
+    if frame.empty:
+        return empty
+
+    for col in ("idle_windows_per_deployment_month", "idle_days_per_deployment_month"):
+        frame[col] = pd.to_numeric(frame.get(col), errors="coerce").fillna(0.0)
+
+    summary = (
+        frame.groupby("tier")
+        .agg(
+            gangs=("gang_name", "nunique"),
+            avg_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", "mean"),
+            avg_idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
+            p50_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", lambda series: series.quantile(0.50)),
+            p75_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", lambda series: series.quantile(0.75)),
+            p90_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", lambda series: series.quantile(0.90)),
+            p50_idle_days_per_deployment_month=("idle_days_per_deployment_month", lambda series: series.quantile(0.50)),
+            p75_idle_days_per_deployment_month=("idle_days_per_deployment_month", lambda series: series.quantile(0.75)),
+            p90_idle_days_per_deployment_month=("idle_days_per_deployment_month", lambda series: series.quantile(0.90)),
+        )
+        .reset_index()
+    )
+    tier_order = [
+        f"Low (<{PRODUCTIVITY_TIER_LOW:g})",
+        f"Mid ({PRODUCTIVITY_TIER_LOW:g}-{PRODUCTIVITY_TIER_HIGH:g})",
+        f"High (>{PRODUCTIVITY_TIER_HIGH:g})",
+    ]
+    summary["tier"] = pd.Categorical(summary["tier"], categories=tier_order, ordered=True)
+    summary = summary.sort_values("tier").reset_index(drop=True)
+    for column in summary.columns:
+        if column == "tier":
+            summary[column] = summary[column].astype(str)
+        else:
+            summary[column] = pd.to_numeric(summary[column], errors="coerce").fillna(0.0)
+
+    low_row = summary[summary["tier"] == tier_order[0]]
+    high_row = summary[summary["tier"] == tier_order[2]]
+    low_windows = float(low_row["avg_idle_windows_per_deployment_month"].iloc[0]) if not low_row.empty else 0.0
+    high_windows = float(high_row["avg_idle_windows_per_deployment_month"].iloc[0]) if not high_row.empty else 0.0
+    low_days = float(low_row["avg_idle_days_per_deployment_month"].iloc[0]) if not low_row.empty else 0.0
+    high_days = float(high_row["avg_idle_days_per_deployment_month"].iloc[0]) if not high_row.empty else 0.0
+
+    delta = {
+        "windows_per_deployment_delta": float(high_windows - low_windows),
+        "days_per_deployment_delta": float(high_days - low_days),
+        "windows_delta_pct_vs_low": float(((high_windows - low_windows) / low_windows * 100.0) if low_windows > 0 else 0.0),
+        "days_delta_pct_vs_low": float(((high_days - low_days) / low_days * 100.0) if low_days > 0 else 0.0),
+    }
+    return {
+        "tiers": summary[tiers_columns],
+        "delta_high_vs_low": delta,
+    }
 
 
 def _prepare_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1067,4 +1938,61 @@ def _empty_payload() -> dict:
     result["hotspot_top10_df"] = []
     result["pareto_metrics"] = result["pareto"]
     result["whatif_base_inputs"] = result["whatif"]
+    result["hypothesis"] = {
+        "h1_crosswalk": {
+            "by_gang_crosswalk": [],
+            "definition_summary": [],
+            "bucket_imbalance": [],
+        },
+        "h2_idle_underutilization": {
+            "tiers": [],
+            "delta_high_vs_low": {
+                "windows_per_deployment_delta": 0.0,
+                "days_per_deployment_delta": 0.0,
+                "windows_delta_pct_vs_low": 0.0,
+                "days_delta_pct_vs_low": 0.0,
+            },
+        },
+        "h3_stint_diagnostics": {
+            "stints_total": 0,
+            "one_and_done_count": 0,
+            "one_and_done_share_pct": 0.0,
+            "one_and_done_confirmed_offsystem_count": 0,
+            "one_and_done_confirmed_offsystem_pct": 0.0,
+            "right_censored_one_and_done_count": 0,
+            "first_prod_mean": 0.0,
+            "follow_prod_mean": 0.0,
+            "follow_minus_first_abs": 0.0,
+            "follow_minus_first_pct_of_first": 0.0,
+            "first_slower_count": 0,
+            "first_slower_pct": 0.0,
+            "median_rest_minus_first": 0.0,
+            "mean_rest_minus_first": 0.0,
+        },
+        "h3_consolidation_scenario": {
+            "per_stint_scenario": [],
+            "scenario_summary": {
+                "reference_pct": 75.0,
+                "rate_cap": 0.0,
+                "stints_total": 0,
+                "one_and_done_total": 0,
+                "eligible_stints": 0,
+                "censored_stints": 0,
+                "days_saved_total": 0.0,
+                "mt_recovered_total": 0.0,
+                "gang_months_avoided_total": 0.0,
+            },
+        },
+        "row_cooccurrence_proxy": {
+            "project_month_summary": [],
+            "proxy_summary": {
+                "idle_gang_days_total": 0.0,
+                "idle_gang_days_likely_row": 0.0,
+                "row_proxy_share": 0.0,
+                "non_row_proxy_share": 0.0,
+                "project_months": 0,
+                "likely_row_project_months": 0,
+            },
+        },
+    }
     return result
