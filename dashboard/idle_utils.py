@@ -293,8 +293,10 @@ def recovery_mt_estimate(
     """
     total = 0.0
     for g in gangs_summary:
-        recoverable_days = reduction_days_per_month * g["scope_months"]
-        total += g["baseline_mt_per_day"] * recoverable_days
+        deployment_months = float(g.get("deployment_months", g.get("scope_months", 0.0)) or 0.0)
+        baseline_mt_per_day = float(g.get("baseline_mt_per_day", 0.0) or 0.0)
+        recoverable_days = reduction_days_per_month * deployment_months
+        total += baseline_mt_per_day * recoverable_days
 
     return {
         "total_recovery_mt":        round(total, 1),
@@ -303,7 +305,7 @@ def recovery_mt_estimate(
         "reduction_days_per_month": reduction_days_per_month,
         "assumptions": [
             f"Idle reduction target: {reduction_days_per_month} days/month/gang",
-            f"Scope months vary per gang (from scope_start to scope_end)",
+            "Deployment months vary per gang (excluding confirmed off-system gaps)",
             "Baseline MT/day is gang-specific (falls back to config default if missing)",
             f"IDLE_MAX_GAP_DAYS cap = {IDLE_MAX_GAP_DAYS}",
             f"Off-system gaps (>{IDLE_OFF_SYSTEM_GAP_DAYS} days) excluded",

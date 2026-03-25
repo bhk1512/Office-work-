@@ -409,11 +409,11 @@ def build_stringing_analytics_layout() -> html.Div:
                             html.Div(
                                 [
                                     html.Div(
-                                        id="stringing-analytics-whatif-saved",
+                                        id="stringing-analytics-whatif-unlocked",
                                         className="analytics-whatif-value",
                                     ),
                                     html.Div(
-                                        "Equivalent gang-months saved",
+                                        "Additional output if bucket reaches target",
                                         className="analytics-whatif-label",
                                     ),
                                 ],
@@ -422,11 +422,11 @@ def build_stringing_analytics_layout() -> html.Div:
                             html.Div(
                                 [
                                     html.Div(
-                                        id="stringing-analytics-whatif-unlocked",
+                                        id="stringing-analytics-whatif-saved",
                                         className="analytics-whatif-value",
                                     ),
                                     html.Div(
-                                        "Equivalent km unlocked (illustrative)",
+                                        "Deployment slots freed for reallocation",
                                         className="analytics-whatif-label",
                                     ),
                                 ],

@@ -837,36 +837,68 @@ def _productivity_bucket_share(productivity: pd.DataFrame) -> list[dict[str, obj
 
 def _build_gang_month_buckets(daily: pd.DataFrame) -> dict[str, object]:
     if daily is None or daily.empty:
-        return {"summary": [], "rows": [], "total_output": 0.0, "total_gang_months": 0}
+        return {
+            "summary": [],
+            "rows": [],
+            "total_output": 0.0,
+            "total_gang_months": 0,
+            "total_active_days": 0.0,
+        }
     work = daily.copy()
     if "month" not in work.columns:
         if "date" in work.columns:
             work["month"] = pd.to_datetime(work["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
         else:
-            return {"summary": [], "rows": [], "total_output": 0.0, "total_gang_months": 0}
+            return {
+                "summary": [],
+                "rows": [],
+                "total_output": 0.0,
+                "total_gang_months": 0,
+                "total_active_days": 0.0,
+            }
     work["daily_km"] = pd.to_numeric(work.get("daily_km"), errors="coerce")
+    if "date" in work.columns:
+        work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.normalize()
+    else:
+        work["date"] = pd.NaT
     work = work.dropna(subset=["daily_km", "gang_name", "month"])
     if work.empty:
-        return {"summary": [], "rows": [], "total_output": 0.0, "total_gang_months": 0}
+        return {
+            "summary": [],
+            "rows": [],
+            "total_output": 0.0,
+            "total_gang_months": 0,
+            "total_active_days": 0.0,
+        }
 
     grouped = (
         work.groupby(["gang_name", "month"], dropna=False)
-        .agg(total_km=("daily_km", "sum"))
+        .agg(
+            total_km=("daily_km", "sum"),
+            active_days=("date", "nunique"),
+        )
         .reset_index()
     )
     grouped["bucket"] = grouped["total_km"].map(_productivity_bucket)
 
     total_output = float(grouped["total_km"].sum())
     total_gm = float(len(grouped.index))
+    total_active_days = float(grouped["active_days"].sum()) if total_gm else 0.0
 
     summary = (
         grouped.groupby("bucket")
-        .agg(gang_months=("gang_name", "size"), km_total=("total_km", "sum"))
+        .agg(
+            gang_months=("gang_name", "size"),
+            km_total=("total_km", "sum"),
+            active_days_total=("active_days", "sum"),
+        )
         .reset_index()
     )
     summary = summary.set_index("bucket").reindex([label for label, _, _ in _PRODUCTIVITY_BUCKETS], fill_value=0)
     summary = summary.reset_index()
-    summary["gang_month_share"] = summary["gang_months"].astype(float) / total_gm if total_gm else 0.0
+    summary["active_days_share"] = (
+        summary["active_days_total"].astype(float) / total_active_days if total_active_days else 0.0
+    )
     summary["km_share"] = summary["km_total"].astype(float) / total_output if total_output else 0.0
     summary["avg_km"] = (
         summary["km_total"].astype(float) / summary["gang_months"].replace(0, np.nan)
@@ -877,6 +909,7 @@ def _build_gang_month_buckets(daily: pd.DataFrame) -> dict[str, object]:
         "rows": grouped.to_dict("records"),
         "total_output": round(total_output, 2),
         "total_gang_months": int(total_gm),
+        "total_active_days": float(total_active_days),
     }
 
 

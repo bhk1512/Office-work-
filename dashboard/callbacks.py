@@ -151,7 +151,7 @@ _REGISTERED_DASH_APPS: "WeakSet[Dash]" = WeakSet()
 _ANALYTICS_CACHE_TTL_SECONDS = 12 * 60 * 60
 _ANALYTICS_CACHE_DIR = Path(".") / ".analytics_cache"
 _ANALYTICS_CACHE = Cache(str(_ANALYTICS_CACHE_DIR)) if Cache else None
-_ANALYTICS_STAMP_CACHE: dict[str, object] = {"stamp": "", "checked_at": 0.0}
+_ANALYTICS_STAMP_CACHE: dict[str, dict[str, object]] = {}
 
 _IDLE_INTERVAL_CACHE_TTL_SECONDS = 300.0
 _IDLE_INTERVAL_CACHE: dict[str, tuple[pd.DataFrame, float]] = {}
@@ -490,10 +490,20 @@ def _format_decimal(value: float | int | None) -> str:
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
 
 
+def _month_filter_for_frame(frame: pd.DataFrame) -> set[pd.Timestamp] | None:
+    if "month" not in frame.columns or frame.empty:
+        return None
+    months = pd.to_datetime(frame["month"], errors="coerce").dropna()
+    unique = set(months.dt.to_period("M").dt.to_timestamp().unique())
+    return unique if unique else None
+
+
 def _analytics_data_stamp(data_path: Path) -> str:
     now = time.time()
-    cached_stamp = _ANALYTICS_STAMP_CACHE.get("stamp")
-    cached_at = _ANALYTICS_STAMP_CACHE.get("checked_at", 0.0)
+    cache_key = str(Path(data_path))
+    cached_entry = _ANALYTICS_STAMP_CACHE.get(cache_key, {})
+    cached_stamp = cached_entry.get("stamp")
+    cached_at = cached_entry.get("checked_at", 0.0)
     if cached_stamp and isinstance(cached_at, (int, float)) and (now - cached_at) < 300:
         return str(cached_stamp)
 
@@ -513,8 +523,7 @@ def _analytics_data_stamp(data_path: Path) -> str:
     except Exception:
         stamp = 0.0
 
-    _ANALYTICS_STAMP_CACHE["stamp"] = stamp
-    _ANALYTICS_STAMP_CACHE["checked_at"] = now
+    _ANALYTICS_STAMP_CACHE[cache_key] = {"stamp": stamp, "checked_at": now}
     return str(stamp)
 
 
@@ -526,7 +535,7 @@ def _analytics_cache_key(
 ) -> str:
     payload = {
         "mode": "erection",
-        "bucket_version": "mt_day_v1",
+        "bucket_version": "mt_day_v2",
         "projects": sorted({str(value).strip() for value in projects if str(value).strip()}),
         "months": [ts.strftime("%Y-%m") for ts in months if isinstance(ts, pd.Timestamp)],
         "gangs": sorted({str(value).strip() for value in gangs if str(value).strip()}),
@@ -549,7 +558,7 @@ def _stringing_analytics_cache_key(
         "gangs": sorted({str(value).strip() for value in gangs if str(value).strip()}),
         "data_stamp": data_stamp,
         "compiled_rows": int(compiled_rows or 0),
-        "version": "v2",
+        "version": "v3",
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -10776,7 +10785,7 @@ def register_callbacks(
                 df["avg_mt_day"] = pd.to_numeric(df["avg_mt_day"], errors="coerce").round(2)
             definition = (
                 "Buckets use average MT/day per gang per calendar month. "
-                "Shares compare the count of deployments with their MT contribution. "
+                "Shares compare active-day share with MT contribution. "
                 "What-if assumes the selected bucket reaches the target MT/day while output and active days stay constant."
             )
             return columns, df.to_dict("records"), definition
@@ -11030,13 +11039,13 @@ def register_callbacks(
 
         scope_projects = int(scoped["project_name"].nunique()) if "project_name" in scoped.columns else 0
         scope_gangs = int(scoped["gang_name"].nunique()) if "gang_name" in scoped.columns else 0
-        scope_gang_months = int((payload.get("whatif_base_inputs") or {}).get("total_gang_months", 0))
+        scope_active_days = int((payload.get("whatif_base_inputs") or {}).get("total_active_days", 0))
         payload["scope"] = {
             "start": scope_start.strftime("%Y-%m-%d") if pd.notna(scope_start) else "",
             "end": scope_end.strftime("%Y-%m-%d") if pd.notna(scope_end) else "",
             "projects": scope_projects,
             "gangs": scope_gangs,
-            "gang_months": scope_gang_months,
+            "active_days": scope_active_days,
         }
         payload["meta"] = {
             "projects": project_list,
@@ -11053,7 +11062,7 @@ def register_callbacks(
         Output("analytics-scope-range", "children"),
         Output("analytics-scope-projects", "children"),
         Output("analytics-scope-gangs", "children"),
-        Output("analytics-scope-gangmonths", "children"),
+        Output("analytics-scope-activedays", "children"),
         Output("analytics-lowshare-scope", "children"),
         Input("analytics-payload", "data"),
     )
@@ -11076,12 +11085,12 @@ def register_callbacks(
 
         projects = int(scope.get("projects", 0) or 0)
         gangs = int(scope.get("gangs", 0) or 0)
-        gang_months = int(scope.get("gang_months", 0) or 0)
+        active_days = int(scope.get("active_days", 0) or 0)
         return (
             range_label,
             f"Projects: {projects}",
             f"Gangs: {gangs}",
-            f"Gang periods: {gang_months}",
+            f"Active days: {active_days:,}",
             scope_short,
         )
 
@@ -11092,16 +11101,18 @@ def register_callbacks(
         Output("analytics-kpi-idle-sub", "children"),
         Output("analytics-kpi-hotspot-value", "children"),
         Output("analytics-kpi-hotspot-sub", "children"),
+        Output("analytics-kpi-recovery-value", "children"),
+        Output("analytics-kpi-recovery-sub", "children"),
         Input("analytics-payload", "data"),
     )
     def _render_analytics_kpis(payload: dict[str, Any] | None):
         if not payload or not payload.get("kpis"):
-            return "N/A", "", "N/A", "", "N/A", ""
+            return "N/A", "", "N/A", "", "N/A", "", "N/A", ""
         kpis = payload["kpis"]
-        low_share = float(kpis.get("low_output_resources_share", 0.0)) * 100.0
+        low_share = float(kpis.get("low_output_active_days_share", 0.0)) * 100.0
         low_out = float(kpis.get("low_output_output_share", 0.0)) * 100.0
-        low_value = f"{low_share:.0f}% resources -> {low_out:.0f}% output"
-        low_sub = "Share of deployments vs MT output"
+        low_value = f"{low_share:.0f}% active days -> {low_out:.0f}% output"
+        low_sub = "Share of active days vs MT output"
 
         high_idle = float(kpis.get("idle_windows_high", 0.0))
         low_idle = float(kpis.get("idle_windows_low", 0.0))
@@ -11117,7 +11128,19 @@ def register_callbacks(
         else:
             hotspot_value = "No hotspot found"
             hotspot_sub = ""
-        return low_value, low_sub, idle_value, idle_sub, hotspot_value, hotspot_sub
+        recovery_mt = float((payload or {}).get("recovery_mt", 0.0))
+        recovery_value = f"{recovery_mt:,.0f} MT"
+        recovery_sub = "If each gang cuts 0.5 idle days/month"
+        return (
+            low_value,
+            low_sub,
+            idle_value,
+            idle_sub,
+            hotspot_value,
+            hotspot_sub,
+            recovery_value,
+            recovery_sub,
+        )
 
     @app.callback(
         Output("analytics-lowshare-chart", "figure"),
@@ -11261,11 +11284,12 @@ def register_callbacks(
         slider_value = _round_to_half(avg_mt_day)
         slider_value = max(2.0, min(20.0, slider_value))
 
-        total_gang_months = float((payload or {}).get("whatif_base_inputs", {}).get("total_gang_months", 0.0))
+        total_active_days = float((payload or {}).get("whatif_base_inputs", {}).get("total_active_days", 0.0))
+        bucket_active_days = float(bucket_row.get("active_days_total", 0.0)) if bucket_row else 0.0
         share_text = ""
-        if total_gang_months > 0:
-            share = gang_months / total_gang_months * 100.0
-            share_text = f"Selected bucket share: {share:.0f}% of gang periods"
+        if total_active_days > 0 and bucket_active_days > 0:
+            share = bucket_active_days / total_active_days * 100.0
+            share_text = f"Selected bucket share: {share:.0f}% of active days"
 
         return options, bucket_value, slider_value, False, share_text
 
@@ -11286,28 +11310,28 @@ def register_callbacks(
         bucket_map = {row.get("bucket_label"): row for row in summary_rows}
         bucket_row = bucket_map.get(bucket_value)
         if not bucket_row:
-            return "0%", "0", _analytics_empty_fig("No data")
+            return "+0 MT", "0 slots freed", _analytics_empty_fig("No data")
 
         total_inputs = (payload or {}).get("whatif_base_inputs", {})
-        total_output = float(total_inputs.get("total_output", 0.0))
         total_gm = float(total_inputs.get("total_gang_months", 0.0))
 
         n_bucket = float(bucket_row.get("gang_months", 0.0))
         total_bucket = float(bucket_row.get("mt_total", 0.0))
         current_avg = float(bucket_row.get("avg_mt_day", 0.0))
         avg_active_days = float(bucket_row.get("avg_active_days", 0.0))
+        active_days_total = float(bucket_row.get("active_days_total", 0.0))
         target_avg = float(target_value or 0.0)
 
-        if n_bucket <= 0 or total_gm <= 0 or total_output <= 0 or target_avg <= 0 or avg_active_days <= 0:
-            return "0%", "0", _analytics_empty_fig("No data")
+        if n_bucket <= 0 or total_gm <= 0 or target_avg <= 0 or avg_active_days <= 0 or active_days_total <= 0:
+            return "+0 MT", "0 slots freed", _analytics_empty_fig("No data")
 
         n_bucket_new = total_bucket / (target_avg * avg_active_days) if target_avg > 0 else n_bucket
         n_new = (total_gm - n_bucket) + n_bucket_new
         saved = total_gm - n_new
-        reduction_pct = (saved / total_gm * 100.0) if total_gm else 0.0
+        unlocked_mt = max(0.0, (target_avg - current_avg) * active_days_total)
 
-        reduction_text = f"{reduction_pct:.0f}%"
-        saved_text = f"{saved:.0f}"
+        reduction_text = f"+{unlocked_mt:,.0f} MT"
+        saved_text = f"{int(max(0.0, round(saved))):,} slots freed"
 
         fig = go.Figure()
         fig.add_bar(
@@ -11361,16 +11385,16 @@ def register_callbacks(
             labels = [label for label in bucket_order if label in bucket_map]
             if not labels:
                 labels = [str(row.get("bucket_label") or "") for row in bucket_rows]
-            gang_share = [_safe_float(bucket_map.get(label, {}).get("gang_month_share", 0.0)) * 100.0 for label in labels]
+            active_days_share = [_safe_float(bucket_map.get(label, {}).get("active_days_share", 0.0)) * 100.0 for label in labels]
             mt_share = [_safe_float(bucket_map.get(label, {}).get("mt_share", 0.0)) * 100.0 for label in labels]
-            if sum(gang_share) <= 0.0 and sum(mt_share) <= 0.0:
+            if sum(active_days_share) <= 0.0 and sum(mt_share) <= 0.0:
                 bucket_fig = _analytics_empty_fig("No bucket data")
             else:
                 bucket_fig = go.Figure()
                 bucket_fig.add_bar(
                     x=labels,
-                    y=gang_share,
-                    name="Deployment Share",
+                    y=active_days_share,
+                    name="Active-days Share",
                     marker_color="#2563eb",
                     hovertemplate="%{y:.1f}%<extra></extra>",
                 )
@@ -11401,33 +11425,32 @@ def register_callbacks(
             tier_labels = [label for label in tier_order if label in tier_map]
             if not tier_labels:
                 tier_labels = [str(row.get("tier") or "") for row in tier_rows]
-            tier_windows = [_safe_float(tier_map.get(label, {}).get("avg_idle_windows", 0.0)) for label in tier_labels]
-            tier_days = [_safe_float(tier_map.get(label, {}).get("avg_idle_days", 0.0)) for label in tier_labels]
-            if sum(tier_windows) <= 0.0 and sum(tier_days) <= 0.0:
+            tier_severity = [_safe_float(tier_map.get(label, {}).get("avg_days_per_window", 0.0)) for label in tier_labels]
+            tier_freq = [_safe_float(tier_map.get(label, {}).get("avg_idle_windows", 0.0)) for label in tier_labels]
+            if sum(tier_severity) <= 0.0:
                 tier_fig = _analytics_empty_fig("No tier data")
             else:
                 tier_fig = go.Figure()
                 tier_fig.add_bar(
                     x=tier_labels,
-                    y=tier_windows,
-                    name="Avg Idle Windows",
-                    marker_color="#f97316",
-                    text=[f"{value:.1f}" for value in tier_windows],
-                    textposition="outside",
-                    hovertemplate="%{y:.2f}<extra></extra>",
-                )
-                tier_fig.add_bar(
-                    x=tier_labels,
-                    y=tier_days,
-                    name="Avg Idle Days",
+                    y=tier_severity,
+                    name="Avg days per idle window",
                     marker_color="#38bdf8",
-                    text=[f"{value:.1f}" for value in tier_days],
+                    text=[f"{severity:.1f} days<br>({freq:.1f} windows)" for severity, freq in zip(tier_severity, tier_freq)],
                     textposition="outside",
-                    hovertemplate="%{y:.2f}<extra></extra>",
+                    hovertemplate="<b>%{x}</b><br>Days/window: %{y:.1f}<extra></extra>",
                 )
                 tier_fig.update_layout(
-                    barmode="group",
-                    **_analytics_chart_layout("Tier", "Avg Idle Windows / Days"),
+                    **_analytics_chart_layout("Tier", "Avg days per idle window"),
+                )
+                tier_fig.add_annotation(
+                    text=f"Idle days capped at {IDLE_MAX_GAP_DAYS} per gap; labels include avg windows/gang",
+                    x=0.5,
+                    y=-0.18,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    font={"size": 10, "color": "#6b7280"},
                 )
 
         hist_rows = payload.get("histogram", {}).get("bins") or []
@@ -11489,7 +11512,7 @@ def register_callbacks(
         title = "Audit"
         if trigger == "analytics-kpi-low-output":
             selection = {"kind": "bucket", "bucket": "0-4"}
-            title = "Low-output Deployment"
+            title = "Low-output Active-day Share"
         elif trigger == "analytics-kpi-idle-windows":
             selection = {
                 "kind": "idle_windows",
@@ -11743,8 +11766,8 @@ def register_callbacks(
                 {"name": "Bucket", "id": "bucket"},
             ]
             definition = (
-                "What-if uses gang-month totals (sum of daily km per gang per calendar month). "
-                "Illustrative only; assumes output constant."
+                "What-if rows are gang-month totals (sum of daily km per gang per calendar month). "
+                "Bucket share is computed from active days in the selected window; illustrative only."
             )
             return columns, df.to_dict("records"), definition
 
@@ -12079,15 +12102,18 @@ def register_callbacks(
         avg_km = float(bucket_row.get("avg_km", 0.0)) if bucket_row else 0.0
         disabled = float(bucket_row.get("gang_months", 0.0)) <= 0 if bucket_row else True
         status = ""
-        total_gm = float((payload or {}).get("productivity", {}).get("gang_months", {}).get("total_gang_months", 0.0))
-        if total_gm > 0 and bucket_row:
-            share = float(bucket_row.get("gang_months", 0.0)) / total_gm * 100.0
-            status = f"Selected bucket share: {share:.0f}% of gang periods"
+        total_active_days = float(
+            (payload or {}).get("productivity", {}).get("gang_months", {}).get("total_active_days", 0.0)
+        )
+        if total_active_days > 0 and bucket_row:
+            bucket_active_days = float(bucket_row.get("active_days_total", 0.0))
+            share = bucket_active_days / total_active_days * 100.0
+            status = f"Selected bucket share: {share:.0f}% of active days"
         return options, bucket_value, round(avg_km or 4, 1), disabled, status
 
     @app.callback(
-        Output("stringing-analytics-whatif-saved", "children"),
         Output("stringing-analytics-whatif-unlocked", "children"),
+        Output("stringing-analytics-whatif-saved", "children"),
         Output("stringing-analytics-whatif-chart", "figure"),
         Input("stringing-analytics-payload", "data"),
         Input("stringing-analytics-whatif-bucket", "value"),
@@ -12103,14 +12129,14 @@ def register_callbacks(
         bucket_map = {row.get("bucket"): row for row in summary_rows}
         bucket_row = bucket_map.get(bucket_value)
         if not bucket_row:
-            return "0", "0", _analytics_empty_fig("No data")
+            return "+0.0 km", "0.0 slots freed", _analytics_empty_fig("No data")
         total_gm = float(gang_months.get("total_gang_months", 0.0))
         n_bucket = float(bucket_row.get("gang_months", 0.0))
         total_bucket = float(bucket_row.get("km_total", 0.0))
         current_avg = float(bucket_row.get("avg_km", 0.0))
         target_avg = float(target_value or 0.0)
         if n_bucket <= 0 or total_gm <= 0 or target_avg <= 0:
-            return "0", "0", _analytics_empty_fig("No data")
+            return "+0.0 km", "0.0 slots freed", _analytics_empty_fig("No data")
         n_bucket_new = total_bucket / target_avg if target_avg > 0 else n_bucket
         n_new = (total_gm - n_bucket) + n_bucket_new
         saved = total_gm - n_new
@@ -12132,7 +12158,7 @@ def register_callbacks(
             xaxis={"title": ""},
             yaxis={"title": "KM/month"},
         )
-        return f"{saved:.1f}", f"{unlocked:.1f}", fig
+        return f"+{unlocked:.1f} km", f"{max(saved, 0.0):.1f} slots freed", fig
 
     @app.callback(
         Output("stringing-analytics-flow-hist", "figure"),

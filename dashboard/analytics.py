@@ -401,7 +401,7 @@ def compute_idle_definition_crosswalk(gang_frame: pd.DataFrame) -> dict[str, pd.
         "bucket_label",
         "gang_months",
         "mt_total",
-        "gang_month_share",
+        "active_days_share",
         "mt_share",
         "avg_mt_day",
         "avg_active_days",
@@ -540,7 +540,7 @@ def compute_idle_definition_crosswalk(gang_frame: pd.DataFrame) -> dict[str, pd.
                 "bucket_label",
                 "gang_months",
                 "mt_total",
-                "gang_month_share",
+                "active_days_share",
                 "mt_share",
                 "avg_mt_day",
                 "avg_active_days",
@@ -548,7 +548,7 @@ def compute_idle_definition_crosswalk(gang_frame: pd.DataFrame) -> dict[str, pd.
         ].copy()
         bucket_imbalance["imbalance_ratio"] = np.where(
             pd.to_numeric(bucket_imbalance["mt_share"], errors="coerce").fillna(0.0) > 0,
-            pd.to_numeric(bucket_imbalance["gang_month_share"], errors="coerce").fillna(0.0)
+            pd.to_numeric(bucket_imbalance["active_days_share"], errors="coerce").fillna(0.0)
             / pd.to_numeric(bucket_imbalance["mt_share"], errors="coerce").fillna(0.0),
             np.nan,
         )
@@ -1270,6 +1270,7 @@ def _compute_gang_month_buckets(
 
     total_gang_months = float(len(grouped.index))
     total_mt = float(grouped["total_mt"].sum()) if total_gang_months else 0.0
+    total_active_days = float(grouped["active_days"].sum()) if total_gang_months else 0.0
 
     summary = (
         grouped.groupby("bucket_label")
@@ -1281,8 +1282,8 @@ def _compute_gang_month_buckets(
         .reset_index()
     )
     summary = summary.set_index("bucket_label").reindex(labels, fill_value=0).reset_index()
-    summary["gang_month_share"] = (
-        summary["gang_months"].astype(float) / total_gang_months if total_gang_months else 0.0
+    summary["active_days_share"] = (
+        summary["active_days_total"].astype(float) / total_active_days if total_active_days else 0.0
     )
     summary["mt_share"] = summary["mt_total"].astype(float) / total_mt if total_mt else 0.0
     summary["avg_mt"] = (
@@ -1478,6 +1479,10 @@ def _compute_gang_metrics(
     gang_metrics["idle_days_per_deployment_month"] = pd.to_numeric(
         gang_metrics["idle_days_per_deployment_month"], errors="coerce"
     ).fillna(0.0).round(3)
+    gang_metrics["days_per_window"] = (
+        gang_metrics["idle_days_capped"].astype(float)
+        / gang_metrics["idle_windows"].replace(0, np.nan).astype(float)
+    ).fillna(0.0).round(3)
     return gang_metrics
 
 
@@ -1525,6 +1530,7 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
                 "avg_idle_days_per_active_month": [0.0, 0.0, 0.0],
                 "avg_idle_windows_per_deployment_month": [0.0, 0.0, 0.0],
                 "avg_idle_days_per_deployment_month": [0.0, 0.0, 0.0],
+                "avg_days_per_window": [0.0, 0.0, 0.0],
                 "avg_deployment_months": [0.0, 0.0, 0.0],
                 "gangs": [0, 0, 0],
             }
@@ -1538,6 +1544,7 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
         "idle_days_per_active_month",
         "idle_windows_per_deployment_month",
         "idle_days_per_deployment_month",
+        "days_per_window",
         "deployment_months",
     ):
         if column not in frame.columns:
@@ -1553,6 +1560,7 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
             avg_idle_days_per_active_month=("idle_days_per_active_month", "mean"),
             avg_idle_windows_per_deployment_month=("idle_windows_per_deployment_month", "mean"),
             avg_idle_days_per_deployment_month=("idle_days_per_deployment_month", "mean"),
+            avg_days_per_window=("days_per_window", "mean"),
             avg_deployment_months=("deployment_months", "mean"),
             gangs=("gang_name", "nunique"),
         )
@@ -1567,6 +1575,7 @@ def _compute_tier_summary(frame: pd.DataFrame) -> pd.DataFrame:
     summary["avg_idle_days_per_active_month"] = summary["avg_idle_days_per_active_month"].astype(float)
     summary["avg_idle_windows_per_deployment_month"] = summary["avg_idle_windows_per_deployment_month"].astype(float)
     summary["avg_idle_days_per_deployment_month"] = summary["avg_idle_days_per_deployment_month"].astype(float)
+    summary["avg_days_per_window"] = summary["avg_days_per_window"].astype(float)
     summary["avg_deployment_months"] = summary["avg_deployment_months"].astype(float)
     summary["gangs"] = summary["gangs"].astype(int)
     return summary
@@ -1731,11 +1740,11 @@ def _compute_trends(
         month_df = frame[frame["month"] == month_value]
         if month_df.empty:
             continue
-        month_buckets, month_rows = _compute_gang_month_buckets(month_df)
-        if not month_rows.empty:
-            low_count = int((month_rows["bucket_label"] == "0-4").sum())
-            total_count = int(len(month_rows.index))
-            pct_low = (low_count / total_count * 100.0) if total_count else 0.0
+        month_buckets, _month_rows = _compute_gang_month_buckets(month_df)
+        if not month_buckets.empty:
+            low_row = month_buckets[month_buckets["bucket_label"] == "0-4"]
+            low_share = float(low_row["active_days_share"].iloc[0]) if not low_row.empty else 0.0
+            pct_low = low_share * 100.0
         else:
             pct_low = 0.0
         low_rows.append({"month": month_value, "pct_low_bucket": pct_low})
@@ -1788,6 +1797,7 @@ def _compute_whatif_inputs(gang_month_rows: pd.DataFrame) -> dict[str, float]:
             "low_bucket_count": 0.0,
             "low_bucket_output": 0.0,
             "total_gang_months": 0.0,
+            "total_active_days": 0.0,
             "total_output": 0.0,
             "low_bucket_avg": 0.0,
         }
@@ -1798,12 +1808,14 @@ def _compute_whatif_inputs(gang_month_rows: pd.DataFrame) -> dict[str, float]:
     low_output = float(working.loc[low_mask, "total_mt"].sum())
     low_active_days = float(pd.to_numeric(working.loc[low_mask, "active_days"], errors="coerce").fillna(0).sum())
     total_gm = float(len(working.index))
+    total_active_days = float(pd.to_numeric(working["active_days"], errors="coerce").fillna(0.0).sum())
     total_output = float(working["total_mt"].sum())
     low_avg = (low_output / low_active_days) if low_active_days else 0.0
     return {
         "low_bucket_count": low_count,
         "low_bucket_output": low_output,
         "total_gang_months": total_gm,
+        "total_active_days": total_active_days,
         "total_output": total_output,
         "low_bucket_avg": low_avg,
     }
@@ -1815,7 +1827,7 @@ def _build_kpis(
     project_summary: pd.DataFrame,
 ) -> dict:
     low_bucket = bucket_summary[bucket_summary["bucket_label"] == "0-4"]
-    low_share = float(low_bucket["gang_month_share"].iloc[0]) if not low_bucket.empty else 0.0
+    low_share = float(low_bucket["active_days_share"].iloc[0]) if not low_bucket.empty else 0.0
     low_mt_share = float(low_bucket["mt_share"].iloc[0]) if not low_bucket.empty else 0.0
 
     def _tier_value(label: str) -> float:
@@ -1846,7 +1858,7 @@ def _build_kpis(
             next_value = float(ranked.iloc[1].get("idle_days_per_100", 0.0) or 0.0)
 
     return {
-        "low_output_resources_share": low_share,
+        "low_output_active_days_share": low_share,
         "low_output_output_share": low_mt_share,
         "idle_windows_high": high_idle,
         "idle_windows_low": low_idle,
@@ -1885,7 +1897,7 @@ def _empty_bucket_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
                 "gang_months",
                 "mt_total",
                 "active_days_total",
-                "gang_month_share",
+                "active_days_share",
                 "mt_share",
                 "avg_mt",
                 "avg_mt_day",
@@ -1909,7 +1921,7 @@ def _empty_bucket_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
 def _empty_payload() -> dict:
     payload = AnalyticsPayload(
         kpis={
-            "low_output_resources_share": 0.0,
+            "low_output_active_days_share": 0.0,
             "low_output_output_share": 0.0,
             "idle_windows_high": 0.0,
             "idle_windows_low": 0.0,
@@ -1928,6 +1940,7 @@ def _empty_payload() -> dict:
             "low_bucket_count": 0.0,
             "low_bucket_output": 0.0,
             "total_gang_months": 0.0,
+            "total_active_days": 0.0,
             "total_output": 0.0,
             "low_bucket_avg": 0.0,
         },

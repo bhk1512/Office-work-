@@ -95,7 +95,7 @@ def build_analytics_layout() -> html.Div:
             html.Span(id="analytics-scope-range", className="analytics-scope-chip"),
             html.Span(id="analytics-scope-projects", className="analytics-scope-chip"),
             html.Span(id="analytics-scope-gangs", className="analytics-scope-chip"),
-            html.Span(id="analytics-scope-gangmonths", className="analytics-scope-chip"),
+            html.Span(id="analytics-scope-activedays", className="analytics-scope-chip"),
             html.Span("Idle cap: 15 days/window", className="analytics-scope-chip"),
         ],
         className="analytics-scope-strip analytics-scope-strip--inline",
@@ -107,7 +107,7 @@ def build_analytics_layout() -> html.Div:
                 html.Button(
                     [
                         html.Div(
-                            "Low-productivity deployment (0-4 MT/day bucket)",
+                            "Low-productivity active-day share (0-4 MT/day bucket)",
                             className="analytics-kpi-title",
                         ),
                         html.Div(id="analytics-kpi-low-output-value", className="analytics-kpi-value"),
@@ -118,7 +118,7 @@ def build_analytics_layout() -> html.Div:
                     n_clicks=0,
                     type="button",
                 ),
-                md=4,
+                md=3,
             ),
             dbc.Col(
                 html.Button(
@@ -135,7 +135,7 @@ def build_analytics_layout() -> html.Div:
                     n_clicks=0,
                     type="button",
                 ),
-                md=4,
+                md=3,
             ),
             dbc.Col(
                 html.Button(
@@ -149,7 +149,21 @@ def build_analytics_layout() -> html.Div:
                     n_clicks=0,
                     type="button",
                 ),
-                md=4,
+                md=3,
+            ),
+            dbc.Col(
+                html.Button(
+                    [
+                        html.Div("Recoverable output (estimate)", className="analytics-kpi-title"),
+                        html.Div(id="analytics-kpi-recovery-value", className="analytics-kpi-value"),
+                        html.Div(id="analytics-kpi-recovery-sub", className="analytics-kpi-sub"),
+                    ],
+                    id="analytics-kpi-recovery",
+                    className="analytics-kpi-card",
+                    n_clicks=0,
+                    type="button",
+                ),
+                md=3,
             ),
         ],
         className="g-3 mb-4",
@@ -195,7 +209,7 @@ def build_analytics_layout() -> html.Div:
                                     className="analytics-whatif-value",
                                 ),
                                 html.Div(
-                                    "Estimated deployment reduction",
+                                    "Additional output if bucket reaches target",
                                     className="analytics-whatif-label",
                                 ),
                             ],
@@ -208,7 +222,7 @@ def build_analytics_layout() -> html.Div:
                                     className="analytics-whatif-value",
                                 ),
                                 html.Div(
-                                    "Equivalent gang periods saved",
+                                    "Deployment slots freed for reallocation",
                                     className="analytics-whatif-label",
                                 ),
                             ],
@@ -254,7 +268,7 @@ def build_analytics_layout() -> html.Div:
                     [
                         dbc.CardHeader(
                             [
-                                html.Div("Deployment vs Output Share", className="section-title"),
+                                html.Div("Active-days vs Output Share", className="section-title"),
                                 html.Div("Bucketed by MT/day", className="section-sub"),
                             ]
                         ),
@@ -268,11 +282,11 @@ def build_analytics_layout() -> html.Div:
                                 html.Div(
                                     [
                                         html.Div(
-                                            "Low-productivity deployment share",
+                                            "Low-productivity active-day share",
                                             className="analytics-lowshare-title",
                                         ),
                                         html.Div(
-                                            "% of gang periods in 0-4 MT/day bucket",
+                                            "% of active days in <4 MT/day bucket",
                                             className="analytics-lowshare-subtitle",
                                         ),
                                         html.Div(
