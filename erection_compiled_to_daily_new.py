@@ -73,7 +73,7 @@ TARGET_SHEET_REGEX = re.compile(r"^\s*erection\s*.*\s*compiled\s*$", flags=re.I)
 # Business rules (centralized here)
 START_CUTOFF = pd.Timestamp("2021-01-01")
 TODAY = pd.Timestamp.today().normalize()
-TOWER_MIN_MT = 4.0
+TOWER_MIN_MT = 0.0
 TOWER_MAX_MT = 500.0
 DEFAULT_TOWER_WEIGHT_ASSUMED_MT = 45.0
 
