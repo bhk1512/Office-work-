@@ -544,9 +544,48 @@ def _extract_template_column_map(ws) -> Dict[int, str]:
     return col_map
 
 
+def _extract_voltage_token(value: object) -> str:
+    text = _normalize_space_only(value)
+    if not text:
+        return ""
+    match = re.search(r"(\d{2,4})\s*kv\b", text)
+    if match:
+        return match.group(1)
+    compact = re.sub(r"\s+", "", text)
+    match = re.search(r"(\d{2,4})kv\b", compact)
+    return match.group(1) if match else ""
+
+
+def _select_template_mapping_for_request(
+    template_entries: List[Dict[str, object]] | None,
+    configured_sheet_name: object = "",
+    line_name: object = "",
+) -> Optional[Dict[str, object]]:
+    if not template_entries:
+        return None
+    if len(template_entries) == 1:
+        return template_entries[0]
+
+    request_token = _extract_voltage_token(configured_sheet_name) or _extract_voltage_token(line_name)
+    if request_token:
+        token_matches = [
+            entry for entry in template_entries if str(entry.get("voltage_token", "")).strip() == request_token
+        ]
+        if token_matches:
+            token_matches.sort(key=lambda item: len(item.get("column_map", {}) or {}), reverse=True)
+            return token_matches[0]
+
+    ranked = sorted(
+        template_entries,
+        key=lambda item: len(item.get("column_map", {}) or {}),
+        reverse=True,
+    )
+    return ranked[0] if ranked else None
+
+
 def load_erection_template_mapping_config(
     input_folder: Optional[Path],
-) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
+) -> Tuple[Dict[str, List[Dict[str, object]]], Dict[str, str]]:
     config_path = _resolve_dpr_config_path(input_folder)
     if config_path is None:
         return {}, {}
@@ -555,7 +594,7 @@ def load_erection_template_mapping_config(
         wb = load_workbook(config_path, data_only=True, read_only=True)
     except Exception as exc:
         logger.warning("Erection template config: failed to read DPR config '%s': %s", config_path, exc)
-        return {}
+        return {}, {}
 
     try:
         if "Sheet Names Check" not in wb.sheetnames:
@@ -576,7 +615,7 @@ def load_erection_template_mapping_config(
         if project_idx is None or check_idx is None:
             return {}, {}
 
-        mapping: Dict[str, Tuple[Dict[int, str], str]] = {}
+        mapping: Dict[str, List[Dict[str, object]]] = {}
         errors: Dict[str, str] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row is None:
@@ -597,21 +636,26 @@ def load_erection_template_mapping_config(
                 )
                 continue
 
-            best_sheet = None
-            best_map: Dict[int, str] = {}
+            template_entries: List[Dict[str, object]] = []
             for sheet_name in template_sheets:
                 col_map = _extract_template_column_map(wb[sheet_name])
-                if len(col_map) > len(best_map):
-                    best_map = col_map
-                    best_sheet = sheet_name
+                if not col_map:
+                    continue
+                template_entries.append(
+                    {
+                        "template_sheet": sheet_name,
+                        "column_map": col_map,
+                        "voltage_token": _extract_voltage_token(sheet_name),
+                    }
+                )
 
-            if not best_map or not best_sheet:
+            if not template_entries:
                 errors[project_key] = (
                     f"Erection template tab(s) for project '{str(project).strip()}' have no usable 'To Map' mapping row."
                 )
                 continue
 
-            mapping[project_key] = (best_map, best_sheet)
+            mapping[project_key] = template_entries
         return mapping, errors
     finally:
         wb.close()
@@ -955,6 +999,7 @@ def process_file(
     configured_sheet_names: Optional[List[Dict[str, str]]] = None,
     template_column_map: Optional[Dict[int, str]] = None,
     template_sheet_name: Optional[str] = None,
+    template_mappings: Optional[List[Dict[str, object]]] = None,
 ):
     """
     Process a single workbook; return:
@@ -1046,6 +1091,17 @@ def process_file(
         selector = sheet_request["selector"]
         sheet_line_name = normalize_line_name(sheet_request.get("line_name", "")) or file_line_name
         line_name_source = str(sheet_request.get("line_name_source", "")).strip()
+        selected_template_column_map = template_column_map
+        selected_template_sheet_name = template_sheet_name
+        if template_mappings:
+            selected_template = _select_template_mapping_for_request(
+                template_mappings,
+                configured_sheet_name=requested_name,
+                line_name=sheet_line_name,
+            )
+            if selected_template:
+                selected_template_column_map = selected_template.get("column_map")
+                selected_template_sheet_name = str(selected_template.get("template_sheet", "")).strip() or None
         project_name = build_project_display(project_code_display, sheet_line_name, base_project_name)
         project_scope_key = build_project_scope_key(project_code_display, sheet_line_name, project_name)
         try:
@@ -1085,7 +1141,7 @@ def process_file(
         hdr_row, cols = find_header_row(
             df_raw,
             search_rows=30,
-            min_score=1.0 if template_column_map else 3.0,
+            min_score=1.0 if selected_template_column_map else 3.0,
         )
         if hdr_row is None:
             issues.append(
@@ -1101,9 +1157,9 @@ def process_file(
         df.columns = cols
 
         applied_mapping: List[str] = []
-        if template_column_map:
+        if selected_template_column_map:
             remapped_columns = list(df.columns)
-            for idx, mapped in sorted(template_column_map.items()):
+            for idx, mapped in sorted(selected_template_column_map.items()):
                 if idx >= len(remapped_columns):
                     continue
                 current = nrm_header(remapped_columns[idx])
@@ -1138,8 +1194,8 @@ def process_file(
         }
         if requested_name:
             diag["configured_sheet"] = requested_name
-        if template_column_map:
-            diag["template_mapping_sheet"] = template_sheet_name or ""
+        if selected_template_column_map:
+            diag["template_mapping_sheet"] = selected_template_sheet_name or ""
             diag["template_mapping_applied"] = bool(applied_mapping)
             diag["template_mapping_changes"] = "; ".join(applied_mapping)
 
@@ -1407,9 +1463,14 @@ def main(argv=None):
         configured_erection_sheets = erection_sheet_config.get(project_key)
         template_column_map = None
         template_sheet_name = None
+        template_mappings = None
         template_error = erection_template_errors.get(project_key)
         if project_key in erection_template_config:
-            template_column_map, template_sheet_name = erection_template_config[project_key]
+            template_mappings = erection_template_config[project_key]
+            selected_project_template = _select_template_mapping_for_request(template_mappings)
+            if selected_project_template:
+                template_column_map = selected_project_template.get("column_map")
+                template_sheet_name = str(selected_project_template.get("template_sheet", "")).strip() or None
         if template_error:
             all_issues.append(
                 {
@@ -1434,6 +1495,7 @@ def main(argv=None):
                 configured_sheet_names=configured_erection_sheets,
                 template_column_map=template_column_map,
                 template_sheet_name=template_sheet_name,
+                template_mappings=template_mappings,
             )
         except Exception as e:
             # Guardrail: never let a single bad file crash the whole pipeline
