@@ -71,6 +71,14 @@ SUMMARY_METRIC_LABELS = {
     TOTAL_MT_COLUMN: "Total MT",
     TOTAL_COUNT_COLUMN: "Total No. of Erections",
 }
+VOLTAGE_FAMILY_WEIGHT_COLUMNS = [
+    "Voltage",
+    "Tower family",
+    "Total MT",
+    "Total No. of Erections",
+    "Average Tower Weight",
+]
+VOLTAGE_FAMILY_WEIGHT_ORDER = ("400 & Below", "765", "800")
 MONTHLY_AVG_LABEL = "Avg Productivity"
 MONTHLY_COUNT_LABEL = "No. of Erections"
 MONTHLY_MT_LABEL = "MT Erected"
@@ -870,6 +878,94 @@ def _annotate_scope_with_voltage(scope: pd.DataFrame, voltage_lookup: dict[str, 
     working["voltage_label"] = working["voltage_label"].fillna("Unmapped")
 
     return working
+
+
+def _normalize_voltage_bucket(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return "Unmapped"
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return "Unmapped"
+    try:
+        kv = float(match.group(1))
+    except (TypeError, ValueError):
+        return "Unmapped"
+    if kv <= 400.0:
+        return "400 & Below"
+    if abs(kv - 765.0) < 0.5:
+        return "765"
+    if abs(kv - 800.0) < 0.5:
+        return "800"
+    return "Other"
+
+
+def _build_voltage_family_weight_table(completions: pd.DataFrame) -> pd.DataFrame:
+    empty_grid = pd.DataFrame(
+        [
+            {"Voltage": voltage, "Tower family": family}
+            for voltage in VOLTAGE_FAMILY_WEIGHT_ORDER
+            for family in TOWER_BUCKETS
+        ]
+    )
+    if completions is None or completions.empty:
+        for column in VOLTAGE_FAMILY_WEIGHT_COLUMNS[2:]:
+            empty_grid[column] = 0.0 if column != "Total No. of Erections" else 0
+        return empty_grid[VOLTAGE_FAMILY_WEIGHT_COLUMNS]
+
+    working = completions.copy()
+    if "tower_family" not in working.columns:
+        tower_series = working.get("tower_type")
+        if tower_series is None:
+            working["tower_family"] = "Unknown"
+        else:
+            normalized = tower_series.fillna("").astype(str).str.strip().str.upper()
+            family = normalized.str.extract(r"^(DA|DB|DC|DD)", expand=False)
+            working["tower_family"] = family.fillna("Unknown")
+    else:
+        working["tower_family"] = (
+            working["tower_family"].fillna("").astype(str).str.strip().str.upper().replace("", "Unknown")
+        )
+    working = working[working["tower_family"].isin(TOWER_BUCKETS)]
+
+    working["voltage_bucket"] = working.get("voltage_label", "").map(_normalize_voltage_bucket)
+    working = working[working["voltage_bucket"].isin(VOLTAGE_FAMILY_WEIGHT_ORDER)]
+    if working.empty:
+        for column in VOLTAGE_FAMILY_WEIGHT_COLUMNS[2:]:
+            empty_grid[column] = 0.0 if column != "Total No. of Erections" else 0
+        return empty_grid[VOLTAGE_FAMILY_WEIGHT_COLUMNS]
+
+    tower_weights = pd.to_numeric(
+        working.get("_tower_weight", working.get("tower_weight")),
+        errors="coerce",
+    ).fillna(0.0)
+    working = working.assign(_tower_weight=tower_weights)
+
+    grouped = (
+        working.groupby(["voltage_bucket", "tower_family"], dropna=False)
+        .agg(
+            **{
+                "Total MT": ("_tower_weight", "sum"),
+                "Total No. of Erections": ("_tower_weight", "size"),
+                "Average Tower Weight": ("_tower_weight", "mean"),
+            }
+        )
+        .reset_index()
+        .rename(columns={"voltage_bucket": "Voltage", "tower_family": "Tower family"})
+    )
+
+    summary = empty_grid.merge(grouped, on=["Voltage", "Tower family"], how="left")
+    summary["Total MT"] = pd.to_numeric(summary["Total MT"], errors="coerce").fillna(0.0).round(2)
+    summary["Total No. of Erections"] = (
+        pd.to_numeric(summary["Total No. of Erections"], errors="coerce").fillna(0).astype(int)
+    )
+    summary["Average Tower Weight"] = pd.to_numeric(summary["Average Tower Weight"], errors="coerce").fillna(0.0)
+    has_rows = summary["Total No. of Erections"] > 0
+    summary.loc[has_rows, "Average Tower Weight"] = (
+        summary.loc[has_rows, "Total MT"] / summary.loc[has_rows, "Total No. of Erections"]
+    )
+    summary["Average Tower Weight"] = summary["Average Tower Weight"].round(2)
+    return summary[VOLTAGE_FAMILY_WEIGHT_COLUMNS]
 
 
 def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, dict[str, str]]:
@@ -6557,6 +6653,7 @@ def export_voltage_tower_productivity_summary(
         include_weekly=False,
         metric_labels=YTD_METRIC_LABELS,
     )
+    voltage_family_weight_table = _build_voltage_family_weight_table(completions)
 
     sheet_label = _sanitize_sheet_name(sheet_name or _DEFAULT_KV_SHEET_NAME) or _DEFAULT_KV_SHEET_NAME
     issues_label = _sanitize_sheet_name(issues_sheet_name or "Issues") or "Issues"
@@ -6572,7 +6669,7 @@ def export_voltage_tower_productivity_summary(
     LOGGER.info("Exporting KV productivity summary for %s to %s", period_label, target_path)
 
     gap_rows = max(2, int(blank_rows_between_tables))
-    tables = [voltage_table, family_table, tower_table]
+    tables = [voltage_family_weight_table, voltage_table, family_table, tower_table]
     issues_table = _build_kv_export_issues(source_daily, month_start, month_end, voltage_lookup)
     start_row = 0
     with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
