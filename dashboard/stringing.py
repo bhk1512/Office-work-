@@ -1030,19 +1030,31 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
             group_key = candidate
             break
 
+    def _inference_sample(frame: pd.DataFrame) -> pd.Series:
+        series_values = frame["length_m"]
+        if isinstance(series_values, pd.DataFrame):
+            merged_values = pd.Series(pd.NA, index=frame.index, dtype="object")
+            for _, series in series_values.items():
+                candidate = series.mask(_blank_like_mask(series), pd.NA)
+                merged_values = merged_values.where(~_blank_like_mask(merged_values), candidate)
+            series_values = merged_values
+        numeric = pd.to_numeric(series_values, errors="coerce")
+        if "from_ap" in frame.columns and "to_ap" in frame.columns:
+            from_blank = _blank_like_mask(frame["from_ap"])
+            to_blank = _blank_like_mask(frame["to_ap"])
+            span_like = ~(from_blank & to_blank)
+            if bool(span_like.any()):
+                filtered = numeric.where(span_like)
+                if filtered.notna().any():
+                    return filtered
+        return numeric
+
     if group_key:
         for key, group in out.groupby(group_key, dropna=False):
-            group_length_values = group["length_m"]
-            if isinstance(group_length_values, pd.DataFrame):
-                merged = pd.Series(pd.NA, index=group.index, dtype="object")
-                for _, series in group_length_values.items():
-                    candidate = series.mask(_blank_like_mask(series), pd.NA)
-                    merged = merged.where(~_blank_like_mask(merged), candidate)
-                group_length_values = merged
-            unit = _infer_length_unit(pd.to_numeric(group_length_values, errors="coerce"))
+            unit = _infer_length_unit(_inference_sample(group))
             unit_series.loc[group.index] = unit
     else:
-        unit = _infer_length_unit(raw_values)
+        unit = _infer_length_unit(_inference_sample(out))
         unit_series = pd.Series(unit, index=out.index, dtype="object")
 
     unit_series = unit_series.fillna("m")
