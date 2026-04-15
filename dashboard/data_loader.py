@@ -623,10 +623,10 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     dpr_issue_rows: list[dict[str, Any]] = []
     configured_codes: set[str] = set(stringing_sheet_config.keys())
     files_by_project: dict[str, list[str]] = {}
-    workbooks_by_project: dict[str, list[Path]] = {}
+    workbooks_by_project_line: dict[tuple[str, str], list[Path]] = {}
     workbook_sheet_cache: dict[str, list[str]] = {}
     coverage_attempt_rows: list[dict[str, Any]] = []
-    selected_workbook_by_project: dict[str, Path] = {}
+    selected_workbook_by_project_line: dict[tuple[str, str], Path] = {}
     erection_daily_reference = _load_erection_daily_reference()
 
     def _append_plan_index_entry(
@@ -786,27 +786,34 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
         key = _normalize_project_code_key(proj)
+        identity = parse_project_identity_from_filename(wb.name)
+        file_line = normalize_line_name(identity.get("line_name", ""))
+        line_key = _normalize_space_only(file_line)
         files_by_project.setdefault(key, []).append(wb.name)
-        workbooks_by_project.setdefault(key, []).append(wb)
+        workbooks_by_project_line.setdefault((key, line_key), []).append(wb)
         try:
             sheet_names, _ = _list_excel_sheet_names(wb)
             workbook_sheet_cache[str(wb.resolve())] = list(sheet_names or [])
         except Exception:
             workbook_sheet_cache[str(wb.resolve())] = []
 
-    for project_key, project_workbooks in workbooks_by_project.items():
+    for project_line_key, project_workbooks in workbooks_by_project_line.items():
+        project_key = project_line_key[0]
         configured_entries = stringing_sheet_config.get(project_key)
         best = _pick_best_project_workbook(project_workbooks, configured_entries, workbook_sheet_cache)
         if best is not None:
-            selected_workbook_by_project[project_key] = best
+            selected_workbook_by_project_line[project_line_key] = best
 
     today = pd.Timestamp.today().normalize()
 
     for wb in candidates:
         proj = _project_from_filename(wb.name) or "UNKNOWN"
+        identity = parse_project_identity_from_filename(wb.name)
+        file_line_name = normalize_line_name(identity.get("line_name", ""))
         project_key = _normalize_project_code_key(proj)
+        project_line_key = (project_key, _normalize_space_only(file_line_name))
         project_sheet_candidates = stringing_sheet_config.get(project_key)
-        selected_wb = selected_workbook_by_project.get(project_key)
+        selected_wb = selected_workbook_by_project_line.get(project_line_key)
         if selected_wb is not None and wb.resolve() != selected_wb.resolve():
             continue
         template_pair = stringing_template_config.get(project_key)
@@ -850,8 +857,14 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
         for sheet_entry in sheet_requests:
             configured_name = str(sheet_entry.get("sheet_name", "")).strip()
-            line_name_override = normalize_line_name(sheet_entry.get("line_name", ""))
-            line_name_source = str(sheet_entry.get("line_name_source", "")).strip()
+            configured_line_name = normalize_line_name(sheet_entry.get("line_name", ""))
+            configured_line_source = str(sheet_entry.get("line_name_source", "")).strip()
+            if configured_line_name:
+                line_name_override = configured_line_name
+                line_name_source = configured_line_source or "config"
+            else:
+                line_name_override = file_line_name
+                line_name_source = configured_line_source or ("filename" if line_name_override else "")
             project_display = build_project_display(proj, line_name_override, proj) or proj
 
             if template_error:
