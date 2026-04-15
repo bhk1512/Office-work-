@@ -1845,19 +1845,45 @@ def _read_prebuilt_stringing_artifacts(
                 pass
 
         if compiled_df is not None and daily_df is not None:
-            latest_artifact_mtime = 0.0
-            for artifact in (
-                workbook_path,
-                root / "StringingCompiled.parquet",
-                root / "StringingDaily.parquet",
-                root / "StringingCoverage.parquet",
-            ):
-                if artifact.exists():
+            source_artifact_mtime = 0.0
+            source_artifacts: list[str | Path] = []
+            if compiled_source is not None:
+                source_artifacts.append(compiled_source)
+            elif compiled_from_workbook:
+                source_artifacts.append(workbook_path)
+            if daily_source is not None:
+                source_artifacts.append(daily_source)
+            elif daily_from_workbook:
+                source_artifacts.append(workbook_path)
+            coverage_source = _find_parquet_source(root, "StringingCoverage")
+            if coverage_source is not None:
+                source_artifacts.append(coverage_source)
+            elif workbook_path.exists():
+                source_artifacts.append(workbook_path)
+
+            for artifact in source_artifacts:
+                artifact_text = str(artifact)
+                if not artifact_text:
+                    continue
+                if "*" in artifact_text:
+                    pattern = Path(artifact_text)
                     try:
-                        latest_artifact_mtime = max(latest_artifact_mtime, float(artifact.stat().st_mtime))
+                        for candidate in pattern.parent.glob(pattern.name):
+                            if candidate.exists():
+                                source_artifact_mtime = max(
+                                    source_artifact_mtime,
+                                    float(candidate.stat().st_mtime),
+                                )
                     except Exception:
                         continue
-            if latest_input_mtime and latest_artifact_mtime and latest_input_mtime > (latest_artifact_mtime + 1.0):
+                    continue
+                artifact_path = Path(artifact_text)
+                if artifact_path.exists():
+                    try:
+                        source_artifact_mtime = max(source_artifact_mtime, float(artifact_path.stat().st_mtime))
+                    except Exception:
+                        continue
+            if latest_input_mtime and source_artifact_mtime and latest_input_mtime > (source_artifact_mtime + 1.0):
                 LOGGER.info(
                     "Stringing: cached artifacts in %s are stale vs newer DPR input files; forcing rebuild.",
                     root,
@@ -1897,6 +1923,18 @@ def _read_prebuilt_stringing_artifacts(
                     "Stringing: cached dataset in %s missing project metadata (%s); forcing rebuild",
                     root,
                     ", ".join(missing_parts),
+                )
+                continue
+            if not _stringing_frame_source_files_exist(compiled_df, Path(raw_root)):
+                LOGGER.warning(
+                    "Stringing: cached compiled dataset in %s points to missing DPR source files; forcing rebuild",
+                    root,
+                )
+                continue
+            if not _stringing_frame_source_files_exist(daily_df, Path(raw_root)):
+                LOGGER.warning(
+                    "Stringing: cached daily dataset in %s points to missing DPR source files; forcing rebuild",
+                    root,
                 )
                 continue
             if not coverage_present:
@@ -1950,6 +1988,37 @@ def _stringing_frame_has_project_metadata(df: pd.DataFrame) -> bool:
         return bool(mask.any())
 
     return _has_values("project_name") or _has_values("project") or _has_values("project_display")
+
+
+def _stringing_frame_source_files_exist(df: pd.DataFrame, raw_root: Path) -> bool:
+    """Return False when cached source_file references no longer exist under raw_root."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty or "source_file" not in df.columns:
+        return True
+    if not raw_root.exists() or not raw_root.is_dir():
+        return True
+
+    source_files = {
+        str(value).strip()
+        for value in df["source_file"].tolist()
+        if str(value).strip() and str(value).strip().lower() not in {"nan", "none", "null"}
+    }
+    if not source_files:
+        return True
+
+    missing = sorted(name for name in source_files if not (raw_root / name).exists())
+    if not missing:
+        return True
+
+    preview = ", ".join(missing[:5])
+    if len(missing) > 5:
+        preview += ", ..."
+    LOGGER.warning(
+        "Stringing: cached frame references missing RAW source files (%d): %s",
+        len(missing),
+        preview,
+    )
+    return False
 
 
 def _ttl_lru_cache(maxsize: int, ttl_seconds: int):

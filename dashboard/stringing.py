@@ -503,6 +503,73 @@ def _empty_stage_frame() -> pd.DataFrame:
     )
 
 
+def _is_blank_like(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    text = str(value).strip().lower()
+    return text in {"", "nan", "none", "null"}
+
+
+def _blank_like_mask(series: pd.Series) -> pd.Series:
+    if not isinstance(series, pd.Series):
+        return pd.Series([], dtype=bool)
+    mask = series.isna()
+    try:
+        text = series.astype("string").fillna("").str.strip().str.lower()
+        mask = mask | text.isin({"", "nan", "none", "null"})
+    except Exception:
+        pass
+    return mask.fillna(True)
+
+
+def _coalesce_duplicate_named_columns(df: pd.DataFrame, column_name: str) -> pd.DataFrame:
+    """Merge duplicate columns with the same name by taking first non-blank value."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    matches = [idx for idx, col in enumerate(out.columns) if col == column_name]
+    if len(matches) <= 1:
+        return out
+
+    merged = pd.Series(pd.NA, index=out.index, dtype="object")
+    for idx in matches:
+        series = out.iloc[:, idx]
+        candidate = series.mask(_blank_like_mask(series), pd.NA)
+        merged = merged.where(~_blank_like_mask(merged), candidate)
+
+    first_idx = matches[0]
+    out.iloc[:, first_idx] = merged
+    keep_mask = [idx == first_idx or col != column_name for idx, col in enumerate(out.columns)]
+    out = out.iloc[:, keep_mask].copy()
+    return out
+
+
+def _collapse_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse known duplicate mapped columns and then keep first of any remaining duplicates."""
+    if df is None or df.empty or df.columns.is_unique:
+        return df
+    out = df.copy()
+    for name in (
+        "length_m",
+        "po_start_date",
+        "po_completion_date",
+        "fs_starting_date",
+        "fs_complete_date",
+        "po",
+        "method",
+        "gang_name",
+    ):
+        out = _coalesce_duplicate_named_columns(out, name)
+    if not out.columns.is_unique:
+        out = out.loc[:, ~out.columns.duplicated(keep="first")].copy()
+    return out
+
+
 _LOCATION_RE = re.compile(r"^\s*(\d+)([A-Za-z]+)?(?:\s*/\s*(\d+))?\s*$")
 _AP_PREFIX_RE = re.compile(r"^\s*ap[\s\-_/]*", flags=re.IGNORECASE)
 _GANTRY_RE = re.compile(r"\b(gantry|gty)\b", flags=re.IGNORECASE)
@@ -715,6 +782,7 @@ def _expand_stringing_stage_to_daily(
         return _empty_stage_frame()
 
     normalized, _ = normalize_stringing_columns(df)
+    normalized = _collapse_duplicate_columns(normalized)
     normalized, _length_metrics = add_length_units(normalized)
     project_col = _pick_project_column(df) or _pick_project_column(normalized)
 
@@ -785,6 +853,8 @@ def _expand_stringing_stage_to_daily(
     for _, r in valid.iterrows():
         start: pd.Timestamp = r[start_col]
         end: pd.Timestamp = r[end_col]
+        method_inferred_value = r.get("method_inferred", False)
+        method_inferred = False if _is_blank_like(method_inferred_value) else bool(method_inferred_value)
         for d in pd.date_range(start, end, freq="D"):
             project_val = r[project_col] if project_col and project_col in valid.columns else pd.NA
             date_norm = d.normalize()
@@ -797,7 +867,7 @@ def _expand_stringing_stage_to_daily(
                 "from_ap": r["from_ap"],
                 "to_ap": r["to_ap"],
                 "method": r["method"],
-                "method_inferred": bool(r.get("method_inferred", False)),
+                "method_inferred": method_inferred,
                 "method_inference_reason": r.get("method_inference_reason", ""),
                 "section_readiness": r["section_readiness"],
                 "po_id": r["po"],
@@ -936,6 +1006,7 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
         }
 
     out = df.copy()
+    out = _collapse_duplicate_columns(out)
     if "length_m" not in out.columns:
         return out, {
             "total_length_km": 0.0,
@@ -943,7 +1014,14 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
             "max_length_km": 0.0,
         }
 
-    raw_values = pd.to_numeric(out["length_m"], errors="coerce")
+    length_values = out["length_m"]
+    if isinstance(length_values, pd.DataFrame):
+        merged = pd.Series(pd.NA, index=out.index, dtype="object")
+        for _, series in length_values.items():
+            candidate = series.mask(_blank_like_mask(series), pd.NA)
+            merged = merged.where(~_blank_like_mask(merged), candidate)
+        length_values = merged
+    raw_values = pd.to_numeric(length_values, errors="coerce")
     unit_series = pd.Series(index=out.index, dtype="object")
 
     group_key = None
@@ -954,7 +1032,14 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
 
     if group_key:
         for key, group in out.groupby(group_key, dropna=False):
-            unit = _infer_length_unit(pd.to_numeric(group["length_m"], errors="coerce"))
+            group_length_values = group["length_m"]
+            if isinstance(group_length_values, pd.DataFrame):
+                merged = pd.Series(pd.NA, index=group.index, dtype="object")
+                for _, series in group_length_values.items():
+                    candidate = series.mask(_blank_like_mask(series), pd.NA)
+                    merged = merged.where(~_blank_like_mask(merged), candidate)
+                group_length_values = merged
+            unit = _infer_length_unit(pd.to_numeric(group_length_values, errors="coerce"))
             unit_series.loc[group.index] = unit
     else:
         unit = _infer_length_unit(raw_values)
