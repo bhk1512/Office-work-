@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 
 from dashboard.config import AppConfig, configure_logging
 from dashboard.plan_utils import compact_project_key, normalize_location
-from dashboard.project_identity import build_project_rollup_identity
+from dashboard.project_identity import build_project_rollup_identity, extract_base_project_code
 from dashboard.state import AppDataStore
 from dashboard.stringing import (
     expand_stringing_to_daily,
@@ -638,9 +638,14 @@ def _prepare_stringing_scope(daily_df: pd.DataFrame, project_info: pd.DataFrame 
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
     working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
     working["project_name"] = working.get("project_name", working.get("project", "")).fillna("").astype(str).str.strip()
+    raw_project_display = (
+        working.get("project_display", working["project_name"]).fillna("").astype(str).str.strip()
+    )
     project_code = working.get("project_code", pd.Series("", index=working.index)).fillna("").astype(str).str.strip()
     existing_norm = working.get("project_key_norm", pd.Series("", index=working.index)).fillna("").astype(str)
+    project_name_base = working["project_name"].map(extract_base_project_code)
     fallback_norm = project_code.map(compact_project_key)
+    fallback_norm = fallback_norm.where(fallback_norm.astype(bool), project_name_base.map(compact_project_key))
     fallback_norm = fallback_norm.where(fallback_norm.astype(bool), working["project_name"].map(compact_project_key))
     working["project_key_norm"] = existing_norm.where(existing_norm.astype(bool), fallback_norm)
 
@@ -648,22 +653,35 @@ def _prepare_stringing_scope(daily_df: pd.DataFrame, project_info: pd.DataFrame 
     if lookup:
         def _lookup_meta(value: object) -> dict[str, str] | None:
             key = compact_project_key(value)
-            return lookup.get(key)
+            if key and key in lookup:
+                return lookup.get(key)
+            base_code = extract_base_project_code(value)
+            if base_code:
+                return lookup.get(compact_project_key(base_code))
+            return None
 
         meta_from_key = working["project_key_norm"].map(_lookup_meta)
         meta_from_name = working["project_name"].map(_lookup_meta)
         meta_series = meta_from_key.where(meta_from_key.notna(), meta_from_name)
-        working["project_display"] = meta_series.map(
+        mapped_project_display = meta_series.map(
             lambda rec: rec.get("project_display", "") if isinstance(rec, dict) else ""
         )
+        working["project_display"] = raw_project_display.where(
+            raw_project_display.astype(bool),
+            mapped_project_display,
+        )
         working["project_display"] = working["project_display"].where(
-            working["project_display"].astype(bool), working["project_name"]
+            working["project_display"].astype(bool),
+            working["project_name"],
         )
         working["pch_display"] = meta_series.map(
             lambda rec: rec.get("pch", "") if isinstance(rec, dict) else ""
         )
     else:
-        working["project_display"] = working["project_name"]
+        working["project_display"] = raw_project_display.where(
+            raw_project_display.astype(bool),
+            working["project_name"],
+        )
         working["pch_display"] = ""
 
     working["pch_display"] = working["pch_display"].fillna("").astype(str).str.strip()
@@ -681,9 +699,14 @@ def _prepare_stringing_compiled_scope(compiled_df: pd.DataFrame, project_info: p
     normalized["month"] = normalized["fs_complete_date"].dt.to_period("M").dt.to_timestamp()
     normalized["gang_name"] = normalized.get("gang_name", "").fillna("").astype(str).str.strip()
     normalized["project_name"] = normalized.get("project_name", normalized.get("project", "")).fillna("").astype(str).str.strip()
+    raw_project_display = (
+        normalized.get("project_display", normalized["project_name"]).fillna("").astype(str).str.strip()
+    )
     project_code = normalized.get("project_code", pd.Series("", index=normalized.index)).fillna("").astype(str).str.strip()
     existing_norm = normalized.get("project_key_norm", pd.Series("", index=normalized.index)).fillna("").astype(str)
+    project_name_base = normalized["project_name"].map(extract_base_project_code)
     fallback_norm = project_code.map(compact_project_key)
+    fallback_norm = fallback_norm.where(fallback_norm.astype(bool), project_name_base.map(compact_project_key))
     fallback_norm = fallback_norm.where(fallback_norm.astype(bool), normalized["project_name"].map(compact_project_key))
     normalized["project_key_norm"] = existing_norm.where(existing_norm.astype(bool), fallback_norm)
 
@@ -691,22 +714,35 @@ def _prepare_stringing_compiled_scope(compiled_df: pd.DataFrame, project_info: p
     if lookup:
         def _lookup_meta(value: object) -> dict[str, str] | None:
             key = compact_project_key(value)
-            return lookup.get(key)
+            if key and key in lookup:
+                return lookup.get(key)
+            base_code = extract_base_project_code(value)
+            if base_code:
+                return lookup.get(compact_project_key(base_code))
+            return None
 
         meta_from_key = normalized["project_key_norm"].map(_lookup_meta)
         meta_from_name = normalized["project_name"].map(_lookup_meta)
         meta_series = meta_from_key.where(meta_from_key.notna(), meta_from_name)
-        normalized["project_display"] = meta_series.map(
+        mapped_project_display = meta_series.map(
             lambda rec: rec.get("project_display", "") if isinstance(rec, dict) else ""
         )
+        normalized["project_display"] = raw_project_display.where(
+            raw_project_display.astype(bool),
+            mapped_project_display,
+        )
         normalized["project_display"] = normalized["project_display"].where(
-            normalized["project_display"].astype(bool), normalized["project_name"]
+            normalized["project_display"].astype(bool),
+            normalized["project_name"],
         )
         normalized["pch_display"] = meta_series.map(
             lambda rec: rec.get("pch", "") if isinstance(rec, dict) else ""
         )
     else:
-        normalized["project_display"] = normalized["project_name"]
+        normalized["project_display"] = raw_project_display.where(
+            raw_project_display.astype(bool),
+            normalized["project_name"],
+        )
         normalized["pch_display"] = ""
 
     normalized["pch_display"] = normalized["pch_display"].fillna("").astype(str).str.strip()
@@ -1079,17 +1115,6 @@ def _monthly_column_layout(
         top_headers.append("")
         bottom_headers.append(label)
 
-    for month_label in month_labels:
-        ordered_columns.extend(
-            [
-                _monthly_avg_column(month_label),
-                _monthly_gangs_column(month_label),
-                _monthly_km_column(month_label),
-            ]
-        )
-        top_headers.extend([month_label, "", ""])
-        bottom_headers.extend([MONTHLY_AVG_LABEL, MONTHLY_GANGS_LABEL, MONTHLY_KM_LABEL])
-
     ordered_columns.extend(
         [
             _monthly_avg_column("Overall"),
@@ -1099,6 +1124,18 @@ def _monthly_column_layout(
     )
     top_headers.extend(["Overall", "", ""])
     bottom_headers.extend([MONTHLY_AVG_LABEL, MONTHLY_GANGS_LABEL, MONTHLY_KM_LABEL])
+
+    # Display latest month first in the monthly summary sheet.
+    for month_label in reversed(month_labels):
+        ordered_columns.extend(
+            [
+                _monthly_avg_column(month_label),
+                _monthly_gangs_column(month_label),
+                _monthly_km_column(month_label),
+            ]
+        )
+        top_headers.extend([month_label, "", ""])
+        bottom_headers.extend([MONTHLY_AVG_LABEL, MONTHLY_GANGS_LABEL, MONTHLY_KM_LABEL])
     return ordered_columns, top_headers, bottom_headers
 
 
