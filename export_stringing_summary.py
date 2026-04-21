@@ -6,6 +6,7 @@ import argparse
 import logging
 import re
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -247,6 +248,27 @@ def _add_span_key(df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def _normalize_gang_series(series: object, *, index: pd.Index | None = None) -> pd.Series:
+    if isinstance(series, pd.Series):
+        normalized = series.copy()
+        if index is not None and not normalized.index.equals(index):
+            normalized = normalized.reindex(index)
+    elif index is not None:
+        normalized = pd.Series("", index=index, dtype="object")
+    else:
+        normalized = pd.Series([], dtype="object")
+    normalized = normalized.fillna("").astype(str).str.strip()
+    blank_mask = normalized.str.lower().isin({"", "nan", "none", "null"})
+    return normalized.where(~blank_mask, "")
+
+
+def _count_unique_gangs(series: object) -> int:
+    normalized = _normalize_gang_series(series)
+    if normalized.empty:
+        return 0
+    return int(normalized.replace("", pd.NA).nunique(dropna=True))
+
+
 def _build_stage_summary(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(
@@ -266,6 +288,7 @@ def _build_stage_summary(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
         )
     working = _add_span_key(df)
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
+    working["gang_name"] = _normalize_gang_series(working.get("gang_name"), index=working.index)
     dates = pd.to_datetime(working.get("date"), errors="coerce").dropna()
     avg_prod = round(float(working["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR), 4) if len(working) else 0.0
     return pd.DataFrame(
@@ -276,7 +299,7 @@ def _build_stage_summary(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
                 "total_km": round(float(working["daily_km"].sum()), 4),
                 "active_days": int(dates.nunique()) if not dates.empty else 0,
                 "spans": int(working["span_key"].nunique()),
-                "gangs": int(working.get("gang_name", pd.Series([], dtype=object)).nunique()),
+                "gangs": _count_unique_gangs(working.get("gang_name")),
                 "projects": int(working["project_key_norm"].nunique()),
                 "start_date": dates.min() if not dates.empty else pd.NaT,
                 "end_date": dates.max() if not dates.empty else pd.NaT,
@@ -301,8 +324,8 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
     working = _add_span_key(df)
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
     working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
-    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
-    working = working[working["gang_name"].astype(bool)]
+    working["gang_name"] = _normalize_gang_series(working.get("gang_name"), index=working.index)
+    working = working[working["gang_name"] != ""]
     if working.empty:
         return pd.DataFrame(
             columns=[
@@ -337,6 +360,101 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
     return grouped.sort_values(["stage", "gang_name"]).reset_index(drop=True)
 
 
+def _clean_optional_text(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    if text.lower() in {"", "nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _normalize_column_label(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _iter_project_candidate_keys(*values: object) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _clean_optional_text(value)
+        if not text:
+            continue
+        for candidate in (text, extract_base_project_code(text)):
+            compact = compact_project_key(candidate)
+            if compact and compact not in seen:
+                seen.add(compact)
+                keys.append(compact)
+    return keys
+
+
+@lru_cache(maxsize=1)
+def _load_master_project_pch_lookup() -> dict[str, str]:
+    master_path = BASE_DIR / "Raw Data" / "Projects and PCH.xlsx"
+    sheet_name = "Sheet1"
+
+    if not master_path.exists():
+        LOGGER.warning(
+            "Projects/PCH master workbook not found at '%s'; using DPR PCH values only.",
+            master_path,
+        )
+        return {}
+
+    try:
+        frame = pd.read_excel(master_path, sheet_name=sheet_name)
+    except Exception as exc:
+        LOGGER.warning(
+            "Unable to read Projects/PCH master workbook '%s' (sheet '%s'): %s; using DPR PCH values only.",
+            master_path,
+            sheet_name,
+            exc,
+        )
+        return {}
+
+    if frame.empty:
+        LOGGER.warning(
+            "Projects/PCH master workbook '%s' (sheet '%s') is empty; using DPR PCH values only.",
+            master_path,
+            sheet_name,
+        )
+        return {}
+
+    normalized_cols = {_normalize_column_label(col): col for col in frame.columns}
+    project_col = normalized_cols.get("project")
+    pch_col = normalized_cols.get("pch")
+    if not project_col or not pch_col:
+        LOGGER.warning(
+            "Projects/PCH master workbook '%s' is missing required columns 'Project' and/or 'PCH'; using DPR PCH values only.",
+            master_path,
+        )
+        return {}
+
+    working = frame[[project_col, pch_col]].copy()
+    working[project_col] = working[project_col].map(_clean_optional_text)
+    working[pch_col] = working[pch_col].map(_clean_optional_text)
+
+    lookup: dict[str, str] = {}
+    duplicate_keys: set[str] = set()
+    for _, row in working.iterrows():
+        project_key = compact_project_key(row.get(project_col, ""))
+        if not project_key:
+            continue
+        canonical_pch = _clean_optional_text(row.get(pch_col, ""))
+        if not canonical_pch:
+            continue
+        if project_key in lookup:
+            duplicate_keys.add(project_key)
+            continue
+        lookup[project_key] = canonical_pch
+
+    if duplicate_keys:
+        LOGGER.warning(
+            "Projects/PCH master workbook '%s' has duplicate project entries for %s; using first occurrence.",
+            master_path,
+            ", ".join(sorted(duplicate_keys)),
+        )
+
+    return lookup
+
+
 def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, dict[str, str]]:
     if project_info is None or project_info.empty:
         return {}
@@ -346,19 +464,26 @@ def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, d
     project_name = project_name.fillna("").astype(str).str.strip()
     key_name = info.get("key_name", pd.Series("", index=info.index)).fillna("").astype(str).str.strip()
     pch = info.get("pch", pd.Series("", index=info.index)).fillna("").astype(str).str.strip()
+    master_pch_lookup = _load_master_project_pch_lookup()
 
     lookup: dict[str, dict[str, str]] = {}
     for code, name, key, pch_value in zip(project_code, project_name, key_name, pch):
+        master_pch = ""
+        for project_key in _iter_project_candidate_keys(code, name, key):
+            canonical = master_pch_lookup.get(project_key, "")
+            if canonical:
+                master_pch = canonical
+                break
+
         display = code or name or key
         entry = {
             "project_code": code,
             "project_display": display,
-            "pch": pch_value,
+            "pch": master_pch or pch_value,
         }
-        for candidate in (code, name, key):
-            compact = compact_project_key(candidate)
-            if compact and compact not in lookup:
-                lookup[compact] = entry
+        for project_key in _iter_project_candidate_keys(code, name, key):
+            if project_key not in lookup:
+                lookup[project_key] = entry
     return lookup
 
 
@@ -497,6 +622,34 @@ def _merge_project_rollup_with_coverage(
     return merged[["PCH", "Project", *metric_columns]]
 
 
+def _merge_pch_rollup_with_coverage(
+    pch_rollup: pd.DataFrame,
+    coverage_registry: pd.DataFrame,
+    *,
+    metric_columns: list[str],
+) -> pd.DataFrame:
+    if coverage_registry is None or coverage_registry.empty:
+        return pch_rollup
+
+    base = coverage_registry[["pch_display"]].rename(columns={"pch_display": "PCH"}).drop_duplicates()
+    if pch_rollup is None or pch_rollup.empty:
+        merged = base.copy()
+    else:
+        merged = base.merge(pch_rollup, on="PCH", how="outer")
+
+    for column in metric_columns:
+        source = merged[column] if column in merged.columns else pd.Series(0.0, index=merged.index)
+        merged[column] = pd.to_numeric(source, errors="coerce").fillna(0.0)
+        if column in {"Gangs", "Spans", "Projects"}:
+            merged[column] = merged[column].astype(int)
+        else:
+            merged[column] = merged[column].round(4)
+
+    merged["PCH"] = merged.get("PCH", "").fillna("").astype(str).str.strip().replace("", "Unassigned")
+    merged = merged.sort_values(["PCH"], key=lambda s: s.astype(str).str.lower()).reset_index(drop=True)
+    return merged[["PCH", *metric_columns]]
+
+
 def _merge_monthly_project_with_coverage(
     monthly_project: pd.DataFrame,
     coverage_registry: pd.DataFrame,
@@ -538,6 +691,39 @@ def _merge_monthly_project_with_coverage(
         if column not in merged.columns:
             merged[column] = 0 if str(column).endswith("__gangs") else 0.0
     return merged[final_columns]
+
+
+def _merge_monthly_pch_with_coverage(
+    monthly_pch: pd.DataFrame,
+    coverage_registry: pd.DataFrame,
+) -> pd.DataFrame:
+    if coverage_registry is None or coverage_registry.empty:
+        return monthly_pch
+
+    base = coverage_registry[["pch_display"]].rename(columns={"pch_display": "PCH"}).drop_duplicates()
+    if monthly_pch is None or monthly_pch.empty:
+        merged = base.copy()
+        ordered_columns = ["PCH"]
+    else:
+        ordered_columns = list(monthly_pch.columns)
+        merged = base.merge(monthly_pch, on="PCH", how="outer")
+
+    for column in merged.columns:
+        if column == "PCH":
+            continue
+        numeric = pd.to_numeric(merged[column], errors="coerce").fillna(0.0)
+        if str(column).endswith("__gangs"):
+            merged[column] = numeric.astype(int)
+        else:
+            merged[column] = numeric.round(2)
+
+    merged["PCH"] = merged.get("PCH", "").fillna("").astype(str).str.strip().replace("", "Unassigned")
+    merged = merged.sort_values(["PCH"], key=lambda s: s.astype(str).str.lower()).reset_index(drop=True)
+
+    for column in ordered_columns:
+        if column not in merged.columns:
+            merged[column] = 0 if str(column).endswith("__gangs") else 0.0
+    return merged[ordered_columns]
 
 
 def _build_coverage_issues_sheet(
@@ -636,7 +822,7 @@ def _prepare_stringing_scope(daily_df: pd.DataFrame, project_info: pd.DataFrame 
     working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
     working = working.dropna(subset=["date"])
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
-    working["gang_name"] = working.get("gang_name", "").fillna("").astype(str).str.strip()
+    working["gang_name"] = _normalize_gang_series(working.get("gang_name"), index=working.index)
     working["project_name"] = working.get("project_name", working.get("project", "")).fillna("").astype(str).str.strip()
     raw_project_display = (
         working.get("project_display", working["project_name"]).fillna("").astype(str).str.strip()
@@ -697,7 +883,7 @@ def _prepare_stringing_compiled_scope(compiled_df: pd.DataFrame, project_info: p
     normalized, _ = add_length_units(normalized)
     normalized["fs_complete_date"] = _parse_date_series(normalized.get("fs_complete_date"))
     normalized["month"] = normalized["fs_complete_date"].dt.to_period("M").dt.to_timestamp()
-    normalized["gang_name"] = normalized.get("gang_name", "").fillna("").astype(str).str.strip()
+    normalized["gang_name"] = _normalize_gang_series(normalized.get("gang_name"), index=normalized.index)
     normalized["project_name"] = normalized.get("project_name", normalized.get("project", "")).fillna("").astype(str).str.strip()
     raw_project_display = (
         normalized.get("project_display", normalized["project_name"]).fillna("").astype(str).str.strip()
@@ -758,11 +944,12 @@ def _summarize_scope(
 ) -> pd.DataFrame:
     if scope is None or scope.empty:
         return pd.DataFrame()
+    scope = scope.copy()
+    scope["gang_name"] = _normalize_gang_series(scope.get("gang_name"), index=scope.index)
     group_columns = group_columns or []
     if group_columns:
         grouped = scope.groupby(group_columns, dropna=False)
     else:
-        scope = scope.copy()
         scope["_all"] = "All"
         grouped = scope.groupby("_all", dropna=False)
     project_col = "project_rollup_key" if "project_rollup_key" in scope.columns else "project_key_norm"
@@ -770,7 +957,7 @@ def _summarize_scope(
         avg_km_month=("daily_km", lambda s: float(s.mean() * _MONTH_PRODUCTIVITY_FACTOR)),
         total_km=("daily_km", "sum"),
         spans=("span_key", "nunique"),
-        gangs=("gang_name", "nunique"),
+        gangs=("gang_name", lambda s: int(s.replace("", pd.NA).nunique(dropna=True))),
         projects=(project_col, "nunique"),
     ).reset_index()
     summary["avg_km_month"] = summary["avg_km_month"].fillna(0.0).round(4)
@@ -791,7 +978,7 @@ def _build_scope_label(scope: pd.DataFrame, start: pd.Timestamp | None, end: pd.
     start_label = start.strftime("%Y-%m-%d") if start is not None else ""
     end_label = end.strftime("%Y-%m-%d") if end is not None else ""
     project_count = int(scope["project_key_norm"].nunique()) if "project_key_norm" in scope.columns else 0
-    gang_count = int(scope["gang_name"].nunique()) if "gang_name" in scope.columns else 0
+    gang_count = _count_unique_gangs(scope.get("gang_name"))
     span_count = int(scope["span_key"].nunique()) if "span_key" in scope.columns else 0
     return (
         f"Scope: {start_label} to {end_label} | Projects: {project_count} | "
@@ -864,6 +1051,7 @@ def _build_review_table_three(
         daily = pd.DataFrame()
     else:
         daily = daily_scope.copy()
+        daily["gang_name"] = _normalize_gang_series(daily.get("gang_name"), index=daily.index)
         method_series = daily.get("method", daily.get("method_norm", pd.Series("", index=daily.index)))
         method_norm = method_series.map(_normalize_method)
         daily["method_group"] = method_norm.map(_method_group)
@@ -894,7 +1082,7 @@ def _build_review_table_three(
             else:
                 avg_prod = float(month_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
                 rows[label] = round(avg_prod, 2)
-                gang_row[label] = int(month_scope["gang_name"].nunique())
+                gang_row[label] = _count_unique_gangs(month_scope.get("gang_name"))
                 tse_scope = month_scope[month_scope["method_group"] == "TSE"]
                 if tse_scope.empty:
                     tse_row[label] = 0.0
@@ -902,7 +1090,7 @@ def _build_review_table_three(
                 else:
                     tse_avg = float(tse_scope["daily_km"].mean() * _MONTH_PRODUCTIVITY_FACTOR)
                     tse_row[label] = round(tse_avg, 2)
-                    tse_gang_row[label] = int(tse_scope["gang_name"].nunique())
+                    tse_gang_row[label] = _count_unique_gangs(tse_scope.get("gang_name"))
 
         km_total = 0.0
         tse_km_total = 0.0
@@ -1086,7 +1274,7 @@ def _build_monthly_km_table(
             continue
         km_total = float(pd.to_numeric(month_scope[metric_column], errors="coerce").sum())
         rows[label] = round(km_total, 2)
-        gang_row[label] = int(month_scope["gang_name"].nunique())
+        gang_row[label] = _count_unique_gangs(month_scope.get("gang_name"))
     return pd.DataFrame([rows, gang_row], columns=[label_col, *labels])
 
 
@@ -1173,7 +1361,7 @@ def _build_monthly_group_summary_table(
         daily["month_key"] = daily["date"].dt.to_period("M").dt.to_timestamp()
         daily_km_source = daily["daily_km"] if "daily_km" in daily.columns else pd.Series(0.0, index=daily.index)
         daily["daily_km"] = pd.to_numeric(daily_km_source, errors="coerce")
-        daily["gang_name"] = daily.get("gang_name", "").fillna("").astype(str).str.strip()
+        daily["gang_name"] = _normalize_gang_series(daily.get("gang_name"), index=daily.index)
         for column in groups:
             if column not in daily.columns:
                 daily[column] = ""
@@ -1202,7 +1390,7 @@ def _build_monthly_group_summary_table(
         for month_key, month_label in zip(month_keys, month_labels):
             month_daily = daily[daily["month_key"] == month_key] if not daily.empty else pd.DataFrame()
             month_avg = month_daily["daily_km"].dropna().mean() if not month_daily.empty else 0.0
-            month_gangs = int(month_daily[month_daily["gang_name"].astype(bool)]["gang_name"].nunique()) if not month_daily.empty else 0
+            month_gangs = _count_unique_gangs(month_daily.get("gang_name")) if not month_daily.empty else 0
             month_compiled = compiled[compiled["month_key"] == month_key] if not compiled.empty else pd.DataFrame()
             month_km = float(month_compiled["length_km"].sum()) if not month_compiled.empty else 0.0
 
@@ -1212,7 +1400,7 @@ def _build_monthly_group_summary_table(
             numeric_columns.extend([_avg_key(month_label), _gang_key(month_label), _km_key(month_label)])
 
         overall_avg = daily["daily_km"].dropna().mean() if not daily.empty else 0.0
-        overall_gangs = int(daily[daily["gang_name"].astype(bool)]["gang_name"].nunique()) if not daily.empty else 0
+        overall_gangs = _count_unique_gangs(daily.get("gang_name")) if not daily.empty else 0
         overall_km = float(compiled["length_km"].sum()) if not compiled.empty else 0.0
         row[overall_avg_key] = round(float(overall_avg) * _MONTH_PRODUCTIVITY_FACTOR if not pd.isna(overall_avg) else 0.0, 2)
         row[overall_gang_key] = overall_gangs
@@ -1400,7 +1588,7 @@ def _build_monthly_comprehensive_table(
         daily = daily.dropna(subset=["date"])
         daily["month_key"] = daily["date"].dt.to_period("M").dt.to_timestamp()
         daily["daily_km"] = pd.to_numeric(daily.get("daily_km"), errors="coerce")
-        daily["gang_name"] = daily.get("gang_name", "").fillna("").astype(str).str.strip()
+        daily["gang_name"] = _normalize_gang_series(daily.get("gang_name"), index=daily.index)
         daily["project_display"] = daily.get(
             "project_rollup_display",
             daily.get("project_display", pd.Series("", index=daily.index)),
@@ -1442,7 +1630,7 @@ def _build_monthly_comprehensive_table(
             daily_projects: set[str] = set()
         else:
             avg_prod = float(month_daily["daily_km"].dropna().mean() * _MONTH_PRODUCTIVITY_FACTOR)
-            gangs = int(month_daily[month_daily["gang_name"].astype(bool)]["gang_name"].nunique())
+            gangs = _count_unique_gangs(month_daily.get("gang_name"))
             daily_projects = set(month_daily.loc[month_daily["project_display"].astype(bool), "project_display"].astype(str))
 
         if month_compiled.empty:
@@ -1495,7 +1683,7 @@ def _build_quarterly_comprehensive_table(
         daily = daily.dropna(subset=["date"])
         daily["quarter_key"] = daily["date"].dt.to_period("Q").dt.start_time.dt.normalize()
         daily["daily_km"] = pd.to_numeric(daily.get("daily_km"), errors="coerce")
-        daily["gang_name"] = daily.get("gang_name", "").fillna("").astype(str).str.strip()
+        daily["gang_name"] = _normalize_gang_series(daily.get("gang_name"), index=daily.index)
         daily["project_display"] = daily.get(
             "project_rollup_display",
             daily.get("project_display", pd.Series("", index=daily.index)),
@@ -1534,7 +1722,7 @@ def _build_quarterly_comprehensive_table(
             daily_projects: set[str] = set()
         else:
             avg_prod = float(quarter_daily["daily_km"].dropna().mean() * _MONTH_PRODUCTIVITY_FACTOR)
-            gangs = int(quarter_daily[quarter_daily["gang_name"].astype(bool)]["gang_name"].nunique())
+            gangs = _count_unique_gangs(quarter_daily.get("gang_name"))
             daily_projects = set(
                 quarter_daily.loc[
                     quarter_daily["project_display"].astype(bool),
@@ -1651,6 +1839,31 @@ def _write_labeled_table(
         return table_start
     table.to_excel(writer, sheet_name=sheet_name, index=False, startrow=table_start)
     return table_start + len(table) + 1
+
+
+def _write_scoped_concat_table(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    scoped_tables: list[tuple[str, pd.DataFrame]],
+    scope_column_name: str = "Scope",
+) -> int:
+    frames: list[pd.DataFrame] = []
+    for scope_label, table in scoped_tables:
+        working = table.copy() if table is not None else pd.DataFrame()
+        if scope_column_name in working.columns:
+            working = working.drop(columns=[scope_column_name])
+        working.insert(0, scope_column_name, scope_label)
+        frames.append(working)
+
+    if not frames:
+        combined = pd.DataFrame(columns=[scope_column_name])
+    else:
+        combined = pd.concat(frames, ignore_index=True, sort=False)
+        ordered_columns = [scope_column_name] + [col for col in combined.columns if col != scope_column_name]
+        combined = combined.reindex(columns=ordered_columns)
+
+    combined.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+    return len(combined) + 1
 
 
 def _write_monthly_scoped_table(
@@ -1995,7 +2208,7 @@ def _build_pareto_table(
     for work in (daily, compiled):
         if work.empty:
             continue
-        work["gang_name"] = work.get("gang_name", "").fillna("").astype(str).str.strip()
+        work["gang_name"] = _normalize_gang_series(work.get("gang_name"), index=work.index)
         method_series = work.get("method", work.get("method_norm", pd.Series("", index=work.index)))
         method_norm = method_series.map(_normalize_method)
         work["method_group"] = method_norm.map(_method_group)
@@ -2106,7 +2319,7 @@ def _normalize_stringing_compiled(df: pd.DataFrame) -> pd.DataFrame:
             normalized[col] = ""
     normalized["from_ap"] = normalized["from_ap"].fillna("").astype(str).str.strip()
     normalized["to_ap"] = normalized["to_ap"].fillna("").astype(str).str.strip()
-    normalized["gang_name"] = normalized["gang_name"].fillna("").astype(str).str.strip()
+    normalized["gang_name"] = _normalize_gang_series(normalized.get("gang_name"), index=normalized.index)
     normalized["source_file"] = normalized["source_file"].fillna("").astype(str).str.strip()
     return normalized
 
@@ -2610,6 +2823,30 @@ def main() -> int:
         compiled_scope,
         scope_name="Overall",
     )
+    pch_rollup = _merge_pch_rollup_with_coverage(
+        pch_rollup,
+        coverage_registry,
+        metric_columns=[
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+            "Projects",
+        ],
+    )
+    tse_pch_rollup = _merge_pch_rollup_with_coverage(
+        tse_pch_rollup,
+        coverage_registry,
+        metric_columns=[
+            "Overall Avg Productivity (KM/month)",
+            "TSE Avg Productivity (KM/month)",
+            "Total KM",
+            "Spans",
+            "Gangs",
+            "Projects",
+        ],
+    )
     project_rollup = _merge_project_rollup_with_coverage(
         project_rollup,
         coverage_registry,
@@ -2632,6 +2869,8 @@ def main() -> int:
             "Gangs",
         ],
     )
+    monthly_pch = _merge_monthly_pch_with_coverage(monthly_pch, coverage_registry)
+    monthly_tse_pch = _merge_monthly_pch_with_coverage(monthly_tse_pch, coverage_registry)
     monthly_project = _merge_monthly_project_with_coverage(monthly_project, coverage_registry)
     monthly_tse_project = _merge_monthly_project_with_coverage(monthly_tse_project, coverage_registry)
     review_table_raw = project_rollup.reindex(
@@ -2830,60 +3069,35 @@ def main() -> int:
 
     output_path = _resolve_output_path(args.output)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        current_row = 0
-        current_row = _write_labeled_table(
-            writer, "Summary", "TSE", summary_rows_tse, startrow=current_row
+        _write_scoped_concat_table(
+            writer,
+            "Summary",
+            [("TSE", summary_rows_tse), ("Overall", summary_rows)],
         )
-        current_row += 1
-        _write_labeled_table(writer, "Summary", "Overall", summary_rows, startrow=current_row)
-
-        current_row = 0
-        current_row = _write_labeled_table(
-            writer, "Gang_Productivity", "TSE", gang_rows_tse, startrow=current_row
+        _write_scoped_concat_table(
+            writer,
+            "Gang_Productivity",
+            [("TSE", gang_rows_tse), ("Overall", gang_rows)],
         )
-        current_row += 1
-        _write_labeled_table(
-            writer, "Gang_Productivity", "Overall", gang_rows, startrow=current_row
+        _write_scoped_concat_table(
+            writer,
+            "PO_FS_Gap",
+            [("TSE", po_fs_gap_tse), ("Overall", po_fs_gap)],
         )
-
-        current_row = 0
-        current_row = _write_labeled_table(
-            writer, "PO_FS_Gap", "TSE", po_fs_gap_tse, startrow=current_row
+        _write_scoped_concat_table(
+            writer,
+            "PO_FS_Gap_Summary",
+            [("TSE", po_fs_gap_summary_tse), ("Overall", po_fs_gap_summary)],
         )
-        current_row += 1
-        _write_labeled_table(
-            writer, "PO_FS_Gap", "Overall", po_fs_gap, startrow=current_row
+        _write_scoped_concat_table(
+            writer,
+            "Erection_PO_Gap",
+            [("TSE", erection_po_gap_tse), ("Overall", erection_po_gap)],
         )
-
-        current_row = 0
-        current_row = _write_labeled_table(
-            writer, "PO_FS_Gap_Summary", "TSE", po_fs_gap_summary_tse, startrow=current_row
-        )
-        current_row += 1
-        _write_labeled_table(
-            writer, "PO_FS_Gap_Summary", "Overall", po_fs_gap_summary, startrow=current_row
-        )
-
-        current_row = 0
-        current_row = _write_labeled_table(
-            writer, "Erection_PO_Gap", "TSE", erection_po_gap_tse, startrow=current_row
-        )
-        current_row += 1
-        _write_labeled_table(
-            writer, "Erection_PO_Gap", "Overall", erection_po_gap, startrow=current_row
-        )
-
-        current_row = 0
-        current_row = _write_labeled_table(
-            writer, "Erection_PO_Gap_Summary", "TSE", erection_po_gap_summary_tse, startrow=current_row
-        )
-        current_row += 1
-        _write_labeled_table(
+        _write_scoped_concat_table(
             writer,
             "Erection_PO_Gap_Summary",
-            "Overall",
-            erection_po_gap_summary,
-            startrow=current_row,
+            [("TSE", erection_po_gap_summary_tse), ("Overall", erection_po_gap_summary)],
         )
         if not method_summary.empty:
             current_row = 0
