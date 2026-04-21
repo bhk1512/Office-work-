@@ -309,41 +309,33 @@ def _build_stage_summary(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
 
 
 def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
+    columns = [
+        "stage",
+        "gang_name",
+        "avg_productivity_km_month",
+        "sustained_km_month",
+        "total_km",
+        "active_days",
+        "active_months",
+        "spans",
+        "projects",
+    ]
     if df is None or df.empty:
-        return pd.DataFrame(
-            columns=[
-                "stage",
-                "gang_name",
-                "avg_productivity_km_month",
-                "total_km",
-                "active_days",
-                "spans",
-                "projects",
-            ]
-        )
+        return pd.DataFrame(columns=columns)
     working = _add_span_key(df)
     working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce").fillna(0.0)
     working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
     working["gang_name"] = _normalize_gang_series(working.get("gang_name"), index=working.index)
     working = working[working["gang_name"] != ""]
     if working.empty:
-        return pd.DataFrame(
-            columns=[
-                "stage",
-                "gang_name",
-                "avg_productivity_km_month",
-                "total_km",
-                "active_days",
-                "spans",
-                "projects",
-            ]
-        )
+        return pd.DataFrame(columns=columns)
     grouped = (
         working.groupby("gang_name", dropna=False)
         .agg(
             avg_productivity_km_month=("daily_km", "mean"),
             total_km=("daily_km", "sum"),
             active_days=("date", lambda s: s.dropna().nunique()),
+            active_months=("date", lambda s: s.dropna().dt.to_period("M").nunique()),
             spans=("span_key", "nunique"),
             projects=("project_key_norm", "nunique"),
         )
@@ -354,9 +346,18 @@ def _build_gang_productivity(df: pd.DataFrame, stage_label: str) -> pd.DataFrame
     ).round(4)
     grouped["total_km"] = grouped["total_km"].fillna(0.0).round(4)
     grouped["active_days"] = grouped["active_days"].fillna(0).astype(int)
+    grouped["active_months"] = grouped["active_months"].fillna(0).astype(int)
+    # Single-month gangs will show sustained_km_month == total_km by design.
+    grouped["sustained_km_month"] = (
+        grouped["total_km"].fillna(0.0)
+        .div(grouped["active_months"].where(grouped["active_months"] > 0))
+        .fillna(0.0)
+        .round(4)
+    )
     grouped["spans"] = grouped["spans"].fillna(0).astype(int)
     grouped["projects"] = grouped["projects"].fillna(0).astype(int)
     grouped.insert(0, "stage", stage_label)
+    grouped = grouped.reindex(columns=columns)
     return grouped.sort_values(["stage", "gang_name"]).reset_index(drop=True)
 
 
@@ -2156,12 +2157,48 @@ def _build_method_summary(
                     "details": "Method column missing or blank",
                 }
             )
-    summary = _summarize_scope(work, group_columns=["method_group"])
+    method_bucket = work["method_group"].copy()
+    tse_mask = method_bucket.eq("TSE")
+    if tse_mask.any():
+        if "method_inferred" in work.columns:
+            method_inferred_raw = work["method_inferred"]
+            inferred_text = method_inferred_raw.fillna("").astype(str).str.strip().str.lower()
+            inferred_bool = inferred_text.map(
+                {
+                    "true": True,
+                    "t": True,
+                    "1": True,
+                    "yes": True,
+                    "y": True,
+                    "false": False,
+                    "f": False,
+                    "0": False,
+                    "no": False,
+                    "n": False,
+                    "": False,
+                    "nan": False,
+                    "none": False,
+                    "null": False,
+                }
+            )
+            inferred_numeric = pd.to_numeric(method_inferred_raw, errors="coerce")
+            inferred_values = inferred_bool.where(inferred_bool.notna(), inferred_numeric)
+            inferred_mask = inferred_values.fillna(False).astype(bool)
+        else:
+            inferred_mask = pd.Series(False, index=work.index)
+            LOGGER.warning(
+                "Method_Summary: 'method_inferred' column missing; defaulting TSE rows to 'TSE (source)'."
+            )
+        method_bucket = method_bucket.where(~tse_mask, "TSE (source)")
+        method_bucket = method_bucket.where(~(tse_mask & inferred_mask), "TSE (inferred)")
+    work["method_bucket"] = method_bucket
+
+    summary = _summarize_scope(work, group_columns=["method_bucket"])
     if summary.empty:
         return summary
     summary = summary.rename(
         columns={
-            "method_group": "Method",
+            "method_bucket": "Method",
             "avg_km_month": "Avg Productivity (KM/month)",
             "total_km": "Total KM",
             "spans": "Spans",
@@ -2169,6 +2206,10 @@ def _build_method_summary(
             "projects": "Projects",
         }
     )
+    bucket_order = ["TSE (source)", "TSE (inferred)", "Manual", "Other"]
+    summary["Method"] = pd.Categorical(summary["Method"], categories=bucket_order, ordered=True)
+    summary = summary.sort_values("Method").reset_index(drop=True)
+    summary["Method"] = summary["Method"].astype(str)
     return summary
 
 
@@ -3038,13 +3079,15 @@ def main() -> int:
         },
         {
             "Assumption": "Method split",
-            "Details": "Method is read from the stringing daily data (method/method_norm). Rows without method are logged in Data_Issues. Summary groups into TSE, Manual, and Other.",
+            "Details": "Method is read from the stringing daily data (method/method_norm). Rows without method are logged in Data_Issues. Most sheets group into TSE, Manual, and Other; Method_Summary splits TSE into source and inferred buckets.",
         },
         {
             "Assumption": "Method fallback (inference)",
             "Details": (
                 "When Method is missing, inference uses erection span depth: "
                 "erection_locations<=2 => manual, >2 => tse, unresolved => tse fallback. "
+                "Method_Summary sheet splits inferred TSE rows from source TSE rows for transparency; "
+                "other sheets combine TSE as a single bucket. "
                 f"Current export inferred rows={method_inferred_total}."
             ),
         },
