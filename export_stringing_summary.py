@@ -2371,9 +2371,12 @@ def _build_gap_summary(df: pd.DataFrame, gap_column: str) -> pd.DataFrame:
             [
                 {
                     "count": 0,
+                    "negative_gap_count": 0,
+                    "negative_gap_pct": 0.0,
                     "avg_gap_days": 0.0,
                     "median_gap_days": 0.0,
                     "min_gap_days": 0,
+                    "min_gap_days_raw": 0,
                     "max_gap_days": 0,
                 }
             ]
@@ -2384,21 +2387,28 @@ def _build_gap_summary(df: pd.DataFrame, gap_column: str) -> pd.DataFrame:
             [
                 {
                     "count": 0,
+                    "negative_gap_count": 0,
+                    "negative_gap_pct": 0.0,
                     "avg_gap_days": 0.0,
                     "median_gap_days": 0.0,
                     "min_gap_days": 0,
+                    "min_gap_days_raw": 0,
                     "max_gap_days": 0,
                 }
             ]
         )
     stats_series = series.clip(lower=0)
+    negative_gap_count = int((series < 0).sum())
     return pd.DataFrame(
         [
             {
                 "count": int(stats_series.size),
+                "negative_gap_count": negative_gap_count,
+                "negative_gap_pct": round(negative_gap_count / len(series), 4) if len(series) > 0 else 0.0,
                 "avg_gap_days": round(float(stats_series.mean()), 2),
                 "median_gap_days": round(float(stats_series.median()), 2),
                 "min_gap_days": int(stats_series.min()),
+                "min_gap_days_raw": int(series.min()) if not series.empty else 0,
                 "max_gap_days": int(stats_series.max()),
             }
         ]
@@ -3043,11 +3053,11 @@ def main() -> int:
         },
         {
             "Assumption": "PO-FS gap",
-            "Details": "gap_days = fs_starting_date - po_completion_date. Negative gaps are flagged in Data_Issues and retained in PO_FS_Gap; summary stats clamp negatives to 0. Missing dates are excluded from stats.",
+            "Details": "gap_days = fs_starting_date - po_completion_date. Negative gaps are flagged in Data_Issues and retained in PO_FS_Gap; summary stats clamp negatives to 0. Missing dates are excluded from stats. Summary tables also expose negative_gap_count, negative_gap_pct, and min_gap_days_raw alongside the clamped statistics.",
         },
         {
             "Assumption": "Erection-PO gap",
-            "Details": "gap_days = po_start_date - last erection completion date within the span (inclusive). Negative gaps are flagged and clamped to 0. Missing dates or unmatched spans are logged in Data_Issues.",
+            "Details": "gap_days = po_start_date - last erection completion date within the span (inclusive). Negative gaps are flagged and clamped to 0. Missing dates or unmatched spans are logged in Data_Issues. Summary tables also expose negative_gap_count, negative_gap_pct, and min_gap_days_raw alongside the clamped statistics.",
         },
         {
             "Assumption": "Location parsing",
