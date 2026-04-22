@@ -307,6 +307,18 @@ def _load_stringing_template_mapping_config(
     )
 
 
+def _load_stringing_template_mapping_catalog(
+    raw_root: Path,
+    *,
+    include_unchecked: bool = False,
+) -> tuple[dict[str, list[tuple[dict[int, str], str]]], dict[str, str]]:
+    return ingest.load_stringing_template_mapping_catalog(
+        raw_root,
+        repo_root=_repo_root_from(Path(__file__)),
+        include_unchecked=include_unchecked,
+    )
+
+
 def _resolve_project_sheet_name(sheet_names: Iterable[str], project_candidates: list[str]) -> str | None:
     return ingest.resolve_project_sheet_name(sheet_names, project_candidates)
 
@@ -607,8 +619,8 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
 
     candidates = _iter_excel_candidates(raw_root)
     stringing_sheet_config = _load_stringing_sheet_config(raw_root)
-    stringing_template_config, stringing_template_errors = _load_stringing_template_mapping_config(raw_root)
-    stringing_template_all_config, _ = _load_stringing_template_mapping_config(raw_root, include_unchecked=True)
+    stringing_template_catalog, stringing_template_errors = _load_stringing_template_mapping_catalog(raw_root)
+    stringing_template_all_catalog, _ = _load_stringing_template_mapping_catalog(raw_root, include_unchecked=True)
     has_stringing_config = bool(stringing_sheet_config)
     skipped_no_stringing = 0
     skipped_not_in_config = 0
@@ -816,12 +828,6 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
         selected_wb = selected_workbook_by_project_line.get(project_line_key)
         if selected_wb is not None and wb.resolve() != selected_wb.resolve():
             continue
-        template_pair = stringing_template_config.get(project_key)
-        template_map = template_pair[0] if template_pair else None
-        template_sheet_name = template_pair[1] if template_pair else ""
-        fallback_template_pair = stringing_template_all_config.get(project_key)
-        fallback_template_map = fallback_template_pair[0] if fallback_template_pair else None
-        fallback_template_sheet = fallback_template_pair[1] if fallback_template_pair else ""
         template_error = stringing_template_errors.get(project_key, "")
         if has_stringing_config and project_sheet_candidates is None:
             skipped_not_in_config += 1
@@ -916,6 +922,23 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     line_name_source=line_name_source,
                 )
                 continue
+
+            template_pair = ingest.select_template_map_for_sheet(
+                stringing_template_catalog.get(project_key, []),
+                configured_sheet_name=configured_name,
+                resolved_sheet_name=actual_sheet,
+                line_name=line_name_override,
+            )
+            template_map = template_pair[0] if template_pair else None
+            template_sheet_name = template_pair[1] if template_pair else ""
+            fallback_template_pair = ingest.select_template_map_for_sheet(
+                stringing_template_all_catalog.get(project_key, []),
+                configured_sheet_name=configured_name,
+                resolved_sheet_name=actual_sheet,
+                line_name=line_name_override,
+            )
+            fallback_template_map = fallback_template_pair[0] if fallback_template_pair else None
+            fallback_template_sheet = fallback_template_pair[1] if fallback_template_pair else ""
 
             template_for_preserve = template_map or fallback_template_map
             min_columns = (max(template_for_preserve.keys()) + 1) if template_for_preserve else None

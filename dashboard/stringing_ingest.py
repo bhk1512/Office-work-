@@ -137,6 +137,11 @@ def _resolve_project_template_sheets(wb, project_name: object, discipline: str) 
     return resolved
 
 
+def _numeric_tokens(value: object) -> set[str]:
+    text = str(value or "")
+    return {token for token in re.findall(r"\d{2,4}", text)}
+
+
 def _extract_template_column_map(ws) -> Dict[int, str]:
     to_map_row = None
     for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
@@ -159,12 +164,14 @@ def _extract_template_column_map(ws) -> Dict[int, str]:
     return mapping
 
 
-def load_stringing_template_mapping_config(
+def load_stringing_template_mapping_catalog(
     raw_root: Path,
     *,
     repo_root: Path | None = None,
     include_unchecked: bool = False,
-) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
+) -> Tuple[Dict[str, List[Tuple[Dict[int, str], str]]], Dict[str, str]]:
+    """Return all usable template maps per project, preserving sheet specificity."""
+
     config_path = resolve_dpr_config_path(raw_root, repo_root=repo_root)
     if config_path is None:
         return {}, {}
@@ -192,7 +199,7 @@ def load_stringing_template_mapping_config(
         if project_idx is None or (check_idx is None and not include_unchecked):
             return {}, {}
 
-        mappings: Dict[str, Tuple[Dict[int, str], str]] = {}
+        catalog: Dict[str, List[Tuple[Dict[int, str], str]]] = {}
         errors: Dict[str, str] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row is None:
@@ -214,23 +221,83 @@ def load_stringing_template_mapping_config(
                     )
                 continue
 
-            best_sheet = None
-            best_map: Dict[int, str] = {}
+            options: List[Tuple[Dict[int, str], str]] = []
             for sheet_name in template_sheets:
                 col_map = _extract_template_column_map(wb[sheet_name])
-                if len(col_map) > len(best_map):
-                    best_map = col_map
-                    best_sheet = sheet_name
-            if not best_map or not best_sheet:
+                if col_map:
+                    options.append((col_map, sheet_name))
+            if not options:
                 if check_enabled:
                     errors[project_key] = (
                         f"Stringing template tab(s) for project '{str(project_val).strip()}' have no usable 'To Map' mapping row."
                     )
                 continue
-            mappings[project_key] = (best_map, best_sheet)
-        return mappings, errors
+            catalog[project_key] = options
+        return catalog, errors
     finally:
         wb.close()
+
+
+def select_template_map_for_sheet(
+    template_options: List[Tuple[Dict[int, str], str]] | None,
+    *,
+    configured_sheet_name: str = "",
+    resolved_sheet_name: str = "",
+    line_name: str = "",
+) -> tuple[dict[int, str], str] | None:
+    """Choose the best template map for a specific stringing sheet request."""
+
+    if not template_options:
+        return None
+
+    hints = [configured_sheet_name or "", resolved_sheet_name or "", line_name or ""]
+    hint_keys = [normalize_space_only(value) for value in hints if normalize_space_only(value)]
+    hint_numbers: set[str] = set()
+    for value in hints:
+        hint_numbers.update(_numeric_tokens(value))
+
+    best: tuple[dict[int, str], str] | None = None
+    best_score = float("-inf")
+    for idx, (col_map, sheet_name) in enumerate(template_options):
+        sheet_key = normalize_space_only(sheet_name)
+        sheet_numbers = _numeric_tokens(sheet_name)
+        score = 0.0
+
+        for hint in hint_keys:
+            if sheet_key == hint:
+                score += 1000.0
+            elif hint and (hint in sheet_key or sheet_key in hint):
+                score += 200.0
+        if hint_numbers:
+            score += float(len(sheet_numbers & hint_numbers)) * 120.0
+
+        # Preserve previous fallback behavior (prefer richer maps) when hints are inconclusive.
+        score += float(len(col_map))
+        score -= idx * 1e-4
+
+        if score > best_score:
+            best_score = score
+            best = (col_map, sheet_name)
+    return best
+
+
+def load_stringing_template_mapping_config(
+    raw_root: Path,
+    *,
+    repo_root: Path | None = None,
+    include_unchecked: bool = False,
+) -> Tuple[Dict[str, Tuple[Dict[int, str], str]], Dict[str, str]]:
+    catalog, errors = load_stringing_template_mapping_catalog(
+        raw_root,
+        repo_root=repo_root,
+        include_unchecked=include_unchecked,
+    )
+    mappings: Dict[str, Tuple[Dict[int, str], str]] = {}
+    for project_key, options in catalog.items():
+        selected = select_template_map_for_sheet(options)
+        if selected is not None:
+            mappings[project_key] = selected
+    return mappings, errors
 
 
 def resolve_template_fallback_for_project(
