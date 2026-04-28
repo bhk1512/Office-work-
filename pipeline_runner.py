@@ -14,6 +14,7 @@ from erection_compiled_to_daily_new import run_pipeline
 from dashboard.config import AppConfig
 from dashboard import stringing_ingest as ingest
 from dashboard import progress_status_ingest
+from dashboard import stretch_readiness_ingest
 from dashboard.stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
@@ -1206,6 +1207,24 @@ def compile_progress_status_to_workbook(
         return None
     return result
 
+
+def compile_stretch_readiness_to_workbook(
+    input_dir: Optional[Path],
+    files: Optional[List[Path]],
+    output_path: Path,
+) -> Optional[Path]:
+    try:
+        result = stretch_readiness_ingest.compile_stretch_readiness_to_workbook(
+            input_dir,
+            files,
+            output_path,
+            repo_root=BASE_DIR,
+        )
+    except Exception as exc:
+        print(f"[pipeline] StretchReadiness: failed to compile from DPRs: {exc}")
+        return None
+    return result
+
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
     """Reload the dashboard dataframe and recompute derived fields."""
     df = dashboard_module.load_daily(workbook_path)
@@ -1460,6 +1479,28 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 )
             except Exception as exc:
                 print(f"[pipeline] ProgressStatus: failed to export parquet: {exc}")
+
+        # --- Compile Stretch Readiness from DPR sources ---
+        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+            stretch_base = base_dir.parent / "StretchReadiness"
+        else:
+            stretch_base = base_dir / "StretchReadiness" if base_dir.name != "StretchReadiness" else base_dir
+        stretch_base.mkdir(parents=True, exist_ok=True)
+        stretch_out = stretch_base / "StretchReadiness_Output.xlsx"
+        print(f"[pipeline] StretchReadiness: compiling to {stretch_out}")
+        compiled_stretch = compile_stretch_readiness_to_workbook(
+            stringing_input,
+            stringing_files,
+            stretch_out,
+        )
+        if compiled_stretch and compiled_stretch.exists():
+            try:
+                export_workbook_to_parquet(
+                    compiled_stretch,
+                    sheets=("RawData", "Summary", "ManpowerAudit", "Diagnostics", "Issues", "Coverage"),
+                )
+            except Exception as exc:
+                print(f"[pipeline] StretchReadiness: failed to export parquet: {exc}")
     else:
         print("[pipeline] Skipping compilation step as requested.")
         parquet_dir = None
