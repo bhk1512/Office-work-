@@ -13,6 +13,7 @@ import pandas as pd
 from erection_compiled_to_daily_new import run_pipeline
 from dashboard.config import AppConfig
 from dashboard import stringing_ingest as ingest
+from dashboard import progress_status_ingest
 from dashboard.stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
