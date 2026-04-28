@@ -1188,6 +1188,24 @@ def compile_stringing_to_workbook(
     )
     return parquet_dir
 
+
+def compile_progress_status_to_workbook(
+    input_dir: Optional[Path],
+    files: Optional[List[Path]],
+    output_path: Path,
+) -> Optional[Path]:
+    try:
+        result = progress_status_ingest.compile_progress_status_to_workbook(
+            input_dir,
+            files,
+            output_path,
+            repo_root=BASE_DIR,
+        )
+    except Exception as exc:
+        print(f"[pipeline] ProgressStatus: failed to compile from DPRs: {exc}")
+        return None
+    return result
+
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
     """Reload the dashboard dataframe and recompute derived fields."""
     df = dashboard_module.load_daily(workbook_path)
@@ -1304,6 +1322,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 
     stringing_out_path: Path | None = None
+    progress_status_out_path: Path | None = None
 
     if not args.skip_compile:
         # Ensure fresh outputs on every compile run
@@ -1418,6 +1437,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 )
             except Exception as exc:
                 print(f"[pipeline] Stringing: failed to export Micro Plan sheets to parquet: {exc}")
+
+        # --- Compile Progress Status from the DPR sources ---
+        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+            progress_status_base = base_dir.parent / "ProgressStatus"
+        else:
+            progress_status_base = base_dir / "ProgressStatus" if base_dir.name != "ProgressStatus" else base_dir
+        progress_status_base.mkdir(parents=True, exist_ok=True)
+        progress_status_out = progress_status_base / "ProgressStatus_Output.xlsx"
+        progress_status_out_path = progress_status_out
+        print(f"[pipeline] ProgressStatus: compiling to {progress_status_out}")
+        compiled_status = compile_progress_status_to_workbook(
+            stringing_input,
+            stringing_files,
+            progress_status_out,
+        )
+        if compiled_status and compiled_status.exists():
+            try:
+                export_workbook_to_parquet(
+                    compiled_status,
+                    sheets=("RawData", "Diagnostics", "Issues", "Coverage"),
+                )
+            except Exception as exc:
+                print(f"[pipeline] ProgressStatus: failed to export parquet: {exc}")
     else:
         print("[pipeline] Skipping compilation step as requested.")
         parquet_dir = None

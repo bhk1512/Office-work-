@@ -22,6 +22,7 @@ from .project_identity import (
 
 DEFAULT_ACTIVITY_ALLOWLIST = (
     "route alignment",
+    "detail survey",
     "detailed survey",
     "check survey",
     "soil investigation",
@@ -30,8 +31,11 @@ DEFAULT_ACTIVITY_ALLOWLIST = (
     "earthing",
     "tower erection",
     "erection",
+    "tower tightening",
     "tack welding",
     "tackwelding",
+    "nh crossing",
+    "power line crossing",
     "stringing",
     "paying out",
     "final sag",
@@ -66,6 +70,48 @@ RAWDATA_COLUMNS = [
     "balance_progress",
     "gangs_working",
     "remarks",
+]
+
+DIAGNOSTICS_COLUMNS = [
+    "Workbook",
+    "Project",
+    "Sheet",
+    "ConfiguredSheet",
+    "LineName",
+    "LineNameSource",
+    "TemplateSheet",
+    "TemplateApplied",
+    "TemplateChanges",
+    "FallbackNote",
+    "SectionsDetected",
+    "HeadersDetected",
+    "Rows",
+    "Status",
+    "Reason",
+]
+
+ISSUES_COLUMNS = [
+    "Workbook",
+    "Project",
+    "Sheet",
+    "ConfiguredSheet",
+    "LineName",
+    "LineNameSource",
+    "Issue",
+    "Reason",
+]
+
+COVERAGE_COLUMNS = [
+    "project_code",
+    "project_display",
+    "status",
+    "reason_code",
+    "reason",
+    "workbook",
+    "configured_sheet",
+    "resolved_sheet",
+    "rows",
+    "available_sheets",
 ]
 
 
@@ -1266,9 +1312,9 @@ def compile_progress_status_to_workbook(
         print(f"[pipeline] ProgressStatus: skipped {skipped_not_in_config} workbook(s) not listed in DPR_Config.")
 
     raw_df = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame(columns=RAWDATA_COLUMNS)
-    diagnostics_df = pd.DataFrame(diagnostics_rows)
-    issues_df = pd.DataFrame(issue_rows)
-    coverage_df = pd.DataFrame(coverage_rows)
+    diagnostics_df = pd.DataFrame(diagnostics_rows, columns=DIAGNOSTICS_COLUMNS)
+    issues_df = pd.DataFrame(issue_rows, columns=ISSUES_COLUMNS)
+    coverage_df = pd.DataFrame(coverage_rows, columns=COVERAGE_COLUMNS)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
