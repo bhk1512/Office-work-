@@ -306,6 +306,10 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
     ]
 
     normalized = df.rename(columns=applied_map).copy()
+    # Template/header aliases can map multiple source columns to one canonical
+    # name (for example, two variants of length). Collapse duplicates so
+    # downstream concatenation and reindexing remain stable.
+    normalized = _collapse_duplicate_columns(normalized)
 
     report: Dict[str, object] = {
         "normalized_columns_ok": len(missing) == 0,
@@ -543,9 +547,9 @@ def _coalesce_duplicate_named_columns(df: pd.DataFrame, column_name: str) -> pd.
         merged = merged.where(~_blank_like_mask(merged), candidate)
 
     first_idx = matches[0]
-    out.iloc[:, first_idx] = merged
     keep_mask = [idx == first_idx or col != column_name for idx, col in enumerate(out.columns)]
     out = out.iloc[:, keep_mask].copy()
+    out[column_name] = merged.astype("object").to_numpy()
     return out
 
 

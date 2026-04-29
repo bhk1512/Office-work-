@@ -15,6 +15,7 @@ from dashboard.config import AppConfig
 from dashboard import stringing_ingest as ingest
 from dashboard import progress_status_ingest
 from dashboard import stretch_readiness_ingest
+from dashboard import stringing_summary_ingest
 from dashboard.stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
@@ -1225,6 +1226,18 @@ def compile_stretch_readiness_to_workbook(
         return None
     return result
 
+
+def compile_stringing_summary_to_workbook(
+    base_dir: Path,
+    output_path: Path,
+) -> Optional[Path]:
+    try:
+        result = stringing_summary_ingest.compile_stringing_summary_to_workbook(base_dir, output_path)
+    except Exception as exc:
+        print(f"[pipeline] StringingSummary: failed to compile unified summary: {exc}")
+        return None
+    return result
+
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
     """Reload the dashboard dataframe and recompute derived fields."""
     df = dashboard_module.load_daily(workbook_path)
@@ -1342,6 +1355,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     stringing_out_path: Path | None = None
     progress_status_out_path: Path | None = None
+    stringing_summary_out_path: Path | None = None
 
     if not args.skip_compile:
         # Ensure fresh outputs on every compile run
@@ -1501,6 +1515,25 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 )
             except Exception as exc:
                 print(f"[pipeline] StretchReadiness: failed to export parquet: {exc}")
+
+        # --- Compile Unified Stringing Summary from Stringing + Status + Stretch artifacts ---
+        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+            summary_base = base_dir.parent / "StringingSummary"
+        else:
+            summary_base = base_dir / "StringingSummary" if base_dir.name != "StringingSummary" else base_dir
+        summary_base.mkdir(parents=True, exist_ok=True)
+        summary_out = summary_base / "StringingSummary_Output.xlsx"
+        print(f"[pipeline] StringingSummary: compiling to {summary_out}")
+        compiled_summary = compile_stringing_summary_to_workbook(base_dir, summary_out)
+        stringing_summary_out_path = compiled_summary if compiled_summary else None
+        if compiled_summary and compiled_summary.exists():
+            try:
+                export_workbook_to_parquet(
+                    compiled_summary,
+                    sheets=stringing_summary_ingest.STRINGING_SUMMARY_SHEETS,
+                )
+            except Exception as exc:
+                print(f"[pipeline] StringingSummary: failed to export parquet: {exc}")
     else:
         print("[pipeline] Skipping compilation step as requested.")
         parquet_dir = None
@@ -1535,7 +1568,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     else:
         stringing_target = Path(dashboard.CONFIG.stringing_data_path)
 
-    new_config = dashboard.AppConfig(data_path=dataset_target, stringing_data_path=stringing_target)
+    if stringing_summary_out_path and stringing_summary_out_path.exists():
+        summary_target = stringing_summary_out_path
+    else:
+        summary_target = Path(getattr(dashboard.CONFIG, "stringing_summary_data_path", "Parquets/StringingSummary/StringingSummary_Output.xlsx"))
+
+    new_config = dashboard.AppConfig(
+        data_path=dataset_target,
+        stringing_data_path=stringing_target,
+        stringing_summary_data_path=summary_target,
+    )
     dashboard.CONFIG = new_config
     dashboard.DATA_PATH = dataset_target
     dashboard.app = dashboard.create_app(new_config)

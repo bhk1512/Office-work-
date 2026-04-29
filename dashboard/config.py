@@ -70,6 +70,18 @@ def _resolve_default_stringing_data_path() -> Path:
 
 
 _DEFAULT_STRINGING_DATA_PATH = _resolve_default_stringing_data_path()
+
+
+def _resolve_default_stringing_summary_data_path() -> Path:
+    """Resolve the default dataset root for unified stringing summary artifacts."""
+
+    override = os.getenv("STRINGING_SUMMARY_DATA_PATH")
+    if override:
+        return Path(override)
+    return Path("Parquets") / "StringingSummary" / "StringingSummary_Output.xlsx"
+
+
+_DEFAULT_STRINGING_SUMMARY_DATA_PATH = _resolve_default_stringing_summary_data_path()
 _DEFAULT_CSP_SCRIPT_SRC = ("https://unpkg.com", "https://cdn.plot.ly", "https://cdn.jsdelivr.net")
 _DEFAULT_CSP_STYLE_SRC = (
     "https://fonts.googleapis.com",
@@ -116,8 +128,17 @@ class AppConfig:
     # Data selection and defaults
     preferred_sheet: str = "ProdDailyExpandedSingles"
     default_benchmark: float = 9.0
+    exec_plan_green_pct: float = float(os.getenv("EXEC_PLAN_GREEN_PCT", "95"))
+    exec_plan_amber_low_pct: float = float(os.getenv("EXEC_PLAN_AMBER_LOW_PCT", "80"))
+    exec_readiness_green_pct: float = float(os.getenv("EXEC_READINESS_GREEN_PCT", "85"))
+    exec_readiness_amber_low_pct: float = float(os.getenv("EXEC_READINESS_AMBER_LOW_PCT", "65"))
+    exec_manpower_green_pct: float = float(os.getenv("EXEC_MANPOWER_GREEN_PCT", "70"))
+    exec_manpower_amber_low_pct: float = float(os.getenv("EXEC_MANPOWER_AMBER_LOW_PCT", "40"))
+    exec_gap_green_pct: float = float(os.getenv("EXEC_GAP_GREEN_PCT", "10"))
+    exec_gap_amber_high_pct: float = float(os.getenv("EXEC_GAP_AMBER_HIGH_PCT", "20"))
     data_path: Path = _DEFAULT_DATA_PATH
     stringing_data_path: Path = _DEFAULT_STRINGING_DATA_PATH
+    stringing_summary_data_path: Path = _DEFAULT_STRINGING_SUMMARY_DATA_PATH
     allowed_data_root: Path = Path(os.getenv("ALLOWED_DATA_ROOT", ".")).resolve()
 
     # Stringing (uses sibling folder under Parquets by default)
@@ -158,6 +179,7 @@ class AppConfig:
         resolved_root = Path(self.allowed_data_root).expanduser().resolve()
         resolved_data = Path(self.data_path).expanduser().resolve()
         resolved_stringing = Path(self.stringing_data_path).expanduser().resolve()
+        resolved_summary = Path(self.stringing_summary_data_path).expanduser().resolve()
 
         if resolved_root != resolved_data and resolved_root not in resolved_data.parents:
             raise ValueError(
@@ -167,6 +189,11 @@ class AppConfig:
         if resolved_root != resolved_stringing and resolved_root not in resolved_stringing.parents:
             raise ValueError(
                 f"STRINGING_DATA_PATH '{resolved_stringing}' must reside inside ALLOWED_DATA_ROOT '{resolved_root}'."
+            )
+
+        if resolved_root != resolved_summary and resolved_root not in resolved_summary.parents:
+            raise ValueError(
+                f"STRINGING_SUMMARY_DATA_PATH '{resolved_summary}' must reside inside ALLOWED_DATA_ROOT '{resolved_root}'."
             )
 
 

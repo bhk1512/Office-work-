@@ -152,6 +152,26 @@ def get_df_stringing_coverage() -> pd.DataFrame:
     return DATA_STORE.get_stringing_coverage()
 
 
+def get_df_status_activity_fact() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_summary_table("StatusActivityFact")
+
+
+def get_df_status_snapshot_project() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_summary_table("StatusSnapshotProject")
+
+
+def get_df_status_snapshot_overall() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_summary_table("StatusSnapshotOverall")
+
+
+def get_df_stretch_section_fact() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_summary_table("StretchSectionFact")
+
+
+def get_df_manpower_productivity_fact() -> pd.DataFrame:
+    return DATA_STORE.get_stringing_summary_table("ManpowerProductivityFact")
+
+
 def load_daily(config_or_path) -> pd.DataFrame:  # type: ignore[override]
     """Compatibility wrapper around the refactored data loader."""
 
@@ -420,6 +440,42 @@ def create_app(config: AppConfig | None = None) -> Dash:
             status=status,
             mimetype="application/json",
         )
+
+    @server.get("/__/stringing-summary-debug")
+    def stringing_summary_debug():  # type: ignore[override]
+        def _serialize_frame(frame: pd.DataFrame, max_rows: int = 5) -> list[dict[str, object]]:
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return []
+            sample = frame.head(max_rows).copy()
+            for column in sample.columns:
+                if pd.api.types.is_datetime64_any_dtype(sample[column]):
+                    sample[column] = pd.to_datetime(sample[column], errors="coerce").dt.strftime("%Y-%m-%d")
+            sample = sample.where(pd.notna(sample), None)
+            return sample.to_dict("records")
+
+        status_activity = get_df_status_activity_fact()
+        status_project = get_df_status_snapshot_project()
+        status_overall = get_df_status_snapshot_overall()
+        stretch_section = get_df_stretch_section_fact()
+        manpower_pairings = get_df_manpower_productivity_fact()
+        payload = {
+            "status_activity_rows": int(len(status_activity.index)),
+            "status_snapshot_project_rows": int(len(status_project.index)),
+            "status_snapshot_overall_rows": int(len(status_overall.index)),
+            "stretch_section_rows": int(len(stretch_section.index)),
+            "manpower_productivity_rows": int(len(manpower_pairings.index)),
+            "samples": {
+                "status_snapshot_overall": _serialize_frame(status_overall),
+                "status_snapshot_project": _serialize_frame(status_project),
+                "stretch_section": _serialize_frame(stretch_section),
+                "manpower_productivity": _serialize_frame(manpower_pairings),
+            },
+        }
+        return server.response_class(
+            response=json.dumps(payload, default=str),
+            status=200,
+            mimetype="application/json",
+        )
     
     @server.errorhandler(403)
     def _forbidden(e): return {"error":"forbidden"}, 403
@@ -441,6 +497,11 @@ def create_app(config: AppConfig | None = None) -> Dash:
         stringing_idle_interval_provider=lambda: DATA_STORE.get_idle_intervals("stringing"),
         stringing_plan_summary_provider=lambda: DATA_STORE.get_stringing_plan_summary(),
         stringing_coverage_provider=get_df_stringing_coverage,
+        status_activity_provider=get_df_status_activity_fact,
+        status_snapshot_project_provider=get_df_status_snapshot_project,
+        status_snapshot_overall_provider=get_df_status_snapshot_overall,
+        stretch_section_provider=get_df_stretch_section_fact,
+        manpower_productivity_provider=get_df_manpower_productivity_fact,
         project_info_provider=get_df_projinfo,
         project_baseline_provider=get_project_baselines_for_mode,
         responsibilities_provider=get_responsibilities_df,

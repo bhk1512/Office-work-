@@ -53,6 +53,29 @@ def _audit_table_block() -> html.Div:
     )
 
 
+def _debug_table(table_id: str, page_size: int = 10) -> dash_table.DataTable:
+    return dash_table.DataTable(
+        id=table_id,
+        columns=[],
+        data=[],
+        page_size=page_size,
+        fixed_rows={"headers": True},
+        style_table={"overflowX": "auto", "maxHeight": "340px"},
+        style_cell={
+            "fontFamily": "Inter, system-ui",
+            "fontSize": 12,
+            "border": "1px solid var(--border, #e6e9f0)",
+            "padding": "6px 8px",
+            "textAlign": "left",
+        },
+        style_header={
+            "fontWeight": "600",
+            "backgroundColor": "#f6f8fc",
+            "border": "1px solid var(--border, #e6e9f0)",
+        },
+    )
+
+
 def build_stringing_analytics_layout() -> html.Div:
     audit_drawer = dbc.Offcanvas(
         [
@@ -553,6 +576,69 @@ def build_stringing_analytics_layout() -> html.Div:
         className="viz-card shadow-soft h-100 w-100",
     )
 
+    debug_card = dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.Div("Data Contracts Debug", className="section-title"),
+                    html.Div(
+                        "Snapshot of pipeline contracts for status, stretch readiness, and manpower-productivity",
+                        className="section-sub",
+                    ),
+                    html.Div(id="stringing-debug-meta", className="analytics-note"),
+                ]
+            ),
+            dbc.CardBody(
+                dbc.Tabs(
+                    [
+                        dbc.Tab(
+                            html.Div(
+                                [
+                                    html.Div("Status Overall Trend", className="fw-semibold mb-2"),
+                                    _debug_table("stringing-debug-status-overall-table", page_size=8),
+                                    html.Hr(className="my-3"),
+                                    html.Div("Status Project Trend", className="fw-semibold mb-2"),
+                                    _debug_table("stringing-debug-status-project-table", page_size=10),
+                                ]
+                            ),
+                            label="Status",
+                            tab_id="stringing-debug-status-tab",
+                        ),
+                        dbc.Tab(
+                            html.Div(
+                                [
+                                    html.Div("Stretch Overall Trend", className="fw-semibold mb-2"),
+                                    _debug_table("stringing-debug-stretch-overall-table", page_size=8),
+                                    html.Hr(className="my-3"),
+                                    html.Div("Stretch Project/Line Trend", className="fw-semibold mb-2"),
+                                    _debug_table("stringing-debug-stretch-project-table", page_size=10),
+                                ]
+                            ),
+                            label="Stretch",
+                            tab_id="stringing-debug-stretch-tab",
+                        ),
+                        dbc.Tab(
+                            html.Div(
+                                [
+                                    html.Div("Manpower Availability Summary", className="fw-semibold mb-2"),
+                                    _debug_table("stringing-debug-manpower-summary-table", page_size=8),
+                                    html.Hr(className="my-3"),
+                                    html.Div("Manpower vs Productivity Pairings", className="fw-semibold mb-2"),
+                                    _debug_table("stringing-debug-manpower-pairing-table", page_size=10),
+                                ]
+                            ),
+                            label="Manpower",
+                            tab_id="stringing-debug-manpower-tab",
+                        ),
+                    ],
+                    id="stringing-debug-tabs",
+                    active_tab="stringing-debug-status-tab",
+                )
+            ),
+        ],
+        className="viz-card shadow-soft h-100 w-100",
+    )
+
     return html.Div(
         [
             html.Div(
@@ -598,6 +684,10 @@ def build_stringing_analytics_layout() -> html.Div:
             ),
             dbc.Row(
                 [dbc.Col(readiness_vs_prod, md=12, className="d-flex")],
+                className="g-3 mb-4 align-items-stretch",
+            ),
+            dbc.Row(
+                [dbc.Col(debug_card, md=12, className="d-flex")],
                 className="g-3 mb-4 align-items-stretch",
             ),
             dcc.Store(id="stringing-analytics-payload", data=None),

@@ -24,6 +24,13 @@ from .data_loader import (
     load_stringing_daily as _load_stringing_daily,
     load_stringing_compiled_raw as _load_stringing_compiled_raw,
     load_stringing_coverage as _load_stringing_coverage,
+    load_progress_status_raw as _load_progress_status_raw,
+    load_progress_status_coverage as _load_progress_status_coverage,
+    load_stretch_readiness_raw as _load_stretch_readiness_raw,
+    load_stretch_readiness_summary as _load_stretch_readiness_summary,
+    load_stretch_readiness_manpower_audit as _load_stretch_readiness_manpower_audit,
+    load_stretch_readiness_coverage as _load_stretch_readiness_coverage,
+    load_stringing_summary_table as _load_stringing_summary_table,
 )
 from .metrics import (
     calc_idle_and_loss,
@@ -51,6 +58,16 @@ LOGGER = logging.getLogger(__name__)
 
 DUCKDB_TABLE_ERECTION = "appdata_erection_daily"
 DUCKDB_TABLE_STRINGING = "appdata_stringing_daily"
+STRINGING_SUMMARY_TABLES: tuple[str, ...] = (
+    "StatusActivityFact",
+    "StatusSnapshotProject",
+    "StatusSnapshotOverall",
+    "StretchSectionFact",
+    "ManpowerProductivityFact",
+    "Coverage",
+    "Diagnostics",
+    "Issues",
+)
 
 
 @dataclass
@@ -111,6 +128,15 @@ class AppDataStore:
         self._stringing_daily: pd.DataFrame | None = None
         self._stringing_compiled: pd.DataFrame | None = None
         self._stringing_coverage: pd.DataFrame | None = None
+        self._progress_status_raw: pd.DataFrame | None = None
+        self._progress_status_coverage: pd.DataFrame | None = None
+        self._stretch_readiness_raw: pd.DataFrame | None = None
+        self._stretch_readiness_summary: pd.DataFrame | None = None
+        self._stretch_readiness_manpower_audit: pd.DataFrame | None = None
+        self._stretch_readiness_coverage: pd.DataFrame | None = None
+        self._stringing_summary_tables: dict[str, pd.DataFrame] = {
+            table: pd.DataFrame() for table in STRINGING_SUMMARY_TABLES
+        }
         self._project_info: pd.DataFrame | None = None
 
         # Responsibilities
@@ -178,6 +204,7 @@ class AppDataStore:
 
         self._precompute_erection_structures(cfg)
         self._maybe_preload_stringing(cfg)
+        self._maybe_preload_status_stretch_summary(cfg)
         self._precompute_stringing_structures(cfg)
         self._build_pch_tiles()
         self._build_traceability_tables(cfg)
@@ -257,6 +284,93 @@ class AppDataStore:
                 if isinstance(self._stringing_coverage, pd.DataFrame)
                 else pd.DataFrame()
             )
+
+    def set_progress_status_raw(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._progress_status_raw = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_progress_status_raw(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._progress_status_raw.copy()
+                if isinstance(self._progress_status_raw, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_progress_status_coverage(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._progress_status_coverage = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_progress_status_coverage(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._progress_status_coverage.copy()
+                if isinstance(self._progress_status_coverage, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stretch_readiness_raw(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._stretch_readiness_raw = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_stretch_readiness_raw(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._stretch_readiness_raw.copy()
+                if isinstance(self._stretch_readiness_raw, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stretch_readiness_summary(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._stretch_readiness_summary = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_stretch_readiness_summary(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._stretch_readiness_summary.copy()
+                if isinstance(self._stretch_readiness_summary, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stretch_readiness_manpower_audit(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._stretch_readiness_manpower_audit = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_stretch_readiness_manpower_audit(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._stretch_readiness_manpower_audit.copy()
+                if isinstance(self._stretch_readiness_manpower_audit, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stretch_readiness_coverage(self, df: pd.DataFrame) -> None:
+        with self._lock:
+            self._stretch_readiness_coverage = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_stretch_readiness_coverage(self) -> pd.DataFrame:
+        with self._lock:
+            return (
+                self._stretch_readiness_coverage.copy()
+                if isinstance(self._stretch_readiness_coverage, pd.DataFrame)
+                else pd.DataFrame()
+            )
+
+    def set_stringing_summary_table(self, table_name: str, df: pd.DataFrame) -> None:
+        key = str(table_name or "").strip()
+        if not key:
+            return
+        with self._lock:
+            self._stringing_summary_tables[key] = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    def get_stringing_summary_table(self, table_name: str) -> pd.DataFrame:
+        key = str(table_name or "").strip()
+        if not key:
+            return pd.DataFrame()
+        with self._lock:
+            frame = self._stringing_summary_tables.get(key)
+            return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
 
     # ------------------------------------------------------------------
     # Responsibilities (erection + stringing)
@@ -1010,6 +1124,35 @@ class AppDataStore:
         if isinstance(compiled_df, pd.DataFrame):
             self.set_stringing_compiled(compiled_df)
             LOGGER.info("Preloaded stringing compiled rows: %d", len(compiled_df))
+
+    def _maybe_preload_status_stretch_summary(self, config: AppConfig) -> None:
+        try:
+            self.set_progress_status_raw(_load_progress_status_raw(config))
+            self.set_progress_status_coverage(_load_progress_status_coverage(config))
+        except Exception as exc:
+            LOGGER.warning("Progress status preload failed: %s", exc)
+            self.set_progress_status_raw(pd.DataFrame())
+            self.set_progress_status_coverage(pd.DataFrame())
+
+        try:
+            self.set_stretch_readiness_raw(_load_stretch_readiness_raw(config))
+            self.set_stretch_readiness_summary(_load_stretch_readiness_summary(config))
+            self.set_stretch_readiness_manpower_audit(_load_stretch_readiness_manpower_audit(config))
+            self.set_stretch_readiness_coverage(_load_stretch_readiness_coverage(config))
+        except Exception as exc:
+            LOGGER.warning("Stretch readiness preload failed: %s", exc)
+            self.set_stretch_readiness_raw(pd.DataFrame())
+            self.set_stretch_readiness_summary(pd.DataFrame())
+            self.set_stretch_readiness_manpower_audit(pd.DataFrame())
+            self.set_stretch_readiness_coverage(pd.DataFrame())
+
+        for table_name in STRINGING_SUMMARY_TABLES:
+            try:
+                frame = _load_stringing_summary_table(config, table_name)
+            except Exception as exc:
+                LOGGER.warning("Stringing summary preload failed for %s: %s", table_name, exc)
+                frame = pd.DataFrame()
+            self.set_stringing_summary_table(table_name, frame)
 
     def _attach_project_codes(self, df: pd.DataFrame, project_info: pd.DataFrame) -> pd.DataFrame:
         if project_info is None or project_info.empty or "project_name" not in df.columns:

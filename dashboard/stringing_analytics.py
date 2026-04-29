@@ -78,6 +78,11 @@ def build_stringing_analytics_payload(
     months: Sequence[pd.Timestamp] | None = None,
     gangs: Sequence[str] | None = None,
     method_filter: str = "tse",
+    status_activity_fact: pd.DataFrame | None = None,
+    status_snapshot_project: pd.DataFrame | None = None,
+    status_snapshot_overall: pd.DataFrame | None = None,
+    stretch_section_fact: pd.DataFrame | None = None,
+    manpower_productivity_fact: pd.DataFrame | None = None,
 ) -> dict:
     """Return a serializable payload for stringing analytics."""
     projects = list(projects or [])
@@ -187,6 +192,25 @@ def build_stringing_analytics_payload(
         },
         relationship=relationship,
     ).to_dict()
+
+    payload["status_overview"] = _build_status_overview_contract(
+        status_activity_fact if isinstance(status_activity_fact, pd.DataFrame) else pd.DataFrame(),
+        status_snapshot_project if isinstance(status_snapshot_project, pd.DataFrame) else pd.DataFrame(),
+        status_snapshot_overall if isinstance(status_snapshot_overall, pd.DataFrame) else pd.DataFrame(),
+        projects=projects,
+        months=months,
+    )
+    payload["stretch_readiness"] = _build_stretch_readiness_contract(
+        stretch_section_fact if isinstance(stretch_section_fact, pd.DataFrame) else pd.DataFrame(),
+        projects=projects,
+        months=months,
+    )
+    payload["manpower_productivity"] = _build_manpower_productivity_contract(
+        manpower_productivity_fact if isinstance(manpower_productivity_fact, pd.DataFrame) else pd.DataFrame(),
+        projects=projects,
+        months=months,
+        gangs=gangs,
+    )
 
     return payload
 
@@ -944,6 +968,248 @@ def _bucket_label(value: float | int | None, buckets: list[tuple[str, float | in
         if upper is not None and float(lower) <= float(value) <= float(upper):
             return label
     return buckets[-1][0] if buckets else ""
+
+
+def _derive_scope_project_key(frame: pd.DataFrame) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series(dtype="string")
+    if "project_scope_key" in frame.columns:
+        source = frame["project_scope_key"]
+    elif "project_code" in frame.columns:
+        source = frame["project_code"]
+    elif "project_name" in frame.columns:
+        source = frame["project_name"]
+    elif "project_display" in frame.columns:
+        source = frame["project_display"]
+    else:
+        source = pd.Series("", index=frame.index)
+    return source.fillna("").astype(str).map(compact_project_key)
+
+
+def _filter_scope_frame(
+    frame: pd.DataFrame,
+    *,
+    projects: Sequence[str] | None,
+    months: Sequence[pd.Timestamp] | None,
+    gangs: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    work = frame.copy()
+    project_keys = {compact_project_key(value) for value in (projects or []) if str(value).strip()}
+    if project_keys:
+        work = work[_derive_scope_project_key(work).isin(project_keys)]
+    if months:
+        month_values = {pd.Timestamp(ts).to_period("M").to_timestamp() for ts in months if isinstance(ts, pd.Timestamp)}
+        if month_values:
+            month_col = None
+            for candidate in ("month", "report_date", "date"):
+                if candidate in work.columns:
+                    month_col = candidate
+                    break
+            if month_col is not None:
+                month_series = pd.to_datetime(work[month_col], errors="coerce").dt.to_period("M").dt.to_timestamp()
+                work = work[month_series.isin(month_values)]
+    if gangs:
+        gang_values = {str(value).strip().lower() for value in gangs if str(value).strip()}
+        if gang_values and "gang_name" in work.columns:
+            work = work[work["gang_name"].fillna("").astype(str).str.strip().str.lower().isin(gang_values)]
+    return work.reset_index(drop=True)
+
+
+def _build_status_overview_contract(
+    status_activity: pd.DataFrame,
+    status_project: pd.DataFrame,
+    status_overall: pd.DataFrame,
+    *,
+    projects: Sequence[str] | None,
+    months: Sequence[pd.Timestamp] | None,
+) -> dict[str, object]:
+    project_scope = _filter_scope_frame(status_project, projects=projects, months=months)
+    if project_scope.empty and isinstance(status_activity, pd.DataFrame) and not status_activity.empty:
+        derived = status_activity.copy()
+        for col in ("quantity_primary", "cumulative_progress", "balance_progress", "plan_for_month", "progress_for_month", "today_progress"):
+            if col in derived.columns:
+                derived[col] = pd.to_numeric(derived[col], errors="coerce")
+        if "month" not in derived.columns:
+            derived["month"] = pd.to_datetime(derived.get("report_date"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+        project_cols = ["project_code", "project_display", "project_scope_key", "line_name", "month"]
+        project_scope = (
+            derived.groupby(project_cols, dropna=False)
+            .agg(
+                quantity_primary_sum=("quantity_primary", "sum"),
+                cumulative_progress_sum=("cumulative_progress", "sum"),
+                balance_progress_sum=("balance_progress", "sum"),
+                plan_for_month_sum=("plan_for_month", "sum"),
+                progress_for_month_sum=("progress_for_month", "sum"),
+                today_progress_sum=("today_progress", "sum"),
+            )
+            .reset_index()
+        )
+        denom = project_scope["quantity_primary_sum"].where(project_scope["quantity_primary_sum"] > 0)
+        project_scope["completion_pct"] = (project_scope["cumulative_progress_sum"] / denom * 100.0).fillna(0.0)
+
+    overall_scope = _filter_scope_frame(status_overall, projects=projects, months=months)
+    if overall_scope.empty and not project_scope.empty:
+        overall_scope = (
+            project_scope.groupby("month", dropna=False)
+            .agg(
+                projects_total=("project_scope_key", lambda s: int(s.fillna("").astype(str).str.strip().astype(bool).sum())),
+                quantity_primary_sum=("quantity_primary_sum", "sum"),
+                cumulative_progress_sum=("cumulative_progress_sum", "sum"),
+                balance_progress_sum=("balance_progress_sum", "sum"),
+                plan_for_month_sum=("plan_for_month_sum", "sum"),
+                progress_for_month_sum=("progress_for_month_sum", "sum"),
+                today_progress_sum=("today_progress_sum", "sum"),
+            )
+            .reset_index()
+        )
+        denom = overall_scope["quantity_primary_sum"].where(overall_scope["quantity_primary_sum"] > 0)
+        overall_scope["completion_pct"] = (overall_scope["cumulative_progress_sum"] / denom * 100.0).fillna(0.0)
+
+    highlights: list[dict[str, object]] = []
+    activity_scope = _filter_scope_frame(status_activity, projects=projects, months=months)
+    if not activity_scope.empty:
+        if "activity_group" not in activity_scope.columns and "activity_norm" in activity_scope.columns:
+            activity_scope["activity_group"] = activity_scope["activity_norm"].fillna("").astype(str)
+        for col in ("cumulative_progress", "balance_progress"):
+            if col in activity_scope.columns:
+                activity_scope[col] = pd.to_numeric(activity_scope[col], errors="coerce")
+        highlights = (
+            activity_scope.groupby(["month", "project_code", "project_display", "activity_group"], dropna=False)
+            .agg(
+                cumulative_progress=("cumulative_progress", "sum"),
+                balance_progress=("balance_progress", "sum"),
+            )
+            .reset_index()
+            .sort_values(["month", "project_code", "activity_group"])
+            .to_dict("records")
+        )
+
+    return {
+        "project_trend": project_scope.sort_values(["month", "project_code", "line_name"]).to_dict("records") if not project_scope.empty else [],
+        "overall_trend": overall_scope.sort_values(["month"]).to_dict("records") if not overall_scope.empty else [],
+        "activity_highlights": highlights,
+    }
+
+
+def _build_stretch_readiness_contract(
+    stretch_section_fact: pd.DataFrame,
+    *,
+    projects: Sequence[str] | None,
+    months: Sequence[pd.Timestamp] | None,
+) -> dict[str, object]:
+    scope = _filter_scope_frame(stretch_section_fact, projects=projects, months=months)
+    if scope.empty:
+        return {"project_line_trend": [], "overall_trend": [], "section_sample": []}
+
+    if "readiness_state" not in scope.columns:
+        scope["readiness_state"] = "UNKNOWN"
+    readiness = scope["readiness_state"].fillna("").astype(str).str.upper()
+    scope["is_ready"] = readiness.eq("READY")
+    scope["is_partial"] = readiness.eq("PARTIAL")
+    scope["is_not_ready"] = readiness.eq("NOT_READY")
+    scope["is_unknown"] = readiness.eq("UNKNOWN")
+    length_source = scope["length_km"] if "length_km" in scope.columns else pd.Series(np.nan, index=scope.index)
+    scope["length_km"] = pd.to_numeric(length_source, errors="coerce")
+    scope["ready_length_km"] = scope["length_km"].where(scope["is_ready"])
+
+    project_line = (
+        scope.groupby(["month", "project_code", "project_display", "line_name"], dropna=False)
+        .agg(
+            sections_total=("section_id", lambda s: int(s.fillna("").astype(str).str.strip().astype(bool).sum())),
+            sections_ready=("is_ready", "sum"),
+            sections_partial=("is_partial", "sum"),
+            sections_not_ready=("is_not_ready", "sum"),
+            sections_unknown=("is_unknown", "sum"),
+            ready_km=("ready_length_km", "sum"),
+            total_km=("length_km", "sum"),
+        )
+        .reset_index()
+    )
+    project_line["readiness_pct"] = (
+        project_line["sections_ready"] / project_line["sections_total"].replace(0, np.nan) * 100.0
+    ).fillna(0.0)
+
+    overall = (
+        project_line.groupby("month", dropna=False)
+        .agg(
+            sections_total=("sections_total", "sum"),
+            sections_ready=("sections_ready", "sum"),
+            sections_partial=("sections_partial", "sum"),
+            sections_not_ready=("sections_not_ready", "sum"),
+            sections_unknown=("sections_unknown", "sum"),
+            ready_km=("ready_km", "sum"),
+            total_km=("total_km", "sum"),
+        )
+        .reset_index()
+    )
+    overall["readiness_pct"] = (
+        overall["sections_ready"] / overall["sections_total"].replace(0, np.nan) * 100.0
+    ).fillna(0.0)
+
+    sample_cols = [col for col in ("project_code", "project_display", "line_name", "section_id", "readiness_state", "length_km", "month") if col in scope.columns]
+    sample = scope[sample_cols].head(500).to_dict("records") if sample_cols else []
+    return {
+        "project_line_trend": project_line.sort_values(["month", "project_code", "line_name"]).to_dict("records"),
+        "overall_trend": overall.sort_values(["month"]).to_dict("records"),
+        "section_sample": sample,
+    }
+
+
+def _build_manpower_productivity_contract(
+    manpower_fact: pd.DataFrame,
+    *,
+    projects: Sequence[str] | None,
+    months: Sequence[pd.Timestamp] | None,
+    gangs: Sequence[str] | None,
+) -> dict[str, object]:
+    scope = _filter_scope_frame(manpower_fact, projects=projects, months=months, gangs=gangs)
+    if scope.empty:
+        return {"pairings": [], "project_line_day": [], "availability_summary": []}
+
+    for col in ("daily_km", "manpower_gang_strength", "manpower_fitters"):
+        if col in scope.columns:
+            scope[col] = pd.to_numeric(scope[col], errors="coerce")
+    if "date" in scope.columns:
+        scope["date"] = pd.to_datetime(scope["date"], errors="coerce").dt.normalize()
+
+    pairings = (
+        scope.groupby(["project_code", "project_display", "line_name", "date", "gang_name"], dropna=False)
+        .agg(
+            daily_km=("daily_km", "sum"),
+            manpower_gang_strength=("manpower_gang_strength", "mean"),
+            manpower_fitters=("manpower_fitters", "mean"),
+            rows=("span_key", "count"),
+            availability=("availability", "first"),
+        )
+        .reset_index()
+    )
+
+    project_line_day = (
+        scope.groupby(["project_code", "project_display", "line_name", "date"], dropna=False)
+        .agg(
+            output_km=("daily_km", "sum"),
+            manpower_gang_strength=("manpower_gang_strength", "mean"),
+            manpower_fitters=("manpower_fitters", "mean"),
+            active_gangs=("gang_name", lambda s: int(s.fillna("").astype(str).str.strip().astype(bool).nunique())),
+            rows=("span_key", "count"),
+        )
+        .reset_index()
+    )
+
+    availability_summary = (
+        scope.groupby(["project_code", "project_display", "availability"], dropna=False)
+        .agg(rows=("span_key", "count"))
+        .reset_index()
+        .to_dict("records")
+    )
+
+    return {
+        "pairings": pairings.sort_values(["date", "project_code", "line_name", "gang_name"]).head(2000).to_dict("records"),
+        "project_line_day": project_line_day.sort_values(["date", "project_code", "line_name"]).head(2000).to_dict("records"),
+        "availability_summary": availability_summary,
+    }
 
 
 __all__ = ["build_stringing_analytics_payload"]

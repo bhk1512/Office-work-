@@ -2687,6 +2687,152 @@ def load_stringing_coverage(config_or_path: AppConfig | Path | str) -> pd.DataFr
 load_stringing_coverage.cache_clear = _load_stringing_artifacts_cached.cache_clear  # type: ignore[attr-defined]
 
 
+def _resolve_sibling_dataset_root(base_path: Path, sibling_name: str) -> Path:
+    root = Path(base_path)
+    if root.is_file():
+        root = root.parent
+    sibling_key = sibling_name.strip().lower()
+    if root.name.lower() == sibling_key:
+        return root
+    if root.name.lower() == "parquets":
+        return root / sibling_name
+    if root.name.lower() == "erection" and root.parent.name.lower() == "parquets":
+        return root.parent / sibling_name
+    if root.parent.name.lower() == "parquets":
+        return root.parent / sibling_name
+    return root / sibling_name
+
+
+@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
+def _load_sibling_sheet_cached(
+    data_path: str,
+    sibling_name: str,
+    workbook_name: str,
+    sheet_name: str,
+) -> pd.DataFrame:
+    base = Path(data_path)
+    root = _resolve_sibling_dataset_root(base, sibling_name)
+    parquet_source = _find_parquet_source(root, sheet_name)
+    if parquet_source:
+        try:
+            frame = _read_parquet(parquet_source)
+            if isinstance(frame, pd.DataFrame):
+                return frame
+        except Exception as exc:
+            LOGGER.warning("%s: failed reading parquet '%s': %s", sibling_name, parquet_source, exc)
+    workbook_path = root / workbook_name
+    if workbook_path.exists():
+        try:
+            with pd.ExcelFile(workbook_path) as xl:
+                if sheet_name in xl.sheet_names:
+                    return xl.parse(sheet_name=sheet_name)
+        except Exception as exc:
+            LOGGER.warning("%s: failed reading sheet '%s' from '%s': %s", sibling_name, sheet_name, workbook_path, exc)
+    return pd.DataFrame()
+
+
+@_ttl_lru_cache(maxsize=CACHE_MAXSIZE, ttl_seconds=CACHE_TTL_SECONDS)
+def _load_named_sheet_cached(
+    dataset_path: str,
+    workbook_name: str,
+    sheet_name: str,
+) -> pd.DataFrame:
+    path = Path(dataset_path)
+    parquet_source = _find_parquet_source(path, sheet_name)
+    if parquet_source:
+        try:
+            frame = _read_parquet(parquet_source)
+            if isinstance(frame, pd.DataFrame):
+                return frame
+        except Exception as exc:
+            LOGGER.warning("Named sheet load failed from parquet '%s': %s", parquet_source, exc)
+
+    workbook_path = path if path.is_file() else (path / workbook_name)
+    if workbook_path.exists():
+        try:
+            with pd.ExcelFile(workbook_path) as xl:
+                if sheet_name in xl.sheet_names:
+                    return xl.parse(sheet_name=sheet_name)
+        except Exception as exc:
+            LOGGER.warning("Named sheet load failed from workbook '%s' sheet '%s': %s", workbook_path, sheet_name, exc)
+    return pd.DataFrame()
+
+
+def load_progress_status_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "ProgressStatus", "ProgressStatus_Output.xlsx", "RawData")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_progress_status_coverage(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "ProgressStatus", "ProgressStatus_Output.xlsx", "Coverage")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_stretch_readiness_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "StretchReadiness", "StretchReadiness_Output.xlsx", "RawData")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_stretch_readiness_summary(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "StretchReadiness", "StretchReadiness_Output.xlsx", "Summary")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_stretch_readiness_manpower_audit(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "StretchReadiness", "StretchReadiness_Output.xlsx", "ManpowerAudit")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_stretch_readiness_coverage(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "StretchReadiness", "StretchReadiness_Output.xlsx", "Coverage")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_stringing_summary_table(
+    config_or_path: AppConfig | Path | str,
+    sheet_name: str,
+) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        summary_path = Path(config_or_path.stringing_summary_data_path)
+    else:
+        summary_path = Path(config_or_path)
+    frame = _load_named_sheet_cached(str(summary_path.resolve()), "StringingSummary_Output.xlsx", sheet_name)
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+load_progress_status_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_progress_status_coverage.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_stretch_readiness_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_stretch_readiness_summary.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_stretch_readiness_manpower_audit.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_stretch_readiness_coverage.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_stringing_summary_table.cache_clear = _load_named_sheet_cached.cache_clear  # type: ignore[attr-defined]
+
+
 def _write_parquet(df: pd.DataFrame, destination: Path) -> None:
     """Persist *df* to *destination* with atomic replace and validation."""
 
