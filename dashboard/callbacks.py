@@ -150,6 +150,7 @@ _STATUS_ACTIVITY_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _STATUS_SNAPSHOT_PROJECT_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _STATUS_SNAPSHOT_OVERALL_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _STRETCH_SECTION_PROVIDER: Callable[[], pd.DataFrame] | None = None
+_STRETCH_READINESS_SUMMARY_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _MANPOWER_PRODUCTIVITY_PROVIDER: Callable[[], pd.DataFrame] | None = None
 _REGISTERED_DASH_APPS: "WeakSet[Dash]" = WeakSet()
 
@@ -2106,6 +2107,7 @@ def register_callbacks(
     status_snapshot_project_provider: Callable[[], pd.DataFrame] | None = None,
     status_snapshot_overall_provider: Callable[[], pd.DataFrame] | None = None,
     stretch_section_provider: Callable[[], pd.DataFrame] | None = None,
+    stretch_readiness_summary_provider: Callable[[], pd.DataFrame] | None = None,
     manpower_productivity_provider: Callable[[], pd.DataFrame] | None = None,
     project_info_provider: Callable[[], pd.DataFrame] | None = None,
     project_baseline_provider: Callable[[], tuple[dict[str, float], dict[str, dict[pd.Timestamp, float]]]] | None = None,
@@ -2139,7 +2141,7 @@ def register_callbacks(
     )
     global DATA_SELECTOR, _PROJECT_INFO_PROVIDER, _STRINGING_COVERAGE_PROVIDER
     global _STATUS_ACTIVITY_PROVIDER, _STATUS_SNAPSHOT_PROJECT_PROVIDER, _STATUS_SNAPSHOT_OVERALL_PROVIDER
-    global _STRETCH_SECTION_PROVIDER, _MANPOWER_PRODUCTIVITY_PROVIDER
+    global _STRETCH_SECTION_PROVIDER, _STRETCH_READINESS_SUMMARY_PROVIDER, _MANPOWER_PRODUCTIVITY_PROVIDER
     global _IDLE_INTERVAL_PROVIDER, _STRINGING_IDLE_INTERVAL_PROVIDER, _STRINGING_PLAN_SUMMARY_PROVIDER
     DATA_SELECTOR = data_selector
     _PROJECT_INFO_PROVIDER = project_info_provider
@@ -2148,6 +2150,7 @@ def register_callbacks(
     _STATUS_SNAPSHOT_PROJECT_PROVIDER = status_snapshot_project_provider
     _STATUS_SNAPSHOT_OVERALL_PROVIDER = status_snapshot_overall_provider
     _STRETCH_SECTION_PROVIDER = stretch_section_provider
+    _STRETCH_READINESS_SUMMARY_PROVIDER = stretch_readiness_summary_provider
     _MANPOWER_PRODUCTIVITY_PROVIDER = manpower_productivity_provider
     _IDLE_INTERVAL_PROVIDER = idle_interval_provider
     _STRINGING_IDLE_INTERVAL_PROVIDER = stringing_idle_interval_provider
@@ -12164,6 +12167,13 @@ def register_callbacks(
             months_ts=months_ts,
             lens=lens,
         )
+        stretch_summary_raw = _exec_filter_frame(
+            _safe_provider_frame(_STRETCH_READINESS_SUMMARY_PROVIDER),
+            projects=project_list,
+            lines=line_list,
+            months_ts=months_ts,
+            lens=lens,
+        )
         manpower_raw = _exec_filter_frame(
             _safe_provider_frame(_MANPOWER_PRODUCTIVITY_PROVIDER),
             projects=project_list,
@@ -12172,27 +12182,52 @@ def register_callbacks(
             lens=lens,
             gangs=gang_list,
         )
+        manpower_projects_total = 0
+        manpower_projects_covered = 0
+        manpower_present = pd.DataFrame()
+        if not manpower_raw.empty:
+            manpower_signal = manpower_raw.get("manpower_signal_type", pd.Series("", index=manpower_raw.index)).fillna("").astype(str).str.upper()
+            manpower_present = manpower_raw[manpower_signal.eq("PRESENT_WITH_VALUES")].copy()
+            if "project_code" in manpower_raw.columns:
+                manpower_projects_total = int(manpower_raw["project_code"].nunique())
+                manpower_projects_covered = int(manpower_present["project_code"].nunique())
+        status_snapshot_overall = _exec_filter_frame(
+            _safe_provider_frame(_STATUS_SNAPSHOT_OVERALL_PROVIDER),
+            projects=[],
+            lines=[],
+            months_ts=months_ts,
+            lens="monthly",
+        )
+        status_snapshot_project = _exec_filter_frame(
+            _safe_provider_frame(_STATUS_SNAPSHOT_PROJECT_PROVIDER),
+            projects=[],
+            lines=[],
+            months_ts=months_ts,
+            lens="monthly",
+        )
+        stringing_compiled_scope = _exec_filter_frame(
+            _safe_provider_frame(stringing_compiled_provider),
+            projects=project_list,
+            lines=line_list,
+            months_ts=months_ts,
+            lens="monthly",
+        )
 
         status_trend = pd.DataFrame()
-        if not status_activity.empty:
-            for col in ("quantity_primary", "cumulative_progress", "plan_for_month", "progress_for_month"):
-                status_activity[col] = pd.to_numeric(status_activity.get(col), errors="coerce")
+        if not status_snapshot_overall.empty:
+            for col in ("completion_pct", "plan_for_month_sum", "progress_for_month_sum"):
+                status_snapshot_overall[col] = pd.to_numeric(status_snapshot_overall.get(col), errors="coerce")
             status_trend = (
-                status_activity.groupby("_period", dropna=False)
+                status_snapshot_overall.groupby("_period", dropna=False)
                 .agg(
-                    quantity_primary=("quantity_primary", "sum"),
-                    cumulative_progress=("cumulative_progress", "sum"),
-                    plan_for_month=("plan_for_month", "sum"),
-                    progress_for_month=("progress_for_month", "sum"),
+                    completion_pct=("completion_pct", "last"),
+                    plan_for_month_sum=("plan_for_month_sum", "sum"),
+                    progress_for_month_sum=("progress_for_month_sum", "sum"),
                 )
                 .reset_index()
             )
-            status_trend["completion_pct"] = status_trend.apply(
-                lambda row: _exec_safe_pct(row.get("cumulative_progress"), row.get("quantity_primary")),
-                axis=1,
-            )
             status_trend["plan_attainment_pct"] = status_trend.apply(
-                lambda row: _exec_safe_pct(row.get("progress_for_month"), row.get("plan_for_month")),
+                lambda row: _exec_safe_pct(row.get("progress_for_month_sum"), row.get("plan_for_month_sum")),
                 axis=1,
             )
         status_trend = status_trend.sort_values("_period")
@@ -12219,14 +12254,38 @@ def register_callbacks(
                 lambda row: _exec_safe_pct(row.get("sections_ready"), row.get("sections_total")),
                 axis=1,
             )
+        stretch_km_trend = pd.DataFrame()
+        if not stretch_summary_raw.empty:
+            for col in ("ready_km", "total_km"):
+                stretch_summary_raw[col] = pd.to_numeric(stretch_summary_raw.get(col), errors="coerce")
+            stretch_km_trend = (
+                stretch_summary_raw.groupby("_period", dropna=False)
+                .agg(
+                    ready_km=("ready_km", "sum"),
+                    total_km=("total_km", "sum"),
+                )
+                .reset_index()
+            )
+            stretch_km_trend["readiness_km_pct"] = stretch_km_trend.apply(
+                lambda row: _exec_safe_pct(row.get("ready_km"), row.get("total_km")),
+                axis=1,
+            )
+        if not stretch_trend.empty and not stretch_km_trend.empty:
+            stretch_trend = stretch_trend.merge(stretch_km_trend, on="_period", how="outer")
+        elif stretch_trend.empty and not stretch_km_trend.empty:
+            stretch_trend = stretch_km_trend.copy()
+        if not stretch_trend.empty:
+            for col in ("sections_total", "sections_ready", "sections_partial", "sections_not_ready", "sections_unknown", "readiness_pct", "ready_km", "total_km", "readiness_km_pct"):
+                if col not in stretch_trend.columns:
+                    stretch_trend[col] = pd.NA
         stretch_trend = stretch_trend.sort_values("_period")
 
         manpower_trend = pd.DataFrame()
-        if not manpower_raw.empty:
-            available = manpower_raw.get("availability", pd.Series("", index=manpower_raw.index)).fillna("").astype(str).str.upper().eq("AVAILABLE")
-            manpower_raw["_available"] = available
+        if not manpower_present.empty:
+            available = manpower_present.get("availability", pd.Series("", index=manpower_present.index)).fillna("").astype(str).str.upper().eq("AVAILABLE")
+            manpower_present["_available"] = available
             manpower_trend = (
-                manpower_raw.groupby("_period", dropna=False)
+                manpower_present.groupby("_period", dropna=False)
                 .agg(rows=("date", "count"), available_rows=("_available", "sum"))
                 .reset_index()
             )
@@ -12235,6 +12294,78 @@ def register_callbacks(
                 axis=1,
             )
         manpower_trend = manpower_trend.sort_values("_period")
+
+        gap_scope = pd.DataFrame()
+        if not stretch_raw.empty and not stringing_compiled_scope.empty:
+            stretch_ready = stretch_raw.copy()
+            readiness_state = stretch_ready.get("readiness_state", pd.Series("", index=stretch_ready.index)).fillna("").astype(str).str.upper()
+            stretch_ready = stretch_ready[readiness_state.eq("READY")].copy()
+            if not stretch_ready.empty:
+                stretch_ready["report_date"] = pd.to_datetime(stretch_ready.get("report_date"), errors="coerce")
+                compiled_map = stringing_compiled_scope.copy()
+                compiled_map["po_start_date"] = pd.to_datetime(compiled_map.get("po_start_date"), errors="coerce")
+
+                def _es_key(series: pd.Series) -> pd.Series:
+                    return series.fillna("").astype(str).str.strip().str.replace(r"\s+", "", regex=True).str.upper()
+
+                compiled_project_col = "project_code" if "project_code" in compiled_map.columns else "project_name"
+                compiled_map["_join_project"] = _es_key(compiled_map.get(compiled_project_col, pd.Series("", index=compiled_map.index)))
+                compiled_map["_join_from"] = _es_key(compiled_map.get("from_ap", pd.Series("", index=compiled_map.index)))
+                compiled_map["_join_to"] = _es_key(compiled_map.get("to_ap", pd.Series("", index=compiled_map.index)))
+                compiled_map = compiled_map[
+                    compiled_map["_join_project"].astype(bool)
+                    & (compiled_map["_join_from"].astype(bool) | compiled_map["_join_to"].astype(bool))
+                ]
+                compiled_map = compiled_map.dropna(subset=["po_start_date"]).sort_values("po_start_date")
+                compiled_map = (
+                    compiled_map.groupby(["_join_project", "_join_from", "_join_to"], dropna=False)
+                    .agg(po_start_date=("po_start_date", "min"))
+                    .reset_index()
+                )
+
+                stretch_ready["_join_project"] = _es_key(stretch_ready.get("project_code", pd.Series("", index=stretch_ready.index)))
+                stretch_ready["_join_from"] = _es_key(stretch_ready.get("from_ap", pd.Series("", index=stretch_ready.index)))
+                stretch_ready["_join_to"] = _es_key(stretch_ready.get("to_ap", pd.Series("", index=stretch_ready.index)))
+                stretch_ready = stretch_ready[
+                    stretch_ready["_join_project"].astype(bool)
+                    & (stretch_ready["_join_from"].astype(bool) | stretch_ready["_join_to"].astype(bool))
+                ]
+                gap_scope = stretch_ready.merge(
+                    compiled_map,
+                    on=["_join_project", "_join_from", "_join_to"],
+                    how="left",
+                )
+                gap_scope["gap_days"] = (gap_scope["po_start_date"] - gap_scope["report_date"]).dt.days
+                gap_scope["gap_days"] = pd.to_numeric(gap_scope["gap_days"], errors="coerce").clip(lower=0.0)
+                invalid_gap = gap_scope["po_start_date"].isna() | gap_scope["report_date"].isna()
+                gap_scope.loc[invalid_gap, "gap_days"] = np.nan
+
+        gap_project_period = pd.DataFrame()
+        if not gap_scope.empty:
+            valid_gap = gap_scope[gap_scope["gap_days"].notna()].copy()
+            if not valid_gap.empty:
+                if "section_id" in valid_gap.columns and valid_gap["section_id"].fillna("").astype(str).str.strip().astype(bool).any():
+                    valid_gap["_gap_section_key"] = (
+                        valid_gap.get("project_code", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
+                        + "|"
+                        + valid_gap["section_id"].fillna("").astype(str).str.strip()
+                    )
+                else:
+                    valid_gap["_gap_section_key"] = (
+                        valid_gap.get("project_code", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
+                        + "|"
+                        + valid_gap.get("from_ap", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
+                        + "|"
+                        + valid_gap.get("to_ap", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
+                    )
+                gap_project_period = (
+                    valid_gap.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
+                    .agg(
+                        gap_days_avg=("gap_days", "mean"),
+                        gap_covered_sections=("_gap_section_key", "nunique"),
+                    )
+                    .reset_index()
+                )
 
         ranking = pd.DataFrame()
         if not status_activity.empty:
@@ -12261,13 +12392,20 @@ def register_callbacks(
                 lambda row: _exec_safe_pct(row.get("progress_for_month"), row.get("plan_for_month")),
                 axis=1,
             )
-            project_rollup["gap_abs"] = project_rollup["erection_cumulative"] - project_rollup["stringing_cumulative"]
-            project_rollup["gap_ratio_pct"] = project_rollup.apply(
-                lambda row: _exec_safe_pct(row.get("gap_abs"), row.get("erection_cumulative")),
-                axis=1,
-            )
             ranking = _exec_latest_per_group(project_rollup, ["project_code", "project_display", "line_name"], "_period")
             ranking = _exec_normalize_key_cols(ranking, ["project_code", "project_display", "line_name"])
+
+        if not ranking.empty and not gap_project_period.empty:
+            gap_latest = _exec_latest_per_group(
+                gap_project_period,
+                ["project_code", "project_display", "line_name"],
+                "_period",
+            )[["project_code", "project_display", "line_name", "gap_days_avg", "gap_covered_sections"]]
+            gap_latest = _exec_normalize_key_cols(gap_latest, ["project_code", "project_display", "line_name"])
+            ranking = ranking.merge(gap_latest, on=["project_code", "project_display", "line_name"], how="left")
+        elif not ranking.empty:
+            ranking["gap_days_avg"] = pd.NA
+            ranking["gap_covered_sections"] = 0
 
         if not ranking.empty and not stretch_raw.empty:
             stretch_rollup = (
@@ -12292,9 +12430,9 @@ def register_callbacks(
         elif not ranking.empty:
             ranking["readiness_pct"] = pd.NA
 
-        if not ranking.empty and not manpower_raw.empty:
+        if not ranking.empty and not manpower_present.empty:
             mp_rollup = (
-                manpower_raw.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
+                manpower_present.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
                 .agg(rows=("date", "count"), available_rows=("_available", "sum"))
                 .reset_index()
             )
@@ -12322,8 +12460,8 @@ def register_callbacks(
             ranking["manpower_rag"] = ranking["manpower_availability_pct"].map(
                 lambda v: _exec_rag_hi(v, green=config.exec_manpower_green_pct, amber_low=config.exec_manpower_amber_low_pct)
             )
-            ranking["gap_rag"] = ranking["gap_ratio_pct"].map(
-                lambda v: _exec_rag_lo(v, green_high=config.exec_gap_green_pct, amber_high=config.exec_gap_amber_high_pct)
+            ranking["gap_rag"] = ranking["gap_days_avg"].map(
+                lambda v: _exec_rag_lo(v, green_high=config.exec_gap_green_days, amber_high=config.exec_gap_amber_days)
             )
             ranking["overall_rag"] = ranking.apply(
                 lambda row: _exec_rag_combine(
@@ -12334,17 +12472,52 @@ def register_callbacks(
             ranking["plan_slippage_pct"] = (100.0 - pd.to_numeric(ranking["plan_attainment_pct"], errors="coerce").fillna(0.0)).clip(lower=0.0)
             ranking["readiness_gap_pct"] = (100.0 - pd.to_numeric(ranking["readiness_pct"], errors="coerce").fillna(0.0)).clip(lower=0.0)
             ranking["manpower_gap_pct"] = (100.0 - pd.to_numeric(ranking["manpower_availability_pct"], errors="coerce").fillna(0.0)).clip(lower=0.0)
-            ranking["es_gap_pct"] = pd.to_numeric(ranking["gap_ratio_pct"], errors="coerce").fillna(0.0).clip(lower=0.0)
+            ranking["es_gap_days"] = pd.to_numeric(ranking["gap_days_avg"], errors="coerce").fillna(0.0).clip(lower=0.0)
             rag_rank = {"RED": 0, "AMBER": 1, "GREEN": 2, "NO_DATA": 3}
             ranking["_rag_sort"] = ranking["overall_rag"].map(rag_rank).fillna(4)
-            ranking = ranking.sort_values(["_rag_sort", "plan_slippage_pct", "es_gap_pct"], ascending=[True, False, False]).reset_index(drop=True)
+            ranking = ranking.sort_values(["_rag_sort", "plan_slippage_pct", "es_gap_days"], ascending=[True, False, False]).reset_index(drop=True)
 
-        kpi_completion = float(status_trend["completion_pct"].iloc[-1]) if not status_trend.empty else 0.0
-        kpi_plan = float(status_trend["plan_attainment_pct"].iloc[-1]) if not status_trend.empty else 0.0
-        kpi_readiness = float(stretch_trend["readiness_pct"].iloc[-1]) if not stretch_trend.empty else 0.0
+        if not status_trend.empty:
+            latest_status = status_trend.iloc[-1]
+            latest_completion = pd.to_numeric(latest_status.get("completion_pct"), errors="coerce")
+            latest_progress = pd.to_numeric(latest_status.get("progress_for_month_sum"), errors="coerce")
+            latest_plan = pd.to_numeric(latest_status.get("plan_for_month_sum"), errors="coerce")
+            kpi_completion = float(latest_completion) if pd.notna(latest_completion) else 0.0
+            kpi_plan = (
+                (float(latest_progress) / float(latest_plan) * 100.0)
+                if pd.notna(latest_progress) and pd.notna(latest_plan) and float(latest_plan) > 0
+                else 0.0
+            )
+        else:
+            kpi_completion = 0.0
+            kpi_plan = 0.0
+        if not stretch_trend.empty:
+            readiness_series = pd.to_numeric(stretch_trend.get("readiness_pct"), errors="coerce").dropna()
+            kpi_readiness = float(readiness_series.iloc[-1]) if not readiness_series.empty else 0.0
+        else:
+            kpi_readiness = 0.0
+        if not stretch_summary_raw.empty:
+            summary_ready_km = pd.to_numeric(stretch_summary_raw.get("ready_km"), errors="coerce").fillna(0.0).sum()
+            summary_total_km = pd.to_numeric(stretch_summary_raw.get("total_km"), errors="coerce").fillna(0.0).sum()
+            kpi_readiness_km = _exec_safe_pct(summary_ready_km, summary_total_km)
+        else:
+            kpi_readiness_km = 0.0
         kpi_manpower = float(manpower_trend["availability_pct"].iloc[-1]) if not manpower_trend.empty else 0.0
-        kpi_gap_pct = float(pd.to_numeric(ranking["gap_ratio_pct"], errors="coerce").mean()) if not ranking.empty else 0.0
-        kpi_gap_abs = float(pd.to_numeric(ranking["gap_abs"], errors="coerce").mean()) if not ranking.empty else 0.0
+        valid_gap_scope = gap_scope[gap_scope["gap_days"].notna()].copy() if not gap_scope.empty else pd.DataFrame()
+        kpi_gap_days = round(float(pd.to_numeric(valid_gap_scope["gap_days"], errors="coerce").mean()), 1) if not valid_gap_scope.empty else 0.0
+        if not valid_gap_scope.empty:
+            if "section_id" in valid_gap_scope.columns and valid_gap_scope["section_id"].fillna("").astype(str).str.strip().astype(bool).any():
+                kpi_gap_covered_sections = int(
+                    (
+                        valid_gap_scope.get("project_code", pd.Series("", index=valid_gap_scope.index)).fillna("").astype(str).str.strip()
+                        + "|"
+                        + valid_gap_scope["section_id"].fillna("").astype(str).str.strip()
+                    ).nunique()
+                )
+            else:
+                kpi_gap_covered_sections = int(len(valid_gap_scope.index))
+        else:
+            kpi_gap_covered_sections = 0
         kpi_atrisk = int((ranking["overall_rag"] == "RED").sum()) if not ranking.empty else 0
 
         status_rows = []
@@ -12356,13 +12529,26 @@ def register_callbacks(
         if not stretch_trend.empty:
             tmp = stretch_trend.copy()
             tmp["period"] = pd.to_datetime(tmp["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
-            stretch_rows = tmp[["period", "readiness_pct", "sections_total", "sections_ready", "sections_partial", "sections_not_ready", "sections_unknown"]].to_dict("records")
+            stretch_rows = tmp[
+                [
+                    "period",
+                    "readiness_pct",
+                    "readiness_km_pct",
+                    "total_km",
+                    "ready_km",
+                    "sections_total",
+                    "sections_ready",
+                    "sections_partial",
+                    "sections_not_ready",
+                    "sections_unknown",
+                ]
+            ].to_dict("records")
 
         callouts = [
             f"At-risk projects (RED): {kpi_atrisk}.",
             f"Portfolio completion: {kpi_completion:.1f}% | Plan attainment: {kpi_plan:.1f}%.",
-            f"Stretch readiness: {kpi_readiness:.1f}% | Manpower availability: {kpi_manpower:.1f}%.",
-            f"Average E-S gap ratio: {kpi_gap_pct:.1f}%.",
+            f"Stretch readiness: {kpi_readiness_km:.1f}% km-weighted ({kpi_readiness:.1f}% section count) | Manpower availability: {kpi_manpower:.1f}%.",
+            f"Average E→S lag: {kpi_gap_days:.1f} days (sections covered: {kpi_gap_covered_sections}).",
         ]
         if not ranking.empty:
             top = ranking.iloc[0]
@@ -12384,9 +12570,12 @@ def register_callbacks(
                 "portfolio_completion_pct": kpi_completion,
                 "plan_attainment_pct": kpi_plan,
                 "stretch_readiness_pct": kpi_readiness,
-                "gap_ratio_pct": kpi_gap_pct,
-                "gap_abs": kpi_gap_abs,
+                "stretch_readiness_km_pct": kpi_readiness_km,
+                "gap_days_avg": kpi_gap_days,
+                "gap_covered_sections": kpi_gap_covered_sections,
                 "manpower_availability_pct": kpi_manpower,
+                "manpower_projects_total": manpower_projects_total,
+                "manpower_projects_covered": manpower_projects_covered,
                 "atrisk_projects": kpi_atrisk,
                 "projects_covered": int(ranking["project_display"].nunique()) if not ranking.empty else 0,
             },
@@ -12401,45 +12590,87 @@ def register_callbacks(
         focus_line = line_list[0] if line_list else ""
         focus_key = _compact_project_key(focus_project)
         focus_status = status_activity[_exec_project_key(status_activity).eq(focus_key)] if not status_activity.empty and focus_key else pd.DataFrame()
+        focus_status_snapshot = (
+            status_snapshot_project[_exec_project_key(status_snapshot_project).eq(focus_key)]
+            if not status_snapshot_project.empty and focus_key
+            else pd.DataFrame()
+        )
         focus_stretch = stretch_raw[_exec_project_key(stretch_raw).eq(focus_key)] if not stretch_raw.empty and focus_key else pd.DataFrame()
-        focus_mp = manpower_raw[_exec_project_key(manpower_raw).eq(focus_key)] if not manpower_raw.empty and focus_key else pd.DataFrame()
+        focus_stretch_summary = (
+            stretch_summary_raw[_exec_project_key(stretch_summary_raw).eq(focus_key)]
+            if not stretch_summary_raw.empty and focus_key
+            else pd.DataFrame()
+        )
+        focus_mp = manpower_present[_exec_project_key(manpower_present).eq(focus_key)] if not manpower_present.empty and focus_key else pd.DataFrame()
         if focus_line:
             if not focus_status.empty and "line_name" in focus_status.columns:
                 focus_status = focus_status[_exec_line_series(focus_status).str.lower().eq(focus_line.strip().lower())]
+            if not focus_status_snapshot.empty and "line_name" in focus_status_snapshot.columns:
+                focus_status_snapshot = focus_status_snapshot[_exec_line_series(focus_status_snapshot).str.lower().eq(focus_line.strip().lower())]
             if not focus_stretch.empty and "line_name" in focus_stretch.columns:
                 focus_stretch = focus_stretch[_exec_line_series(focus_stretch).str.lower().eq(focus_line.strip().lower())]
+            if not focus_stretch_summary.empty and "line_name" in focus_stretch_summary.columns:
+                focus_stretch_summary = focus_stretch_summary[_exec_line_series(focus_stretch_summary).str.lower().eq(focus_line.strip().lower())]
             if not focus_mp.empty and "line_name" in focus_mp.columns:
                 focus_mp = focus_mp[_exec_line_series(focus_mp).str.lower().eq(focus_line.strip().lower())]
 
         proj_status_rows = []
-        if not focus_status.empty:
+        if not focus_status_snapshot.empty:
+            for col in ("completion_pct", "cumulative_progress_sum", "plan_for_month_sum", "progress_for_month_sum"):
+                focus_status_snapshot[col] = pd.to_numeric(focus_status_snapshot.get(col), errors="coerce")
             group = (
-                focus_status.groupby("_period", dropna=False)
+                focus_status_snapshot.groupby("_period", dropna=False)
                 .agg(
-                    quantity_primary=("quantity_primary", "sum"),
-                    cumulative_progress=("cumulative_progress", "sum"),
-                    plan_for_month=("plan_for_month", "sum"),
-                    progress_for_month=("progress_for_month", "sum"),
+                    completion_pct=("completion_pct", "last"),
+                    cumulative_progress=("cumulative_progress_sum", "sum"),
+                    plan_for_month=("plan_for_month_sum", "sum"),
+                    progress_for_month=("progress_for_month_sum", "sum"),
                 )
                 .reset_index()
             )
-            group["completion_pct"] = group.apply(lambda row: _exec_safe_pct(row.get("cumulative_progress"), row.get("quantity_primary")), axis=1)
             group["plan_attainment_pct"] = group.apply(lambda row: _exec_safe_pct(row.get("progress_for_month"), row.get("plan_for_month")), axis=1)
+            group = group.sort_values("_period")
             group["period"] = pd.to_datetime(group["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
             proj_status_rows = group[["period", "completion_pct", "plan_attainment_pct", "cumulative_progress", "plan_for_month", "progress_for_month"]].to_dict("records")
 
         proj_activity = []
-        if not focus_status.empty:
+        if not focus_status_snapshot.empty and not focus_status.empty:
+            latest_proj_period = pd.to_datetime(focus_status_snapshot.get("_period"), errors="coerce").max()
             temp = focus_status.copy()
-            temp["activity_group"] = temp.get("activity_group", pd.Series("", index=temp.index)).fillna("").astype(str)
+            temp["activity_norm"] = temp.get("activity_norm", pd.Series("", index=temp.index)).fillna("").astype(str).str.lower()
+            temp["quantity_primary"] = pd.to_numeric(temp.get("quantity_primary"), errors="coerce")
             temp["cumulative_progress"] = pd.to_numeric(temp.get("cumulative_progress"), errors="coerce")
-            if "_period" in temp.columns and temp["_period"].notna().any():
-                temp = temp[temp["_period"].eq(temp["_period"].max())]
-            proj_activity = temp.groupby("activity_group", dropna=False)["cumulative_progress"].sum().reset_index().rename(columns={"cumulative_progress": "value"}).to_dict("records")
+            if pd.notna(latest_proj_period):
+                temp_period = pd.to_datetime(temp.get("_period"), errors="coerce")
+                temp = temp[temp_period.eq(latest_proj_period)]
+
+            def _activity_completion(mask: pd.Series) -> float:
+                scoped = temp[mask].copy()
+                if scoped.empty:
+                    return 0.0
+                num = float(pd.to_numeric(scoped.get("cumulative_progress"), errors="coerce").fillna(0.0).sum())
+                den = float(pd.to_numeric(scoped.get("quantity_primary"), errors="coerce").fillna(0.0).sum())
+                return _exec_safe_pct(num, den)
+
+            activity_norm = temp.get("activity_norm", pd.Series("", index=temp.index)).fillna("").astype(str).str.lower()
+            foundation_mask = activity_norm.str.contains("foundation", na=False)
+            tower_erection_mask = activity_norm.str.contains("erection", na=False)
+            opgw_mask = activity_norm.str.contains("opgw", na=False)
+            stringing_mask = activity_norm.str.contains("stringing", na=False) & ~opgw_mask
+
+            proj_activity = [
+                {"activity": "Foundation", "completion_pct": _activity_completion(foundation_mask)},
+                {"activity": "Tower Erection", "completion_pct": _activity_completion(tower_erection_mask)},
+                {"activity": "Stringing", "completion_pct": _activity_completion(stringing_mask)},
+                {"activity": "OPGW", "completion_pct": _activity_completion(opgw_mask)},
+            ]
 
         proj_stretch_state = []
         proj_stretch_trend = []
         proj_blocked = []
+        proj_stretch_total_km = 0.0
+        proj_stretch_ready_km = 0.0
+        proj_stretch_readiness_km_pct = 0.0
         if not focus_stretch.empty:
             state = focus_stretch.get("readiness_state", pd.Series("", index=focus_stretch.index)).fillna("").astype(str).str.upper()
             proj_stretch_state = [{"state": key, "count": int((state == key).sum())} for key in ("READY", "PARTIAL", "NOT_READY", "UNKNOWN")]
@@ -12450,27 +12681,109 @@ def register_callbacks(
                 sections_ready=("_ready", "sum"),
             ).reset_index()
             trend["readiness_pct"] = trend.apply(lambda row: _exec_safe_pct(row.get("sections_ready"), row.get("sections_total")), axis=1)
-            trend["period"] = pd.to_datetime(trend["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
-            proj_stretch_trend = trend[["period", "sections_total", "sections_ready", "readiness_pct"]].to_dict("records")
             blocked = temp[~temp["_ready"]].copy()
             keep = [col for col in ("section_id", "readiness_state", "length_km", "balance_towers", "remarks") if col in blocked.columns]
             proj_blocked = blocked[keep].head(200).to_dict("records") if keep else []
+        else:
+            trend = pd.DataFrame()
+        if not focus_stretch_summary.empty:
+            for col in ("ready_km", "total_km"):
+                focus_stretch_summary[col] = pd.to_numeric(focus_stretch_summary.get(col), errors="coerce")
+            proj_stretch_ready_km = float(focus_stretch_summary["ready_km"].fillna(0.0).sum())
+            proj_stretch_total_km = float(focus_stretch_summary["total_km"].fillna(0.0).sum())
+            proj_stretch_readiness_km_pct = _exec_safe_pct(proj_stretch_ready_km, proj_stretch_total_km)
+            trend_km = (
+                focus_stretch_summary.groupby("_period", dropna=False)
+                .agg(
+                    ready_km=("ready_km", "sum"),
+                    total_km=("total_km", "sum"),
+                )
+                .reset_index()
+            )
+            trend_km["readiness_km_pct"] = trend_km.apply(
+                lambda row: _exec_safe_pct(row.get("ready_km"), row.get("total_km")),
+                axis=1,
+            )
+        else:
+            trend_km = pd.DataFrame()
+        if not trend.empty and not trend_km.empty:
+            trend = trend.merge(trend_km, on="_period", how="outer")
+        elif trend.empty and not trend_km.empty:
+            trend = trend_km.copy()
+        if not trend.empty:
+            for col in ("sections_total", "sections_ready", "readiness_pct", "total_km", "ready_km", "readiness_km_pct"):
+                if col not in trend.columns:
+                    trend[col] = pd.NA
+            trend = trend.sort_values("_period")
+            trend["period"] = pd.to_datetime(trend["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
+            proj_stretch_trend = trend[
+                ["period", "sections_total", "sections_ready", "readiness_pct", "total_km", "ready_km", "readiness_km_pct"]
+            ].to_dict("records")
+
+        focus_gap = gap_scope[_exec_project_key(gap_scope).eq(focus_key)] if not gap_scope.empty and focus_key else pd.DataFrame()
+        if focus_line and not focus_gap.empty and "line_name" in focus_gap.columns:
+            focus_gap = focus_gap[_exec_line_series(focus_gap).str.lower().eq(focus_line.strip().lower())]
 
         gap_rows = []
-        if not focus_status.empty:
-            temp = focus_status.copy()
-            group_key = temp.get("activity_group", pd.Series("", index=temp.index)).fillna("").astype(str).str.lower()
-            temp["_is_erection"] = group_key.str.contains("tower erection", na=False)
-            temp["_is_stringing"] = group_key.eq("stringing")
-            temp["cumulative_progress"] = pd.to_numeric(temp.get("cumulative_progress"), errors="coerce")
-            gap = temp.groupby("_period", dropna=False).agg(
-                erection_cumulative=("cumulative_progress", lambda s: float(s[temp.loc[s.index, "_is_erection"]].sum())),
-                stringing_cumulative=("cumulative_progress", lambda s: float(s[temp.loc[s.index, "_is_stringing"]].sum())),
-            ).reset_index()
-            gap["gap_abs"] = gap["erection_cumulative"] - gap["stringing_cumulative"]
-            gap["gap_ratio_pct"] = gap.apply(lambda row: _exec_safe_pct(row.get("gap_abs"), row.get("erection_cumulative")), axis=1)
-            gap["period"] = pd.to_datetime(gap["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
-            gap_rows = gap[["period", "erection_cumulative", "stringing_cumulative", "gap_abs", "gap_ratio_pct"]].to_dict("records")
+        se_latest_erection = 0.0
+        se_latest_stringing = 0.0
+        se_gap_days_avg = 0.0
+        if not focus_status.empty or not focus_gap.empty:
+            se_trend = pd.DataFrame()
+            if not focus_status.empty:
+                temp = focus_status.copy()
+                group_key = temp.get("activity_group", pd.Series("", index=temp.index)).fillna("").astype(str).str.lower()
+                temp["_is_erection"] = group_key.str.contains("tower erection", na=False)
+                temp["_is_stringing"] = group_key.eq("stringing")
+                temp["cumulative_progress"] = pd.to_numeric(temp.get("cumulative_progress"), errors="coerce")
+                se_trend = temp.groupby("_period", dropna=False).agg(
+                    erection_cumulative_mt=("cumulative_progress", lambda s: float(s[temp.loc[s.index, "_is_erection"]].sum())),
+                    stringing_cumulative_km=("cumulative_progress", lambda s: float(s[temp.loc[s.index, "_is_stringing"]].sum())),
+                ).reset_index()
+            gap_lag_trend = pd.DataFrame()
+            if not focus_gap.empty:
+                valid_focus_gap = focus_gap[focus_gap["gap_days"].notna()].copy()
+                if not valid_focus_gap.empty:
+                    if "section_id" in valid_focus_gap.columns and valid_focus_gap["section_id"].fillna("").astype(str).str.strip().astype(bool).any():
+                        valid_focus_gap["_gap_section_key"] = (
+                            valid_focus_gap.get("project_code", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
+                            + "|"
+                            + valid_focus_gap["section_id"].fillna("").astype(str).str.strip()
+                        )
+                    else:
+                        valid_focus_gap["_gap_section_key"] = (
+                            valid_focus_gap.get("project_code", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
+                            + "|"
+                            + valid_focus_gap.get("from_ap", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
+                            + "|"
+                            + valid_focus_gap.get("to_ap", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
+                        )
+                    gap_lag_trend = valid_focus_gap.groupby("_period", dropna=False).agg(
+                        gap_days_avg=("gap_days", "mean"),
+                        gap_covered_sections=("_gap_section_key", "nunique"),
+                    ).reset_index()
+                    se_gap_days_avg = round(float(pd.to_numeric(valid_focus_gap["gap_days"], errors="coerce").mean()), 1)
+            if not se_trend.empty and not gap_lag_trend.empty:
+                se_combined = se_trend.merge(gap_lag_trend, on="_period", how="outer")
+            elif not se_trend.empty:
+                se_combined = se_trend.copy()
+                se_combined["gap_days_avg"] = pd.NA
+                se_combined["gap_covered_sections"] = pd.NA
+            else:
+                se_combined = gap_lag_trend.copy()
+                se_combined["erection_cumulative_mt"] = pd.NA
+                se_combined["stringing_cumulative_km"] = pd.NA
+            if not se_combined.empty:
+                se_combined = se_combined.sort_values("_period")
+                se_combined["period"] = pd.to_datetime(se_combined["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
+                gap_rows = se_combined[
+                    ["period", "erection_cumulative_mt", "stringing_cumulative_km", "gap_days_avg", "gap_covered_sections"]
+                ].to_dict("records")
+                latest_se = se_combined.iloc[-1]
+                latest_erection_val = pd.to_numeric(latest_se.get("erection_cumulative_mt"), errors="coerce")
+                latest_stringing_val = pd.to_numeric(latest_se.get("stringing_cumulative_km"), errors="coerce")
+                se_latest_erection = float(latest_erection_val) if pd.notna(latest_erection_val) else 0.0
+                se_latest_stringing = float(latest_stringing_val) if pd.notna(latest_stringing_val) else 0.0
 
         mp_scatter = []
         mp_availability = []
@@ -12498,6 +12811,8 @@ def register_callbacks(
         if focus_summary.empty and not ranking.empty:
             focus_summary = ranking.head(1)
         row = focus_summary.iloc[0] if not focus_summary.empty else pd.Series(dtype="object")
+        row_gap_days = pd.to_numeric(row.get("gap_days_avg"), errors="coerce")
+        proj_gap_days_kpi = float(row_gap_days) if pd.notna(row_gap_days) else float(se_gap_days_avg or 0.0)
 
         proj_payload = {
             "scope": {
@@ -12512,14 +12827,25 @@ def register_callbacks(
                 "completion_pct": float(pd.to_numeric(row.get("completion_pct"), errors="coerce") or 0.0),
                 "plan_attainment_pct": float(pd.to_numeric(row.get("plan_attainment_pct"), errors="coerce") or 0.0),
                 "readiness_pct": float(pd.to_numeric(row.get("readiness_pct"), errors="coerce") or 0.0),
-                "gap_ratio_pct": float(pd.to_numeric(row.get("gap_ratio_pct"), errors="coerce") or 0.0),
-                "gap_abs": float(pd.to_numeric(row.get("gap_abs"), errors="coerce") or 0.0),
+                "gap_days_avg": proj_gap_days_kpi,
                 "manpower_availability_pct": float(pd.to_numeric(row.get("manpower_availability_pct"), errors="coerce") or 0.0),
                 "rag": str(row.get("overall_rag", "NO_DATA")),
             },
             "status": {"trend": proj_status_rows, "activity_contribution": proj_activity},
-            "stretch": {"state_split": proj_stretch_state, "trend": proj_stretch_trend, "blocked_sections": proj_blocked},
-            "stringing_erection": {"gap_trend": gap_rows},
+            "stretch": {
+                "state_split": proj_stretch_state,
+                "trend": proj_stretch_trend,
+                "blocked_sections": proj_blocked,
+                "readiness_km_pct": proj_stretch_readiness_km_pct,
+                "total_km": proj_stretch_total_km,
+                "ready_km": proj_stretch_ready_km,
+            },
+            "stringing_erection": {
+                "gap_trend": gap_rows,
+                "erection_cumulative_mt": se_latest_erection,
+                "stringing_cumulative_km": se_latest_stringing,
+                "gap_days_avg": se_gap_days_avg,
+            },
             "manpower_productivity": {"scatter": mp_scatter, "availability": mp_availability, "league": mp_league},
             "coverage": {
                 "rows": [
@@ -12577,6 +12903,16 @@ def register_callbacks(
         if not stretch_df.empty:
             fig_stretch = go.Figure()
             fig_stretch.add_trace(go.Scatter(x=stretch_df["period"], y=stretch_df["readiness_pct"], mode="lines+markers", line={"width": 3, "color": "#d97706"}, name="Readiness %"))
+            if "readiness_km_pct" in stretch_df.columns and pd.to_numeric(stretch_df.get("readiness_km_pct"), errors="coerce").notna().any():
+                fig_stretch.add_trace(
+                    go.Scatter(
+                        x=stretch_df["period"],
+                        y=stretch_df["readiness_km_pct"],
+                        mode="lines+markers",
+                        line={"width": 3, "color": "#0f766e"},
+                        name="Readiness % (km-weighted)",
+                    )
+                )
             fig_stretch.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 40, "r": 20, "t": 10, "b": 35}, yaxis={"title": "%", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"})
         else:
             fig_stretch = _exec_empty_fig("No stretch readiness data")
@@ -12584,7 +12920,7 @@ def register_callbacks(
         ranking_columns = []
         ranking_data = []
         if not ranking_df.empty:
-            for col in ("completion_pct", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_ratio_pct"):
+            for col in ("completion_pct", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg"):
                 ranking_df[col] = pd.to_numeric(ranking_df.get(col), errors="coerce").round(1)
             ranking_columns = [
                 {"name": "Project", "id": "project_display"},
@@ -12593,19 +12929,23 @@ def register_callbacks(
                 {"name": "Plan %", "id": "plan_attainment_pct"},
                 {"name": "Readiness %", "id": "readiness_pct"},
                 {"name": "Manpower %", "id": "manpower_availability_pct"},
-                {"name": "E-S Gap %", "id": "gap_ratio_pct"},
+                {"name": "E→S Lag (days)", "id": "gap_days_avg"},
                 {"name": "RAG", "id": "overall_rag"},
             ]
-            ranking_data = ranking_df[["project_display", "line_name", "completion_pct", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_ratio_pct", "overall_rag"]].to_dict("records")
+            ranking_data = ranking_df[["project_display", "line_name", "completion_pct", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg", "overall_rag"]].to_dict("records")
 
         if not risk_df.empty:
             labels = (risk_df["project_display"].fillna("").astype(str) + " | " + risk_df["line_name"].fillna("").astype(str)).tolist()
+            risk_es_days = pd.to_numeric(
+                risk_df.get("es_gap_days", risk_df.get("gap_days_avg", pd.Series(0.0, index=risk_df.index))),
+                errors="coerce",
+            ).fillna(0.0)
             fig_risk = go.Figure()
             fig_risk.add_bar(x=labels, y=risk_df["plan_slippage_pct"], name="Plan slippage", marker_color="#dc2626")
             fig_risk.add_bar(x=labels, y=risk_df["readiness_gap_pct"], name="Readiness gap", marker_color="#d97706")
             fig_risk.add_bar(x=labels, y=risk_df["manpower_gap_pct"], name="Manpower gap", marker_color="#2563eb")
-            fig_risk.add_bar(x=labels, y=risk_df["es_gap_pct"], name="E-S gap", marker_color="#7c3aed")
-            fig_risk.update_layout(barmode="stack", template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 75}, xaxis={"tickangle": -30}, yaxis={"title": "Risk contribution (%)", "gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.16, "x": 0})
+            fig_risk.add_bar(x=labels, y=risk_es_days, name="E-S lag (days)", marker_color="#7c3aed")
+            fig_risk.update_layout(barmode="stack", template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 75}, xaxis={"tickangle": -30}, yaxis={"title": "Risk contribution (higher is worse)", "gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.16, "x": 0})
         else:
             fig_risk = _exec_empty_fig("No risk driver data")
 
@@ -12622,20 +12962,36 @@ def register_callbacks(
             coverage_data = coverage_df[["project_display", "line_name", "status_data", "stretch_data", "manpower_data"]].to_dict("records")
 
         callout_children = [html.Li(text) for text in callouts] if callouts else [html.Li("No callouts available.")]
+        manpower_total = int(kpis.get("manpower_projects_total", 0) or 0)
+        manpower_covered = int(kpis.get("manpower_projects_covered", 0) or 0)
+        kpi_atrisk = int(kpis.get("atrisk_projects", 0) or 0)
+        if kpi_atrisk == 0:
+            atrisk_sub = "All projects on track"
+        else:
+            atrisk_sub = f"{kpi_atrisk} project(s) flagged RED"
+        plan_green = float(config.exec_plan_green_pct)
+        plan_amber = float(config.exec_plan_amber_low_pct)
+        plan_sub = f"≥{plan_green:.0f}% = on track, {plan_amber:.0f}–{plan_green:.0f}% = watch"
+        if manpower_covered == 0:
+            manpower_value = "—"
+            manpower_sub = "No manpower data available"
+        else:
+            manpower_value = f"{float(kpis.get('manpower_availability_pct', 0.0)):.1f}%"
+            manpower_sub = f"{manpower_covered} of {manpower_total} projects have manpower data"
 
         return (
             f"{float(kpis.get('portfolio_completion_pct', 0.0)):.1f}%",
             f"{lens} view | {int(kpis.get('projects_covered', 0) or 0)} projects",
             f"{float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
-            f"G≥{config.exec_plan_green_pct:.0f}, A≥{config.exec_plan_amber_low_pct:.0f}",
-            f"{float(kpis.get('stretch_readiness_pct', 0.0)):.1f}%",
-            f"G≥{config.exec_readiness_green_pct:.0f}, A≥{config.exec_readiness_amber_low_pct:.0f}",
-            f"{float(kpis.get('gap_ratio_pct', 0.0)):.1f}%",
-            f"Abs gap: {float(kpis.get('gap_abs', 0.0)):.1f}",
-            f"{float(kpis.get('manpower_availability_pct', 0.0)):.1f}%",
-            f"G≥{config.exec_manpower_green_pct:.0f}, A≥{config.exec_manpower_amber_low_pct:.0f}",
+            plan_sub,
+            f"{float(kpis.get('stretch_readiness_km_pct', 0.0)):.1f}%",
+            f"km-weighted | {float(kpis.get('stretch_readiness_pct', 0.0)):.1f}% by section count",
+            f"{float(kpis.get('gap_days_avg', 0.0)):.0f} days",
+            "Avg. delay: ready to P/O start",
+            manpower_value,
+            manpower_sub,
             str(int(kpis.get("atrisk_projects", 0) or 0)),
-            "Overall RAG = RED",
+            atrisk_sub,
             fig_status,
             fig_stretch,
             ranking_columns,
@@ -12708,11 +13064,32 @@ def register_callbacks(
             fig_proj_status = _exec_empty_fig("No status trend")
 
         if not act_df.empty:
-            act_df["value"] = pd.to_numeric(act_df.get("value"), errors="coerce")
-            act_df = act_df.sort_values("value", ascending=True).tail(12)
+            if "activity" not in act_df.columns and "activity_group" in act_df.columns:
+                act_df["activity"] = act_df["activity_group"].fillna("").astype(str)
+            if "completion_pct" not in act_df.columns and "value" in act_df.columns:
+                act_df["completion_pct"] = pd.to_numeric(act_df.get("value"), errors="coerce")
+            act_df["completion_pct"] = pd.to_numeric(act_df.get("completion_pct"), errors="coerce")
+            order = {"Foundation": 0, "Tower Erection": 1, "Stringing": 2, "OPGW": 3}
+            palette = {
+                "Foundation": "#102a72",      # navy
+                "Tower Erection": "#1d4ed8",  # blue
+                "Stringing": "#3b82f6",       # medium blue
+                "OPGW": "#0f766e",            # teal
+            }
+            act_df["_order"] = act_df.get("activity", pd.Series("", index=act_df.index)).map(order).fillna(99)
+            act_df = act_df.sort_values("_order", ascending=False)
+            bar_colors = act_df.get("activity", pd.Series("", index=act_df.index)).map(palette).fillna("#0ea5e9").tolist()
             fig_act = go.Figure()
-            fig_act.add_bar(x=act_df["value"], y=act_df["activity_group"], orientation="h", marker_color="#0ea5e9")
-            fig_act.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 120, "r": 20, "t": 10, "b": 30}, xaxis={"title": "Cumulative progress", "gridcolor": "#e6e9f0"}, yaxis={"title": ""})
+            fig_act.add_bar(x=act_df["completion_pct"], y=act_df["activity"], orientation="h", marker_color=bar_colors)
+            fig_act.add_vline(x=100, line_width=2, line_dash="dash", line_color="#475569")
+            fig_act.update_layout(
+                template="plotly_white",
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                margin={"l": 120, "r": 20, "t": 10, "b": 30},
+                xaxis={"title": "Completion %", "gridcolor": "#e6e9f0", "range": [0, 100]},
+                yaxis={"title": ""},
+            )
         else:
             fig_act = _exec_empty_fig("No activity contribution")
 
@@ -12724,8 +13101,26 @@ def register_callbacks(
 
         if not stretch_trend_df.empty:
             fig_stretch_trend = go.Figure()
-            fig_stretch_trend.add_trace(go.Scatter(x=stretch_trend_df["period"], y=stretch_trend_df["readiness_pct"], mode="lines+markers", line={"width": 3, "color": "#d97706"}))
-            fig_stretch_trend.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 35, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Readiness %", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"})
+            fig_stretch_trend.add_trace(
+                go.Scatter(
+                    x=stretch_trend_df["period"],
+                    y=stretch_trend_df["readiness_pct"],
+                    mode="lines+markers",
+                    line={"width": 3, "color": "#d97706"},
+                    name="Readiness % (section count)",
+                )
+            )
+            if "readiness_km_pct" in stretch_trend_df.columns and pd.to_numeric(stretch_trend_df.get("readiness_km_pct"), errors="coerce").notna().any():
+                fig_stretch_trend.add_trace(
+                    go.Scatter(
+                        x=stretch_trend_df["period"],
+                        y=stretch_trend_df["readiness_km_pct"],
+                        mode="lines+markers",
+                        line={"width": 3, "color": "#0f766e"},
+                        name="Readiness % (km-weighted)",
+                    )
+                )
+            fig_stretch_trend.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 35, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Readiness %", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.12, "x": 0})
         else:
             fig_stretch_trend = _exec_empty_fig("No stretch trend")
 
@@ -12733,13 +13128,46 @@ def register_callbacks(
         blocked_data = blocked_df.to_dict("records") if not blocked_df.empty else []
 
         if not gap_df.empty:
+            if "gap_days_avg" not in gap_df.columns:
+                gap_df["gap_days_avg"] = pd.to_numeric(gap_df.get("gap_ratio_pct"), errors="coerce")
+            if "erection_cumulative_mt" not in gap_df.columns:
+                gap_df["erection_cumulative_mt"] = pd.to_numeric(gap_df.get("erection_cumulative"), errors="coerce")
+            if "stringing_cumulative_km" not in gap_df.columns:
+                gap_df["stringing_cumulative_km"] = pd.to_numeric(gap_df.get("stringing_cumulative"), errors="coerce")
             fig_gap = go.Figure()
-            fig_gap.add_bar(x=gap_df["period"], y=gap_df["gap_ratio_pct"], marker_color="#7c3aed")
-            fig_gap.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Gap %", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"})
+            fig_gap.add_bar(x=gap_df["period"], y=gap_df["gap_days_avg"], marker_color="#7c3aed")
+            fig_gap.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Lag (days)", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"})
             fig_se = go.Figure()
-            fig_se.add_trace(go.Scatter(x=gap_df["period"], y=gap_df["erection_cumulative"], mode="lines+markers", name="Erection", line={"width": 3, "color": "#0f766e"}))
-            fig_se.add_trace(go.Scatter(x=gap_df["period"], y=gap_df["stringing_cumulative"], mode="lines+markers", name="Stringing", line={"width": 3, "color": "#2563eb"}))
-            fig_se.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Cumulative", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.12, "x": 0})
+            fig_se.add_trace(
+                go.Scatter(
+                    x=gap_df["period"],
+                    y=gap_df["erection_cumulative_mt"],
+                    mode="lines+markers",
+                    name="Erection (MT)",
+                    line={"width": 3, "color": "#0f766e"},
+                    yaxis="y",
+                )
+            )
+            fig_se.add_trace(
+                go.Scatter(
+                    x=gap_df["period"],
+                    y=gap_df["stringing_cumulative_km"],
+                    mode="lines+markers",
+                    name="Stringing (km)",
+                    line={"width": 3, "color": "#2563eb"},
+                    yaxis="y2",
+                )
+            )
+            fig_se.update_layout(
+                template="plotly_white",
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                margin={"l": 30, "r": 40, "t": 10, "b": 30},
+                yaxis={"title": "Erection cumulative (MT)", "gridcolor": "#e6e9f0"},
+                yaxis2={"title": "Stringing cumulative (km)", "overlaying": "y", "side": "right"},
+                xaxis={"gridcolor": "#e6e9f0"},
+                legend={"orientation": "h", "y": 1.12, "x": 0},
+            )
         else:
             fig_gap = _exec_empty_fig("No E-S gap trend")
             fig_se = _exec_empty_fig("No cumulative detail")
@@ -12778,22 +13206,29 @@ def register_callbacks(
         coverage_columns = [{"name": "Category", "id": "category"}, {"name": "Status", "id": "status"}] if not coverage_df.empty else []
         coverage_data = coverage_df.to_dict("records") if not coverage_df.empty else []
 
+        proj_readiness_section_pct = float(kpis.get("readiness_pct", 0.0) or 0.0)
+        proj_readiness_km_val = pd.to_numeric(stretch.get("readiness_km_pct"), errors="coerce")
+        if pd.notna(proj_readiness_km_val):
+            proj_readiness_sub = f"km-weighted | {proj_readiness_section_pct:.1f}% by section count"
+        else:
+            proj_readiness_sub = "Sections ready / total sections"
+
         return (
             f"Project: {scope.get('project', 'N/A')} | Line: {scope.get('line', 'All lines')}",
             f"Reporting: {scope.get('period_label', 'N/A')}",
             scope.get("coverage_label", "Coverage: N/A"),
             f"{float(kpis.get('completion_pct', 0.0)):.1f}%",
-            "Cumulative vs quantity",
+            "Overall cumulative progress vs total quantity",
             f"{float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
-            "Progress vs plan",
+            "Current-month progress vs current-month plan",
             f"{float(kpis.get('readiness_pct', 0.0)):.1f}%",
-            "Ready sections / total",
-            f"{float(kpis.get('gap_ratio_pct', 0.0)):.1f}%",
-            f"Abs gap: {float(kpis.get('gap_abs', 0.0)):.1f}",
+            proj_readiness_sub,
+            f"{float(kpis.get('gap_days_avg', 0.0)):.0f} days",
+            "Average delay from READY to P/O start",
             f"{float(kpis.get('manpower_availability_pct', 0.0)):.1f}%",
-            "Available pairings",
+            "Availability across valid manpower pairings",
             str(kpis.get("rag", "NO_DATA")),
-            "Combined RAG",
+            "Overall project health classification",
             fig_proj_status,
             fig_act,
             fig_state,
@@ -12860,7 +13295,7 @@ def register_callbacks(
                             f"Portfolio completion: {float(kpis.get('portfolio_completion_pct', 0.0)):.1f}%",
                             f"Plan attainment: {float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
                             f"Stretch readiness: {float(kpis.get('stretch_readiness_pct', 0.0)):.1f}%",
-                            f"E-S gap: {float(kpis.get('gap_ratio_pct', 0.0)):.1f}% (abs {float(kpis.get('gap_abs', 0.0)):.1f})",
+                            f"E→S lag: {float(kpis.get('gap_days_avg', 0.0)):.1f} days (sections {int(kpis.get('gap_covered_sections', 0) or 0)})",
                             f"Manpower availability: {float(kpis.get('manpower_availability_pct', 0.0)):.1f}%",
                             f"At-risk projects (RED): {int(kpis.get('atrisk_projects', 0) or 0)}",
                         ]
@@ -12902,11 +13337,11 @@ def register_callbacks(
                 ax_rank.axis("off")
                 if not ranking_rows.empty:
                     rank = ranking_rows.head(10).copy()
-                    for col in ("plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_ratio_pct"):
+                    for col in ("plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg"):
                         rank[col] = pd.to_numeric(rank[col], errors="coerce").round(1)
-                    cols = ["project_display", "line_name", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_ratio_pct", "overall_rag"]
+                    cols = ["project_display", "line_name", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg", "overall_rag"]
                     rank = rank[cols]
-                    rank.columns = ["Project", "Line", "Plan %", "Readiness %", "Manpower %", "E-S Gap %", "RAG"]
+                    rank.columns = ["Project", "Line", "Plan %", "Readiness %", "Manpower %", "E→S Lag (days)", "RAG"]
                     table = ax_rank.table(cellText=rank.values.tolist(), colLabels=rank.columns.tolist(), loc="center", cellLoc="left")
                     table.auto_set_font_size(False)
                     table.set_fontsize(8)
@@ -12939,7 +13374,7 @@ def register_callbacks(
                                 f"Completion: {float(p_kpis.get('completion_pct', 0.0)):.1f}%",
                                 f"Plan attainment: {float(p_kpis.get('plan_attainment_pct', 0.0)):.1f}%",
                                 f"Readiness: {float(p_kpis.get('readiness_pct', 0.0)):.1f}%",
-                                f"E-S gap: {float(p_kpis.get('gap_ratio_pct', 0.0)):.1f}% (abs {float(p_kpis.get('gap_abs', 0.0)):.1f})",
+                                f"E→S lag: {float(p_kpis.get('gap_days_avg', 0.0)):.1f} days",
                                 f"Manpower availability: {float(p_kpis.get('manpower_availability_pct', 0.0)):.1f}%",
                                 f"RAG: {p_kpis.get('rag', 'NO_DATA')}",
                             ]

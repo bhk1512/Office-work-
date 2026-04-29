@@ -136,6 +136,8 @@ class AppConfig:
     exec_manpower_amber_low_pct: float = float(os.getenv("EXEC_MANPOWER_AMBER_LOW_PCT", "40"))
     exec_gap_green_pct: float = float(os.getenv("EXEC_GAP_GREEN_PCT", "10"))
     exec_gap_amber_high_pct: float = float(os.getenv("EXEC_GAP_AMBER_HIGH_PCT", "20"))
+    exec_gap_green_days: float = float(os.getenv("EXEC_GAP_GREEN_DAYS", "30"))
+    exec_gap_amber_days: float = float(os.getenv("EXEC_GAP_AMBER_DAYS", "60"))
     data_path: Path = _DEFAULT_DATA_PATH
     stringing_data_path: Path = _DEFAULT_STRINGING_DATA_PATH
     stringing_summary_data_path: Path = _DEFAULT_STRINGING_SUMMARY_DATA_PATH

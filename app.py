@@ -168,6 +168,10 @@ def get_df_stretch_section_fact() -> pd.DataFrame:
     return DATA_STORE.get_stringing_summary_table("StretchSectionFact")
 
 
+def get_df_stretch_readiness_summary() -> pd.DataFrame:
+    return DATA_STORE.get_stretch_readiness_summary()
+
+
 def get_df_manpower_productivity_fact() -> pd.DataFrame:
     return DATA_STORE.get_stringing_summary_table("ManpowerProductivityFact")
 
@@ -501,6 +505,7 @@ def create_app(config: AppConfig | None = None) -> Dash:
         status_snapshot_project_provider=get_df_status_snapshot_project,
         status_snapshot_overall_provider=get_df_status_snapshot_overall,
         stretch_section_provider=get_df_stretch_section_fact,
+        stretch_readiness_summary_provider=get_df_stretch_readiness_summary,
         manpower_productivity_provider=get_df_manpower_productivity_fact,
         project_info_provider=get_df_projinfo,
         project_baseline_provider=get_project_baselines_for_mode,
