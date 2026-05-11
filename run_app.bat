@@ -25,8 +25,8 @@ python -m pip install --upgrade pip
 REM pip install -r requirements.txt
 python -m pip install -r requirements.txt
 REM Run outlook watcher once before pipeline (set SKIP_DPR_WATCHER=1 to skip)
-if defined SKIP_DPR_WATCHER (
-    echo [run_app] SKIP_DPR_WATCHER set; skipping Outlook watcher.
+if "%SKIP_DPR_WATCHER%"=="1" (
+    echo [run_app] SKIP_DPR_WATCHER=1; skipping Outlook watcher.
 ) else (
     python outlook_dpr_watcher.py
     if errorlevel 1 (
