@@ -3530,7 +3530,8 @@ def _prepare_project_details(df: pd.DataFrame) -> pd.DataFrame:
         col_noa    = pick_any(["noa_start", "NOA Start", "NOA Date", "NOA"])
         col_loa    = pick_any(["loa_end", "LOA End", "LOA Date", "LOA"])
         col_pe     = pick_any(["planning_eng", "Planning Engineer"])            
-        col_pch    = pick_any(["pch", "PCH"])                                   
+        # PCH is intentionally sourced only from Projects and PCH.xlsx mapping.
+        # Do not read/retain PCH from ProjectDetails.
         col_rm     = pick_any(["regional_mgr", "Regional Manager"])             
         col_pm     = pick_any(["project_mgr", "Project Manager"])               
         col_si     = pick_any(["section_inch", "Section Incharge", "Section Incharge/Engineer", "Section Incharge/Engg"])
@@ -3543,7 +3544,7 @@ def _prepare_project_details(df: pd.DataFrame) -> pd.DataFrame:
             "noa_start": pd.to_datetime(df[col_noa], errors="coerce"),
             "loa_end": pd.to_datetime(df[col_loa], errors="coerce"),
             "planning_eng": df[col_pe].astype(str).str.strip(),
-            "pch": df[col_pch].astype(str).str.strip(),
+            "pch": "",
             "regional_mgr": df[col_rm].astype(str).str.strip(),
             "project_mgr": df[col_pm].astype(str).str.strip(),
             "section_inch": df[col_si].astype(str).str.strip(),
@@ -3578,14 +3579,14 @@ def _load_project_pch_mapping(mapping_path: Path | None) -> pd.DataFrame:
     try:
         frame = pd.read_excel(mapping_path)
     except FileNotFoundError:
-        LOGGER.warning("Projects/PCH workbook was not found at %s; skipping fallback.", mapping_path)
+        LOGGER.warning("Projects/PCH workbook was not found at %s.", mapping_path)
         return pd.DataFrame()
     except Exception as exc:  # pragma: no cover - defensive guard for unexpected formats
         LOGGER.warning("Unable to read Projects/PCH workbook '%s': %s", mapping_path, exc)
         return pd.DataFrame()
 
     if frame.empty:
-        LOGGER.warning("Projects/PCH workbook at %s is empty; skipping fallback.", mapping_path)
+        LOGGER.warning("Projects/PCH workbook at %s is empty.", mapping_path)
         return pd.DataFrame()
 
     def _match_column(keywords: tuple[str, ...]) -> str:
@@ -3671,9 +3672,6 @@ def _augment_project_details_with_pch(details: pd.DataFrame, mapping: pd.DataFra
         ]
         details = pd.DataFrame(columns=base_cols)
 
-    if mapping is None or mapping.empty:
-        return details.copy()
-
     work = details.copy()
 
     def _clean_text(value: object) -> str:
@@ -3686,31 +3684,39 @@ def _augment_project_details_with_pch(details: pd.DataFrame, mapping: pd.DataFra
     def _compact(value: object) -> str:
         return re.sub(r"[^a-z0-9]", "", _clean_text(value).lower())
 
-    for column in ("project_code", "project_name", "pch"):
+    for column in ("project_code", "project_name"):
         if column in work.columns:
             work[column] = work[column].map(_clean_text)
         else:
             work[column] = ""
+    # Strict policy: PCH comes only from Projects and PCH.xlsx.
+    work["pch"] = ""
 
     work["project_code_norm"] = work["project_code"].map(_compact)
     work["project_name_norm"] = work["project_name"].map(_compact)
 
-    mapping = mapping.copy()
-    mapping["project_code_norm"] = mapping["project_code"].map(_compact)
-    mapping["project_name_norm"] = mapping["project_name"].map(_compact)
+    mapping = (mapping.copy() if isinstance(mapping, pd.DataFrame) else pd.DataFrame())
+    if not mapping.empty:
+        mapping["project_code_norm"] = mapping["project_code"].map(_compact)
+        mapping["project_name_norm"] = mapping["project_name"].map(_compact)
+    else:
+        LOGGER.warning("Projects/PCH mapping is empty; all projects will be set to Unassigned.")
 
-    code_to_pch = (
-        mapping.dropna(subset=["project_code_norm", "pch"])
-        .drop_duplicates(subset=["project_code_norm"])
-        .set_index("project_code_norm")["pch"]
-        .to_dict()
-    )
-    name_to_pch = (
-        mapping.dropna(subset=["project_name_norm", "pch"])
-        .drop_duplicates(subset=["project_name_norm"])
-        .set_index("project_name_norm")["pch"]
-        .to_dict()
-    )
+    code_to_pch = {}
+    name_to_pch = {}
+    if not mapping.empty:
+        code_to_pch = (
+            mapping.dropna(subset=["project_code_norm", "pch"])
+            .drop_duplicates(subset=["project_code_norm"])
+            .set_index("project_code_norm")["pch"]
+            .to_dict()
+        )
+        name_to_pch = (
+            mapping.dropna(subset=["project_name_norm", "pch"])
+            .drop_duplicates(subset=["project_name_norm"])
+            .set_index("project_name_norm")["pch"]
+            .to_dict()
+        )
 
     missing_mask = work["pch"].map(_clean_text).eq("")
     if missing_mask.any():
@@ -3721,34 +3727,38 @@ def _augment_project_details_with_pch(details: pd.DataFrame, mapping: pd.DataFra
             filled = work.loc[missing_mask, "project_name_norm"].map(name_to_pch).fillna("")
             work.loc[missing_mask, "pch"] = filled
 
-    existing_codes = set(work["project_code_norm"].dropna())
-    existing_names = set(work["project_name_norm"].dropna())
-    extra_rows = []
-    for _, row in mapping.iterrows():
-        code_norm = row.get("project_code_norm", "")
-        name_norm = row.get("project_name_norm", "")
-        if code_norm and code_norm in existing_codes:
-            continue
-        if name_norm and name_norm in existing_names:
-            continue
-        project_code = row.get("project_code", "")
-        project_name = row.get("project_name", "") or project_code
-        new_row = {col: "" for col in work.columns}
-        new_row["project_code"] = project_code
-        new_row["project_name"] = project_name
-        new_row["pch"] = row.get("pch", "")
-        if "key_name" in work.columns:
-            new_row["key_name"] = str(project_name).lower().replace("  ", " ").strip()
-        if "Project Name" in work.columns:
-            new_row["Project Name"] = project_name
-        if "noa_start" in work.columns:
-            new_row["noa_start"] = pd.NaT
-        if "loa_end" in work.columns:
-            new_row["loa_end"] = pd.NaT
-        extra_rows.append(new_row)
+    if not mapping.empty:
+        existing_codes = set(work["project_code_norm"].dropna())
+        existing_names = set(work["project_name_norm"].dropna())
+        extra_rows = []
+        for _, row in mapping.iterrows():
+            code_norm = row.get("project_code_norm", "")
+            name_norm = row.get("project_name_norm", "")
+            if code_norm and code_norm in existing_codes:
+                continue
+            if name_norm and name_norm in existing_names:
+                continue
+            project_code = row.get("project_code", "")
+            project_name = row.get("project_name", "") or project_code
+            new_row = {col: "" for col in work.columns}
+            new_row["project_code"] = project_code
+            new_row["project_name"] = project_name
+            new_row["pch"] = row.get("pch", "")
+            if "key_name" in work.columns:
+                new_row["key_name"] = str(project_name).lower().replace("  ", " ").strip()
+            if "Project Name" in work.columns:
+                new_row["Project Name"] = project_name
+            if "noa_start" in work.columns:
+                new_row["noa_start"] = pd.NaT
+            if "loa_end" in work.columns:
+                new_row["loa_end"] = pd.NaT
+            extra_rows.append(new_row)
 
-    if extra_rows:
-        work = pd.concat([work, pd.DataFrame(extra_rows)], ignore_index=True)
+        if extra_rows:
+            work = pd.concat([work, pd.DataFrame(extra_rows)], ignore_index=True)
+
+    work["pch"] = work["pch"].map(_clean_text)
+    work["pch"] = work["pch"].where(work["pch"].astype(bool), "Unassigned")
 
     work = work.drop(columns=["project_code_norm", "project_name_norm"], errors="ignore")
     return work

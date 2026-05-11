@@ -1,0 +1,2497 @@
+﻿[
+    {
+        "output":  "store-click-meta.data",
+        "inputs":  [
+                       {
+                           "id":  "g-actual-vs-bench",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "g-top5",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "g-bottom5",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "{\"index\":[\"ALL\"],\"type\":\"avp-row\"}",
+                           "property":  "n_clicks_timestamp"
+                       },
+                       {
+                           "id":  "{\"index\":[\"ALL\"],\"type\":\"avp-tip\"}",
+                           "property":  "n_clicks_timestamp"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "83c0b30b050a85491516a79123f34f93"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "store-selected-gang.data",
+        "inputs":  [
+                       {
+                           "id":  "store-click-meta",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "9466567b232aa99f3b78f30d4fe3d0be"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "store-global-performance-click-meta.data",
+        "inputs":  [
+                       {
+                           "id":  "global-performance-actual-vs-bench",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "global-performance-top5",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "global-performance-bottom5",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "{\"index\":[\"ALL\"],\"type\":\"global-performance-avp-row\"}",
+                           "property":  "n_clicks_timestamp"
+                       },
+                       {
+                           "id":  "{\"index\":[\"ALL\"],\"type\":\"global-performance-avp-tip\"}",
+                           "property":  "n_clicks_timestamp"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "0e63492dee65d13d7a26df910e22f959"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "global-performance-selected-gang.data",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-click-meta",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "9466567b232aa99f3b78f30d4fe3d0be"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "store-project-modal-click-meta.data",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-actual-vs-bench",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "project-modal-top5",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "project-modal-bottom5",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "{\"index\":[\"ALL\"],\"type\":\"project-modal-avp-row\"}",
+                           "property":  "n_clicks_timestamp"
+                       },
+                       {
+                           "id":  "{\"index\":[\"ALL\"],\"type\":\"project-modal-avp-tip\"}",
+                           "property":  "n_clicks_timestamp"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "9afdd8df1537a291461aae69019555c3"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "project-modal-selected-gang.data",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-click-meta",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "9466567b232aa99f3b78f30d4fe3d0be"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "scroll-wire.children",
+        "inputs":  [
+                       {
+                           "id":  "store-click-meta",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "93ee16d92550285f896b93b60fd5a7f6"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "project-modal-scroll-wire.children",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-click-meta",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "project-modal-scroll-target",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "ca5f352a4455904e6b5db3106657c266"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "project-modal-history-wire.children",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-history",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "8606d5d02fb866095a8f84129b47a2f8"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "..f-project.value...f-line.value...f-gang.value...f-stringing-scope.value...f-time-lens.value..",
+        "inputs":  [
+                       {
+                           "id":  "btn-reset-filters",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "store-filtered-scope.data",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-line",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-stringing-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-erections-range.start_date...project-modal-erections-range.end_date...project-modal-stringing-range.start_date...project-modal-stringing-range.end_date..",
+        "inputs":  [
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "store-stringing-scope.data",
+        "inputs":  [
+                       {
+                           "id":  "f-stringing-scope",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "btn-reset-filters",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "project-modal-stringing-scope",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "store-stringing-scope",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "project-modal-stringing-scope.value",
+        "inputs":  [
+                       {
+                           "id":  "store-stringing-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "project-modal-stringing-scope",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "f-project.options",
+        "inputs":  [
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "f-line.options",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "f-gang.options",
+        "inputs":  [
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "f-month.options",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-stringing-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "global-performance-projects.options",
+        "inputs":  [
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "global-performance-months.options",
+        "inputs":  [
+                       {
+                           "id":  "global-performance-projects",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "store-global-performance-scope.data",
+        "inputs":  [
+                       {
+                           "id":  "global-performance-projects",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "global-performance-months",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "global-performance-min-erections",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-global-performance-mode",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-stringing-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..global-performance-modal.is_open...store-global-performance-mode.data..",
+        "inputs":  [
+                       {
+                           "id":  "btn-open-global-performance-erection",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "btn-open-global-performance-stringing",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "global-performance-modal-close",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "global-performance-modal",
+                          "property":  "is_open"
+                      },
+                      {
+                          "id":  "store-global-performance-mode",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..global-performance-topbot-mode-label.children...global-performance-tbl-idle-intervals.columns...global-performance-tbl-daily-prod.columns...global-performance-benchmark-table.columns..",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-mode",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "global-performance-benchmark-label.children",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-mode",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "global-performance-erections-threshold-label.children",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-mode",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..global-performance-benchmark-table.data...global-performance-benchmark-status.children..",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "global-performance-benchmark",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..global-performance-avp-list.children...global-performance-actual-vs-bench.figure...global-performance-top5.figure...global-performance-bottom5.figure..",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "global-performance-topbot-metric",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "f-month.value",
+        "inputs":  [
+                       {
+                           "id":  "btn-reset-filters",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "options"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "f-month",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "f-quick-range.value",
+        "inputs":  [
+                       {
+                           "id":  "btn-reset-filters",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "link-clear-quick-range",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "link-clear-quick-range.style",
+        "inputs":  [
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..label-resp-period.children...label-stringing-plan-period.children...label-perf-period.children...label-gang-period.children..",
+        "inputs":  [
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..pd-title.children...project-details.children..",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..erection-card-projects.children...erection-card-totals.children...erection-card-gangs.children...erection-card-productivity.children...erection-card-loss.children...stringing-card-projects.children...stringing-card-totals.children...stringing-card-gangs.children...stringing-card-productivity.children...stringing-card-loss.children...stringing-card-tse.children..",
+        "inputs":  [
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..tbl-idle-intervals.data...tbl-daily-prod.data...modal-tbl-idle-intervals.data...modal-tbl-daily-prod.data..",
+        "inputs":  [
+                       {
+                           "id":  "store-click-meta",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "trace-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "modal-trace-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "store-project-modal-scope.data",
+        "inputs":  [
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "project-modal-stringing-scope",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-project-modal-performance-mode",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-trace-gang.options...project-modal-trace-gang.value..",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "project-modal-selected-gang",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-tbl-idle-intervals.data...project-modal-tbl-daily-prod.data..",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-project-modal-click-meta",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "project-modal-trace-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "project-modal-selected-gang",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-topbot-mode-label.children...project-modal-tbl-idle-intervals.columns...project-modal-tbl-daily-prod.columns..",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-performance-mode",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-avp-list.children...project-modal-actual-vs-bench.figure...project-modal-top5.figure...project-modal-bottom5.figure..",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "project-modal-topbot-metric",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "f-month",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "f-quick-range",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "f-gang",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "project-modal-stringing-scope",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "store-project-modal-performance-mode",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..tbl-erections-completed.columns...tbl-erections-completed.data..",
+        "inputs":  [
+                       {
+                           "id":  "erections-completion-range",
+                           "property":  "start_date"
+                       },
+                       {
+                           "id":  "erections-completion-range",
+                           "property":  "end_date"
+                       },
+                       {
+                           "id":  "erections-search",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "project-modal-erections-search.value",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-erections-search-reset",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "project-modal-stringing-search.value",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-stringing-search-reset",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "project-modal-erections-table.data",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-erections-range",
+                           "property":  "start_date"
+                       },
+                       {
+                           "id":  "project-modal-erections-range",
+                           "property":  "end_date"
+                       },
+                       {
+                           "id":  "project-modal-erections-search",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "project-modal-stringing-table.data",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-stringing-range",
+                           "property":  "start_date"
+                       },
+                       {
+                           "id":  "project-modal-stringing-range",
+                           "property":  "end_date"
+                       },
+                       {
+                           "id":  "project-modal-stringing-search",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "project-modal-stringing-scope",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..erections-completion-range.start_date...erections-completion-range.end_date...erections-search.value..",
+        "inputs":  [
+                       {
+                           "id":  "btn-reset-erections",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..download-trace-xlsx.data...project-modal-download-trace.data..",
+        "inputs":  [
+                       {
+                           "id":  "btn-export-trace",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "modal-btn-export-trace",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "project-modal-btn-export-trace",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "f-project",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "f-month",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "f-quick-range",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "f-gang",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "trace-gang",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "store-selected-gang",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "erections-completion-range",
+                          "property":  "start_date"
+                      },
+                      {
+                          "id":  "erections-completion-range",
+                          "property":  "end_date"
+                      },
+                      {
+                          "id":  "erections-search",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "store-project-tile-focus",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "project-modal-trace-gang",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "project-modal-erections-range",
+                          "property":  "start_date"
+                      },
+                      {
+                          "id":  "project-modal-erections-range",
+                          "property":  "end_date"
+                      },
+                      {
+                          "id":  "project-modal-erections-search",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "global-performance-download-trace.data",
+        "inputs":  [
+                       {
+                           "id":  "global-performance-btn-export-trace",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "store-global-performance-scope",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "global-performance-trace-gang",
+                          "property":  "value"
+                      },
+                      {
+                          "id":  "global-performance-selected-gang",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..global-performance-tbl-idle-intervals.data...global-performance-tbl-daily-prod.data..",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-global-performance-click-meta",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "global-performance-trace-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "global-performance-selected-gang",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..trace-gang.options...trace-gang.value...modal-trace-gang.options...modal-trace-gang.value..",
+        "inputs":  [
+                       {
+                           "id":  "store-filtered-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-selected-gang",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "trace-gang",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..global-performance-trace-gang.options...global-performance-trace-gang.value..",
+        "inputs":  [
+                       {
+                           "id":  "store-global-performance-scope",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "global-performance-selected-gang",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "global-performance-trace-gang",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..store-pch-modal-focus.data...kpi-pch-modal.is_open..",
+        "inputs":  [
+                       {
+                           "id":  "{\"metric\":[\"ALL\"],\"mode\":[\"ALL\"],\"type\":\"summary-pill-trigger\"}",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "kpi-pch-modal-close",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "kpi-pch-modal",
+                          "property":  "is_open"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..kpi-pch-modal-accordion.children...kpi-pch-modal-accordion.active_item...kpi-pch-modal-title.children...store-project-tile-meta.data..",
+        "inputs":  [
+                       {
+                           "id":  "store-pch-modal-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "store-stringing-scope",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "store-project-modal-focus-cache.data",
+        "inputs":  [
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..store-project-tile-focus.data...project-detail-modal.is_open...store-project-modal-history.data..",
+        "inputs":  [
+                       {
+                           "id":  "{\"context\":[\"ALL\"],\"mode\":[\"ALL\"],\"project\":[\"ALL\"],\"type\":\"project-tile-trigger\"}",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "project-modal-close-top",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "{\"key\":[\"ALL\"],\"type\":\"proj-resp-open\"}",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "project-modal-location",
+                           "property":  "href"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "project-detail-modal",
+                          "property":  "is_open"
+                      },
+                      {
+                          "id":  "store-project-tile-meta",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "store-project-modal-focus-cache",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-summary.children...project-modal-title.children...project-modal-dpr-strip.children...project-modal-activity-rows.children...project-modal-stretch-pie.figure...project-modal-es-lag.figure..",
+        "inputs":  [
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "project-modal-stringing-scope",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..store-project-modal-section.data...store-project-modal-performance-mode.data...project-modal-scroll-target.data..",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-btn-erections",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "project-modal-btn-stringing",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "project-modal-btn-performance-erection",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "project-modal-btn-performance-stringing",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "store-project-tile-focus",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "store-project-modal-section",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "store-project-modal-performance-mode",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-section-erections.is_open...project-modal-section-stringing.is_open...project-modal-section-performance.is_open...project-modal-btn-erections.className...project-modal-btn-stringing.className...project-modal-btn-performance-erection.className...project-modal-btn-performance-stringing.className..",
+        "inputs":  [
+                       {
+                           "id":  "store-project-modal-section",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-project-modal-performance-mode",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..project-modal-perf-collapse.is_open...project-modal-perf-toggle.children..",
+        "inputs":  [
+                       {
+                           "id":  "project-modal-perf-toggle",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "project-modal-perf-collapse",
+                          "property":  "is_open"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "{\"key\":[\"MATCH\"],\"type\":\"proj-resp-collapse\"}.is_open",
+        "inputs":  [
+                       {
+                           "id":  "{\"key\":[\"MATCH\"],\"type\":\"proj-resp-toggle\"}",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "{\"key\":[\"MATCH\"],\"type\":\"proj-resp-collapse\"}",
+                          "property":  "is_open"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..proj-resp-modal.is_open...proj-resp-modal-title.children...store-proj-resp-code.data...store-proj-resp-month.data...store-proj-resp-plan.data..",
+        "inputs":  [
+                       {
+                           "id":  "{\"key\":[\"ALL\"],\"type\":\"proj-resp-open\"}",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "proj-resp-modal-close",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "proj-resp-modal",
+                          "property":  "is_open"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..proj-resp-graph.figure...proj-resp-kpi-target.children...proj-resp-kpi-delivered.children...proj-resp-kpi-ach.children..",
+        "inputs":  [
+                       {
+                           "id":  "store-proj-resp-code",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-proj-resp-month",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "store-proj-resp-plan",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "proj-resp-entity",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "proj-resp-metric",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "proj-resp-modal",
+                           "property":  "is_open"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..trace-modal.is_open...trace-modal-title.children..",
+        "inputs":  [
+                       {
+                           "id":  "store-dblclick",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "trace-modal-close",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "trace-modal",
+                          "property":  "is_open"
+                      },
+                      {
+                          "id":  "store-selected-gang",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "analytics-payload.data",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "analytics-refresh-interval",
+                           "property":  "n_intervals"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-scope-range.children...analytics-scope-projects.children...analytics-scope-gangs.children...analytics-scope-activedays.children...analytics-lowshare-scope.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-kpi-low-output-value.children...analytics-kpi-low-output-sub.children...analytics-kpi-idle-value.children...analytics-kpi-idle-sub.children...analytics-kpi-hotspot-value.children...analytics-kpi-hotspot-sub.children...analytics-kpi-recovery-value.children...analytics-kpi-recovery-sub.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-lowshare-chart.figure...analytics-lowshare-value.children...analytics-lowshare-delta.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "analytics-hotspot-chart.figure",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-whatif-bucket.options...analytics-whatif-bucket.value...analytics-whatif-slider.value...analytics-whatif-slider.disabled...analytics-whatif-status.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "analytics-whatif-bucket",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "analytics-whatif-reset",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-whatif-reduction.children...analytics-whatif-saved.children...analytics-whatif-chart.figure..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "analytics-whatif-bucket",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "analytics-whatif-slider",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-hist-median.children...analytics-hist-pct-low.children...analytics-hist-pct-high.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-bucket-chart.figure...analytics-tier-chart.figure...analytics-hist-chart.figure..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-audit-drawer.is_open...analytics-audit-selection.data...analytics-audit-title.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-kpi-low-output",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "analytics-kpi-idle-windows",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "analytics-kpi-hotspot",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "analytics-bucket-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "analytics-tier-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "analytics-hist-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "analytics-hotspot-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "analytics-audit-close",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "analytics-payload",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "analytics-audit-drawer",
+                          "property":  "is_open"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..analytics-audit-table.columns...analytics-audit-table.data...analytics-audit-definition.children..",
+        "inputs":  [
+                       {
+                           "id":  "analytics-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "analytics-audit-selection",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "analytics-audit-download.data",
+        "inputs":  [
+                       {
+                           "id":  "analytics-audit-export-btn",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "analytics-payload",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "analytics-audit-selection",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-payload.data",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "stringing-analytics-refresh-interval",
+                           "property":  "n_intervals"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..executive-overview-payload.data...project-overview-payload.data..",
+        "inputs":  [
+                       {
+                           "id":  "f-project",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-line",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-month",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-quick-range",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-gang",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "f-time-lens",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "executive-refresh-interval",
+                           "property":  "n_intervals"
+                       },
+                       {
+                           "id":  "project-overview-refresh-interval",
+                           "property":  "n_intervals"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..exec-compliance-ticker.children...exec-compliance-ticker.style...exec-compliance-ticker.className..",
+        "inputs":  [
+                       {
+                           "id":  "executive-overview-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "exec-portfolio-table-container.children",
+        "inputs":  [
+                       {
+                           "id":  "executive-overview-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "exec-portfolio-view",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "exec-pch-expanded.data",
+        "inputs":  [
+                       {
+                           "id":  "{\"pch\":[\"ALL\"],\"type\":\"exec-pch-toggle\"}",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "exec-pch-expanded",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  {
+                                    "namespace":  "_dashprivate_clientside_funcs",
+                                    "function_name":  "7236ebc144c30a03377264b87b09bfa8"
+                                },
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  false
+    },
+    {
+        "output":  "..exec-kpi-portfolio-completion.children...exec-kpi-portfolio-completion-sub.children...exec-kpi-plan-attainment.children...exec-kpi-plan-attainment-sub.children...exec-kpi-readiness.children...exec-kpi-readiness-sub.children...exec-kpi-gap.children...exec-kpi-gap-sub.children...exec-kpi-manpower.children...exec-kpi-manpower-sub.children...exec-kpi-atrisk.children...exec-kpi-atrisk-sub.children...exec-status-trend-graph.figure...exec-stretch-trend-graph.figure...exec-project-ranking-table.columns...exec-project-ranking-table.data...exec-risk-driver-graph.figure...exec-callouts-list.children...exec-coverage-summary-table.columns...exec-coverage-summary-table.data..",
+        "inputs":  [
+                       {
+                           "id":  "executive-overview-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..proj-overview-last-updated.children...proj-kpi-completion.children...proj-kpi-completion-sub.children...proj-kpi-plan.children...proj-kpi-plan-sub.children...proj-kpi-readiness.children...proj-kpi-readiness-sub.children...proj-kpi-gap.children...proj-kpi-gap-sub.children...proj-kpi-manpower.children...proj-kpi-manpower-sub.children...proj-stretch-summary-chip.children...proj-stretch-state-graph.figure...proj-stretch-blocked-summary.children...proj-es-lag-chart.figure...proj-erection-prod-chart.figure...proj-stringing-prod-chart.figure..",
+        "inputs":  [
+                       {
+                           "id":  "project-overview-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "proj-overview-project-select",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..proj-overview-project-select.options...proj-overview-project-select.value..",
+        "inputs":  [
+                       {
+                           "id":  "executive-overview-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "proj-activity-breakdown.children",
+        "inputs":  [
+                       {
+                           "id":  "project-overview-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "proj-overview-project-select",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "proj-dpr-strip.children",
+        "inputs":  [
+                       {
+                           "id":  "project-overview-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "proj-overview-project-select",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "proj-overview-rag-badge-container.children",
+        "inputs":  [
+                       {
+                           "id":  "project-overview-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "proj-overview-project-select",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "download-executive-pdf.data",
+        "inputs":  [
+                       {
+                           "id":  "btn-export-executive-pdf",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "executive-overview-payload",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "project-overview-payload",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "f-project",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-debug-meta.children...stringing-debug-status-overall-table.columns...stringing-debug-status-overall-table.data...stringing-debug-status-project-table.columns...stringing-debug-status-project-table.data...stringing-debug-stretch-overall-table.columns...stringing-debug-stretch-overall-table.data...stringing-debug-stretch-project-table.columns...stringing-debug-stretch-project-table.data...stringing-debug-manpower-summary-table.columns...stringing-debug-manpower-summary-table.data...stringing-debug-manpower-pairing-table.columns...stringing-debug-manpower-pairing-table.data..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-scope-range.children...stringing-analytics-scope-projects.children...stringing-analytics-scope-gangs.children...stringing-analytics-scope-spans.children...stringing-analytics-scope-totalkm.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-kpi-output.children...stringing-analytics-kpi-output-sub.children...stringing-analytics-kpi-readiness.children...stringing-analytics-kpi-readiness-sub.children...stringing-analytics-kpi-flow.children...stringing-analytics-kpi-flow-sub.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-readiness-hist.figure...stringing-analytics-readiness-pct-15.children...stringing-analytics-readiness-pct-60.children...stringing-analytics-readiness-median.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-readiness-hotspot.figure",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-readiness-funnel.figure",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-prod-hist.figure...stringing-analytics-prod-median.children...stringing-analytics-prod-pct-low.children...stringing-analytics-prod-pct-high.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-share-chart.figure",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-whatif-bucket.options...stringing-analytics-whatif-bucket.value...stringing-analytics-whatif-slider.value...stringing-analytics-whatif-slider.disabled...stringing-analytics-whatif-status.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "stringing-analytics-whatif-bucket",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "stringing-analytics-whatif-reset",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-whatif-unlocked.children...stringing-analytics-whatif-saved.children...stringing-analytics-whatif-chart.figure..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "stringing-analytics-whatif-bucket",
+                           "property":  "value"
+                       },
+                       {
+                           "id":  "stringing-analytics-whatif-slider",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-flow-hist.figure",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-cycle-chart.figure",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-ageing-table.columns...stringing-analytics-ageing-table.data..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-relationship-chart.figure",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-audit-drawer.is_open...stringing-analytics-audit-selection.data...stringing-analytics-audit-title.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-kpi-output-card",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "stringing-analytics-kpi-readiness-card",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "stringing-analytics-kpi-flow-card",
+                           "property":  "n_clicks"
+                       },
+                       {
+                           "id":  "stringing-analytics-readiness-hist",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-readiness-hotspot",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-readiness-funnel",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-prod-hist",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-share-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-flow-hist",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-cycle-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-relationship-chart",
+                           "property":  "clickData"
+                       },
+                       {
+                           "id":  "stringing-analytics-audit-close",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "stringing-analytics-payload",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "stringing-analytics-audit-drawer",
+                          "property":  "is_open"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-section-filter.options...stringing-analytics-section-filter.value..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-audit-selection",
+                           "property":  "data"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "stringing-analytics-payload",
+                          "property":  "data"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "..stringing-analytics-audit-table.columns...stringing-analytics-audit-table.data...stringing-analytics-audit-definition.children..",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-payload",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "stringing-analytics-audit-selection",
+                           "property":  "data"
+                       },
+                       {
+                           "id":  "stringing-analytics-section-filter",
+                           "property":  "value"
+                       }
+                   ],
+        "state":  [
+
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  false,
+        "long":  null,
+        "dynamic_creator":  null
+    },
+    {
+        "output":  "stringing-analytics-audit-download.data",
+        "inputs":  [
+                       {
+                           "id":  "stringing-analytics-audit-export-btn",
+                           "property":  "n_clicks"
+                       }
+                   ],
+        "state":  [
+                      {
+                          "id":  "stringing-analytics-payload",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "stringing-analytics-audit-selection",
+                          "property":  "data"
+                      },
+                      {
+                          "id":  "stringing-analytics-section-filter",
+                          "property":  "value"
+                      }
+                  ],
+        "clientside_function":  null,
+        "prevent_initial_call":  true,
+        "long":  null,
+        "dynamic_creator":  null
+    }
+]

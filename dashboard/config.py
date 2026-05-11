@@ -138,6 +138,7 @@ class AppConfig:
     exec_gap_amber_high_pct: float = float(os.getenv("EXEC_GAP_AMBER_HIGH_PCT", "20"))
     exec_gap_green_days: float = float(os.getenv("EXEC_GAP_GREEN_DAYS", "30"))
     exec_gap_amber_days: float = float(os.getenv("EXEC_GAP_AMBER_DAYS", "60"))
+    enable_legacy_es_gap_inference: bool = os.getenv("ENABLE_LEGACY_ES_GAP_INFERENCE", "0") in {"1", "true", "True"}
     data_path: Path = _DEFAULT_DATA_PATH
     stringing_data_path: Path = _DEFAULT_STRINGING_DATA_PATH
     stringing_summary_data_path: Path = _DEFAULT_STRINGING_SUMMARY_DATA_PATH

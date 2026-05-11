@@ -135,7 +135,7 @@ def _coerce_numeric_cell(value: object) -> Optional[int]:
         return None
 
 
-def extract_stringing_number_of_tse(path: str | bytes | "pathlike", sheet_name: str, search_rows: int = 6) -> Optional[int]:
+def extract_stringing_number_of_tse(path: str | bytes | "pathlike", sheet_name: str, search_rows: int = 20) -> Optional[int]:
     """
     Locate the \"Number of TSE\" value from the top rows of a Stringing Compiled sheet.
 
@@ -149,16 +149,30 @@ def extract_stringing_number_of_tse(path: str | bytes | "pathlike", sheet_name: 
         return None
     if df is None or df.empty:
         return None
-    targets = {"numberoftse", "nooftse", "numoftse"}
+    exact_targets = {"numberoftse", "numberoftses", "nooftse", "nooftses", "numoftse", "numoftses"}
     arr = df.to_numpy(object)
     for row in arr:
         for idx, cell in enumerate(row):
             key = _canon_key(cell)
             if not key:
                 continue
-            if key in targets:
-                neighbor = row[idx + 1] if idx + 1 < len(row) else None
-                coerced = _coerce_numeric_cell(neighbor)
+            looks_like_tse_label = key in exact_targets or (
+                "tse" in key and any(token in key for token in ("number", "num", "noof", "count"))
+            )
+            if not looks_like_tse_label:
+                continue
+
+            # Most files keep value in adjacent cell, but some embed it in the same cell
+            # (e.g., "Number of TSE: 4") or place it on the left.
+            candidates = []
+            if idx + 1 < len(row):
+                candidates.append(row[idx + 1])
+            if idx - 1 >= 0:
+                candidates.append(row[idx - 1])
+            candidates.append(cell)
+
+            for candidate in candidates:
+                coerced = _coerce_numeric_cell(candidate)
                 if coerced is not None:
                     return coerced
     return None

@@ -25,6 +25,7 @@ from dashboard.stringing import (
     parse_project_code_from_filename,
     find_stringing_header_row,
     infer_missing_methods_from_erection,
+    extract_stringing_number_of_tse,
 )
 from microplan_compile import (
     compile_microplans_to_workbook,
@@ -35,6 +36,10 @@ from dashboard.project_identity import (
     build_project_scope_key,
     normalize_line_name,
     parse_project_identity_from_filename,
+)
+from dashboard.completed_projects import (
+    is_completed_project,
+    load_completed_project_keys,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -262,6 +267,32 @@ def _stringing_candidates(input_dir: Optional[Path], files: Optional[List[Path]]
             ]
         )
     return []
+
+
+def _filter_completed_project_files(
+    candidates: List[Path],
+    completed_project_keys: set[str],
+    *,
+    stage: str,
+) -> List[Path]:
+    if not candidates or not completed_project_keys:
+        return candidates
+    filtered: List[Path] = []
+    skipped = 0
+    skipped_projects: set[str] = set()
+    for candidate in candidates:
+        project = parse_project_code_from_filename(candidate.name) or ""
+        if project and is_completed_project(project, completed_project_keys):
+            skipped += 1
+            skipped_projects.add(project.strip().upper())
+            continue
+        filtered.append(candidate)
+    if skipped:
+        print(
+            f"[pipeline] {stage}: skipped_completed_files={skipped}, "
+            f"skipped_completed_projects={len(skipped_projects)}"
+        )
+    return filtered
 
 
 def _load_erection_daily_reference() -> pd.DataFrame:
@@ -655,8 +686,16 @@ def compile_stringing_to_workbook(
     files: Optional[List[Path]],
     output_path: Path,
     sheet_name: Optional[str] = None,
+    *,
+    completed_project_keys: Optional[set[str]] = None,
 ) -> Optional[Path]:
     candidates = _stringing_candidates(input_dir, files)
+    if completed_project_keys:
+        candidates = _filter_completed_project_files(
+            candidates,
+            completed_project_keys,
+            stage="Stringing",
+        )
     if not candidates:
         print("[pipeline] Stringing: no candidate files found; skipping.")
         return None
@@ -736,6 +775,7 @@ def compile_stringing_to_workbook(
         template_applied = False
         template_fallback_used = False
         template_sheet_used = template_sheet_name or ""
+        tse_value: int | None = None
 
         if template_error:
             if f.name in template_error_logged:
@@ -795,6 +835,10 @@ def compile_stringing_to_workbook(
             if found is None:
                 raise ValueError("NO_TARGET_SHEET")
             used_name = used_name or found
+            try:
+                tse_value = extract_stringing_number_of_tse(str(f), found)
+            except Exception:
+                tse_value = None
         except Exception as read_exc:
             is_no_target = isinstance(read_exc, ValueError) and str(read_exc) == "NO_TARGET_SHEET"
             if is_no_target:
@@ -979,6 +1023,10 @@ def compile_stringing_to_workbook(
             compiled_norm,
             erection_daily_reference,
         )
+        if "number_of_tse" not in compiled_norm.columns:
+            compiled_norm["number_of_tse"] = pd.NA
+        if tse_value is not None:
+            compiled_norm["number_of_tse"] = int(tse_value)
         method_inference_rows = int(method_inference_summary.get("method_inferred_rows", 0) or 0)
         compiled.append(compiled_norm)
 
@@ -1195,6 +1243,8 @@ def compile_progress_status_to_workbook(
     input_dir: Optional[Path],
     files: Optional[List[Path]],
     output_path: Path,
+    *,
+    completed_project_keys: Optional[set[str]] = None,
 ) -> Optional[Path]:
     try:
         result = progress_status_ingest.compile_progress_status_to_workbook(
@@ -1202,6 +1252,7 @@ def compile_progress_status_to_workbook(
             files,
             output_path,
             repo_root=BASE_DIR,
+            completed_project_keys=completed_project_keys,
         )
     except Exception as exc:
         print(f"[pipeline] ProgressStatus: failed to compile from DPRs: {exc}")
@@ -1213,6 +1264,8 @@ def compile_stretch_readiness_to_workbook(
     input_dir: Optional[Path],
     files: Optional[List[Path]],
     output_path: Path,
+    *,
+    completed_project_keys: Optional[set[str]] = None,
 ) -> Optional[Path]:
     try:
         result = stretch_readiness_ingest.compile_stretch_readiness_to_workbook(
@@ -1220,6 +1273,7 @@ def compile_stretch_readiness_to_workbook(
             files,
             output_path,
             repo_root=BASE_DIR,
+            completed_project_keys=completed_project_keys,
         )
     except Exception as exc:
         print(f"[pipeline] StretchReadiness: failed to compile from DPRs: {exc}")
@@ -1230,9 +1284,16 @@ def compile_stretch_readiness_to_workbook(
 def compile_stringing_summary_to_workbook(
     base_dir: Path,
     output_path: Path,
+    *,
+    completed_project_keys: Optional[set[str]] = None,
 ) -> Optional[Path]:
     try:
-        result = stringing_summary_ingest.compile_stringing_summary_to_workbook(base_dir, output_path)
+        result = stringing_summary_ingest.compile_stringing_summary_to_workbook(
+            base_dir,
+            output_path,
+            completed_project_keys=completed_project_keys,
+            repo_root=BASE_DIR,
+        )
     except Exception as exc:
         print(f"[pipeline] StringingSummary: failed to compile unified summary: {exc}")
         return None
@@ -1356,8 +1417,31 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     stringing_out_path: Path | None = None
     progress_status_out_path: Path | None = None
     stringing_summary_out_path: Path | None = None
+    completed_project_keys = load_completed_project_keys(BASE_DIR / "Raw Data", BASE_DIR)
 
     if not args.skip_compile:
+        if resolved_files:
+            resolved_files = _filter_completed_project_files(
+                resolved_files,
+                completed_project_keys,
+                stage="Compile input",
+            )
+        elif resolved_input and resolved_input.exists():
+            folder_candidates = sorted(
+                [
+                    p
+                    for p in resolved_input.rglob("*.xls*")
+                    if p.is_file() and not p.name.startswith("~$")
+                ]
+            )
+            filtered_candidates = _filter_completed_project_files(
+                folder_candidates,
+                completed_project_keys,
+                stage="Compile input",
+            )
+            resolved_files = filtered_candidates
+            resolved_input = None
+
         # Ensure fresh outputs on every compile run
         # 1) Remove any existing compiled workbook
         # 2) Remove any existing parquet dataset directory
@@ -1384,6 +1468,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             print(f"[pipeline] Compiling from folder: {resolved_input}")
         if resolved_files:
             print("[pipeline] Compiling from files\n  - " + "\n  - ".join(str(p) for p in resolved_files))
+        if not resolved_input and not resolved_files:
+            print("[pipeline] No active DPR files remain after completed-project exclusion; skipping compile steps.")
+            return
         print(f"[pipeline] Writing output to: {resolved_output}")
         run_pipeline(
             input_path=resolved_input,
@@ -1444,6 +1531,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 stringing_files,
                 stringing_out,
                 sheet_name=AppConfig().stringing_sheet_name,
+                completed_project_keys=completed_project_keys,
             )
             if stringing_parquet_dir:
                 print(f"[pipeline] Stringing: compiled parquet at {stringing_parquet_dir}")
@@ -1484,6 +1572,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             stringing_input,
             stringing_files,
             progress_status_out,
+            completed_project_keys=completed_project_keys,
         )
         if compiled_status and compiled_status.exists():
             try:
@@ -1506,6 +1595,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             stringing_input,
             stringing_files,
             stretch_out,
+            completed_project_keys=completed_project_keys,
         )
         if compiled_stretch and compiled_stretch.exists():
             try:
@@ -1524,7 +1614,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         summary_base.mkdir(parents=True, exist_ok=True)
         summary_out = summary_base / "StringingSummary_Output.xlsx"
         print(f"[pipeline] StringingSummary: compiling to {summary_out}")
-        compiled_summary = compile_stringing_summary_to_workbook(base_dir, summary_out)
+        compiled_summary = compile_stringing_summary_to_workbook(
+            base_dir,
+            summary_out,
+            completed_project_keys=completed_project_keys,
+        )
         stringing_summary_out_path = compiled_summary if compiled_summary else None
         if compiled_summary and compiled_summary.exists():
             try:

@@ -10,6 +10,32 @@ import pandas as pd
 
 from .project_identity import build_project_display, build_project_scope_key, normalize_line_name
 from .stringing import normalize_stringing_columns
+from .completed_projects import is_completed_project
+
+
+def _load_consolidation_rules(config_path: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """Read Consolidation Rule column from DPR_Config Sheet Names Check.
+
+    Returns (split_codes, merge_codes) as frozensets of normalized project codes.
+    Blank/unknown rows default to implicit kV-inference behavior.
+    """
+    try:
+        df = pd.read_excel(config_path, sheet_name="Sheet Names Check", usecols=["Project Code", "Consolidation Rule"])
+    except Exception:
+        return frozenset(), frozenset()
+    split_codes: set[str] = set()
+    merge_codes: set[str] = set()
+    for _, row in df.iterrows():
+        code = str(row.get("Project Code") or "").strip()
+        rule = str(row.get("Consolidation Rule") or "").strip().lower()
+        if not code:
+            continue
+        norm = "".join(c for c in code.lower() if c.isalnum())
+        if rule == "split":
+            split_codes.add(norm)
+        elif rule == "merge":
+            merge_codes.add(norm)
+    return frozenset(split_codes), frozenset(merge_codes)
 
 PARQUET_SUFFIXES: tuple[str, ...] = (".parquet", ".parq", ".pq")
 
@@ -26,6 +52,7 @@ STRINGING_SUMMARY_SHEETS: tuple[str, ...] = (
 
 _DATE_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
 _PROJECT_RE = re.compile(r"\b(TA|TB)\s*[-_ ]?\s*(\d{3,4})\b", flags=re.IGNORECASE)
+_KV_RE = re.compile(r"\b(\d{2,4})\s*k\s*v\b", flags=re.IGNORECASE)
 
 
 def _safe_text(value: object) -> str:
@@ -59,6 +86,97 @@ def _normalize_project_display(code: str, display: str, line_name: str) -> str:
     return build_project_display(code_text, normalize_line_name(line_name), visible)
 
 
+def _extract_kv_line_label(value: object) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    match = _KV_RE.search(text)
+    if not match:
+        return ""
+    try:
+        number = int(match.group(1))
+    except Exception:
+        return ""
+    return f"{number}kV"
+
+
+def _infer_line_from_project_label(project_label: object, project_code: object) -> str:
+    label = _safe_text(project_label)
+    code = _normalize_project_code(project_code)
+    if not label or not code:
+        return ""
+    if label.lower().startswith(code.lower()):
+        suffix = label[len(code) :]
+        suffix = re.sub(r"^[\s\-_/|:]+", "", suffix)
+        return normalize_line_name(suffix)
+    return ""
+
+
+def _apply_kv_line_identity_policy(
+    frame: pd.DataFrame,
+    *,
+    candidate_fields: Iterable[str],
+    display_fallback_fields: Iterable[str] = (),
+    split_project_codes: frozenset[str] = frozenset(),
+    merge_project_codes: frozenset[str] = frozenset(),
+) -> pd.DataFrame:
+    """Normalize project line identity using kV detection, with optional explicit overrides.
+
+    split_project_codes: normalized project codes forced to split regardless of kV inference.
+    merge_project_codes: normalized project codes forced to merge regardless of kV inference.
+    """
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+
+    work = frame.copy()
+    for column in ("project_code", "project_display", "project_scope_key", "line_name"):
+        if column not in work.columns:
+            work[column] = ""
+
+    work["project_code"] = work["project_code"].map(_normalize_project_code)
+    work["line_name"] = work["line_name"].map(normalize_line_name)
+
+    kv_candidate = pd.Series("", index=work.index, dtype="object")
+    for column in candidate_fields:
+        if column not in work.columns:
+            continue
+        candidate = work[column].map(_extract_kv_line_label).map(normalize_line_name)
+        fill_mask = ~kv_candidate.astype(bool) & candidate.astype(bool)
+        if fill_mask.any():
+            kv_candidate = kv_candidate.where(~fill_mask, candidate)
+
+    kv_sets = (
+        work.assign(_kv_candidate=kv_candidate)
+        .groupby("project_code", dropna=False)["_kv_candidate"]
+        .agg(lambda s: {normalize_line_name(value) for value in s if normalize_line_name(value)})
+    )
+    split_projects = {project for project, values in kv_sets.items() if len(values) >= 2}
+    split_projects |= split_project_codes
+    split_projects -= merge_project_codes
+
+    work["line_name"] = kv_candidate.where(work["project_code"].isin(split_projects), "").map(normalize_line_name)
+
+    display_source = pd.Series("", index=work.index, dtype="object")
+    for column in ("project_display", *tuple(display_fallback_fields)):
+        if column not in work.columns:
+            continue
+        candidate = work[column].fillna("").astype(str).str.strip()
+        fill_mask = ~display_source.astype(bool) & candidate.astype(bool)
+        if fill_mask.any():
+            display_source = display_source.where(~fill_mask, candidate)
+    display_source = display_source.where(display_source.astype(bool), work["project_code"].fillna("").astype(str))
+
+    work["project_display"] = [
+        _normalize_project_display(code, display, line)
+        for code, display, line in zip(work["project_code"], display_source, work["line_name"])
+    ]
+    work["project_scope_key"] = [
+        build_project_scope_key(code, line, display)
+        for code, line, display in zip(work["project_code"], work["line_name"], work["project_display"])
+    ]
+    return work
+
+
 def _extract_date_from_text(value: object) -> str:
     text = _safe_text(value)
     if not text:
@@ -69,12 +187,17 @@ def _extract_date_from_text(value: object) -> str:
 
 def _parse_report_date(series: pd.Series | None, fallback: pd.Series | None = None) -> pd.Series:
     if series is None:
-        parsed = pd.Series(pd.NaT, dtype="datetime64[ns]")
+        if fallback is not None:
+            parsed = pd.Series(pd.NaT, index=fallback.index, dtype="datetime64[ns]")
+        else:
+            parsed = pd.Series(pd.NaT, dtype="datetime64[ns]")
     else:
         parsed = pd.to_datetime(series, errors="coerce")
     if fallback is not None:
         fill = fallback.fillna("").astype(str).map(_extract_date_from_text)
         fallback_parsed = pd.to_datetime(fill, errors="coerce")
+        if len(parsed.index) != len(fallback_parsed.index):
+            parsed = pd.Series(pd.to_datetime(parsed, errors="coerce").values, index=fallback_parsed.index, dtype="datetime64[ns]")
         parsed = parsed.where(parsed.notna(), fallback_parsed)
     return pd.to_datetime(parsed, errors="coerce").dt.normalize()
 
@@ -144,18 +267,18 @@ def _read_parquet(source: str) -> pd.DataFrame:
 
 
 def _load_table(root: Path, workbook_name: str, sheet_name: str) -> pd.DataFrame:
-    parquet = _find_parquet_source(root, sheet_name)
-    if parquet:
-        try:
-            return _read_parquet(parquet)
-        except Exception:
-            pass
     workbook_path = root / workbook_name
     if workbook_path.exists():
         try:
             with pd.ExcelFile(workbook_path) as xl:
                 if sheet_name in xl.sheet_names:
                     return xl.parse(sheet_name=sheet_name)
+        except Exception:
+            pass
+    parquet = _find_parquet_source(root, sheet_name)
+    if parquet:
+        try:
+            return _read_parquet(parquet)
         except Exception:
             pass
     return pd.DataFrame()
@@ -304,6 +427,10 @@ def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
     for col in output_cols:
         if col not in work.columns:
             work[col] = ""
+    work = _apply_kv_line_identity_policy(
+        work,
+        candidate_fields=("line_name", "section_label", "project_display", "source_sheet", "configured_sheet", "template_sheet", "source_file"),
+    )
     return work[output_cols].reset_index(drop=True)
 
 
@@ -565,6 +692,10 @@ def _build_stretch_section_fact(stretch_raw: pd.DataFrame) -> pd.DataFrame:
         "configured_sheet",
         "template_sheet",
     ]
+    work = _apply_kv_line_identity_policy(
+        work,
+        candidate_fields=("line_name", "section_label", "project_display", "source_sheet", "configured_sheet", "template_sheet", "source_file"),
+    )
     return work[output_cols].reset_index(drop=True)
 
 
@@ -758,6 +889,14 @@ def _build_manpower_productivity_fact(
 
     daily["project_code"] = project_codes
     daily["line_name"] = daily["line_name"].map(normalize_line_name)
+    inferred_from_project = [
+        _infer_line_from_project_label(project_label, code)
+        for project_label, code in zip(display_series, daily["project_code"])
+    ]
+    inferred_series = pd.Series(inferred_from_project, index=daily.index).map(normalize_line_name)
+    empty_line_mask = ~daily["line_name"].astype(bool) & inferred_series.astype(bool)
+    if empty_line_mask.any():
+        daily.loc[empty_line_mask, "line_name"] = inferred_series.loc[empty_line_mask]
     daily["project_display"] = [
         _normalize_project_display(code, display, line)
         for code, display, line in zip(daily["project_code"], display_series, daily["line_name"])
@@ -857,6 +996,12 @@ def _build_manpower_productivity_fact(
     reason = reason.where(~(~has_values & audit_signal.str.startswith("MISSING")), "Manpower source sheet missing in DPR configuration/source.")
     daily["availability_reason"] = reason
     daily["manpower_status"] = daily.get("audit_status", "")
+
+    daily = _apply_kv_line_identity_policy(
+        daily,
+        candidate_fields=("line_name", "project_display", "project", "project_name"),
+        display_fallback_fields=("project_name", "project"),
+    )
 
     output = daily[
         [
@@ -1036,12 +1181,26 @@ def _build_diagnostics(
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
 
+    def _coverage_metrics(source_df: pd.DataFrame) -> tuple[int | None, int | None]:
+        if not isinstance(source_df, pd.DataFrame) or source_df.empty:
+            return None, None
+        report_col = "report_date" if "report_date" in source_df.columns else ("date" if "date" in source_df.columns else "")
+        if not report_col:
+            return None, None
+        parsed = pd.to_datetime(source_df.get(report_col), errors="coerce").dropna()
+        if parsed.empty:
+            return 0, 0
+        return int(parsed.nunique()), int(parsed.dt.to_period("M").nunique())
+
     def _row(component: str, source_df: pd.DataFrame) -> dict[str, object]:
         present = isinstance(source_df, pd.DataFrame) and not source_df.empty
+        distinct_report_dates, distinct_months = _coverage_metrics(source_df)
         return {
             "component": component,
             "status": "AVAILABLE" if present else "NO_DATA",
             "rows": int(len(source_df.index)) if isinstance(source_df, pd.DataFrame) else 0,
+            "distinct_report_dates": distinct_report_dates,
+            "distinct_months": distinct_months,
         }
 
     rows.append(_row("StringingDailySource", stringing_daily))
@@ -1065,7 +1224,25 @@ def _build_issues(issues: list[dict[str, object]]) -> pd.DataFrame:
     return frame[["severity", "component", "code", "message"]]
 
 
-def compile_stringing_summary_to_workbook(base_dir: Path, output_path: Path) -> Path:
+def _exclude_completed_projects(frame: pd.DataFrame, completed_project_keys: set[str] | None) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty or not completed_project_keys:
+        return frame
+    if "project_code" not in frame.columns:
+        return frame
+    project_series = frame["project_code"].fillna("").astype(str)
+    mask = project_series.map(lambda value: is_completed_project(value, completed_project_keys))
+    if not mask.any():
+        return frame
+    return frame.loc[~mask].copy()
+
+
+def compile_stringing_summary_to_workbook(
+    base_dir: Path,
+    output_path: Path,
+    *,
+    completed_project_keys: set[str] | None = None,
+    repo_root: Path | None = None,
+) -> Path:
     """Compile StringingSummary workbook from existing Stringing/Status/Stretch artifacts."""
 
     base_dir = Path(base_dir).resolve()
@@ -1075,6 +1252,10 @@ def compile_stringing_summary_to_workbook(base_dir: Path, output_path: Path) -> 
     stringing_root = _resolve_sibling_root(base_dir, "Stringing")
     status_root = _resolve_sibling_root(base_dir, "ProgressStatus")
     stretch_root = _resolve_sibling_root(base_dir, "StretchReadiness")
+
+    _repo_root = Path(repo_root).resolve() if repo_root else base_dir.parent.parent
+    _config_path = _repo_root / "Raw Data" / "DPR_Config.xlsx"
+    _split_codes, _merge_codes = _load_consolidation_rules(_config_path)
     issues: list[dict[str, object]] = []
 
     def _load(root: Path, workbook: str, sheet: str, component: str) -> pd.DataFrame:
@@ -1101,11 +1282,31 @@ def compile_stringing_summary_to_workbook(base_dir: Path, output_path: Path) -> 
     stretch_coverage = _load(stretch_root, "StretchReadiness_Output.xlsx", "Coverage", "StretchReadiness")
     manpower_audit = _load(stretch_root, "StretchReadiness_Output.xlsx", "ManpowerAudit", "StretchReadiness")
 
-    status_fact = _build_status_activity_fact(status_raw)
+    def _apply_consolidation_override(df: pd.DataFrame) -> pd.DataFrame:
+        """Force line_name/scope_key to merged for projects explicitly configured as 'merge'."""
+        if df.empty or not _merge_codes or "project_code" not in df.columns:
+            return df
+        mask = df["project_code"].isin(_merge_codes)
+        if not mask.any():
+            return df
+        work = df.copy()
+        work.loc[mask, "line_name"] = ""
+        work.loc[mask, "project_scope_key"] = [
+            build_project_scope_key(code, "", display)
+            for code, display in zip(work.loc[mask, "project_code"], work.loc[mask, "project_display"])
+        ]
+        return work
+
+    status_fact = _apply_consolidation_override(_build_status_activity_fact(status_raw))
     status_project, status_overall = _build_status_snapshots(status_fact)
-    stretch_fact = _build_stretch_section_fact(stretch_raw)
-    manpower_fact = _build_manpower_productivity_fact(stringing_daily, stringing_compiled, manpower_audit)
+    stretch_fact = _apply_consolidation_override(_build_stretch_section_fact(stretch_raw))
+    manpower_fact = _apply_consolidation_override(_build_manpower_productivity_fact(stringing_daily, stringing_compiled, manpower_audit))
     coverage = _build_coverage(stringing_coverage, status_coverage, stretch_coverage, manpower_fact)
+    status_fact = _exclude_completed_projects(status_fact, completed_project_keys)
+    status_project = _exclude_completed_projects(status_project, completed_project_keys)
+    stretch_fact = _exclude_completed_projects(stretch_fact, completed_project_keys)
+    manpower_fact = _exclude_completed_projects(manpower_fact, completed_project_keys)
+    coverage = _exclude_completed_projects(coverage, completed_project_keys)
     diagnostics = _build_diagnostics(
         stringing_daily,
         status_raw,

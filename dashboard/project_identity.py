@@ -21,6 +21,18 @@ _GENERIC_LINE_TOKENS = {
     "erection",
 }
 
+_NULL_TEXT_TOKENS = {
+    "",
+    "none",
+    "nan",
+    "na",
+    "n/a",
+    "null",
+    "nil",
+    "--",
+    "-",
+}
+
 
 def _compact(value: object) -> str:
     if value is None:
@@ -32,7 +44,7 @@ def normalize_line_name(value: object) -> str:
     if value is None:
         return ""
     text = str(value).strip()
-    if not text or text.lower() in {"nan", "none"}:
+    if not text or text.lower() in _NULL_TEXT_TOKENS:
         return ""
     text = re.sub(r"\s+", " ", text)
     return text
@@ -42,12 +54,18 @@ def _split_csv_tokens(value: object, *, keep_empty: bool) -> list[str]:
     if value is None:
         return []
     text = str(value).strip()
-    if not text or text.lower() == "nan":
+    if not text or text.lower() in _NULL_TEXT_TOKENS:
         return []
     parts = [str(part).strip() for part in re.split(r"[;,]", text)]
+    normalized_parts = []
+    for part in parts:
+        if part.lower() in _NULL_TEXT_TOKENS:
+            normalized_parts.append("")
+        else:
+            normalized_parts.append(part)
     if keep_empty:
-        return parts
-    return [part for part in parts if part]
+        return normalized_parts
+    return [part for part in normalized_parts if part]
 
 
 def infer_line_name_from_sheet_name(sheet_name: object, mode: str = "") -> str:

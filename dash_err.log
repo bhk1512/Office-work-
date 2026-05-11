@@ -1,0 +1,12 @@
+2026-04-29 17:22:24,948 [INFO] dash.dash - Dash is running on http://0.0.0.0:8050/
+
+{"message": "Dash is running on http://0.0.0.0:8050/\n", "taskName": null}
+2026-04-29 17:22:24,963 [INFO] werkzeug - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8050
+ * Running on http://10.10.33.141:8050
+{"message": "\u001b[31m\u001b[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.\u001b[0m\n * Running on all addresses (0.0.0.0)\n * Running on http://127.0.0.1:8050\n * Running on http://10.10.33.141:8050", "taskName": null}
+2026-04-29 17:22:24,964 [INFO] werkzeug - [33mPress CTRL+C to quit[0m
+{"message": "\u001b[33mPress CTRL+C to quit\u001b[0m", "taskName": null}
+2026-04-29 17:22:32,663 [INFO] werkzeug - 127.0.0.1 - - [29/Apr/2026 17:22:32] "POST /_dash-update-component HTTP/1.1" 200 -
+{"message": "127.0.0.1 - - [29/Apr/2026 17:22:32] \"POST /_dash-update-component HTTP/1.1\" 200 -", "taskName": null}

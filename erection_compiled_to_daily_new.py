@@ -1244,12 +1244,24 @@ def process_file(
         else:
             work["Tower Type"] = ""
 
+        tightening_col = None
+        for candidate in ("tower tightening", "tower tightening date", "tower_tightening", "tightening date"):
+            if candidate in df.columns:
+                tightening_col = candidate
+                break
+        if tightening_col:
+            work["tower tightening"] = df[tightening_col]
+        else:
+            work["tower tightening"] = pd.NA
+
         # Parse + clean (do not drop yet; capture issues first)
         work["Start Date"] = work["starting date"].apply(to_date)
         work["Complete Date"] = work["completion date"].apply(to_date)
+        work["Tower Tightening"] = work["tower tightening"].apply(to_date)
         repaired_dates = _repair_ambiguous_non_positive_dates(work)
         work["Start Date"] = pd.to_datetime(work["Start Date"], errors="coerce")
         work["Complete Date"] = pd.to_datetime(work["Complete Date"], errors="coerce")
+        work["Tower Tightening"] = pd.to_datetime(work["Tower Tightening"], errors="coerce").dt.normalize()
         diag["date_repairs_applied"] = int(repaired_dates)
         if repaired_dates:
             issues.append(
@@ -1267,6 +1279,9 @@ def process_file(
         work["Project Display"] = project_name
         work["Project Scope Key"] = project_scope_key
         work["Location No."] = work["location no"].astype(object).map(
+            lambda x: str(x).strip() if pd.notna(x) else pd.NA
+        )
+        work["Tower Tightening Raw"] = work["tower tightening"].astype(object).map(
             lambda x: str(x).strip() if pd.notna(x) else pd.NA
         )
 
@@ -1308,6 +1323,8 @@ def process_file(
                         "Project Display",
                         "Project Scope Key",
                         "Location No.",
+                        "Tower Tightening Raw",
+                        "Tower Tightening",
                         "Status",
                     ],
                 ].copy()
@@ -1342,6 +1359,8 @@ def process_file(
                 "Project Display",
                 "Project Scope Key",
                 "Location No.",
+                "Tower Tightening Raw",
+                "Tower Tightening",
                 "Status",
             ]
         ].copy()

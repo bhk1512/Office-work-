@@ -1,4 +1,4 @@
-﻿"""Dash callbacks for the productivity dashboard."""
+"""Dash callbacks for the productivity dashboard."""
 
 from __future__ import annotations
 
@@ -114,6 +114,70 @@ PROJECT_MODAL_CHART_SOURCES = {
     "project-modal-top5",
     "project-modal-bottom5",
 }
+KEC_COLOURS = {
+    "navy": "#002060",
+    "blue": "#0070c0",
+    "blue_light": "#4da6e0",
+    "green": "#28a745",
+    "amber": "#f0ad4e",
+    "red": "#dc3545",
+    "grey": "#94a3b8",
+    "teal": "#0f766e",
+}
+KEC_SEQUENCE = [
+    "#0070c0",
+    "#002060",
+    "#28a745",
+    "#f0ad4e",
+    "#dc3545",
+    "#4da6e0",
+    "#0f766e",
+    "#94a3b8",
+]
+
+
+def _kec_layout(
+    *,
+    height: int = 280,
+    title: str = "",
+    yaxis_title: str = "",
+    xaxis_title: str = "",
+    legend: bool = True,
+    margin: dict | None = None,
+) -> dict:
+    return {
+        "template": "plotly_white",
+        "paper_bgcolor": "white",
+        "plot_bgcolor": "white",
+        "font": {
+            "family": "Segoe UI, Tahoma, Geneva, Verdana, sans-serif",
+            "size": 12,
+            "color": "#1e293b",
+        },
+        "height": height,
+        "margin": margin or {"l": 50, "r": 20, "t": 30, "b": 40},
+        "xaxis": {
+            "title": xaxis_title,
+            "gridcolor": "#eef2f6",
+            "linecolor": "#e0e0e0",
+            "tickfont": {"size": 11},
+            "title_font": {"size": 12, "color": "#64748b"},
+        },
+        "yaxis": {
+            "title": yaxis_title,
+            "gridcolor": "#eef2f6",
+            "linecolor": "#e0e0e0",
+            "tickfont": {"size": 11},
+            "title_font": {"size": 12, "color": "#64748b"},
+        },
+        "legend": {
+            "orientation": "h",
+            "y": 1.12,
+            "x": 0,
+            "font": {"size": 11},
+        } if legend else {"visible": False},
+        "title": {"text": title, "font": {"size": 13, "color": "#002060"}, "x": 0, "pad": {"l": 4}} if title else {},
+    }
 
 # App-wide config instance for callback logic
 config = AppConfig()
@@ -847,7 +911,7 @@ def _prepare_stringing_completed(
     working["gang_name_display"] = working.get("gang_name", "").astype(str).str.strip()
     from_ap = working.get("from_ap", pd.Series([""] * len(working), index=working.index)).astype(str).str.strip()
     to_ap   = working.get("to_ap",   pd.Series([""] * len(working), index=working.index)).astype(str).str.strip()
-    working["span_display"] = (from_ap + " \u2192 " + to_ap).str.strip(" \u2192 ")  # From→To
+    working["span_display"] = (from_ap + " \u2192 " + to_ap).str.strip(" \u2192 ")  # From?To
 
     # search filter (project/gang/from/to)
     if search_text:
@@ -880,7 +944,7 @@ def _prepare_stringing_completed(
         {
             "completion_date": working["date"],
             "project_name": working["project_name_display"],
-            "location_no": working["span_display"],  # show From→To in the 'Location' column
+            "location_no": working["span_display"],  # show From?To in the 'Location' column
             "tower_weight_mt": pd.to_numeric(working.get("daily_km", np.nan), errors="coerce"),  # will display as KM
             "daily_prod_mt":  pd.to_numeric(working.get("daily_km", np.nan), errors="coerce"),  # KM/day
             "gang_name": working["gang_name_display"],
@@ -1052,6 +1116,55 @@ def _resolve_focus_mode(focus_payload: Any, fallback: str = "erection") -> str:
                 return "erection"
             return normalized
     return normalized_fallback
+
+
+def _canonical_project_focus_payload(value: Any) -> dict[str, Any] | None:
+    """Normalize any project-focus-like payload into the shared store contract."""
+    if not isinstance(value, Mapping):
+        return None
+    project = str(value.get("project") or value.get("display") or "").strip()
+    if not project:
+        return None
+    display = str(value.get("display") or project).strip() or project
+    code = str(value.get("code") or _extract_project_code(display) or project).strip() or project
+    mode = _resolve_focus_mode(value, "erection")
+    return {
+        "project": project,
+        "display": display,
+        "code": code,
+        "mode": mode,
+        "pch": value.get("pch"),
+        "ts": float(value.get("ts") or time.time()),
+    }
+
+
+def _project_focus_equal(left: Any, right: Any) -> bool:
+    left_payload = _canonical_project_focus_payload(left)
+    right_payload = _canonical_project_focus_payload(right)
+    if not left_payload and not right_payload:
+        return True
+    if not left_payload or not right_payload:
+        return False
+    return (
+        str(left_payload.get("project") or "").strip() == str(right_payload.get("project") or "").strip()
+        and str(left_payload.get("display") or "").strip() == str(right_payload.get("display") or "").strip()
+        and str(left_payload.get("code") or "").strip() == str(right_payload.get("code") or "").strip()
+        and str(left_payload.get("mode") or "").strip() == str(right_payload.get("mode") or "").strip()
+    )
+
+
+def _project_name_from_focus_or_selected(
+    focus_data: Any,
+    selected_project: str | None,
+    fallback_scope_project: str | None = None,
+) -> str:
+    focus_payload = _canonical_project_focus_payload(focus_data)
+    if focus_payload:
+        return str(focus_payload.get("project") or "").strip()
+    text = str(selected_project or "").strip()
+    if text:
+        return text
+    return str(fallback_scope_project or "").strip()
 
 
 def _normalize_deployment_filter(value: str | None) -> str:
@@ -1827,19 +1940,16 @@ def _build_loss_vs_potential_figure(
 ) -> go.Figure:
     """Return the delivered vs lost stacked bar chart for gang performance."""
 
-    base_layout = dict(
-        height=260,
-        margin=dict(l=36, r=16, t=10, b=50),
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="#ffffff",
-        hovermode="x unified",
-    )
-
     df = pd.DataFrame(loss_rows or [])
     required_cols = {"gang_name", "delivered", "lost"}
     if df.empty or not required_cols.issubset(df.columns):
         fig = go.Figure()
-        fig.update_layout(**base_layout)
+        fig.update_layout(
+            **_kec_layout(height=260, legend=False, margin={"l": 36, "r": 16, "t": 10, "b": 50}),
+            hovermode="x unified",
+        )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
         fig.add_annotation(
             text="No gang performance data for this selection.",
             xref="paper",
@@ -1849,8 +1959,6 @@ def _build_loss_vs_potential_figure(
             showarrow=False,
             font=dict(color="#6b7280"),
         )
-        fig.update_xaxes(visible=False)
-        fig.update_yaxes(visible=False)
         return fig
 
     df = df.copy()
@@ -1865,7 +1973,12 @@ def _build_loss_vs_potential_figure(
     df = df.sort_values("potential", ascending=False).head(10)
     if df.empty:
         fig = go.Figure()
-        fig.update_layout(**base_layout)
+        fig.update_layout(
+            **_kec_layout(height=260, legend=False, margin={"l": 36, "r": 16, "t": 10, "b": 50}),
+            hovermode="x unified",
+        )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
         fig.add_annotation(
             text="No gang performance data for this selection.",
             xref="paper",
@@ -1875,8 +1988,6 @@ def _build_loss_vs_potential_figure(
             showarrow=False,
             font=dict(color="#6b7280"),
         )
-        fig.update_xaxes(visible=False)
-        fig.update_yaxes(visible=False)
         return fig
 
     hover_fields = [
@@ -1886,8 +1997,8 @@ def _build_loss_vs_potential_figure(
     ]
     customdata = np.stack([series.to_numpy(dtype=float) for series in hover_fields], axis=-1)
 
-    delivered_color = "#22C55E"
-    lost_color = "#EF4444"
+    delivered_color = KEC_COLOURS["blue"]
+    lost_color = KEC_COLOURS["red"]
     unit_text = unit_label or "MT"
 
     fig = go.Figure()
@@ -1919,12 +2030,16 @@ def _build_loss_vs_potential_figure(
     )
 
     fig.update_layout(
-        **base_layout,
+        **_kec_layout(
+            height=260,
+            yaxis_title=unit_text,
+            margin={"l": 36, "r": 16, "t": 10, "b": 50},
+        ),
         barmode="stack",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+        hovermode="x unified",
     )
     fig.update_xaxes(tickangle=-15, automargin=True, showspikes=False)
-    fig.update_yaxes(title=f"{unit_text}", gridcolor="#e5e7eb", zeroline=False, showspikes=False)
+    fig.update_yaxes(zeroline=False, showspikes=False)
     return fig
 
 
@@ -2018,6 +2133,33 @@ def _compute_dashboard_outputs(
         baseline_map=None,
         is_stringing=is_stringing_mode,
     )
+    metric_axis_title = ("KM" if is_stringing_mode else "MT") if metric_key == "erection" else rate_label
+    fig_top.update_traces(marker_color=KEC_COLOURS["green"], selector={"type": "bar"})
+    fig_bottom.update_traces(marker_color=KEC_COLOURS["red"], selector={"type": "bar"})
+    fig_top.update_layout(
+        **_kec_layout(
+            height=200,
+            xaxis_title="Gang",
+            yaxis_title=metric_axis_title,
+            legend=False,
+            margin={"l": 36, "r": 16, "t": 10, "b": 40},
+        ),
+        bargap=0.25,
+        hovermode="closest",
+    )
+    fig_bottom.update_layout(
+        **_kec_layout(
+            height=200,
+            xaxis_title="Gang",
+            yaxis_title=metric_axis_title,
+            legend=False,
+            margin={"l": 36, "r": 16, "t": 10, "b": 40},
+        ),
+        bargap=0.25,
+        hovermode="closest",
+    )
+    fig_top.update_xaxes(tickangle=-10)
+    fig_bottom.update_xaxes(tickangle=-10)
 
     selected_projects = (scope_meta.get("selected") or {}).get("projects") or []
     monthly_scope = project_scope[["month", "project_name", "daily_prod_mt"]].dropna(subset=["month", "project_name"])
@@ -2029,6 +2171,27 @@ def _compute_dashboard_outputs(
         selected_projects=selected_projects,
         avg_line=avg_line,
     )
+    line_colour_idx = 0
+    for trace in fig_lines.data:
+        if isinstance(trace, go.Scatter) and "Benchmark" not in str(getattr(trace, "name", "")):
+            colour = KEC_SEQUENCE[line_colour_idx % len(KEC_SEQUENCE)]
+            line_colour_idx += 1
+            if trace.line is not None:
+                trace.line.color = colour
+            marker_size = getattr(trace.marker, "size", None) if trace.marker is not None else None
+            if marker_size is not None:
+                trace.marker.color = colour
+    fig_lines.update_layout(
+        **_kec_layout(
+            height=320,
+            xaxis_title="Month",
+            yaxis_title=metric_axis_title,
+            margin={"l": 40, "r": 20, "t": 30, "b": 90},
+        ),
+        colorway=KEC_SEQUENCE,
+        hovermode="x unified",
+    )
+    fig_lines.update_xaxes(tickformat="%b %Y")
 
     avp_children = _build_avp_rows(
         project_scope,
@@ -5222,44 +5385,8 @@ def register_callbacks(
         avp_children = avp_children or html.Div("No gangs available for this selection.", className="text-muted")
         return avp_children, fig_loss, fig_top, fig_bottom
 
-    def _resolve_reset_month_value() -> str:
-        try:
-            df = data_selector.select("erection")
-            latest_date = None
-            if isinstance(df, pd.DataFrame) and not df.empty and "date" in df.columns:
-                dates = pd.to_datetime(df["date"], errors="coerce").dropna()
-                if not dates.empty:
-                    latest_date = dates.max()
-            if latest_date is None:
-                return datetime.today().strftime("%Y-%m")
-            return pd.Timestamp(latest_date).strftime("%Y-%m")
-        except Exception:
-            return datetime.today().strftime("%Y-%m")
-
-    def _pick_latest_month_value(
-        options: Sequence[dict[str, Any]] | None,
-        current_value: Sequence[str] | str | None,
-    ) -> Any:
-        if isinstance(current_value, list) and len(current_value) == 0:
-            return dash.no_update
-        if current_value:
-            selected = set(current_value if isinstance(current_value, (list, tuple)) else [current_value])
-            opt_values = {opt.get("value") for opt in (options or []) if isinstance(opt, dict)}
-            if selected & opt_values:
-                return dash.no_update
-        opt_values = [opt.get("value") for opt in (options or []) if isinstance(opt, dict)]
-        if not opt_values:
-            return dash.no_update
-
-        def _parse(val: str) -> int:
-            try:
-                y, m = val.split("-")
-                return int(y) * 100 + int(m)
-            except Exception:
-                return -1
-
-        latest = max(opt_values, key=_parse)
-        return [latest]
+    def _resolve_reset_month_value() -> list[str]:
+        return []
 
     @app.callback(
         Output("f-month", "value"),
@@ -5281,12 +5408,18 @@ def register_callbacks(
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
         if trigger_id == "btn-reset-filters":
-            return [_resolve_reset_month_value()]
+            return _resolve_reset_month_value()
         if trigger_id == "f-quick-range" and quick_range_value:
             return None
         if quick_range_value:
             return dash.no_update
-        return _pick_latest_month_value(options, current_value)
+        if current_value:
+            selected = set(current_value if isinstance(current_value, (list, tuple)) else [current_value])
+            opt_values = {opt.get("value") for opt in (options or []) if isinstance(opt, dict)}
+            if selected & opt_values:
+                return dash.no_update
+            return []
+        return dash.no_update
 
     @app.callback(
         Output("f-quick-range", "value"),
@@ -5353,7 +5486,7 @@ def register_callbacks(
             text = str(raw).strip()
             if not text:
                 return ""
-            if any(marker in text for marker in ("Ãƒ", "Ã‚")):
+            if any(marker in text for marker in ("Ã", "Â")):
                 try:
                     text = text.encode("latin-1").decode("utf-8").strip()
                 except (UnicodeEncodeError, UnicodeDecodeError):
@@ -6564,7 +6697,7 @@ def register_callbacks(
 
     @app.callback(
         Output("store-project-modal-scope", "data"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
@@ -6603,7 +6736,7 @@ def register_callbacks(
         Output("project-modal-trace-gang", "options"),
         Output("project-modal-trace-gang", "value"),
         Input("store-project-modal-scope", "data"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         Input("project-modal-selected-gang", "data"),
         prevent_initial_call=True,
     )
@@ -6640,7 +6773,7 @@ def register_callbacks(
         Input("store-project-modal-click-meta", "data"),
         Input("project-modal-trace-gang", "value"),
         Input("project-modal-selected-gang", "data"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         prevent_initial_call=True,
     )
     def _project_modal_trace_tables(
@@ -6725,7 +6858,7 @@ def register_callbacks(
         Output("project-modal-top5", "figure"),
         Output("project-modal-bottom5", "figure"),
         Input("store-project-modal-scope", "data"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         Input("project-modal-topbot-metric", "value"),
         State("f-month", "value"),
         State("f-quick-range", "value"),
@@ -6800,6 +6933,301 @@ def register_callbacks(
 
         avp_children = avp_children or html.Div("No gangs available for this selection.", className="text-muted")
         return avp_children, fig_loss, fig_top5, fig_bottom5
+
+    @app.callback(
+        Output("store-project-overview-scope", "data"),
+        Input("store-project-surface-focus", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("proj-overview-stringing-scope", "value"),
+        Input("store-project-overview-performance-mode", "data"),
+        prevent_initial_call=False,
+    )
+    def _sync_project_overview_scope_store(
+        focus_data: dict[str, Any] | None,
+        months,
+        quick_range,
+        gangs,
+        stringing_scope,
+        performance_mode,
+    ):
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return None
+        project_code = (focus_data or {}).get("code")
+        eff_mode = _modal_mode_from_store(performance_mode, "erection")
+        if eff_mode == "stringing" and not config.enable_stringing:
+            eff_mode = "erection"
+        method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
+        return _build_project_scope_meta(
+            project_name,
+            project_code,
+            eff_mode,
+            months,
+            quick_range,
+            gangs,
+            method_values,
+            stringing_scope,
+        )
+
+    @app.callback(
+        Output("store-project-overview-performance-mode", "data"),
+        Input("store-project-surface-focus", "data"),
+        State("store-project-overview-performance-mode", "data"),
+        prevent_initial_call=False,
+    )
+    def _sync_project_overview_mode_from_focus(focus_data: dict[str, Any] | None, current_mode: Any):
+        mode = _resolve_focus_mode(focus_data, _modal_mode_from_store(current_mode, "erection"))
+        if mode == "stringing" and not config.enable_stringing:
+            mode = "erection"
+        return _compose_modal_mode_payload(mode)
+
+    @app.callback(
+        Output("proj-overview-perf-collapse", "is_open"),
+        Output("proj-overview-perf-toggle", "children"),
+        Input("proj-overview-perf-toggle", "n_clicks"),
+        State("proj-overview-perf-collapse", "is_open"),
+        prevent_initial_call=False,
+    )
+    def _toggle_project_overview_performance(n_clicks: int | None, is_open: bool | None):
+        if not n_clicks:
+            return False, "Show Gang Performance"
+        new_state = not bool(is_open)
+        label = "Hide Gang Performance" if new_state else "Show Gang Performance"
+        return new_state, label
+
+    @app.callback(
+        Output("proj-overview-avp-list", "children"),
+        Output("proj-overview-actual-vs-bench", "figure"),
+        Output("proj-overview-top5", "figure"),
+        Output("proj-overview-bottom5", "figure"),
+        Input("store-project-overview-scope", "data"),
+        Input("store-project-surface-focus", "data"),
+        Input("proj-overview-topbot-metric", "value"),
+        State("f-month", "value"),
+        State("f-quick-range", "value"),
+        State("f-gang", "value"),
+        State("proj-overview-stringing-scope", "value"),
+        State("store-project-overview-performance-mode", "data"),
+    )
+    def _update_project_overview_performance(
+        scope_store: dict[str, Any] | None,
+        focus_data: dict[str, Any] | None,
+        topbot_metric: str | None,
+        months,
+        quick_range,
+        gangs,
+        stringing_scope,
+        performance_mode,
+    ):
+        empty_fig = go.Figure()
+        if not focus_data or not focus_data.get("project"):
+            return (
+                html.Div("Select a project to view gang performance.", className="text-muted"),
+                empty_fig,
+                empty_fig,
+                empty_fig,
+            )
+
+        project_name = focus_data.get("project")
+        project_code = focus_data.get("code")
+        scope_meta = None
+        if isinstance(scope_store, dict):
+            selected = (scope_store.get("selected") or {}).get("projects") or []
+            if project_name in selected:
+                scope_meta = scope_store
+        if scope_meta is None:
+            eff_mode = _modal_mode_from_store(performance_mode, "erection")
+            if eff_mode == "stringing" and not config.enable_stringing:
+                eff_mode = "erection"
+            method_values = _method_filters_for_scope(stringing_scope) if eff_mode == "stringing" else []
+            scope_meta = _build_project_scope_meta(
+                project_name,
+                project_code,
+                eff_mode,
+                months,
+                quick_range,
+                gangs,
+                method_values,
+                stringing_scope,
+            )
+
+        try:
+            (
+                *_kpi,
+                avp_children,
+                fig_loss,
+                fig_top5,
+                fig_bottom5,
+                _fig_project,
+            ) = _compute_dashboard_outputs(
+                scope_meta,
+                topbot_metric,
+                avp_namespace="proj-overview-avp",
+                summarizer=_summarize_scope_for_cards,
+                summary_factory=_empty_summary_payload,
+            )
+        except PreventUpdate:
+            return (
+                html.Div("No data available for the selected project.", className="text-muted"),
+                empty_fig,
+                empty_fig,
+                empty_fig,
+            )
+
+        avp_children = avp_children or html.Div("No gangs available for this selection.", className="text-muted")
+        return avp_children, fig_loss, fig_top5, fig_bottom5
+
+    @app.callback(
+        Output("proj-overview-erections-search", "value"),
+        Input("proj-overview-erections-search-reset", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _reset_overview_erections_search(n):
+        if not n:
+            raise PreventUpdate
+        return ""
+
+    @app.callback(
+        Output("proj-overview-stringing-search", "value"),
+        Input("proj-overview-stringing-search-reset", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _reset_overview_stringing_search(n):
+        if not n:
+            raise PreventUpdate
+        return ""
+
+    @app.callback(
+        Output("proj-overview-erections-table", "data"),
+        Input("proj-overview-erections-range", "start_date"),
+        Input("proj-overview-erections-range", "end_date"),
+        Input("proj-overview-erections-search", "value"),
+        Input("store-project-surface-focus", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+    )
+    def _update_overview_erections_table(
+        start_date,
+        end_date,
+        search_text,
+        focus_data: dict[str, Any] | None,
+        months,
+        quick_range,
+        gangs,
+    ):
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return []
+        project_code = (focus_data or {}).get("code")
+
+        range_start = _parse_completion_date(start_date) or _default_completion_date()
+        range_end = _parse_completion_date(end_date) or range_start
+        if range_start > range_end:
+            range_start, range_end = range_end, range_start
+
+        candidate_ids = _project_filter_candidates(project_name, project_code)
+        if not candidate_ids:
+            if project_name:
+                candidate_ids = [str(project_name)]
+            elif project_code:
+                candidate_ids = [str(project_code)]
+        project_list = _normalize_str_list(candidate_ids)
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        months_list = _normalize_str_list(_ensure_list(months))
+
+        frames, _, _ = _build_scope_frames(
+            "erection",
+            project_list=project_list,
+            gang_list=gang_list,
+            months_value=months_list,
+            quick_range=quick_range,
+            method_values=[],
+        )
+        scoped = frames.get("project_gang", pd.DataFrame()).copy()
+        _export_df, display_df = _prepare_erections_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            responsibilities_provider=responsibilities_provider,
+            search_text=search_text,
+        )
+        return display_df.to_dict("records") if not display_df.empty else []
+
+    @app.callback(
+        Output("proj-overview-stringing-table", "data"),
+        Input("proj-overview-stringing-range", "start_date"),
+        Input("proj-overview-stringing-range", "end_date"),
+        Input("proj-overview-stringing-search", "value"),
+        Input("store-project-surface-focus", "data"),
+        Input("f-month", "value"),
+        Input("f-quick-range", "value"),
+        Input("f-gang", "value"),
+        Input("proj-overview-stringing-scope", "value"),
+    )
+    def _update_overview_stringing_table(
+        start_date,
+        end_date,
+        search_text,
+        focus_data: dict[str, Any] | None,
+        months,
+        quick_range,
+        gangs,
+        stringing_scope,
+    ):
+        if not config.enable_stringing:
+            return []
+        project_name = (focus_data or {}).get("project")
+        if not project_name:
+            return []
+        project_code = (focus_data or {}).get("code")
+
+        range_start = _parse_completion_date(start_date) or _default_completion_date()
+        range_end = _parse_completion_date(end_date) or range_start
+        if range_start > range_end:
+            range_start, range_end = range_end, range_start
+
+        candidate_ids = _project_filter_candidates(project_name, project_code)
+        if not candidate_ids:
+            if project_name:
+                candidate_ids = [str(project_name)]
+            elif project_code:
+                candidate_ids = [str(project_code)]
+        project_list = _normalize_str_list(candidate_ids)
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+        months_list = _normalize_str_list(_ensure_list(months))
+        method_list = _method_filters_for_scope(stringing_scope)
+        months_ts = resolve_months(months_list, quick_range)
+
+        frames, _, _ = _build_scope_frames(
+            "stringing",
+            project_list=project_list,
+            gang_list=gang_list,
+            months_value=months_list,
+            quick_range=quick_range,
+            method_values=method_list,
+            deployment_filter=stringing_scope,
+        )
+        scoped = frames.get("project_gang", pd.DataFrame()).copy()
+        if "date" not in scoped.columns or scoped.empty:
+            selector = DATA_SELECTOR
+            df_fallback = selector.select("stringing") if selector is not None else pd.DataFrame()
+            if isinstance(df_fallback, pd.DataFrame) and not df_fallback.empty:
+                scoped = apply_filters(
+                    _stringing_scope(df_fallback, method_list),
+                    project_list,
+                    months_ts,
+                    gang_list,
+                )
+        _export_df, display_df = _prepare_stringing_completed(
+            scoped,
+            range_start=range_start,
+            range_end=range_end,
+            search_text=search_text,
+        )
+        return display_df.to_dict("records") if not display_df.empty else []
 
 
     @app.callback(
@@ -6896,7 +7324,7 @@ def register_callbacks(
         Input("project-modal-erections-range", "start_date"),
         Input("project-modal-erections-range", "end_date"),
         Input("project-modal-erections-search", "value"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
@@ -6953,7 +7381,7 @@ def register_callbacks(
         Input("project-modal-stringing-range", "start_date"),
         Input("project-modal-stringing-range", "end_date"),
         Input("project-modal-stringing-search", "value"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
@@ -7051,7 +7479,7 @@ def register_callbacks(
         State("erections-completion-range", "start_date"),
         State("erections-completion-range", "end_date"),
         State("erections-search", "value"),
-        State("store-project-tile-focus", "data"),
+        State("store-project-surface-focus", "data"),
         State("project-modal-trace-gang", "value"),
         State("project-modal-erections-range", "start_date"),
         State("project-modal-erections-range", "end_date"),
@@ -8003,10 +8431,6 @@ def register_callbacks(
                     def _compact_code(value: str) -> str:
                         return str(value or "").strip().lower().replace(" ", "")
 
-                name_keys = info["project_name_display"].astype(str).map(_compact_code)
-                for idx, key in zip(info.index, name_keys):
-                    if key and key not in info_key_map:
-                        info_key_map[key] = idx
                 for code_col in ("project_code", "Project Code"):
                     if code_col in info.columns:
                         code_keys = info[code_col].astype(str).map(_compact_code)
@@ -8017,12 +8441,6 @@ def register_callbacks(
                 info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])
                 def _compact_code(value: str) -> str:
                     return str(value or "").strip().lower().replace(" ", "")
-
-            proj_info_pch = {}
-            proj_info_pch_norm = {}
-            if not info.empty and "pch" in info.columns:
-                proj_info_pch = dict(zip(info["project_name_display"], info["pch"].astype(str)))
-                proj_info_pch_norm = { _normalize_lower(k): str(v) for k, v in proj_info_pch.items() if str(k).strip() }
 
             try:
                 from .pch_normalizer import normalize_pch as _normalize_pch, CANONICAL_PCH_PRIMARY as _PCH_ORDER
@@ -8040,16 +8458,17 @@ def register_callbacks(
                 planned_km = float(row.get("planned_km", 0.0) or 0.0)
                 delivered_km = float(row.get("delivered_km", 0.0) or 0.0)
                 # Meta join
-                meta = info[info.get("project_name_norm", "").astype(str) == _normalize_lower(proj)].iloc[:1] if not info.empty else pd.DataFrame()
-                if (not isinstance(meta, pd.DataFrame)) or meta.empty:
-                    target_key = _compact_code(proj)
-                    if target_key and target_key in info_key_map:
-                        meta = info.loc[[info_key_map[target_key]]]
+                meta = pd.DataFrame()
+                proj_code_hint = (
+                    _extract_project_code(proj)
+                    or _extract_project_code(str(row.get("project_code", "")))
+                    or _extract_project_code(str(row.get("code", "")))
+                )
+                target_key = _compact_code(proj_code_hint) if proj_code_hint else ""
+                if target_key and target_key in info_key_map:
+                    meta = info.loc[[info_key_map[target_key]]]
                 raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
-                if (not raw_pch) and proj:
-                    raw_pch = proj_info_pch.get(proj, "") or proj_info_pch_norm.get(_normalize_lower(proj), "")
-                # Use normalized PCH if known; otherwise keep the original as-is (no 'Unassigned')
-                pch_label = _normalize_pch(raw_pch) or str(raw_pch or "").strip()
+                pch_label = _normalize_pch(raw_pch) or "Unassigned"
                 try:
                     proj_code = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
                         meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
@@ -8788,7 +9207,6 @@ def register_callbacks(
                 return str(v or "").strip()
             _PCH_ORDER = ()
 
-        info_name_to_pch: dict[str, str] = {}
         info_code_to_pch: dict[str, str] = {}
         if isinstance(info_df, pd.DataFrame) and not info_df.empty:
             info = info_df.copy()
@@ -8810,10 +9228,6 @@ def register_callbacks(
                 def _compact_code(s: str) -> str:
                     return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
                 info_key_map: dict[str, int] = {}
-                name_keys = info["project_name_display"].astype(str).map(_compact_code)
-                for idx, key in zip(info.index, name_keys):
-                    if key and key not in info_key_map:
-                        info_key_map[key] = idx
                 for code_col in ("project_code", "Project Code"):
                     if code_col in info.columns:
                         code_keys = info[code_col].astype(str).map(_compact_code)
@@ -8823,30 +9237,20 @@ def register_callbacks(
             except Exception:
                 info_key_map = {}
 
-            if pch_col in info.columns:
-                info_name_to_pch = {
-                    _normalize_lower(str(row.get("project_name_display", ""))): _normalize_pch(row.get(pch_col, ""))
-                    for _, row in info.iterrows()
-                    if str(row.get("project_name_display", "")).strip()
-                }
-                if "project_code" in info.columns:
-                    try:
-                        info_code_to_pch = {
-                            re.sub(r"[^a-z0-9]", "", str(row.get("project_code", "")).strip().lower()): _normalize_pch(row.get(pch_col, ""))
-                            for _, row in info.iterrows()
-                            if str(row.get("project_code", "")).strip()
-                        }
-                    except Exception:
-                        info_code_to_pch = {}
+            if pch_col in info.columns and "project_code" in info.columns:
+                try:
+                    info_code_to_pch = {
+                        re.sub(r"[^a-z0-9]", "", str(row.get("project_code", "")).strip().lower()): _normalize_pch(row.get(pch_col, ""))
+                        for _, row in info.iterrows()
+                        if str(row.get("project_code", "")).strip()
+                    }
+                except Exception:
+                    info_code_to_pch = {}
         else:
             info = pd.DataFrame(columns=["project_name_display", "project_name_norm", "pch", "regional_mgr", "project_mgr", "planning_eng"])
             info_key_map = {}
 
         # Build hierarchy: PCH -> Projects -> Locations
-        # Ensure we always have a PCH value; fall back to project-info mapping if blank
-        proj_info_pch = {}
-        if not info.empty and "pch" in info.columns:
-            proj_info_pch = dict(zip(info["project_name_display"], info["pch"].astype(str)))
 
         # Import PCH normalizer to canonicalize labels for grouping and display
         try:
@@ -8861,23 +9265,21 @@ def register_callbacks(
         aggregated_by_proj_key: dict[str, tuple[str, str]] = {}
         for (mp_pch, proj), mt in planned_mt.items():
             nos_planned = int(planned_nos.get((mp_pch, proj), 0)) if hasattr(planned_nos, 'get') else 0
-            # Robust lookup of Project Details row using normalized name; if not found, try compact code match
             proj_norm = _normalize_lower(proj)
-            # Use normalized-name match, then compact-key map fallback
-            meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
-            if (not isinstance(meta, pd.DataFrame)) or meta.empty:
-                try:
-                    import re as _re
-                    def _compact_code(s: str) -> str:
-                        return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
-                    target_key = _compact_code(str(proj))
-                    if target_key and target_key in info_key_map:
-                        meta = info.loc[[info_key_map[target_key]]]
-                except Exception:
-                    pass
+            meta = pd.DataFrame()
+            try:
+                import re as _re
+                def _compact_code(s: str) -> str:
+                    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
+                proj_code_hint = _extract_project_code(str(proj))
+                target_key = _compact_code(proj_code_hint) if proj_code_hint else ""
+                if target_key and target_key in info_key_map:
+                    meta = info.loc[[info_key_map[target_key]]]
+            except Exception:
+                pass
             raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
-            # Determine PCH solely from Project Details; if unrecognized, keep original
-            pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
+            # Determine PCH solely from Project Details; if missing, assign Unassigned
+            pch_label = (_normalize_pch(raw_pch) or "Unassigned")
             # Derive display heading and identity key using code when available
             try:
                 proj_code = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
@@ -8926,20 +9328,15 @@ def register_callbacks(
         for proj in map(lambda x: str(x), delivered_projects):
             if not proj or not str(proj).strip():
                 continue
-            proj_norm = _normalize_lower(proj)
             # If this project already exists from the planned aggregation, update delivered values instead of duplicating
             try:
                 import re as _re
                 def _compact_code(s: str) -> str:
                     return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
-                # Prefer code if we can resolve it from info
-                meta_lookup = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
-                proj_code_lookup = (meta_lookup.get("project_code").iloc[0] if (isinstance(meta_lookup, pd.DataFrame) and not meta_lookup.empty and "project_code" in meta_lookup.columns) else (
-                    meta_lookup.get("Project Code").iloc[0] if (isinstance(meta_lookup, pd.DataFrame) and not meta_lookup.empty and "Project Code" in meta_lookup.columns) else ""
-                )) if isinstance(meta_lookup, pd.DataFrame) else ""
-                proj_key = _compact_code(proj_code_lookup) or _compact_code(proj)
+                proj_code_lookup = _extract_project_code(proj)
+                proj_key = _compact_code(proj_code_lookup) if proj_code_lookup else _compact_code(proj)
             except Exception:
-                proj_key = proj_norm
+                proj_key = _normalize_lower(proj)
             if proj_key in aggregated_by_proj_key:
                 try:
                     existing_key = aggregated_by_proj_key[proj_key]
@@ -8951,15 +9348,11 @@ def register_callbacks(
                 except Exception:
                     # fallback to normal add path
                     pass
-            meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
-            if (not isinstance(meta, pd.DataFrame)) or meta.empty:
-                # Try compact-key lookup
-                if proj_key and proj_key in info_key_map:
-                    meta = info.loc[[info_key_map[proj_key]]]
+            meta = info.loc[[info_key_map[proj_key]]] if (proj_key and proj_key in info_key_map) else pd.DataFrame()
             raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
             pch_label = (
                 _normalize_pch(raw_pch)
-                or str(raw_pch or "").strip()
+                or "Unassigned"
             )
             # Build display and project code for heading
             try:
@@ -9021,7 +9414,7 @@ def register_callbacks(
                 if not proj or proj_key in aggregated_by_proj_key:
                     continue
                 raw_pch = str(meta_row.get(pch_col, "")) if pch_col in meta_row.index else ""
-                pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
+                pch_label = (_normalize_pch(raw_pch) or "Unassigned")
                 proj_display = f"{resolved_code} : {proj}".strip(" :") if resolved_code else proj
                 key = (pch_label, proj_display)
                 aggregated[key] = {
@@ -9071,16 +9464,14 @@ def register_callbacks(
                     return str(s or "").strip().lower().replace(" ", "")
 
             for proj in sorted({p for p in scoped_projects if p}):
-                proj_norm = _normalize_lower(proj)
                 proj_key = _compact_code_fallback(proj)
                 if not proj_key or proj_key in aggregated_by_proj_key:
                     continue
-                meta = info[info.get("project_name_norm", "").astype(str) == proj_norm].iloc[:1] if not info.empty else pd.DataFrame()
-                if (not isinstance(meta, pd.DataFrame)) or meta.empty:
-                    if proj_key and proj_key in info_key_map:
-                        meta = info.loc[[info_key_map[proj_key]]]
+                proj_code_hint = _extract_project_code(proj)
+                proj_lookup_key = _compact_code_fallback(proj_code_hint) if proj_code_hint else proj_key
+                meta = info.loc[[info_key_map[proj_lookup_key]]] if (proj_lookup_key and proj_lookup_key in info_key_map) else pd.DataFrame()
                 raw_pch = (meta[pch_col].iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and pch_col in meta.columns) else "")
-                pch_label = (_normalize_pch(raw_pch) or str(raw_pch or "").strip())
+                pch_label = (_normalize_pch(raw_pch) or "Unassigned")
                 try:
                     proj_code = (meta.get("project_code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "project_code" in meta.columns) else (
                         meta.get("Project Code").iloc[0] if (isinstance(meta, pd.DataFrame) and not meta.empty and "Project Code" in meta.columns) else ""
@@ -9935,7 +10326,7 @@ def register_callbacks(
 
     @app.callback(
         Output("store-project-modal-focus-cache", "data"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         prevent_initial_call=False,
     )
     def _cache_project_modal_focus(focus_payload):
@@ -9943,6 +10334,75 @@ def register_callbacks(
         if isinstance(focus_payload, Mapping):
             return focus_payload
         return None
+
+    @app.callback(
+        Output("store-project-surface-focus", "data"),
+        Input("store-project-tile-focus", "data"),
+        Input("proj-overview-project-select", "value"),
+        Input("project-modal-project-select", "value"),
+        State("store-project-surface-focus", "data"),
+        prevent_initial_call=False,
+    )
+    def _sync_project_surface_focus(
+        tile_focus_data: dict[str, Any] | None,
+        overview_project_value: str | None,
+        modal_project_value: str | None,
+        current_focus: dict[str, Any] | None,
+    ):
+        trigger = _resolve_triggered_id()
+        current_payload = _canonical_project_focus_payload(current_focus)
+
+        if trigger == "store-project-tile-focus":
+            next_payload = _canonical_project_focus_payload(tile_focus_data)
+            if not next_payload:
+                return None
+            if _project_focus_equal(current_payload, next_payload):
+                raise PreventUpdate
+            next_payload["ts"] = time.time()
+            return next_payload
+
+        if trigger in {"proj-overview-project-select", "project-modal-project-select"}:
+            selected_value = str((overview_project_value if trigger == "proj-overview-project-select" else modal_project_value) or "").strip()
+            if not selected_value:
+                raise PreventUpdate
+            next_payload = _canonical_project_focus_payload(
+                {
+                    "project": selected_value,
+                    "display": selected_value,
+                    "code": _extract_project_code(selected_value) or selected_value,
+                    "mode": (current_payload or {}).get("mode") or "erection",
+                    "pch": (current_payload or {}).get("pch"),
+                    "ts": time.time(),
+                }
+            )
+            if not next_payload:
+                raise PreventUpdate
+            if _project_focus_equal(current_payload, next_payload):
+                raise PreventUpdate
+            return next_payload
+
+        if current_payload:
+            return current_payload
+        fallback_payload = _canonical_project_focus_payload(tile_focus_data)
+        return fallback_payload
+
+    @app.callback(
+        Output("store-project-tile-focus", "data", allow_duplicate=True),
+        Input("store-project-surface-focus", "data"),
+        State("store-project-tile-focus", "data"),
+        prevent_initial_call=True,
+    )
+    def _sync_tile_focus_from_surface(
+        shared_focus: dict[str, Any] | None,
+        tile_focus: dict[str, Any] | None,
+    ):
+        next_payload = _canonical_project_focus_payload(shared_focus)
+        if not next_payload:
+            raise PreventUpdate
+        if _project_focus_equal(next_payload, tile_focus):
+            raise PreventUpdate
+        next_payload["ts"] = time.time()
+        return next_payload
 
     @app.callback(
         Output("store-project-tile-focus", "data"),
@@ -10050,6 +10510,21 @@ def register_callbacks(
             tile_meta = tile_meta_data or {}
             meta = tile_meta.get(project_key or "")
             if not meta:
+                if str(trigger.get("context") or "").strip().lower() == "exec-portfolio":
+                    project_label = str(project_key or "").strip()
+                    if not project_label:
+                        raise PreventUpdate
+                    payload = {
+                        "project": project_label,
+                        "code": _extract_project_code(project_label) or project_label,
+                        "display": project_label,
+                        "mode": str(trigger.get("mode") or "erection"),
+                        "pch": None,
+                        "ts": time.time(),
+                    }
+                    if not is_open:
+                        history_payload = _history_action("open")
+                    return payload, True, history_payload
                 LOGGER.warning("No tile metadata found for key %s", project_key)
                 raise PreventUpdate
             payload = {
@@ -10066,74 +10541,18 @@ def register_callbacks(
         raise PreventUpdate
 
     def _project_modal_summary_placeholder() -> html.Div:
-        return html.Div(
-            [
-                html.Div("Select a project tile to view its detailed view.", className="mb-2"),
-                html.Div(
-                    [
-                        dbc.Button(
-                            "Show Completed Towers",
-                            id="project-modal-btn-erections",
-                            color="primary",
-                            size="lg",
-                            className="modal-section-btn",
-                            n_clicks=0,
-                        ),
-                        dbc.Button(
-                            "Show Gang Performance",
-                            id="project-modal-btn-performance-erection",
-                            color="primary",
-                            size="lg",
-                            className="modal-section-btn",
-                            n_clicks=0,
-                        ),
-                    ],
-                    className="d-flex gap-2 flex-wrap",
-                    style={"display": "none"},
-                ),
-                html.Div(
-                    [
-                        dbc.Button(
-                            "Show Completed Stringing",
-                            id="project-modal-btn-stringing",
-                            color="primary",
-                            size="lg",
-                            className="modal-section-btn",
-                            n_clicks=0,
-                        ),
-                        dbc.Button(
-                            "Show Gang Performance",
-                            id="project-modal-btn-performance-stringing",
-                            color="primary",
-                            size="lg",
-                            className="modal-section-btn",
-                            n_clicks=0,
-                        ),
-                    ],
-                    className="d-flex gap-2 flex-wrap",
-                    style={"display": "none"},
-                ),
-                html.Div(
-                    dbc.RadioItems(
-                        id="project-modal-stringing-scope",
-                        options=[
-                            {"label": "All", "value": "all"},
-                            {"label": "Manual", "value": "manual"},
-                            {"label": "TSE", "value": "tse"},
-                            {"label": "Hotline", "value": "hotline"},
-                        ],
-                        value="all",
-                    ),
-                    style={"display": "none"},
-                ),
-            ],
-            className="project-empty",
-        )
+        return html.Div()
 
     @app.callback(
         Output("project-modal-summary", "children"),
         Output("project-modal-title", "children"),
-        Input("store-project-tile-focus", "data"),
+        Output("project-modal-dpr-strip", "children"),
+        Output("project-modal-activity-rows", "children"),
+        Output("project-modal-stretch-pie", "figure"),
+        Output("project-modal-es-lag", "figure"),
+        Output("project-modal-stretch-blocked-summary", "children"),
+        Output("project-modal-stretch-summary-chip", "children"),
+        Input("store-project-surface-focus", "data"),
         Input("f-month", "value"),
         Input("f-quick-range", "value"),
         Input("f-gang", "value"),
@@ -10148,367 +10567,320 @@ def register_callbacks(
         stringing_scope,
     ):
         base_title = "Project Deep Dive"
+        _ = stringing_scope
+        month_list = _normalize_str_list(_ensure_list(months))
+        months_ts = resolve_months(month_list, quick_range)
+        gang_list = _normalize_str_list(_ensure_list(gangs))
+
+        def _empty_fig(message: str) -> go.Figure:
+            fig = go.Figure()
+            fig.update_layout(
+                **_kec_layout(height=220, legend=False, margin={"l": 20, "r": 20, "t": 20, "b": 20}),
+                annotations=[
+                    {
+                        "text": message,
+                        "xref": "paper",
+                        "yref": "paper",
+                        "x": 0.5,
+                        "y": 0.5,
+                        "showarrow": False,
+                        "font": {"size": 13, "color": "#64748b"},
+                    }
+                ],
+            )
+            fig.update_xaxes(visible=False)
+            fig.update_yaxes(visible=False)
+            return fig
+
+        def _dpr_fields(
+            project_label: str,
+            dpr_date: str,
+            scope_label: str,
+            tse_label: str,
+            rag: str,
+        ) -> list[html.Div]:
+            rag_upper = str(rag or "NO_DATA").upper().strip() or "NO_DATA"
+            rag_class = {
+                "RED": "dpr-value dpr-value--red",
+                "GREEN": "dpr-value dpr-value--green",
+                "AMBER": "dpr-value",
+                "NO_DATA": "dpr-value",
+            }.get(rag_upper, "dpr-value")
+            return [
+                html.Div([html.Label("Project"), html.Div(project_label or "N/A", className="dpr-value")], className="dpr-field"),
+                html.Div([html.Label("Latest DPR Date"), html.Div(dpr_date or "N/A", className="dpr-value")], className="dpr-field"),
+                html.Div([html.Label("Scope"), html.Div(scope_label or "N/A", className="dpr-value")], className="dpr-field"),
+                html.Div([html.Label("Number of TSE"), html.Div(tse_label or "N/A", className="dpr-value")], className="dpr-field"),
+                html.Div([html.Label("RAG"), html.Div(rag_upper.replace("_", " "), className=rag_class)], className="dpr-field"),
+            ]
+
+        empty_dpr = _dpr_fields("N/A", "N/A", "N/A", "N/A", "NO_DATA")
+        empty_activity = html.Div("Select a project to view activity completion.", className="text-muted")
+        empty_stretch = _empty_fig("No stretch readiness data")
+        empty_lag = _empty_fig("No stretch readiness gap data")
         if not isinstance(focus_data, dict):
-            return _project_modal_summary_placeholder(), base_title
+            return _project_modal_summary_placeholder(), base_title, empty_dpr, empty_activity, empty_stretch, empty_lag, "No blocked stretches in current scope.", "Ready 0.0/0.0 km (0.0%)"
 
         project_name = (focus_data.get("project") or "").strip()
         project_display = (focus_data.get("display") or project_name).strip()
         project_code = (focus_data.get("code") or "").strip()
         title_label = project_display or project_name
         lookup_label = project_name or project_display
-
         candidate_ids = _project_filter_candidates(lookup_label, project_code)
         if not candidate_ids:
             fallback = [value for value in (project_name, project_display, project_code) if value]
             candidate_ids = fallback[:1]
         project_list = _normalize_str_list(candidate_ids)
         if not project_list:
-            return _project_modal_summary_placeholder(), base_title
+            return _project_modal_summary_placeholder(), base_title, empty_dpr, empty_activity, empty_stretch, empty_lag, "No blocked stretches in current scope.", "Ready 0.0/0.0 km (0.0%)"
 
-        gang_list = _normalize_str_list(_ensure_list(gangs))
-        months_list = _normalize_str_list(_ensure_list(months))
-        deployment_scope = _normalize_deployment_filter(stringing_scope)
-        method_list = _normalize_str_list(_method_filters_for_scope(deployment_scope), lower=True)
+        title = f"{base_title} - {title_label}" if title_label else base_title
+        match_keys = {_compact_project_key(value) for value in project_list if str(value).strip()}
+        if project_code:
+            match_keys.add(_compact_project_key(project_code))
+        if project_display:
+            match_keys.add(_compact_project_key(project_display))
+        if project_name:
+            match_keys.add(_compact_project_key(project_name))
+        match_keys = {key for key in match_keys if key}
+        if not match_keys:
+            return _project_modal_summary_placeholder(), title, empty_dpr, empty_activity, empty_stretch, empty_lag, "No blocked stretches in current scope.", "Ready 0.0/0.0 km (0.0%)"
 
-        def _project_summary_for_mode(mode_value: str, *, is_stringing: bool) -> dict[str, str]:
-            method_payload = method_list if is_stringing else []
-            try:
-                scope_meta = _build_scope_meta_payload(
-                    eff_mode=mode_value,
-                    project_list=project_list,
-                    gang_list=gang_list,
-                    months_list=months_list,
-                    quick_range=quick_range,
-                    method_values=method_payload,
-                    method_list=method_payload,
-                    deployment_filter=deployment_scope if is_stringing else "all",
-                )
-            except Exception:
-                LOGGER.exception(
-                    "Unable to build %s summary for project %s", mode_value, title_label or "unknown"
-                )
-                return _empty_summary_payload(is_stringing)
-            return _summarize_scope_for_cards(scope_meta)
+        def _project_key_series(frame: pd.DataFrame) -> pd.Series:
+            key_source = pd.Series("", index=frame.index, dtype="string")
+            for col in ("project_code", "project_scope_key", "project_display", "project_name", "project"):
+                if col not in frame.columns:
+                    continue
+                candidate = frame[col].fillna("").astype(str).str.strip()
+                key_source = key_source.where(key_source.astype(bool), candidate)
+            return key_source.map(_compact_project_key)
 
-        erection_summary = _project_summary_for_mode("erection", is_stringing=False)
-        stringing_summary = (
-            _project_summary_for_mode("stringing", is_stringing=True) if config.enable_stringing else None
-        )
-
-        import re as _re
-
-        display_label = project_display or project_name or lookup_label
-
-        def _compact_project_value(value: Any) -> str:
-            text = "" if value is None else str(value).strip().lower()
-            if not text:
-                return ""
-            return _re.sub(r"[^a-z0-9]", "", text)
-
-        match_normals: set[str] = set()
-        match_compacts: set[str] = set()
-
-        def _register_match_value(value: Any) -> None:
-            text = "" if value is None else str(value).strip()
-            if not text:
-                return
-            lowered = text.lower()
-            match_normals.add(lowered)
-            compact = _re.sub(r"[^a-z0-9]", "", lowered)
-            if compact:
-                match_compacts.add(compact)
-
-        for candidate in project_list:
-            _register_match_value(candidate)
-        for candidate in (project_code, project_display, project_name, lookup_label):
-            _register_match_value(candidate)
-
-        project_code_token = _compact_project_value(project_code or display_label)
-
-        def _collect_plan_months(plan_mode: str) -> list[pd.Timestamp]:
-            try:
-                frame, _, _, _ = _fetch_monthly_plan(plan_mode)
-            except Exception:
-                LOGGER.exception("Unable to load %s monthly plan for modal summary", plan_mode)
-                return []
+        def _filter_project_frame(frame: pd.DataFrame) -> pd.DataFrame:
             if not isinstance(frame, pd.DataFrame) or frame.empty:
-                return []
-            work = frame.copy()
-            if "completion_month" in work.columns:
-                work["completion_month"] = pd.to_datetime(
-                    work["completion_month"], errors="coerce"
-                ).dt.to_period("M").dt.to_timestamp()
-            elif "plan_month" in work.columns:
-                work["completion_month"] = pd.to_datetime(
-                    work["plan_month"], errors="coerce"
-                ).dt.to_period("M").dt.to_timestamp()
-            elif "completion_date" in work.columns:
-                work["completion_month"] = pd.to_datetime(
-                    work["completion_date"], errors="coerce"
-                ).dt.to_period("M").dt.to_timestamp()
-            else:
-                work["completion_month"] = pd.NaT
-            if "completion_month" not in work.columns:
-                return []
-            match_columns = [
-                column
-                for column in (
-                    "project_name",
-                    "project",
-                    "project_key",
-                    "project_name_display",
-                    "Project Name",
-                    "Project Code",
-                )
-                if column in work.columns
-            ]
-            if not match_columns or (not match_normals and not match_compacts):
-                return []
-            mask = pd.Series(False, index=work.index)
-            for column in match_columns:
-                series = work[column].astype(str).str.strip().str.lower()
-                col_mask = pd.Series(False, index=series.index)
-                if match_normals:
-                    col_mask |= series.isin(match_normals)
-                if match_compacts:
-                    col_mask |= series.str.replace(r"[^a-z0-9]", "", regex=True).isin(match_compacts)
-                mask |= col_mask
-            if not mask.any():
-                return []
-            subset = work.loc[mask, "completion_month"].dropna()
-            if subset.empty:
-                return []
-            months = sorted({pd.Timestamp(value) for value in subset})
-            if not months:
-                return []
-            return months[-2:]
+                return pd.DataFrame()
+            mask = _project_key_series(frame).isin(match_keys)
+            return frame.loc[mask].copy() if mask.any() else pd.DataFrame()
 
-        def _monthly_plan_block(plan_mode: str) -> html.Div | None:
-            label = "Monthly Plan (Stringing)" if plan_mode == "stringing" else "Monthly Plan (Erection)"
-            months = _collect_plan_months(plan_mode)
-            if not months:
-                return html.Div("Micro Plan not available.", className="summary-plan-tile summary-plan-empty text-muted")
-            mode_token = "stringing" if plan_mode == "stringing" else "erection"
-            link_buttons: list[Any] = []
-            for ts in months:
-                label_text = ts.strftime("%b %Y")
-                month_value = ts.strftime("%Y-%m")
-                payload = "||".join(
-                    [
-                        mode_token,
-                        project_code_token or "",
-                        month_value or "",
-                        display_label or project_name or "",
-                    ]
-                )
-                payload = f"{payload}||__modal__"
-                link_buttons.append(
-                    dbc.Button(
-                        label_text,
-                        id={"type": "proj-resp-open", "key": payload},
-                        color="link",
-                        className="summary-plan-link",
-                    )
-                )
-            return html.Div(
-                [
-                    html.Div(label, className="summary-plan-tile__title"),
-                    html.Div(
-                        link_buttons,
-                        className="summary-plan-tile__links d-flex flex-wrap gap-2",
-                    ),
-                ],
-                className="summary-plan-tile",
-            )
+        def _latest_date_label(frame: pd.DataFrame) -> str:
+            if frame.empty:
+                return "N/A"
+            for col in ("report_date", "date", "month", "_period"):
+                if col in frame.columns:
+                    parsed = pd.to_datetime(frame[col], errors="coerce")
+                    parsed = parsed[parsed.notna()]
+                    if not parsed.empty:
+                        return pd.Timestamp(parsed.max()).strftime("%d %b %Y")
+            return "N/A"
 
-        def _summary_card(
-            title: str,
-            summary_payload: dict[str, str],
-            *,
-            include_tse: bool = False,
-            include_po: bool = False,
-            actions: list[Any] | None = None,
-            controls: Any | None = None,
-        ) -> dbc.Col:
-            rows = [
-                ("F/S Total Planned / Done / Balance", summary_payload.get("totals", "-")),
-                ("Gangs", summary_payload.get("gangs", "-")),
-                ("Productivity / Historical Avg", summary_payload.get("productivity", "-")),
-                ("Lost Units", summary_payload.get("lost_units", "-")),
-            ]
-            if include_po:
-                rows.append(("P/O Total Planned / Done / Balance", summary_payload.get("po_completion", "-")))
-            if include_tse:
-                rows.append(("No. of TSE", summary_payload.get("tse", "-")))
-            pills = [
-                html.Div(
-                    [
-                        html.Span(label, className="summary-pill__label"),
-                        html.Span(value, className="summary-pill__value"),
-                    ],
-                    className="summary-pill",
-                )
-                for label, value in rows
-            ]
-            if controls is not None:
-                header = html.Div(
-                    [
-                        html.Div(title, className="snapshot-card__title fw-semibold"),
-                        html.Div(
-                            controls,
-                            className="stringing-scope-control d-flex flex-wrap align-items-center gap-2",
-                        ),
-                    ],
-                    className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2",
-                )
-            else:
-                header = html.Div(title, className="snapshot-card__title fw-semibold mb-2")
-            children = [header, *pills]
-            if actions:
-                children.append(
-                    html.Div(actions, className="summary-card-actions d-flex flex-column gap-2 mt-2")
-                )
-            return dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(children, className="d-flex flex-column gap-1 summary-card-body"),
-                    className="shadow-sm h-100 snapshot-card",
-                ),
-                xs=12,
-                md=6,
-            )
+        status_frame = _filter_project_frame(_safe_provider_frame(_STATUS_ACTIVITY_PROVIDER))
+        stretch_frame = _filter_project_frame(_safe_provider_frame(_STRETCH_SECTION_PROVIDER))
+        snapshot_frame = _filter_project_frame(_safe_provider_frame(_STATUS_SNAPSHOT_PROJECT_PROVIDER))
 
-        erection_actions: list[Any] = []
-        plan_block = _monthly_plan_block("erection")
-        if plan_block is not None:
-            erection_actions.append(plan_block)
-        erection_actions.append(
-            html.Div(
-                [
-                    dbc.Button(
-                        "Show Completed Towers",
-                        id="project-modal-btn-erections",
-                        color="primary",
-                        size="lg",
-                        className="modal-section-btn",
-                    ),
-                    dbc.Button(
-                        "Show Gang Performance",
-                        id="project-modal-btn-performance-erection",
-                        color="primary",
-                        size="lg",
-                        className="modal-section-btn",
-                    ),
-                ],
-                className="d-flex flex-wrap gap-2",
-            )
+        dpr_label = _latest_date_label(stretch_frame)
+        if dpr_label == "N/A":
+            dpr_label = _latest_date_label(status_frame)
+        if dpr_label == "N/A" and isinstance(focus_data, dict):
+            fallback_period = str((focus_data or {}).get("period_label") or "").strip()
+            if fallback_period:
+                dpr_label = fallback_period
+        stretch_summary_frame = _filter_project_frame(_safe_provider_frame(_STRETCH_READINESS_SUMMARY_PROVIDER))
+        stringing_scope_km = (
+            float(pd.to_numeric(stretch_summary_frame.get("total_km"), errors="coerce").fillna(0.0).sum())
+            if not stretch_summary_frame.empty
+            else 0.0
         )
+        erection_scope_qty = 0.0
+        if not status_frame.empty:
+            status_scope_for_qty = status_frame.copy()
+            date_series = pd.Series(pd.NaT, index=status_scope_for_qty.index)
+            for col in ("report_date", "date", "_period", "month"):
+                if col in status_scope_for_qty.columns:
+                    candidate = pd.to_datetime(status_scope_for_qty[col], errors="coerce")
+                    date_series = date_series.where(date_series.notna(), candidate)
+            latest_scope_ts = date_series.max() if hasattr(date_series, "max") else pd.NaT
+            if pd.notna(latest_scope_ts):
+                status_scope_for_qty = status_scope_for_qty[date_series.eq(latest_scope_ts)].copy()
+            activity_norm = status_scope_for_qty.get("activity_norm", pd.Series("", index=status_scope_for_qty.index)).fillna("").astype(str).str.lower()
+            if activity_norm.eq("").all() and "activity_group" in status_scope_for_qty.columns:
+                activity_norm = status_scope_for_qty.get("activity_group", pd.Series("", index=status_scope_for_qty.index)).fillna("").astype(str).str.lower()
+            status_scope_for_qty["quantity_primary"] = pd.to_numeric(status_scope_for_qty.get("quantity_primary"), errors="coerce").fillna(0.0)
+            erection_scope_qty = float(status_scope_for_qty.loc[activity_norm.str.contains("erection", na=False), "quantity_primary"].sum())
+        scope_label = f"E: {erection_scope_qty:,.0f} | S: {stringing_scope_km:.1f} km"
+        rag_label = "NO_DATA"
+        if not snapshot_frame.empty:
+            period_col = ""
+            for col in ("_period", "month", "date", "report_date"):
+                if col in snapshot_frame.columns:
+                    period_col = col
+                    break
+            if period_col:
+                snapshot_frame["_ts_sort"] = pd.to_datetime(snapshot_frame[period_col], errors="coerce")
+                snapshot_frame = snapshot_frame.sort_values("_ts_sort", ascending=True, na_position="last")
+            snapshot_row = snapshot_frame.iloc[-1]
+            for col in ("overall_rag", "rag", "overall_status"):
+                value = snapshot_row.get(col, None)
+                if value is not None and str(value).strip():
+                    rag_label = str(value).strip().upper()
+                    break
+        tse_label = "N/A"
+        tse_norm_map, tse_alias_map = _get_stringing_tse_lookup()
+        if tse_norm_map or tse_alias_map:
+            label_candidates: list[str] = [value for value in (project_display, project_name, project_code) if value]
+            label_candidates.extend(project_list)
+            matched_value: int | None = None
+            for label in label_candidates:
+                base = str(label or "").strip()
+                if not base:
+                    continue
+                parts = [base]
+                if " : " in base:
+                    left, right = base.split(" : ", 1)
+                    parts.extend([left.strip(), right.strip()])
+                norm_keys: list[str] = []
+                compact_keys: list[str] = []
+                for part in parts:
+                    norm_key = _normalize_lower(part)
+                    if norm_key and norm_key not in norm_keys:
+                        norm_keys.append(norm_key)
+                    compact_key = _compact_project_key(part)
+                    if compact_key and compact_key not in compact_keys:
+                        compact_keys.append(compact_key)
+                match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{3,4})\b", base.upper())
+                if match:
+                    compact_key = _compact_project_key(f"{match.group(1)}{match.group(2)}")
+                    if compact_key and compact_key not in compact_keys:
+                        compact_keys.append(compact_key)
+                value, _canonical = _resolve_tse_value(norm_keys, compact_keys, tse_norm_map, tse_alias_map)
+                if value is not None:
+                    matched_value = int(value)
+                    break
+            if matched_value is not None:
+                tse_label = f"{matched_value:,}"
+        dpr_children = _dpr_fields(title_label or "N/A", dpr_label, scope_label, tse_label, rag_label)
 
-        stringing_actions: list[Any] | None = None
-        stringing_scope_control: Any | None = None
-        if config.enable_stringing:
-            stringing_actions = []
-            plan_block_stringing = _monthly_plan_block("stringing")
-            if plan_block_stringing is not None:
-                stringing_actions.append(plan_block_stringing)
-            stringing_actions.append(
-                html.Div(
-                    [
-                        dbc.Button(
-                            "Show Completed Stringing",
-                            id="project-modal-btn-stringing",
-                            color="primary",
-                            size="lg",
-                            className="modal-section-btn",
-                        ),
-                        dbc.Button(
-                            "Show Gang Performance",
-                            id="project-modal-btn-performance-stringing",
-                            color="primary",
-                            size="lg",
-                            className="modal-section-btn",
-                        ),
-                    ],
-                    className="d-flex flex-wrap gap-2",
-                )
-            )
-            stringing_scope_control = [
-                html.Div("Deployment", className="filter-label mb-1 me-2"),
-                dbc.RadioItems(
-                    id="project-modal-stringing-scope",
-                    options=[
-                        {"label": "All", "value": "all"},
-                        {"label": "Manual", "value": "manual"},
-                        {"label": "TSE", "value": "tse"},
-                        {"label": "Hotline", "value": "hotline"},
-                    ],
-                    value=deployment_scope,
-                    class_name="segment",
-                    label_class_name="segment-label",
-                    label_checked_class_name="segment-label--active",
-                    input_class_name="segment-input",
-                ),
+        activity_rows: list[Any] = []
+        if not status_frame.empty:
+            date_col = ""
+            for col in ("_period", "report_date", "date", "month"):
+                if col in status_frame.columns:
+                    date_col = col
+                    break
+            if date_col:
+                parsed_dates = pd.to_datetime(status_frame[date_col], errors="coerce")
+                if parsed_dates.notna().any():
+                    latest_date = parsed_dates.max()
+                    status_frame = status_frame[parsed_dates.eq(latest_date)].copy()
+            status_frame["activity_norm"] = status_frame.get("activity_norm", pd.Series("", index=status_frame.index)).fillna("").astype(str).str.lower()
+            status_frame["cumulative_progress"] = pd.to_numeric(status_frame.get("cumulative_progress"), errors="coerce")
+            status_frame["quantity_primary"] = pd.to_numeric(status_frame.get("quantity_primary"), errors="coerce")
+
+            def _activity_metrics(mask: pd.Series) -> tuple[float, float, float]:
+                scoped = status_frame[mask].copy()
+                if scoped.empty:
+                    return 0.0, 0.0, 0.0
+                actual = float(pd.to_numeric(scoped["cumulative_progress"], errors="coerce").fillna(0.0).sum())
+                target = float(pd.to_numeric(scoped["quantity_primary"], errors="coerce").fillna(0.0).sum())
+                return actual, target, _exec_safe_pct(actual, target)
+
+            activity_specs = [
+                ("Foundation", status_frame["activity_norm"].str.contains("foundation", na=False), "#002060"),
+                ("Tower Erection", status_frame["activity_norm"].str.contains("erection", na=False), "#0070c0"),
+                ("Stringing", status_frame["activity_norm"].str.contains("stringing", na=False) & ~status_frame["activity_norm"].str.contains("opgw", na=False), "#28a745"),
+                ("OPGW", status_frame["activity_norm"].str.contains("opgw", na=False), "#f0ad4e"),
+                ("Earthing", status_frame["activity_norm"].str.contains("earthing", na=False), "#dc3545"),
             ]
-        else:
-            hidden_controls = html.Div(
-                [
+            for label, mask, color in activity_specs:
+                actual, target, pct = _activity_metrics(mask)
+                activity_rows.append(
                     html.Div(
                         [
-                            dbc.Button(
-                                "Show Completed Stringing",
-                                id="project-modal-btn-stringing",
-                                color="primary",
-                                size="lg",
-                                className="modal-section-btn",
-                                n_clicks=0,
+                            html.Div(label, className="act-label"),
+                            html.Div(
+                                html.Div(className="act-bar-fill", style={"width": f"{max(0.0, min(100.0, pct)):.1f}%", "background": color}),
+                                className="act-bar-track",
                             ),
-                            dbc.Button(
-                                "Show Gang Performance",
-                                id="project-modal-btn-performance-stringing",
-                                color="primary",
-                                size="lg",
-                                className="modal-section-btn",
-                                n_clicks=0,
-                            ),
+                            html.Div(f"{actual:.1f} / {target:.1f}", className="act-numbers"),
+                            html.Div(f"{pct:.1f}%", className="act-pct"),
                         ],
-                        className="d-flex flex-wrap gap-2",
-                    ),
-                    dbc.RadioItems(
-                        id="project-modal-stringing-scope",
-                        options=[
-                            {"label": "All", "value": "all"},
-                            {"label": "Manual", "value": "manual"},
-                            {"label": "TSE", "value": "tse"},
-                            {"label": "Hotline", "value": "hotline"},
-                        ],
-                        value=deployment_scope,
-                    ),
-                ],
-                style={"display": "none"},
-            )
-            cards.append(hidden_controls)
-
-        cards: list[dbc.Col] = [
-            _summary_card(
-                "Erection Snapshot",
-                erection_summary or _empty_summary_payload(False),
-                actions=erection_actions,
-            ),
-        ]
-        if config.enable_stringing:
-            cards.append(
-                _summary_card(
-                    "Stringing Snapshot",
-                    stringing_summary or _empty_summary_payload(True),
-                    include_tse=True,
-                    include_po=True,
-                    actions=stringing_actions,
-                    controls=stringing_scope_control,
+                        className="act-row",
+                    )
                 )
-            )
+        activity_content = activity_rows if activity_rows else html.Div("No activity data available.", className="text-muted")
 
-        summary_layout = dbc.Row(cards, className="g-2 project-modal-summary-table")
-        title = f"{base_title} · {title_label}" if title_label else base_title
-        return summary_layout, title
+        stretch_figure = _empty_fig("No stretch readiness data")
+        stretch_figure.update_layout(height=280)
+        counts: list[int] = []
+        if not stretch_frame.empty:
+            states = stretch_frame.get("readiness_state", pd.Series("", index=stretch_frame.index)).fillna("").astype(str).str.upper()
+            counts = [int((states == "READY").sum()), int((states == "PARTIAL").sum()), int((states == "NOT_READY").sum()), int((states == "UNKNOWN").sum())]
+            if sum(counts) > 0:
+                stretch_figure = go.Figure(
+                    data=[
+                        go.Pie(
+                            labels=["READY", "PARTIAL", "NOT_READY", "UNKNOWN"],
+                            values=counts,
+                            hole=0.45,
+                            domain={"x": [0.0, 0.62], "y": [0.02, 0.98]},
+                            marker={"colors": [KEC_COLOURS["green"], KEC_COLOURS["amber"], KEC_COLOURS["red"], KEC_COLOURS["grey"]]},
+                        )
+                    ]
+                )
+                stretch_figure.update_layout(
+                    **{
+                        **_kec_layout(height=280, legend=True, margin={"l": 10, "r": 140, "t": 10, "b": 10}),
+                        "legend": {
+                            "orientation": "v",
+                            "x": 1.0,
+                            "xanchor": "left",
+                            "y": 0.5,
+                            "yanchor": "middle",
+                            "font": {"size": 12},
+                        },
+                    },
+                )
+
+        lag_figure = _empty_fig("No stretch readiness gap data")
+        blocked_summary = "No blocked stretches in current scope."
+        if counts:
+            blocked_count = int(max(sum(counts) - counts[0], 0))
+            if blocked_count > 0:
+                blocked_summary = f"Blocked stretches: {blocked_count}"
+        ready_km = 0.0
+        total_km = 0.0
+        if not stretch_summary_frame.empty:
+            ready_km = float(pd.to_numeric(stretch_summary_frame.get("ready_km"), errors="coerce").fillna(0.0).sum())
+            total_km = float(pd.to_numeric(stretch_summary_frame.get("total_km"), errors="coerce").fillna(0.0).sum())
+        stretch_summary_chip = f"Ready {ready_km:.1f}/{total_km:.1f} km ({_exec_safe_pct(ready_km, total_km):.1f}%)"
+        stretch_has_data = bool(not stretch_frame.empty and pd.Series(counts).sum() > 0)
+        if stretch_has_data:
+            readiness_hist, _readiness_stats = _build_project_readiness_histogram(
+                match_keys,
+                projects=project_list,
+                months=months_ts,
+                gangs=gang_list,
+                method_filter="tse",
+            )
+            readiness_labels = [str(row.get("bucket", "")).strip() for row in readiness_hist]
+            readiness_counts = [int(pd.to_numeric(row.get("count"), errors="coerce") or 0) for row in readiness_hist]
+            if readiness_labels and sum(readiness_counts) > 0:
+                lag_figure = go.Figure()
+                lag_figure.add_bar(
+                    x=readiness_labels,
+                    y=readiness_counts,
+                    marker_color=KEC_COLOURS["blue_light"],
+                    hovertemplate="%{y} spans<extra></extra>",
+                )
+                lag_figure.update_layout(
+                    **_kec_layout(
+                        height=260,
+                        xaxis_title="Gap bucket (days)",
+                        yaxis_title="Spans",
+                        legend=False,
+                        margin={"l": 40, "r": 20, "t": 10, "b": 40},
+                    ),
+                )
+
+        return _project_modal_summary_placeholder(), title, dpr_children, activity_content, stretch_figure, lag_figure, blocked_summary, stretch_summary_chip
 
     @app.callback(
         Output("store-project-modal-section", "data"),
@@ -10518,7 +10890,7 @@ def register_callbacks(
         Input("project-modal-btn-stringing", "n_clicks"),
         Input("project-modal-btn-performance-erection", "n_clicks"),
         Input("project-modal-btn-performance-stringing", "n_clicks"),
-        Input("store-project-tile-focus", "data"),
+        Input("store-project-surface-focus", "data"),
         State("store-project-modal-section", "data"),
         State("store-project-modal-performance-mode", "data"),
         prevent_initial_call=True,
@@ -10541,7 +10913,7 @@ def register_callbacks(
         def _scroll_payload(anchor_id: str) -> dict[str, float]:
             return {"anchor": anchor_id, "ts": time.time()}
 
-        if trigger == "store-project-tile-focus":
+        if trigger == "store-project-surface-focus":
             perf_mode = _resolve_focus_mode(focus_data, perf_mode)
             if perf_mode == "stringing" and not config.enable_stringing:
                 perf_mode = "erection"
@@ -10619,6 +10991,20 @@ def register_callbacks(
             _perf_class("erection"),
             _perf_class("stringing"),
         )
+
+    @app.callback(
+        Output("project-modal-perf-collapse", "is_open"),
+        Output("project-modal-perf-toggle", "children"),
+        Input("project-modal-perf-toggle", "n_clicks"),
+        State("project-modal-perf-collapse", "is_open"),
+        prevent_initial_call=False,
+    )
+    def _toggle_project_modal_performance(n_clicks: int | None, is_open: bool | None):
+        if not n_clicks:
+            return False, "Show Gang Performance"
+        new_state = not bool(is_open)
+        label = "Hide Gang Performance" if new_state else "Show Gang Performance"
+        return new_state, label
 
     # Toggle responsibilities visibility inside each project tile (pattern-matching IDs)
     @app.callback(
@@ -10792,13 +11178,10 @@ def register_callbacks(
             font={"size": 13, "color": "#64748b"},
         )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 30, "r": 20, "t": 20, "b": 30},
-            xaxis={"visible": False},
-            yaxis={"visible": False},
+            **_kec_layout(height=280, legend=False, margin={"l": 30, "r": 20, "t": 20, "b": 30}),
         )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
         return fig
 
     def _safe_float(value: object) -> float:
@@ -10809,16 +11192,11 @@ def register_callbacks(
         return number if np.isfinite(number) else 0.0
 
     def _analytics_chart_layout(title: str, yaxis_title: str) -> dict[str, Any]:
-        return {
-            "template": "plotly_white",
-            "paper_bgcolor": "white",
-            "plot_bgcolor": "white",
-            "margin": {"l": 40, "r": 20, "t": 24, "b": 40},
-            "font": {"family": "Inter, system-ui", "size": 12, "color": "#0f172a"},
-            "legend": {"orientation": "h", "y": 1.15, "x": 0},
-            "xaxis": {"title": title, "tickangle": -25},
-            "yaxis": {"title": yaxis_title, "gridcolor": "#e6e9f0", "zerolinecolor": "#e6e9f0"},
-        }
+        return _kec_layout(
+            xaxis_title=title,
+            yaxis_title=yaxis_title,
+            margin={"l": 40, "r": 20, "t": 24, "b": 40},
+        )
 
     def _analytics_sparkline(
         x_values: list[str],
@@ -10838,13 +11216,10 @@ def register_callbacks(
             )
         )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 10, "r": 10, "t": 10, "b": 10},
-            xaxis={"visible": False},
-            yaxis={"visible": False},
+            **_kec_layout(height=150, legend=False, margin={"l": 10, "r": 10, "t": 10, "b": 10}),
         )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
         return fig
 
     def _analytics_table_from_selection(
@@ -11168,8 +11543,8 @@ def register_callbacks(
         end_ts = pd.to_datetime(end_raw, errors="coerce")
 
         if pd.notna(start_ts) and pd.notna(end_ts):
-            range_label = f"Scope: {start_ts.strftime('%d %b %Y')} – {end_ts.strftime('%d %b %Y')}"
-            scope_short = "Scope: {}–{}".format(
+            range_label = f"Scope: {start_ts.strftime('%d %b %Y')} - {end_ts.strftime('%d %b %Y')}"
+            scope_short = "Scope: {}-{}".format(
                 start_ts.strftime("%b'%y"),
                 end_ts.strftime("%b'%y"),
             )
@@ -11262,9 +11637,9 @@ def register_callbacks(
                 x=low_months,
                 y=low_values,
                 mode="lines+markers",
-                line={"color": "#2563eb", "width": 3},
+                line={"color": KEC_COLOURS["blue"], "width": 2.5},
                 fill="tozeroy",
-                fillcolor="rgba(37,99,235,0.12)",
+                fillcolor="rgba(0,112,192,0.12)",
                 marker={"size": 6},
                 hovertemplate="%{y:.1f}%<extra></extra>",
             )
@@ -11277,26 +11652,22 @@ def register_callbacks(
             arrowhead=2,
             ax=12,
             ay=-18,
-            font={"size": 11, "color": "#1e3a8a"},
+            font={"size": 11, "color": KEC_COLOURS["navy"]},
         )
         mid_index = len(low_months) // 2
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 20, "r": 20, "t": 10, "b": 20},
-            xaxis={
-                "tickvals": [low_months[0], low_months[mid_index], low_months[-1]],
-                "ticktext": [
-                    pd.to_datetime(low_months[0]).strftime("%b'%y"),
-                    pd.to_datetime(low_months[mid_index]).strftime("%b'%y"),
-                    pd.to_datetime(low_months[-1]).strftime("%b'%y"),
-                ],
-                "tickfont": {"size": 10},
-            },
-            yaxis={"gridcolor": "#e6e9f0", "tickfont": {"size": 10}},
-            showlegend=False,
+            **_kec_layout(height=220, legend=False, margin={"l": 20, "r": 20, "t": 10, "b": 20}),
         )
+        fig.update_xaxes(
+            tickvals=[low_months[0], low_months[mid_index], low_months[-1]],
+            ticktext=[
+                pd.to_datetime(low_months[0]).strftime("%b'%y"),
+                pd.to_datetime(low_months[mid_index]).strftime("%b'%y"),
+                pd.to_datetime(low_months[-1]).strftime("%b'%y"),
+            ],
+            tickfont={"size": 10},
+        )
+        fig.update_yaxes(gridcolor="#e6e9f0", tickfont={"size": 10})
 
         return fig, f"{low_last:.0f}%", delta_text
 
@@ -11317,16 +11688,16 @@ def register_callbacks(
             x=df["idle_days_per_100"],
             y=df["project_name"],
             orientation="h",
-            marker_color="#ef4444",
+            marker_color=KEC_COLOURS["red"],
             hovertemplate="%{x:.1f}<extra></extra>",
         )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 120, "r": 20, "t": 20, "b": 30},
-            xaxis={"title": "Idle Days / 100 Towers", "gridcolor": "#e6e9f0"},
-            yaxis={"title": "", "tickfont": {"size": 11}},
+            **_kec_layout(
+                xaxis_title="Idle Days / 100 Towers",
+                yaxis_title="Project",
+                legend=False,
+                margin={"l": 120, "r": 20, "t": 20, "b": 30},
+            ),
         )
         return fig
 
@@ -11431,18 +11802,19 @@ def register_callbacks(
         fig.add_bar(
             x=["Current Avg", "Target Avg"],
             y=[current_avg, target_avg],
-            marker_color=["#94a3b8", "#22c55e"],
+            marker_color=[KEC_COLOURS["grey"], KEC_COLOURS["green"]],
             text=[f"{current_avg:.1f} MT/day", f"{target_avg:.1f} MT/day"],
             textposition="outside",
             hovertemplate="%{y:.1f} MT/day<extra></extra>",
         )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 20, "r": 10, "t": 10, "b": 20},
-            xaxis={"title": "", "tickangle": 0},
-            yaxis={"title": "MT/day"},
+            **_kec_layout(
+                height=220,
+                xaxis_title="",
+                yaxis_title="MT/day",
+                legend=False,
+                margin={"l": 20, "r": 10, "t": 10, "b": 20},
+            ),
         )
         return reduction_text, saved_text, fig
 
@@ -11489,14 +11861,14 @@ def register_callbacks(
                     x=labels,
                     y=active_days_share,
                     name="Active-days Share",
-                    marker_color="#2563eb",
+                    marker_color=KEC_COLOURS["blue"],
                     hovertemplate="%{y:.1f}%<extra></extra>",
                 )
                 bucket_fig.add_bar(
                     x=labels,
                     y=mt_share,
                     name="MT Output Share",
-                    marker_color="#22c55e",
+                    marker_color=KEC_COLOURS["green"],
                     hovertemplate="%{y:.1f}%<extra></extra>",
                 )
             bucket_layout = _analytics_chart_layout("Bucket", "Share (%)")
@@ -11529,7 +11901,7 @@ def register_callbacks(
                     x=tier_labels,
                     y=tier_severity,
                     name="Avg days per idle window",
-                    marker_color="#38bdf8",
+                    marker_color=KEC_COLOURS["blue_light"],
                     text=[f"{severity:.1f} days<br>({freq:.1f} windows)" for severity, freq in zip(tier_severity, tier_freq)],
                     textposition="outside",
                     hovertemplate="<b>%{x}</b><br>Days/window: %{y:.1f}<extra></extra>",
@@ -11560,7 +11932,7 @@ def register_callbacks(
                 hist_fig.add_bar(
                     x=hist_labels,
                     y=hist_values,
-                    marker_color="#0f766e",
+                    marker_color=KEC_COLOURS["teal"],
                     hovertemplate="%{y} gangs<extra></extra>",
                 )
                 hist_fig.update_layout(**_analytics_chart_layout("MT/day Bin", "Gangs"))
@@ -11917,7 +12289,12 @@ def register_callbacks(
     ) -> dict[str, Any]:
         data_selector_local = DATA_SELECTOR
         if data_selector_local is None:
-            return build_stringing_analytics_payload(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+            return build_stringing_analytics_payload(
+                pd.DataFrame(),
+                pd.DataFrame(),
+                pd.DataFrame(),
+                enable_legacy_es_gap_inference=config.enable_legacy_es_gap_inference,
+            )
         project_list = _normalize_str_list(_ensure_list(projects))
         gang_list = _normalize_str_list(_ensure_list(gangs))
         month_list = _normalize_str_list(_ensure_list(months))
@@ -11968,6 +12345,7 @@ def register_callbacks(
             status_snapshot_overall=status_snapshot_overall,
             stretch_section_fact=stretch_section,
             manpower_productivity_fact=manpower_productivity,
+            enable_legacy_es_gap_inference=config.enable_legacy_es_gap_inference,
         )
         payload["meta"] = {
             "projects": project_list,
@@ -11986,12 +12364,7 @@ def register_callbacks(
     def _exec_empty_fig(message: str) -> go.Figure:
         fig = go.Figure()
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 20, "r": 20, "t": 20, "b": 30},
-            xaxis={"visible": False},
-            yaxis={"visible": False},
+            **_kec_layout(height=280, legend=False, margin={"l": 20, "r": 20, "t": 20, "b": 30}),
             annotations=[
                 {
                     "text": message,
@@ -12004,6 +12377,8 @@ def register_callbacks(
                 }
             ],
         )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
         return fig
 
     def _select_exec_datetime(frame: pd.DataFrame) -> pd.Series:
@@ -12025,10 +12400,86 @@ def register_callbacks(
     def _exec_project_key(frame: pd.DataFrame) -> pd.Series:
         if frame is None or frame.empty:
             return pd.Series([], dtype="string")
-        for col in ("project_scope_key", "project_display", "project_name", "project", "project_code"):
-            if col in frame.columns:
-                return frame[col].fillna("").astype(str).map(_compact_project_key)
-        return pd.Series("", index=frame.index, dtype="string")
+        key_source = pd.Series("", index=frame.index, dtype="string")
+
+        # Prefer explicit scope key when available to avoid collapsing
+        # multi-line variants under the same base project code.
+        if "project_scope_key" in frame.columns:
+            scope_candidate = frame["project_scope_key"].fillna("").astype(str).str.strip()
+            key_source = key_source.where(key_source.astype(bool), scope_candidate)
+
+        # Build a line-aware fallback key when scope key is missing.
+        if "line_name" in frame.columns:
+            line_candidate = frame["line_name"].fillna("").astype(str).str.strip()
+            base_candidate = pd.Series("", index=frame.index, dtype="string")
+            for col in ("project_code", "project_display", "project_name", "project"):
+                if col not in frame.columns:
+                    continue
+                col_values = frame[col].fillna("").astype(str).str.strip()
+                base_candidate = base_candidate.where(base_candidate.astype(bool), col_values)
+            scoped_fallback = (
+                base_candidate.where(base_candidate.astype(bool), "")
+                + "::"
+                + line_candidate.where(line_candidate.astype(bool), "")
+            )
+            scoped_fallback = scoped_fallback.where(line_candidate.astype(bool), "")
+            key_source = key_source.where(key_source.astype(bool), scoped_fallback)
+
+        for col in ("project_display", "project_name", "project", "project_code"):
+            if col not in frame.columns:
+                continue
+            candidate = frame[col].fillna("").astype(str).str.strip()
+            key_source = key_source.where(key_source.astype(bool), candidate)
+        return key_source.map(_compact_project_key)
+
+    def _canonical_pch_label(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "Unassigned"
+        raw = re.sub(r"[._]+", " ", raw)
+        return re.sub(r"\s+", " ", raw).strip() or "Unassigned"
+
+    def _build_pch_map_from_project_info() -> dict[str, str]:
+        info_df = _safe_provider_frame(_PROJECT_INFO_PROVIDER)
+        if info_df.empty:
+            LOGGER.warning("PCH mapping unavailable: project info provider returned no rows.")
+            return {}
+
+        pch_col = ""
+        for candidate in ("PCH", "pch", "PCH Name", "PCHName", "pch_name"):
+            if candidate in info_df.columns:
+                pch_col = candidate
+                break
+        if not pch_col:
+            LOGGER.warning("PCH mapping unavailable: no PCH column found in project info.")
+            return {}
+
+        mapped_codes: dict[str, str] = {}
+        duplicate_labels: dict[str, set[str]] = {}
+        for _, row in info_df.iterrows():
+            pch = _canonical_pch_label(row.get(pch_col))
+            for code_col in ("project_code", "Project Code"):
+                if code_col not in info_df.columns:
+                    continue
+                code_key = _compact_project_key(row.get(code_col))
+                if not code_key:
+                    continue
+                existing = mapped_codes.get(code_key)
+                if existing is not None and existing != pch:
+                    dup = duplicate_labels.setdefault(code_key, {existing})
+                    dup.add(pch)
+                    continue
+                mapped_codes[code_key] = pch
+
+        if duplicate_labels:
+            for code_key, labels in duplicate_labels.items():
+                LOGGER.warning(
+                    "PCH mapping conflict for project_code key '%s': labels=%s. Keeping '%s'.",
+                    code_key,
+                    sorted(labels),
+                    mapped_codes.get(code_key, "Unassigned"),
+                )
+        return mapped_codes
 
     def _exec_line_series(frame: pd.DataFrame) -> pd.Series:
         if frame is None or frame.empty:
@@ -12058,7 +12509,17 @@ def register_callbacks(
         work = frame.copy()
         project_keys = {_compact_project_key(v) for v in projects if str(v).strip()}
         if project_keys:
-            work = work[_exec_project_key(work).isin(project_keys)]
+            key_mask = _exec_project_key(work).isin(project_keys)
+            if "project_code" in work.columns:
+                code_mask = work["project_code"].fillna("").astype(str).map(_compact_project_key).isin(project_keys)
+                key_mask = key_mask | code_mask
+            if "project_display" in work.columns:
+                display_mask = work["project_display"].fillna("").astype(str).map(_compact_project_key).isin(project_keys)
+                key_mask = key_mask | display_mask
+            if "project_name" in work.columns:
+                name_mask = work["project_name"].fillna("").astype(str).map(_compact_project_key).isin(project_keys)
+                key_mask = key_mask | name_mask
+            work = work[key_mask]
         line_values = {str(v).strip().lower() for v in lines if str(v).strip()}
         if line_values and "line_name" in work.columns:
             work = work[_exec_line_series(work).str.lower().isin(line_values)]
@@ -12123,6 +12584,147 @@ def register_callbacks(
                 out[col] = out[col].fillna("").astype(str).str.strip()
         return out
 
+    def _compute_es_gap_stats(
+        stringing_compiled_provider_local: Callable[[], pd.DataFrame] | None,
+        erection_daily_provider: Callable[[], pd.DataFrame] | None,
+        projects: list[str],
+        months: Sequence[pd.Timestamp] | None = None,
+        gangs: Sequence[str] | None = None,
+        method_filter: str = "tse",
+    ) -> dict[str, Any]:
+        """Reuse trusted Stringing Analytics E→S gap computation."""
+        if not config.enable_legacy_es_gap_inference:
+            return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+        from .stringing_analytics import (
+            _build_erection_po_gap_table,
+            _filter_compiled_by_date,
+            _filter_method,
+            _gap_stats,
+            _normalize_stringing_compiled,
+        )
+
+        try:
+            compiled_df = _safe_provider_frame(stringing_compiled_provider_local)
+            erection_df = _safe_provider_frame(erection_daily_provider)
+            if compiled_df.empty or erection_df.empty:
+                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+
+            compiled_df = _normalize_stringing_compiled(compiled_df)
+            if compiled_df.empty:
+                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+
+            compiled_df = _filter_compiled_by_date(
+                compiled_df,
+                "po_start_date",
+                list(projects or []),
+                list(months or []),
+                list(gangs or []),
+            )
+            compiled_df = _filter_method(compiled_df, method_filter)
+            if compiled_df.empty:
+                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+
+            gap_table = _build_erection_po_gap_table(compiled_df, erection_df)
+            if gap_table.empty or "gap_days" not in gap_table.columns:
+                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+
+            stats = _gap_stats(gap_table, "gap_days")
+            work = gap_table.copy()
+            work["gap_days"] = pd.to_numeric(work.get("gap_days"), errors="coerce")
+            work = work.dropna(subset=["gap_days"])
+            if "project_name" in work.columns and not work.empty:
+                per_project = (
+                    work.groupby("project_name", dropna=False)["gap_days"]
+                    .median()
+                    .round(0)
+                    .to_dict()
+                )
+            else:
+                per_project = {}
+            return {
+                "median": stats.get("median"),
+                "pct_over_60": stats.get("pct_over_60"),
+                "pct_over_15": stats.get("pct_over_15"),
+                "per_project": per_project,
+            }
+        except Exception as exc:
+            LOGGER.warning("ES gap stats failed: %s", exc)
+            return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+
+    _PROJECT_READINESS_BUCKETS: list[tuple[str, int, int | None]] = [
+        ("0-15", 0, 15),
+        ("16-30", 16, 30),
+        ("31-60", 31, 60),
+        ("61-90", 61, 90),
+        (">90", 91, None),
+    ]
+
+    def _build_project_readiness_histogram(
+        match_keys: set[str],
+        *,
+        projects: Sequence[str] | None = None,
+        months: Sequence[pd.Timestamp] | None = None,
+        gangs: Sequence[str] | None = None,
+        method_filter: str = "tse",
+    ) -> tuple[list[dict[str, object]], dict[str, float | int]]:
+        """Project-scoped Stretch Readiness gap distribution using Stringing Analytics logic."""
+        from .stringing_analytics import (
+            _bucket_distribution,
+            _build_erection_po_gap_table,
+            _filter_compiled_by_date,
+            _filter_method,
+            _gap_stats,
+            _normalize_stringing_compiled,
+        )
+
+        empty_hist = [{"bucket": label, "count": 0, "pct": 0.0} for label, _, _ in _PROJECT_READINESS_BUCKETS]
+        empty_stats: dict[str, float | int] = {"n": 0, "median": 0.0, "pct_over_15": 0.0, "pct_over_60": 0.0}
+        if not config.enable_legacy_es_gap_inference:
+            return empty_hist, empty_stats
+        if not match_keys:
+            return empty_hist, empty_stats
+
+        compiled_df = _safe_provider_frame(stringing_compiled_provider)
+        if compiled_df.empty:
+            return empty_hist, empty_stats
+
+        if DATA_SELECTOR is None:
+            return empty_hist, empty_stats
+        try:
+            erection_df = DATA_SELECTOR.select("erection")
+        except Exception:
+            erection_df = pd.DataFrame()
+        if not isinstance(erection_df, pd.DataFrame) or erection_df.empty:
+            return empty_hist, empty_stats
+
+        normalized = _normalize_stringing_compiled(compiled_df)
+        if normalized.empty:
+            return empty_hist, empty_stats
+        normalized = _filter_compiled_by_date(
+            normalized,
+            "po_start_date",
+            list(projects or []),
+            list(months or []),
+            list(gangs or []),
+        )
+        normalized = _filter_method(normalized, method_filter)
+        if normalized.empty:
+            return empty_hist, empty_stats
+        normalized = normalized[_exec_project_key(normalized).isin(match_keys)].copy()
+        if normalized.empty:
+            return empty_hist, empty_stats
+
+        gaps = _build_erection_po_gap_table(normalized, erection_df)
+        if gaps.empty or "gap_days" not in gaps.columns:
+            return empty_hist, empty_stats
+        gaps["gap_days"] = pd.to_numeric(gaps.get("gap_days"), errors="coerce").clip(lower=0)
+        gaps = gaps[gaps["gap_days"].notna()].copy()
+        if gaps.empty:
+            return empty_hist, empty_stats
+        hist = _bucket_distribution(gaps, "gap_days", _PROJECT_READINESS_BUCKETS)
+        stats = _gap_stats(gaps, "gap_days")
+        return hist, stats
+
     @app.callback(
         Output("executive-overview-payload", "data"),
         Output("project-overview-payload", "data"),
@@ -12152,6 +12754,18 @@ def register_callbacks(
         gang_list = _normalize_str_list(_ensure_list(gangs))
         lens = "weekly" if str(time_lens).strip().lower() == "weekly" else "monthly"
         months_ts = resolve_months(month_list, quick_range)
+        today_month = pd.Timestamp.now().normalize().to_period("M").to_timestamp().normalize()
+        target_month = (max(months_ts) if months_ts else today_month)
+        target_month = pd.Timestamp(target_month).to_period("M").to_timestamp().normalize()
+        target_month_label = target_month.strftime("%b %Y")
+        line_values = {str(v).strip().lower() for v in line_list if str(v).strip()}
+
+        def _apply_line_filter(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame is None or frame.empty or not line_values:
+                return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+            if "line_name" not in frame.columns:
+                return frame
+            return frame[_exec_line_series(frame).str.lower().isin(line_values)].copy()
 
         status_activity = _exec_filter_frame(
             _safe_provider_frame(_STATUS_ACTIVITY_PROVIDER),
@@ -12191,11 +12805,45 @@ def register_callbacks(
             if "project_code" in manpower_raw.columns:
                 manpower_projects_total = int(manpower_raw["project_code"].nunique())
                 manpower_projects_covered = int(manpower_present["project_code"].nunique())
+
+        erection_scope_full = pd.DataFrame()
+        stringing_scope_full = pd.DataFrame()
+        try:
+            erection_frames, _, _ = _build_scope_frames(
+                "erection",
+                project_list=project_list,
+                gang_list=gang_list,
+                months_value=month_list,
+                quick_range=quick_range,
+                method_values=[],
+            )
+            erection_scope_full = _apply_line_filter(erection_frames.get("full", pd.DataFrame()).copy())
+        except Exception:
+            erection_scope_full = pd.DataFrame()
+        try:
+            stringing_frames, _, _ = _build_scope_frames(
+                "stringing",
+                project_list=project_list,
+                gang_list=gang_list,
+                months_value=month_list,
+                quick_range=quick_range,
+                method_values=[],
+            )
+            stringing_scope_full = _apply_line_filter(stringing_frames.get("full", pd.DataFrame()).copy())
+        except Exception:
+            stringing_scope_full = pd.DataFrame()
         status_snapshot_overall = _exec_filter_frame(
             _safe_provider_frame(_STATUS_SNAPSHOT_OVERALL_PROVIDER),
             projects=[],
             lines=[],
             months_ts=months_ts,
+            lens="monthly",
+        )
+        status_snapshot_overall_all = _exec_filter_frame(
+            _safe_provider_frame(_STATUS_SNAPSHOT_OVERALL_PROVIDER),
+            projects=[],
+            lines=[],
+            months_ts=None,
             lens="monthly",
         )
         status_snapshot_project = _exec_filter_frame(
@@ -12205,20 +12853,46 @@ def register_callbacks(
             months_ts=months_ts,
             lens="monthly",
         )
-        stringing_compiled_scope = _exec_filter_frame(
-            _safe_provider_frame(stringing_compiled_provider),
+        status_activity_all = _exec_filter_frame(
+            _safe_provider_frame(_STATUS_ACTIVITY_PROVIDER),
             projects=project_list,
             lines=line_list,
-            months_ts=months_ts,
-            lens="monthly",
+            months_ts=None,
+            lens=lens,
+        )
+        stretch_all = _exec_filter_frame(
+            _safe_provider_frame(_STRETCH_SECTION_PROVIDER),
+            projects=project_list,
+            lines=line_list,
+            months_ts=None,
+            lens=lens,
+        )
+        stretch_summary_all = _exec_filter_frame(
+            _safe_provider_frame(_STRETCH_READINESS_SUMMARY_PROVIDER),
+            projects=project_list,
+            lines=line_list,
+            months_ts=None,
+            lens=lens,
+        )
+        es_gap_stats = _compute_es_gap_stats(
+            stringing_compiled_provider,
+            (lambda: DATA_SELECTOR.select("erection")) if DATA_SELECTOR is not None else None,
+            project_list,
+            months_ts,
+            gang_list,
+            "tse",
         )
 
         status_trend = pd.DataFrame()
-        if not status_snapshot_overall.empty:
+        status_snapshot_overall_trend = status_snapshot_overall_all.copy()
+        if not status_snapshot_overall_trend.empty:
             for col in ("completion_pct", "plan_for_month_sum", "progress_for_month_sum"):
-                status_snapshot_overall[col] = pd.to_numeric(status_snapshot_overall.get(col), errors="coerce")
-            status_trend = (
-                status_snapshot_overall.groupby("_period", dropna=False)
+                status_snapshot_overall_trend[col] = pd.to_numeric(
+                    status_snapshot_overall_trend.get(col),
+                    errors="coerce",
+                )
+            status_snapshot_overall_trend = (
+                status_snapshot_overall_trend.groupby("_period", dropna=False)
                 .agg(
                     completion_pct=("completion_pct", "last"),
                     plan_for_month_sum=("plan_for_month_sum", "sum"),
@@ -12226,21 +12900,90 @@ def register_callbacks(
                 )
                 .reset_index()
             )
-            status_trend["plan_attainment_pct"] = status_trend.apply(
+            status_snapshot_overall_trend["plan_attainment_pct"] = status_snapshot_overall_trend.apply(
                 lambda row: _exec_safe_pct(row.get("progress_for_month_sum"), row.get("plan_for_month_sum")),
                 axis=1,
             )
-        status_trend = status_trend.sort_values("_period")
+            status_snapshot_overall_trend = status_snapshot_overall_trend[
+                pd.to_datetime(status_snapshot_overall_trend.get("_period"), errors="coerce").notna()
+            ].copy()
+
+        status_activity_trend = pd.DataFrame()
+        if not status_activity_all.empty:
+            status_activity_all_rollup = status_activity_all.copy()
+            for col in ("quantity_primary", "cumulative_progress", "plan_for_month", "progress_for_month"):
+                status_activity_all_rollup[col] = pd.to_numeric(status_activity_all_rollup.get(col), errors="coerce")
+            status_activity_trend = (
+                status_activity_all_rollup.groupby("_period", dropna=False)
+                .agg(
+                    quantity_primary=("quantity_primary", "sum"),
+                    cumulative_progress=("cumulative_progress", "sum"),
+                    plan_for_month_sum=("plan_for_month", "sum"),
+                    progress_for_month_sum=("progress_for_month", "sum"),
+                )
+                .reset_index()
+            )
+            status_activity_trend["completion_pct"] = status_activity_trend.apply(
+                lambda row: _exec_safe_pct(row.get("cumulative_progress"), row.get("quantity_primary")),
+                axis=1,
+            )
+            status_activity_trend["plan_attainment_pct"] = status_activity_trend.apply(
+                lambda row: _exec_safe_pct(row.get("progress_for_month_sum"), row.get("plan_for_month_sum")),
+                axis=1,
+            )
+            status_activity_trend = status_activity_trend[
+                pd.to_datetime(status_activity_trend.get("_period"), errors="coerce").notna()
+            ].copy()
+
+        status_snapshot_points = (
+            int(pd.to_datetime(status_snapshot_overall_trend.get("_period"), errors="coerce").nunique())
+            if not status_snapshot_overall_trend.empty
+            else 0
+        )
+        status_activity_points = (
+            int(pd.to_datetime(status_activity_trend.get("_period"), errors="coerce").nunique())
+            if not status_activity_trend.empty
+            else 0
+        )
+        if status_snapshot_points >= 3 or status_snapshot_points >= status_activity_points:
+            status_trend = status_snapshot_overall_trend.copy()
+        else:
+            status_trend = status_activity_trend.copy()
+            if status_snapshot_points and status_snapshot_points < 3:
+                LOGGER.warning(
+                    "Status trend fallback engaged: StatusSnapshotOverall has %s period(s); using StatusActivityFact with %s period(s).",
+                    status_snapshot_points,
+                    status_activity_points,
+                )
+        if max(status_snapshot_points, status_activity_points) < 3:
+            LOGGER.warning(
+                "Status trend remains sparse after fallback: snapshot_periods=%s activity_periods=%s",
+                status_snapshot_points,
+                status_activity_points,
+            )
+        if "_period" in status_trend.columns:
+            status_trend = status_trend.sort_values("_period")
+        status_sparse_reason = ""
+        if max(status_snapshot_points, status_activity_points) < 2:
+            status_sparse_reason = (
+                f"Limited status history: snapshot={status_snapshot_points} period(s), "
+                f"activity={status_activity_points} period(s)."
+            )
 
         stretch_trend = pd.DataFrame()
-        if not stretch_raw.empty:
-            readiness = stretch_raw.get("readiness_state", pd.Series("", index=stretch_raw.index)).fillna("").astype(str).str.upper()
-            stretch_raw["_ready"] = readiness.eq("READY")
-            stretch_raw["_partial"] = readiness.eq("PARTIAL")
-            stretch_raw["_not_ready"] = readiness.eq("NOT_READY")
-            stretch_raw["_unknown"] = readiness.eq("UNKNOWN")
-            stretch_trend = (
-                stretch_raw.groupby("_period", dropna=False)
+        stretch_section_trend = pd.DataFrame()
+        if not stretch_all.empty:
+            stretch_all_rollup = stretch_all.copy()
+            readiness = stretch_all_rollup.get(
+                "readiness_state",
+                pd.Series("", index=stretch_all_rollup.index),
+            ).fillna("").astype(str).str.upper()
+            stretch_all_rollup["_ready"] = readiness.eq("READY")
+            stretch_all_rollup["_partial"] = readiness.eq("PARTIAL")
+            stretch_all_rollup["_not_ready"] = readiness.eq("NOT_READY")
+            stretch_all_rollup["_unknown"] = readiness.eq("UNKNOWN")
+            stretch_section_trend = (
+                stretch_all_rollup.groupby("_period", dropna=False)
                 .agg(
                     sections_total=("section_id", lambda s: int(s.fillna("").astype(str).str.strip().astype(bool).sum())),
                     sections_ready=("_ready", "sum"),
@@ -12250,16 +12993,19 @@ def register_callbacks(
                 )
                 .reset_index()
             )
-            stretch_trend["readiness_pct"] = stretch_trend.apply(
+            stretch_section_trend["readiness_pct"] = stretch_section_trend.apply(
                 lambda row: _exec_safe_pct(row.get("sections_ready"), row.get("sections_total")),
                 axis=1,
             )
+            stretch_section_trend = stretch_section_trend[
+                pd.to_datetime(stretch_section_trend.get("_period"), errors="coerce").notna()
+            ].copy()
         stretch_km_trend = pd.DataFrame()
-        if not stretch_summary_raw.empty:
+        if not stretch_summary_all.empty:
             for col in ("ready_km", "total_km"):
-                stretch_summary_raw[col] = pd.to_numeric(stretch_summary_raw.get(col), errors="coerce")
+                stretch_summary_all[col] = pd.to_numeric(stretch_summary_all.get(col), errors="coerce")
             stretch_km_trend = (
-                stretch_summary_raw.groupby("_period", dropna=False)
+                stretch_summary_all.groupby("_period", dropna=False)
                 .agg(
                     ready_km=("ready_km", "sum"),
                     total_km=("total_km", "sum"),
@@ -12270,15 +13016,46 @@ def register_callbacks(
                 lambda row: _exec_safe_pct(row.get("ready_km"), row.get("total_km")),
                 axis=1,
             )
-        if not stretch_trend.empty and not stretch_km_trend.empty:
-            stretch_trend = stretch_trend.merge(stretch_km_trend, on="_period", how="outer")
-        elif stretch_trend.empty and not stretch_km_trend.empty:
+        if not stretch_section_trend.empty and not stretch_km_trend.empty:
+            stretch_trend = stretch_section_trend.merge(stretch_km_trend, on="_period", how="outer")
+        elif stretch_section_trend.empty and not stretch_km_trend.empty:
             stretch_trend = stretch_km_trend.copy()
+        else:
+            stretch_trend = stretch_section_trend.copy()
         if not stretch_trend.empty:
             for col in ("sections_total", "sections_ready", "sections_partial", "sections_not_ready", "sections_unknown", "readiness_pct", "ready_km", "total_km", "readiness_km_pct"):
                 if col not in stretch_trend.columns:
                     stretch_trend[col] = pd.NA
-        stretch_trend = stretch_trend.sort_values("_period")
+        stretch_section_points = (
+            int(pd.to_datetime(stretch_section_trend.get("_period"), errors="coerce").nunique())
+            if not stretch_section_trend.empty
+            else 0
+        )
+        stretch_km_points = (
+            int(pd.to_datetime(stretch_km_trend.get("_period"), errors="coerce").nunique())
+            if not stretch_km_trend.empty
+            else 0
+        )
+        if stretch_section_points < 3 and stretch_km_points >= 3:
+            LOGGER.warning(
+                "Stretch trend fallback engaged: StretchSectionFact has %s period(s); using km trend history with %s period(s).",
+                stretch_section_points,
+                stretch_km_points,
+            )
+        if max(stretch_section_points, stretch_km_points) < 3:
+            LOGGER.warning(
+                "Stretch trend remains sparse after fallback: section_periods=%s km_periods=%s",
+                stretch_section_points,
+                stretch_km_points,
+            )
+        if "_period" in stretch_trend.columns:
+            stretch_trend = stretch_trend.sort_values("_period")
+        stretch_sparse_reason = ""
+        if max(stretch_section_points, stretch_km_points) < 2:
+            stretch_sparse_reason = (
+                f"Limited stretch history: section={stretch_section_points} period(s), "
+                f"km={stretch_km_points} period(s)."
+            )
 
         manpower_trend = pd.DataFrame()
         if not manpower_present.empty:
@@ -12293,94 +13070,23 @@ def register_callbacks(
                 lambda row: _exec_safe_pct(row.get("available_rows"), row.get("rows")),
                 axis=1,
             )
-        manpower_trend = manpower_trend.sort_values("_period")
-
-        gap_scope = pd.DataFrame()
-        if not stretch_raw.empty and not stringing_compiled_scope.empty:
-            stretch_ready = stretch_raw.copy()
-            readiness_state = stretch_ready.get("readiness_state", pd.Series("", index=stretch_ready.index)).fillna("").astype(str).str.upper()
-            stretch_ready = stretch_ready[readiness_state.eq("READY")].copy()
-            if not stretch_ready.empty:
-                stretch_ready["report_date"] = pd.to_datetime(stretch_ready.get("report_date"), errors="coerce")
-                compiled_map = stringing_compiled_scope.copy()
-                compiled_map["po_start_date"] = pd.to_datetime(compiled_map.get("po_start_date"), errors="coerce")
-
-                def _es_key(series: pd.Series) -> pd.Series:
-                    return series.fillna("").astype(str).str.strip().str.replace(r"\s+", "", regex=True).str.upper()
-
-                compiled_project_col = "project_code" if "project_code" in compiled_map.columns else "project_name"
-                compiled_map["_join_project"] = _es_key(compiled_map.get(compiled_project_col, pd.Series("", index=compiled_map.index)))
-                compiled_map["_join_from"] = _es_key(compiled_map.get("from_ap", pd.Series("", index=compiled_map.index)))
-                compiled_map["_join_to"] = _es_key(compiled_map.get("to_ap", pd.Series("", index=compiled_map.index)))
-                compiled_map = compiled_map[
-                    compiled_map["_join_project"].astype(bool)
-                    & (compiled_map["_join_from"].astype(bool) | compiled_map["_join_to"].astype(bool))
-                ]
-                compiled_map = compiled_map.dropna(subset=["po_start_date"]).sort_values("po_start_date")
-                compiled_map = (
-                    compiled_map.groupby(["_join_project", "_join_from", "_join_to"], dropna=False)
-                    .agg(po_start_date=("po_start_date", "min"))
-                    .reset_index()
-                )
-
-                stretch_ready["_join_project"] = _es_key(stretch_ready.get("project_code", pd.Series("", index=stretch_ready.index)))
-                stretch_ready["_join_from"] = _es_key(stretch_ready.get("from_ap", pd.Series("", index=stretch_ready.index)))
-                stretch_ready["_join_to"] = _es_key(stretch_ready.get("to_ap", pd.Series("", index=stretch_ready.index)))
-                stretch_ready = stretch_ready[
-                    stretch_ready["_join_project"].astype(bool)
-                    & (stretch_ready["_join_from"].astype(bool) | stretch_ready["_join_to"].astype(bool))
-                ]
-                gap_scope = stretch_ready.merge(
-                    compiled_map,
-                    on=["_join_project", "_join_from", "_join_to"],
-                    how="left",
-                )
-                gap_scope["gap_days"] = (gap_scope["po_start_date"] - gap_scope["report_date"]).dt.days
-                gap_scope["gap_days"] = pd.to_numeric(gap_scope["gap_days"], errors="coerce").clip(lower=0.0)
-                invalid_gap = gap_scope["po_start_date"].isna() | gap_scope["report_date"].isna()
-                gap_scope.loc[invalid_gap, "gap_days"] = np.nan
-
-        gap_project_period = pd.DataFrame()
-        if not gap_scope.empty:
-            valid_gap = gap_scope[gap_scope["gap_days"].notna()].copy()
-            if not valid_gap.empty:
-                if "section_id" in valid_gap.columns and valid_gap["section_id"].fillna("").astype(str).str.strip().astype(bool).any():
-                    valid_gap["_gap_section_key"] = (
-                        valid_gap.get("project_code", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
-                        + "|"
-                        + valid_gap["section_id"].fillna("").astype(str).str.strip()
-                    )
-                else:
-                    valid_gap["_gap_section_key"] = (
-                        valid_gap.get("project_code", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
-                        + "|"
-                        + valid_gap.get("from_ap", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
-                        + "|"
-                        + valid_gap.get("to_ap", pd.Series("", index=valid_gap.index)).fillna("").astype(str).str.strip()
-                    )
-                gap_project_period = (
-                    valid_gap.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
-                    .agg(
-                        gap_days_avg=("gap_days", "mean"),
-                        gap_covered_sections=("_gap_section_key", "nunique"),
-                    )
-                    .reset_index()
-                )
+        if "_period" in manpower_trend.columns:
+            manpower_trend = manpower_trend.sort_values("_period")
 
         ranking = pd.DataFrame()
-        if not status_activity.empty:
-            activity_group = status_activity.get("activity_group", pd.Series("", index=status_activity.index)).fillna("").astype(str).str.lower()
-            status_activity["_is_erection"] = activity_group.str.contains("tower erection", na=False)
-            status_activity["_is_stringing"] = activity_group.eq("stringing")
+        ranking_source = status_activity_all if not status_activity_all.empty else status_activity
+        if not ranking_source.empty:
+            ranking_source = ranking_source.copy()
+            activity_group = ranking_source.get("activity_group", pd.Series("", index=ranking_source.index)).fillna("").astype(str).str.lower()
+            ranking_source["_is_erection"] = activity_group.str.contains("tower erection", na=False)
+            ranking_source["_is_stringing"] = activity_group.eq("stringing")
             project_rollup = (
-                status_activity.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
+                ranking_source.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
                 .agg(
                     quantity_primary=("quantity_primary", "sum"),
                     cumulative_progress=("cumulative_progress", "sum"),
                     plan_for_month=("plan_for_month", "sum"),
                     progress_for_month=("progress_for_month", "sum"),
-                    erection_cumulative=("cumulative_progress", lambda s: float(s[status_activity.loc[s.index, "_is_erection"]].sum())),
-                    stringing_cumulative=("cumulative_progress", lambda s: float(s[status_activity.loc[s.index, "_is_stringing"]].sum())),
                 )
                 .reset_index()
             )
@@ -12395,21 +13101,75 @@ def register_callbacks(
             ranking = _exec_latest_per_group(project_rollup, ["project_code", "project_display", "line_name"], "_period")
             ranking = _exec_normalize_key_cols(ranking, ["project_code", "project_display", "line_name"])
 
-        if not ranking.empty and not gap_project_period.empty:
-            gap_latest = _exec_latest_per_group(
-                gap_project_period,
-                ["project_code", "project_display", "line_name"],
-                "_period",
-            )[["project_code", "project_display", "line_name", "gap_days_avg", "gap_covered_sections"]]
-            gap_latest = _exec_normalize_key_cols(gap_latest, ["project_code", "project_display", "line_name"])
-            ranking = ranking.merge(gap_latest, on=["project_code", "project_display", "line_name"], how="left")
-        elif not ranking.empty:
-            ranking["gap_days_avg"] = pd.NA
+        project_status_meta = pd.DataFrame(columns=["_project_key", "latest_report_date", "has_target_month_status"])
+        if not status_activity_all.empty:
+            project_keys_series = _exec_project_key(status_activity_all).fillna("").astype(str)
+            report_dates = pd.to_datetime(status_activity_all.get("report_date"), errors="coerce")
+            if not report_dates.notna().any():
+                report_dates = _select_exec_datetime(status_activity_all)
+            activity_months = pd.to_datetime(status_activity_all.get("_month"), errors="coerce")
+            if not activity_months.notna().any():
+                activity_months = _exec_period(_select_exec_datetime(status_activity_all), "monthly")
+            meta_frame = pd.DataFrame(
+                {
+                    "_project_key": project_keys_series,
+                    "_report_date": report_dates,
+                    "_month_local": pd.to_datetime(activity_months, errors="coerce"),
+                }
+            )
+            meta_frame = meta_frame[meta_frame["_project_key"].astype(bool)].copy()
+            if not meta_frame.empty:
+                latest_report = (
+                    meta_frame.groupby("_project_key", dropna=False)["_report_date"]
+                    .max()
+                    .dt.strftime("%Y-%m-%d")
+                )
+                latest_report = latest_report.fillna("")
+                has_target = (
+                    meta_frame.assign(_has_target=meta_frame["_month_local"].eq(target_month))
+                    .groupby("_project_key", dropna=False)["_has_target"]
+                    .any()
+                )
+                project_status_meta = pd.DataFrame(
+                    {
+                        "_project_key": latest_report.index.astype(str),
+                        "latest_report_date": latest_report.values,
+                        "has_target_month_status": has_target.reindex(latest_report.index).fillna(False).values,
+                    }
+                )
+
+        if not ranking.empty:
+            ranking["_project_key"] = _exec_project_key(ranking)
+            if not project_status_meta.empty:
+                ranking = ranking.merge(project_status_meta, on="_project_key", how="left")
+            if "latest_report_date" not in ranking.columns:
+                ranking["latest_report_date"] = ""
+            else:
+                ranking["latest_report_date"] = ranking["latest_report_date"].fillna("").astype(str)
+            if "has_target_month_status" not in ranking.columns:
+                ranking["has_target_month_status"] = False
+            else:
+                ranking["has_target_month_status"] = ranking["has_target_month_status"].fillna(False).astype(bool)
+            ranking["target_month"] = target_month.strftime("%Y-%m-%d")
+
+        if not ranking.empty:
+            gap_per_project = es_gap_stats.get("per_project", {}) or {}
+            gap_map = {
+                _compact_project_key(k): float(v)
+                for k, v in gap_per_project.items()
+                if _compact_project_key(k) and pd.notna(v)
+            }
+            ranking["gap_days_avg"] = _exec_project_key(ranking).map(gap_map)
             ranking["gap_covered_sections"] = 0
 
         if not ranking.empty and not stretch_raw.empty:
+            stretch_rollup_source = stretch_raw.copy()
+            stretch_rollup_state = stretch_rollup_source.get(
+                "readiness_state", pd.Series("", index=stretch_rollup_source.index)
+            ).fillna("").astype(str).str.upper()
+            stretch_rollup_source["_ready"] = stretch_rollup_state.eq("READY")
             stretch_rollup = (
-                stretch_raw.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
+                stretch_rollup_source.groupby(["project_code", "project_display", "line_name", "_period"], dropna=False)
                 .agg(
                     sections_total=("section_id", lambda s: int(s.fillna("").astype(str).str.strip().astype(bool).sum())),
                     sections_ready=("_ready", "sum"),
@@ -12477,8 +13237,24 @@ def register_callbacks(
             ranking["_rag_sort"] = ranking["overall_rag"].map(rag_rank).fillna(4)
             ranking = ranking.sort_values(["_rag_sort", "plan_slippage_pct", "es_gap_days"], ascending=[True, False, False]).reset_index(drop=True)
 
-        if not status_trend.empty:
-            latest_status = status_trend.iloc[-1]
+        status_trend_kpi = pd.DataFrame()
+        if not status_snapshot_overall.empty:
+            status_snapshot_overall_kpi = status_snapshot_overall.copy()
+            for col in ("completion_pct", "plan_for_month_sum", "progress_for_month_sum"):
+                status_snapshot_overall_kpi[col] = pd.to_numeric(status_snapshot_overall_kpi.get(col), errors="coerce")
+            status_trend_kpi = (
+                status_snapshot_overall_kpi.groupby("_period", dropna=False)
+                .agg(
+                    completion_pct=("completion_pct", "last"),
+                    plan_for_month_sum=("plan_for_month_sum", "sum"),
+                    progress_for_month_sum=("progress_for_month_sum", "sum"),
+                )
+                .reset_index()
+                .sort_values("_period")
+            )
+
+        if not status_trend_kpi.empty:
+            latest_status = status_trend_kpi.iloc[-1]
             latest_completion = pd.to_numeric(latest_status.get("completion_pct"), errors="coerce")
             latest_progress = pd.to_numeric(latest_status.get("progress_for_month_sum"), errors="coerce")
             latest_plan = pd.to_numeric(latest_status.get("plan_for_month_sum"), errors="coerce")
@@ -12491,8 +13267,29 @@ def register_callbacks(
         else:
             kpi_completion = 0.0
             kpi_plan = 0.0
-        if not stretch_trend.empty:
-            readiness_series = pd.to_numeric(stretch_trend.get("readiness_pct"), errors="coerce").dropna()
+        selected_period_label = None
+        if not status_trend_kpi.empty:
+            selected_period_ts = pd.to_datetime(status_trend_kpi["_period"], errors="coerce").dropna()
+            if not selected_period_ts.empty:
+                selected_period_label = selected_period_ts.max().strftime("%b %Y")
+        if not stretch_raw.empty:
+            stretch_kpi = stretch_raw.copy()
+            readiness_kpi = stretch_kpi.get("readiness_state", pd.Series("", index=stretch_kpi.index)).fillna("").astype(str).str.upper()
+            stretch_kpi["_ready"] = readiness_kpi.eq("READY")
+            stretch_kpi_rollup = (
+                stretch_kpi.groupby("_period", dropna=False)
+                .agg(
+                    sections_total=("section_id", lambda s: int(s.fillna("").astype(str).str.strip().astype(bool).sum())),
+                    sections_ready=("_ready", "sum"),
+                )
+                .reset_index()
+                .sort_values("_period")
+            )
+            stretch_kpi_rollup["readiness_pct"] = stretch_kpi_rollup.apply(
+                lambda row: _exec_safe_pct(row.get("sections_ready"), row.get("sections_total")),
+                axis=1,
+            )
+            readiness_series = pd.to_numeric(stretch_kpi_rollup.get("readiness_pct"), errors="coerce").dropna()
             kpi_readiness = float(readiness_series.iloc[-1]) if not readiness_series.empty else 0.0
         else:
             kpi_readiness = 0.0
@@ -12503,32 +13300,25 @@ def register_callbacks(
         else:
             kpi_readiness_km = 0.0
         kpi_manpower = float(manpower_trend["availability_pct"].iloc[-1]) if not manpower_trend.empty else 0.0
-        valid_gap_scope = gap_scope[gap_scope["gap_days"].notna()].copy() if not gap_scope.empty else pd.DataFrame()
-        kpi_gap_days = round(float(pd.to_numeric(valid_gap_scope["gap_days"], errors="coerce").mean()), 1) if not valid_gap_scope.empty else 0.0
-        if not valid_gap_scope.empty:
-            if "section_id" in valid_gap_scope.columns and valid_gap_scope["section_id"].fillna("").astype(str).str.strip().astype(bool).any():
-                kpi_gap_covered_sections = int(
-                    (
-                        valid_gap_scope.get("project_code", pd.Series("", index=valid_gap_scope.index)).fillna("").astype(str).str.strip()
-                        + "|"
-                        + valid_gap_scope["section_id"].fillna("").astype(str).str.strip()
-                    ).nunique()
-                )
-            else:
-                kpi_gap_covered_sections = int(len(valid_gap_scope.index))
-        else:
-            kpi_gap_covered_sections = 0
+        kpi_gap_days = es_gap_stats.get("median")
+        kpi_gap_pct_over_60 = es_gap_stats.get("pct_over_60")
+        kpi_gap_pct_over_15 = es_gap_stats.get("pct_over_15")
+        kpi_gap_covered_sections = 0
         kpi_atrisk = int((ranking["overall_rag"] == "RED").sum()) if not ranking.empty else 0
+        kpi_erection_prod = _avg_metric_value(erection_scope_full, "daily_prod_mt", False)
+        kpi_stringing_prod = _avg_metric_value(stringing_scope_full, "daily_km", True)
+        erection_prod_coverage = int(len(erection_scope_full.index)) if isinstance(erection_scope_full, pd.DataFrame) else 0
+        stringing_prod_coverage = int(len(stringing_scope_full.index)) if isinstance(stringing_scope_full, pd.DataFrame) else 0
 
         status_rows = []
         if not status_trend.empty:
             tmp = status_trend.copy()
-            tmp["period"] = pd.to_datetime(tmp["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
+            tmp["period"] = pd.to_datetime(tmp["_period"], errors="coerce").dt.strftime("%b %Y")
             status_rows = tmp[["period", "completion_pct", "plan_attainment_pct"]].to_dict("records")
         stretch_rows = []
         if not stretch_trend.empty:
             tmp = stretch_trend.copy()
-            tmp["period"] = pd.to_datetime(tmp["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
+            tmp["period"] = pd.to_datetime(tmp["_period"], errors="coerce").dt.strftime("%b %Y")
             stretch_rows = tmp[
                 [
                     "period",
@@ -12548,7 +13338,12 @@ def register_callbacks(
             f"At-risk projects (RED): {kpi_atrisk}.",
             f"Portfolio completion: {kpi_completion:.1f}% | Plan attainment: {kpi_plan:.1f}%.",
             f"Stretch readiness: {kpi_readiness_km:.1f}% km-weighted ({kpi_readiness:.1f}% section count) | Manpower availability: {kpi_manpower:.1f}%.",
-            f"Average E→S lag: {kpi_gap_days:.1f} days (sections covered: {kpi_gap_covered_sections}).",
+            (
+                f"Average E→S lag: {float(kpi_gap_days):.1f} days "
+                f"({float(kpi_gap_pct_over_60 or 0.0):.0f}% spans delayed >60 days)."
+                if kpi_gap_days is not None
+                else "Average E→S lag: No gap data."
+            ),
         ]
         if not ranking.empty:
             top = ranking.iloc[0]
@@ -12566,17 +13361,41 @@ def register_callbacks(
 
         exec_payload = {
             "lens": lens,
+            "selected_period": selected_period_label,
+            "target_month": target_month.strftime("%Y-%m-%d"),
+            "target_month_label": target_month_label,
+            "data_coverage": {
+                "status": {
+                    "snapshot_points": status_snapshot_points,
+                    "activity_points": status_activity_points,
+                    "trend_points": int(len(status_rows)),
+                    "sparse_reason": status_sparse_reason,
+                },
+                "stretch": {
+                    "section_points": stretch_section_points,
+                    "km_points": stretch_km_points,
+                    "trend_points": int(len(stretch_rows)),
+                    "sparse_reason": stretch_sparse_reason,
+                },
+            },
             "kpis": {
                 "portfolio_completion_pct": kpi_completion,
                 "plan_attainment_pct": kpi_plan,
                 "stretch_readiness_pct": kpi_readiness,
                 "stretch_readiness_km_pct": kpi_readiness_km,
-                "gap_days_avg": kpi_gap_days,
+                "gap_days_median": kpi_gap_days,
+                "gap_pct_over_60": kpi_gap_pct_over_60,
+                "gap_pct_over_15": kpi_gap_pct_over_15,
+                "gap_per_project": es_gap_stats.get("per_project", {}) or {},
                 "gap_covered_sections": kpi_gap_covered_sections,
                 "manpower_availability_pct": kpi_manpower,
                 "manpower_projects_total": manpower_projects_total,
                 "manpower_projects_covered": manpower_projects_covered,
                 "atrisk_projects": kpi_atrisk,
+                "erection_productivity_mt_day": kpi_erection_prod,
+                "stringing_productivity_km_month": kpi_stringing_prod,
+                "erection_productivity_rows": erection_prod_coverage,
+                "stringing_productivity_rows": stringing_prod_coverage,
                 "projects_covered": int(ranking["project_display"].nunique()) if not ranking.empty else 0,
             },
             "overall_trends": {"status": status_rows, "stretch": stretch_rows},
@@ -12616,6 +13435,7 @@ def register_callbacks(
 
         proj_status_rows = []
         if not focus_status_snapshot.empty:
+            focus_status_snapshot = focus_status_snapshot.copy()
             for col in ("completion_pct", "cumulative_progress_sum", "plan_for_month_sum", "progress_for_month_sum"):
                 focus_status_snapshot[col] = pd.to_numeric(focus_status_snapshot.get(col), errors="coerce")
             group = (
@@ -12687,6 +13507,7 @@ def register_callbacks(
         else:
             trend = pd.DataFrame()
         if not focus_stretch_summary.empty:
+            focus_stretch_summary = focus_stretch_summary.copy()
             for col in ("ready_km", "total_km"):
                 focus_stretch_summary[col] = pd.to_numeric(focus_stretch_summary.get(col), errors="coerce")
             proj_stretch_ready_km = float(focus_stretch_summary["ready_km"].fillna(0.0).sum())
@@ -12720,70 +13541,7 @@ def register_callbacks(
                 ["period", "sections_total", "sections_ready", "readiness_pct", "total_km", "ready_km", "readiness_km_pct"]
             ].to_dict("records")
 
-        focus_gap = gap_scope[_exec_project_key(gap_scope).eq(focus_key)] if not gap_scope.empty and focus_key else pd.DataFrame()
-        if focus_line and not focus_gap.empty and "line_name" in focus_gap.columns:
-            focus_gap = focus_gap[_exec_line_series(focus_gap).str.lower().eq(focus_line.strip().lower())]
-
         gap_rows = []
-        se_latest_erection = 0.0
-        se_latest_stringing = 0.0
-        se_gap_days_avg = 0.0
-        if not focus_status.empty or not focus_gap.empty:
-            se_trend = pd.DataFrame()
-            if not focus_status.empty:
-                temp = focus_status.copy()
-                group_key = temp.get("activity_group", pd.Series("", index=temp.index)).fillna("").astype(str).str.lower()
-                temp["_is_erection"] = group_key.str.contains("tower erection", na=False)
-                temp["_is_stringing"] = group_key.eq("stringing")
-                temp["cumulative_progress"] = pd.to_numeric(temp.get("cumulative_progress"), errors="coerce")
-                se_trend = temp.groupby("_period", dropna=False).agg(
-                    erection_cumulative_mt=("cumulative_progress", lambda s: float(s[temp.loc[s.index, "_is_erection"]].sum())),
-                    stringing_cumulative_km=("cumulative_progress", lambda s: float(s[temp.loc[s.index, "_is_stringing"]].sum())),
-                ).reset_index()
-            gap_lag_trend = pd.DataFrame()
-            if not focus_gap.empty:
-                valid_focus_gap = focus_gap[focus_gap["gap_days"].notna()].copy()
-                if not valid_focus_gap.empty:
-                    if "section_id" in valid_focus_gap.columns and valid_focus_gap["section_id"].fillna("").astype(str).str.strip().astype(bool).any():
-                        valid_focus_gap["_gap_section_key"] = (
-                            valid_focus_gap.get("project_code", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
-                            + "|"
-                            + valid_focus_gap["section_id"].fillna("").astype(str).str.strip()
-                        )
-                    else:
-                        valid_focus_gap["_gap_section_key"] = (
-                            valid_focus_gap.get("project_code", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
-                            + "|"
-                            + valid_focus_gap.get("from_ap", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
-                            + "|"
-                            + valid_focus_gap.get("to_ap", pd.Series("", index=valid_focus_gap.index)).fillna("").astype(str).str.strip()
-                        )
-                    gap_lag_trend = valid_focus_gap.groupby("_period", dropna=False).agg(
-                        gap_days_avg=("gap_days", "mean"),
-                        gap_covered_sections=("_gap_section_key", "nunique"),
-                    ).reset_index()
-                    se_gap_days_avg = round(float(pd.to_numeric(valid_focus_gap["gap_days"], errors="coerce").mean()), 1)
-            if not se_trend.empty and not gap_lag_trend.empty:
-                se_combined = se_trend.merge(gap_lag_trend, on="_period", how="outer")
-            elif not se_trend.empty:
-                se_combined = se_trend.copy()
-                se_combined["gap_days_avg"] = pd.NA
-                se_combined["gap_covered_sections"] = pd.NA
-            else:
-                se_combined = gap_lag_trend.copy()
-                se_combined["erection_cumulative_mt"] = pd.NA
-                se_combined["stringing_cumulative_km"] = pd.NA
-            if not se_combined.empty:
-                se_combined = se_combined.sort_values("_period")
-                se_combined["period"] = pd.to_datetime(se_combined["_period"], errors="coerce").dt.strftime("%Y-%m-%d")
-                gap_rows = se_combined[
-                    ["period", "erection_cumulative_mt", "stringing_cumulative_km", "gap_days_avg", "gap_covered_sections"]
-                ].to_dict("records")
-                latest_se = se_combined.iloc[-1]
-                latest_erection_val = pd.to_numeric(latest_se.get("erection_cumulative_mt"), errors="coerce")
-                latest_stringing_val = pd.to_numeric(latest_se.get("stringing_cumulative_km"), errors="coerce")
-                se_latest_erection = float(latest_erection_val) if pd.notna(latest_erection_val) else 0.0
-                se_latest_stringing = float(latest_stringing_val) if pd.notna(latest_stringing_val) else 0.0
 
         mp_scatter = []
         mp_availability = []
@@ -12812,9 +13570,33 @@ def register_callbacks(
             focus_summary = ranking.head(1)
         row = focus_summary.iloc[0] if not focus_summary.empty else pd.Series(dtype="object")
         row_gap_days = pd.to_numeric(row.get("gap_days_avg"), errors="coerce")
-        proj_gap_days_kpi = float(row_gap_days) if pd.notna(row_gap_days) else float(se_gap_days_avg or 0.0)
+        proj_gap_days_kpi = float(row_gap_days) if pd.notna(row_gap_days) else 0.0
+
+        def _scope_for_project(frame: pd.DataFrame, project_key: str, line_name: str) -> pd.DataFrame:
+            if frame is None or frame.empty or not project_key:
+                return pd.DataFrame()
+            scoped = frame[_exec_project_key(frame).eq(project_key)].copy()
+            if line_name and "line_name" in scoped.columns:
+                scoped = scoped[_exec_line_series(scoped).str.lower().eq(line_name.strip().lower())]
+            return scoped
+
+        focus_erection_scope = _scope_for_project(erection_scope_full, focus_key, focus_line)
+        focus_stringing_scope = _scope_for_project(stringing_scope_full, focus_key, focus_line)
+        proj_erection_prod = _avg_metric_value(focus_erection_scope, "daily_prod_mt", False)
+        proj_stringing_prod = _avg_metric_value(focus_stringing_scope, "daily_km", True)
+        proj_erection_rows = int(len(focus_erection_scope.index))
+        proj_stringing_rows = int(len(focus_stringing_scope.index))
 
         proj_payload = {
+            "filters": {
+                "projects": project_list,
+                "lines": line_list,
+                "months": month_list,
+                "quick_range": quick_range or "",
+                "gangs": gang_list,
+                "lens": lens,
+            },
+            "ranking": ranking.to_dict("records") if not ranking.empty else [],
             "scope": {
                 "project": focus_project or str(row.get("project_display", "")),
                 "line": focus_line or str(row.get("line_name", "All lines")),
@@ -12829,6 +13611,10 @@ def register_callbacks(
                 "readiness_pct": float(pd.to_numeric(row.get("readiness_pct"), errors="coerce") or 0.0),
                 "gap_days_avg": proj_gap_days_kpi,
                 "manpower_availability_pct": float(pd.to_numeric(row.get("manpower_availability_pct"), errors="coerce") or 0.0),
+                "erection_productivity_mt_day": proj_erection_prod,
+                "stringing_productivity_km_month": proj_stringing_prod,
+                "erection_productivity_rows": proj_erection_rows,
+                "stringing_productivity_rows": proj_stringing_rows,
                 "rag": str(row.get("overall_rag", "NO_DATA")),
             },
             "status": {"trend": proj_status_rows, "activity_contribution": proj_activity},
@@ -12842,11 +13628,20 @@ def register_callbacks(
             },
             "stringing_erection": {
                 "gap_trend": gap_rows,
-                "erection_cumulative_mt": se_latest_erection,
-                "stringing_cumulative_km": se_latest_stringing,
-                "gap_days_avg": se_gap_days_avg,
+                "gap_days_avg": proj_gap_days_kpi,
+                "reason": "No section-level READY?P/O join available for selected scope." if not gap_rows else "",
             },
-            "manpower_productivity": {"scatter": mp_scatter, "availability": mp_availability, "league": mp_league},
+            "manpower_productivity": {
+                "scatter": mp_scatter,
+                "availability": mp_availability,
+                "league": mp_league,
+                "reason": "No valid manpower pairings in selected scope." if not mp_scatter else "",
+            },
+            "data_coverage": {
+                "status_points": int(len(proj_status_rows)),
+                "stretch_points": int(len(proj_stretch_trend)),
+                "manpower_points": int(len(mp_scatter)),
+            },
             "coverage": {
                 "rows": [
                     {"category": "Status", "status": "AVAILABLE" if proj_status_rows else "NO_DATA"},
@@ -12856,6 +13651,477 @@ def register_callbacks(
             },
         }
         return exec_payload, proj_payload
+
+    @app.callback(
+        Output("exec-compliance-ticker", "children"),
+        Output("exec-compliance-ticker", "style"),
+        Output("exec-compliance-ticker", "className"),
+        Input("executive-overview-payload", "data"),
+    )
+    def _render_exec_compliance_ticker(_payload: dict[str, Any] | None):
+        today = pd.Timestamp.now().normalize()
+
+        stale_projects: list[str] = []
+        sources = [
+            _safe_provider_frame(_STATUS_ACTIVITY_PROVIDER),
+            _safe_provider_frame(_STRETCH_SECTION_PROVIDER),
+        ]
+        work_frames: list[pd.DataFrame] = []
+        for source in sources:
+            if source.empty:
+                continue
+            date_col = ""
+            for candidate in ("report_date", "date", "month"):
+                if candidate in source.columns:
+                    date_col = candidate
+                    break
+            if not date_col:
+                continue
+
+            project_series = None
+            for col in ("project_code", "project_display", "project_name"):
+                if col in source.columns:
+                    project_series = source[col]
+                    break
+            if project_series is None:
+                continue
+
+            candidate_frame = pd.DataFrame(
+                {
+                    "_project_code": project_series.map(_extract_project_code).fillna("").astype(str).str.strip(),
+                    "_report_date": pd.to_datetime(source[date_col], errors="coerce").dt.normalize(),
+                }
+            )
+            candidate_frame = candidate_frame[
+                candidate_frame["_project_code"].astype(bool) & candidate_frame["_report_date"].notna()
+            ]
+            if not candidate_frame.empty:
+                work_frames.append(candidate_frame)
+
+        if work_frames:
+            work = pd.concat(work_frames, ignore_index=True)
+            latest_dates = work.groupby("_project_code", dropna=False)["_report_date"].max()
+            stale_projects = sorted(
+                latest_dates[(today - latest_dates).dt.days > 3].index.astype(str).str.strip().tolist()
+            )
+
+        if not stale_projects:
+            return "All projects have reported within 3 days.", {"display": "none"}, "compliance-ticker"
+
+        shown_projects = stale_projects[:5]
+        extra_count = len(stale_projects) - len(shown_projects)
+        stale_text = ", ".join(shown_projects)
+        if extra_count > 0:
+            stale_text = f"{stale_text}, and {extra_count} more"
+
+        if len(stale_projects) >= 3:
+            return (
+                f"?? Data Alert: {len(stale_projects)} project(s) have not reported in over 3 days - {stale_text}. Review before presenting.",
+                {"display": "flex"},
+                "compliance-ticker compliance-ticker--red",
+            )
+
+        return (
+            f"?? Data Alert: {len(stale_projects)} project(s) have not reported in over 3 days - {stale_text}. Review before presenting.",
+            {"display": "flex"},
+            "compliance-ticker",
+        )
+
+    @app.callback(
+        Output("exec-portfolio-table-container", "children"),
+        Input("executive-overview-payload", "data"),
+        Input("exec-portfolio-view", "value"),
+    )
+    def _render_exec_portfolio_table(payload: dict[str, Any] | None, view_mode: str | None):
+        safe = payload or {}
+        kpis = safe.get("kpis") or {}
+        ranking_df = pd.DataFrame(safe.get("project_ranking") or [])
+        if ranking_df.empty:
+            return html.Div("No portfolio data available.", className="text-muted")
+
+        ranking_df = ranking_df.copy()
+        if "project_display" not in ranking_df.columns:
+            ranking_df["project_display"] = ranking_df.get("project_code", "")
+        if "project_code" not in ranking_df.columns:
+            ranking_df["project_code"] = ranking_df.get("project_display", "")
+        ranking_df["project_display"] = ranking_df["project_display"].fillna("").astype(str).str.strip()
+        ranking_df["project_code"] = ranking_df["project_code"].fillna("").astype(str).str.strip()
+        ranking_df["_project_key"] = _exec_project_key(ranking_df)
+        ranking_df = ranking_df[ranking_df["_project_key"].astype(bool)].copy()
+        ranking_df = ranking_df.drop_duplicates(subset=["_project_key"], keep="first")
+        if ranking_df.empty:
+            return html.Div("No portfolio data available.", className="text-muted")
+
+        def _safe_number(value: Any) -> float | None:
+            numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            if pd.isna(numeric):
+                return None
+            return float(numeric)
+
+        def _as_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            text = str(value or "").strip().lower()
+            return text in {"1", "true", "yes", "y"}
+
+        gap_per_project_raw = kpis.get("gap_per_project") or {}
+        gap_per_project = {
+            _compact_project_key(k): _safe_number(v)
+            for k, v in dict(gap_per_project_raw).items()
+            if _compact_project_key(k)
+        }
+        ranking_df["gap_days_avg"] = ranking_df["_project_key"].map(gap_per_project)
+
+        def _build_prog_cell(actual: Any, target: Any):
+            actual_value = _safe_number(actual)
+            target_value = _safe_number(target)
+            actual_blank = actual_value is None or actual_value == 0.0
+            target_blank = target_value is None or target_value == 0.0
+            if actual_blank and target_blank:
+                return html.Div("-", className="text-muted", style={"textAlign": "center"})
+
+            actual_fmt = actual_value if actual_value is not None else 0.0
+            target_fmt = target_value if target_value is not None else 0.0
+            pct = (actual_fmt / target_fmt * 100.0) if target_fmt > 0 else 0.0
+            pct_clamped = max(0.0, min(pct, 100.0))
+            fill_class = "prog-fill--green" if pct >= 90 else ("prog-fill--amber" if pct >= 50 else "prog-fill--red")
+            return html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(f"{actual_fmt:.0f}", className="prog-actual"),
+                            html.Span(f" / {target_fmt:.0f}", className="prog-target"),
+                        ],
+                        className="prog-numbers",
+                    ),
+                    html.Div(f"({pct_clamped:.0f}%)", className="prog-pct"),
+                    html.Div(
+                        html.Div(className=f"prog-fill {fill_class}", style={"width": f"{pct_clamped:.0f}%"}),
+                        className="prog-bar",
+                    ),
+                ],
+                className="prog-cell",
+            )
+
+        def _build_rag_badge(rag: Any):
+            colours = {"GREEN": "rag-badge--green", "AMBER": "rag-badge--amber", "RED": "rag-badge--red"}
+            rag_label = str(rag).upper().strip() if str(rag).strip() else "NO_DATA"
+            cls = colours.get(rag_label, "rag-badge--nodata")
+            return html.Span(rag_label, className=f"rag-badge {cls}")
+
+        def _sanitize_pch_key(value: Any) -> str:
+            token = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip().lower()).strip("-")
+            return token or "unassigned"
+
+        pch_by_code = _build_pch_map_from_project_info()
+
+        def _resolve_pch(row: pd.Series) -> str:
+            code_key = str(row.get("_project_key", "")).strip() or _compact_project_key(row.get("project_code"))
+            pch = pch_by_code.get(code_key) or "Unassigned"
+            return _canonical_pch_label(pch)
+
+        ranking_df["pch_group"] = ranking_df.apply(_resolve_pch, axis=1)
+        mapped_keys = set(pch_by_code.keys())
+        missing_mapping_keys = sorted(
+            {
+                key
+                for key in ranking_df["_project_key"].fillna("").astype(str)
+                if key and key not in mapped_keys
+            }
+        )
+        if missing_mapping_keys:
+            LOGGER.warning(
+                "PCH mapping missing for %s project key(s); assigning Unassigned. Sample=%s",
+                len(missing_mapping_keys),
+                missing_mapping_keys[:10],
+            )
+
+        mode = "month" if str(view_mode).strip().lower() == "month" else "cum"
+        target_month = pd.to_datetime(safe.get("target_month"), errors="coerce")
+        if pd.isna(target_month):
+            target_month = pd.Timestamp.now().normalize().to_period("M").to_timestamp().normalize()
+        else:
+            target_month = pd.Timestamp(target_month).to_period("M").to_timestamp().normalize()
+
+        snapshot_latest = pd.DataFrame()
+        snapshot_project = _safe_provider_frame(_STATUS_SNAPSHOT_PROJECT_PROVIDER)
+        if not snapshot_project.empty:
+            snapshot_project = snapshot_project.copy()
+            snapshot_project["_project_key"] = _exec_project_key(snapshot_project)
+            snapshot_project["_period_local"] = _exec_period(_select_exec_datetime(snapshot_project), "monthly")
+            snapshot_project = snapshot_project[snapshot_project["_project_key"].astype(bool)].copy()
+            if not snapshot_project.empty:
+                snapshot_latest = _exec_latest_per_group(snapshot_project, ["_project_key"], "_period_local")
+                snapshot_latest = snapshot_latest.set_index("_project_key", drop=False)
+
+        activity_values: dict[str, dict[str, dict[str, float | None]]] = {}
+        status_activity = _safe_provider_frame(_STATUS_ACTIVITY_PROVIDER)
+        if not status_activity.empty:
+            status_activity = status_activity.copy()
+            status_activity["_project_key"] = _exec_project_key(status_activity)
+            status_activity["_month_local"] = _exec_period(_select_exec_datetime(status_activity), "monthly")
+            status_activity = status_activity[status_activity["_project_key"].astype(bool)].copy()
+            ranking_keys = set(ranking_df["_project_key"].dropna().astype(str))
+            if ranking_keys:
+                status_activity = status_activity[status_activity["_project_key"].isin(ranking_keys)].copy()
+            if not status_activity.empty:
+                if mode == "month":
+                    status_latest = status_activity[status_activity["_month_local"].eq(target_month)].copy()
+                else:
+                    if status_activity["_month_local"].notna().any():
+                        latest_period = status_activity.groupby("_project_key", dropna=False)["_month_local"].transform("max")
+                        period_series = status_activity["_month_local"]
+                        latest_mask = period_series.eq(latest_period) | (period_series.isna() & latest_period.isna())
+                        status_latest = status_activity[latest_mask].copy()
+                    else:
+                        status_latest = status_activity.copy()
+
+                status_latest["activity_norm"] = status_latest.get("activity_norm", pd.Series("", index=status_latest.index)).fillna("").astype(str).str.lower()
+                status_latest["cumulative_progress"] = pd.to_numeric(status_latest.get("cumulative_progress"), errors="coerce").fillna(0.0)
+                status_latest["quantity_primary"] = pd.to_numeric(status_latest.get("quantity_primary"), errors="coerce").fillna(0.0)
+                status_latest["progress_for_month"] = pd.to_numeric(status_latest.get("progress_for_month"), errors="coerce").fillna(0.0)
+                status_latest["plan_for_month"] = pd.to_numeric(status_latest.get("plan_for_month"), errors="coerce").fillna(0.0)
+
+                for project_key, project_frame in status_latest.groupby("_project_key", dropna=False):
+                    project_metrics: dict[str, dict[str, float | None]] = {}
+
+                    def _collect(mask: pd.Series) -> dict[str, float | None]:
+                        scoped = project_frame[mask].copy()
+                        if scoped.empty:
+                            return {
+                                "cum_actual": None,
+                                "cum_target": None,
+                                "month_actual": None,
+                                "month_target": None,
+                            }
+                        return {
+                            "cum_actual": float(scoped["cumulative_progress"].sum()),
+                            "cum_target": float(scoped["quantity_primary"].sum()),
+                            "month_actual": float(scoped["progress_for_month"].sum()),
+                            "month_target": float(scoped["plan_for_month"].sum()),
+                        }
+
+                    activity_norm = project_frame["activity_norm"]
+                    opgw_mask = activity_norm.str.contains("opgw", na=False)
+                    project_metrics["foundation"] = _collect(activity_norm.str.contains("foundation", na=False))
+                    project_metrics["tower_erection"] = _collect(activity_norm.str.contains("erection", na=False))
+                    project_metrics["stringing"] = _collect(activity_norm.str.contains("stringing", na=False) & ~opgw_mask)
+                    project_metrics["opgw"] = _collect(opgw_mask)
+                    activity_values[str(project_key)] = project_metrics
+        LOGGER.warning(
+            "DEBUG exec portfolio metrics: ranking_projects=%s status_rows=%s keyed_projects=%s sample_keys=%s",
+            int(len(ranking_df.index)),
+            int(len(status_activity.index)) if isinstance(status_activity, pd.DataFrame) else 0,
+            int(len(activity_values)),
+            list(activity_values.keys())[:5],
+        )
+
+        pct_columns = {
+            "foundation": ("foundation_completion_pct",),
+            "tower_erection": ("tower_erection_completion_pct", "erection_completion_pct"),
+            "stringing": ("stringing_completion_pct",),
+            "opgw": ("opgw_completion_pct",),
+        }
+        if not snapshot_latest.empty:
+            for project_key in ranking_df["_project_key"].tolist():
+                if project_key not in activity_values:
+                    activity_values[project_key] = {}
+                snapshot_row = snapshot_latest.loc[project_key] if project_key in snapshot_latest.index else None
+                if snapshot_row is None or not isinstance(snapshot_row, (pd.Series, pd.DataFrame)):
+                    continue
+                if isinstance(snapshot_row, pd.DataFrame):
+                    snapshot_row = snapshot_row.iloc[0]
+                for activity_key, candidates in pct_columns.items():
+                    existing = activity_values[project_key].get(activity_key) or {}
+                    has_existing = any(
+                        _safe_number(existing.get(field)) not in (None, 0.0)
+                        for field in ("cum_actual", "cum_target", "month_actual", "month_target")
+                    )
+                    if has_existing:
+                        continue
+                    pct_value = None
+                    for col in candidates:
+                        if col in snapshot_row.index:
+                            pct_numeric = _safe_number(snapshot_row.get(col))
+                            if pct_numeric is not None:
+                                pct_value = pct_numeric
+                                break
+                    if pct_value is not None:
+                        activity_values[project_key][activity_key] = {
+                            "cum_actual": float(pct_value),
+                            "cum_target": 100.0,
+                            "month_actual": None,
+                            "month_target": None,
+                        }
+
+        def _activity_pair(project_key: str, activity_key: str) -> tuple[float | None, float | None]:
+            bucket = activity_values.get(project_key, {}).get(activity_key) or {}
+            if mode == "month":
+                return _safe_number(bucket.get("month_actual")), _safe_number(bucket.get("month_target"))
+            return _safe_number(bucket.get("cum_actual")), _safe_number(bucket.get("cum_target"))
+
+        grouped_rows: OrderedDict[str, list[pd.Series]] = OrderedDict()
+        for _, rank_row in ranking_df.iterrows():
+            pch_name = str(rank_row.get("pch_group", "")).strip() or "Unassigned"
+            grouped_rows.setdefault(pch_name, []).append(rank_row)
+
+        pch_names = sorted(grouped_rows.keys(), key=lambda value: (str(value).strip().lower() == "unassigned", str(value).lower()))
+        table_rows: list[Any] = []
+        rag_rank = {"RED": 3, "AMBER": 2, "GREEN": 1, "NO_DATA": 0}
+
+        for pch_name in pch_names:
+            project_rows = grouped_rows.get(pch_name) or []
+            pch_key = _sanitize_pch_key(pch_name)
+
+            def _sum_activity(activity_key: str) -> tuple[float | None, float | None]:
+                actual_total = 0.0
+                target_total = 0.0
+                has_values = False
+                for row in project_rows:
+                    proj_key = str(row.get("_project_key", ""))
+                    actual_value, target_value = _activity_pair(proj_key, activity_key)
+                    if actual_value is not None:
+                        actual_total += float(actual_value)
+                    if target_value is not None:
+                        target_total += float(target_value)
+                    if (actual_value not in (None, 0.0)) or (target_value not in (None, 0.0)):
+                        has_values = True
+                if not has_values:
+                    return None, None
+                return actual_total, target_total
+
+            rag_values = [str(row.get("overall_rag", "NO_DATA")).upper().strip() or "NO_DATA" for row in project_rows]
+            pch_rag = "NO_DATA"
+            if rag_values:
+                pch_rag = max(rag_values, key=lambda item: rag_rank.get(item, -1))
+            pch_lag = pd.to_numeric(pd.Series([row.get("gap_days_avg") for row in project_rows]), errors="coerce").dropna()
+            pch_lag_cell = html.Div("-", className="text-muted", style={"textAlign": "center"})
+            if not pch_lag.empty:
+                pch_lag_cell = html.Div(f"{float(pch_lag.mean()):.0f} days", className="fw-700")
+
+            table_rows.append(
+                html.Tr(
+                    [
+                        html.Td(
+                            html.Button(
+                                [
+                                    html.Span("?", id=f"chevron-{pch_key}", className="toggle-chevron"),
+                                    html.Span(str(pch_name), className="fw-700"),
+                                ],
+                                id={"type": "exec-pch-toggle", "pch": pch_key},
+                                n_clicks=0,
+                                className="w-100 text-start",
+                                style={
+                                    "border": "none",
+                                    "background": "transparent",
+                                    "padding": "0",
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                },
+                            )
+                        ),
+                        html.Td(_build_prog_cell(*_sum_activity("foundation"))),
+                        html.Td(_build_prog_cell(*_sum_activity("tower_erection"))),
+                        html.Td(_build_prog_cell(*_sum_activity("stringing"))),
+                        html.Td(_build_prog_cell(*_sum_activity("opgw"))),
+                        html.Td(_build_rag_badge(pch_rag), style={"textAlign": "center"}),
+                        html.Td(pch_lag_cell, style={"textAlign": "center"}),
+                    ],
+                    id=f"pch-row-{pch_key}",
+                    className="pch-row",
+                )
+            )
+
+            for rank_row in project_rows:
+                project_name = str(rank_row.get("project_display") or rank_row.get("project_code") or "").strip() or "Unknown Project"
+                project_label = project_name
+                project_key = str(rank_row.get("_project_key", "")).strip()
+                if mode == "month":
+                    has_target_month_status = _as_bool(rank_row.get("has_target_month_status"))
+                    if not has_target_month_status:
+                        latest_dpr = str(rank_row.get("latest_report_date") or "").strip()
+                        stale_tag = f"[STALE: last DPR {latest_dpr}]" if latest_dpr else "[STALE: no DPR date]"
+                        project_label = f"{project_label} {stale_tag}"
+                lag_value = _safe_number(rank_row.get("gap_days_avg"))
+                if lag_value is None:
+                    lag_cell = html.Div("-", className="text-muted", style={"textAlign": "center"})
+                else:
+                    lag_cell = html.Div(f"{lag_value:.0f} days")
+
+                table_rows.append(
+                    html.Tr(
+                        [
+                            html.Td(project_label),
+                            html.Td(_build_prog_cell(*_activity_pair(project_key, "foundation"))),
+                            html.Td(_build_prog_cell(*_activity_pair(project_key, "tower_erection"))),
+                            html.Td(_build_prog_cell(*_activity_pair(project_key, "stringing"))),
+                            html.Td(_build_prog_cell(*_activity_pair(project_key, "opgw"))),
+                            html.Td(_build_rag_badge(rank_row.get("overall_rag", "NO_DATA")), style={"textAlign": "center"}),
+                            html.Td(lag_cell, style={"textAlign": "center"}),
+                        ],
+                        id={
+                            "type": "project-tile-trigger",
+                            "project": project_name,
+                            "mode": "erection",
+                            "context": "exec-portfolio",
+                        },
+                        n_clicks=0,
+                        className=f"project-row pch-child-{pch_key}",
+                        style={"display": "none"},
+                    )
+                )
+
+        return html.Table(
+            [
+                html.Thead(
+                    html.Tr(
+                        [
+                            html.Th("Project / PCH"),
+                            html.Th("Foundation"),
+                            html.Th("Tower Erection"),
+                            html.Th("Stringing"),
+                            html.Th("OPGW"),
+                            html.Th("RAG"),
+                            html.Th("E→S Lag"),
+                        ]
+                    )
+                ),
+                html.Tbody(table_rows),
+            ],
+            className="portfolio-table",
+        )
+
+    app.clientside_callback(
+        """
+        function(_clicks, _store){
+            const C = window.dash_clientside;
+            const NO = C.no_update;
+            const ctx = C.callback_context;
+            if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
+            const prop = ctx.triggered[0].prop_id || "";
+            const idPart = prop.split(".")[0];
+            let pch_key = "";
+            try {
+                const parsed = JSON.parse(idPart);
+                pch_key = parsed && parsed.pch ? String(parsed.pch) : "";
+            } catch (e) {
+                return NO;
+            }
+            if (!pch_key) return NO;
+            const rows = document.querySelectorAll(`.pch-child-${pch_key}`);
+            const chevron = document.getElementById(`chevron-${pch_key}`);
+            rows.forEach((r) => {
+                r.style.display = (r.style.display === "none" || r.style.display === "") ? "table-row" : "none";
+            });
+            if (chevron) chevron.classList.toggle("open");
+            return NO;
+        }
+        """,
+        Output("exec-pch-expanded", "data"),
+        Input({"type": "exec-pch-toggle", "pch": ALL}, "n_clicks"),
+        State("exec-pch-expanded", "data"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("exec-kpi-portfolio-completion", "children"),
@@ -12870,8 +14136,6 @@ def register_callbacks(
         Output("exec-kpi-manpower-sub", "children"),
         Output("exec-kpi-atrisk", "children"),
         Output("exec-kpi-atrisk-sub", "children"),
-        Output("exec-status-trend-graph", "figure"),
-        Output("exec-stretch-trend-graph", "figure"),
         Output("exec-project-ranking-table", "columns"),
         Output("exec-project-ranking-table", "data"),
         Output("exec-risk-driver-graph", "figure"),
@@ -12883,39 +14147,11 @@ def register_callbacks(
     def _render_executive_overview(payload: dict[str, Any] | None):
         safe = payload or {}
         kpis = safe.get("kpis") or {}
-        trends = safe.get("overall_trends") or {}
-        status_df = pd.DataFrame(trends.get("status") or [])
-        stretch_df = pd.DataFrame(trends.get("stretch") or [])
         ranking_df = pd.DataFrame(safe.get("project_ranking") or [])
         risk_df = pd.DataFrame(safe.get("risk_drivers") or [])
         coverage_df = pd.DataFrame(safe.get("coverage_summary") or [])
         callouts = safe.get("callouts") or []
         lens = str(safe.get("lens") or "monthly").title()
-
-        if not status_df.empty:
-            fig_status = go.Figure()
-            fig_status.add_trace(go.Scatter(x=status_df["period"], y=status_df["completion_pct"], mode="lines+markers", name="Completion %", line={"width": 3, "color": "#2563eb"}))
-            fig_status.add_trace(go.Scatter(x=status_df["period"], y=status_df["plan_attainment_pct"], mode="lines+markers", name="Plan %", line={"width": 3, "color": "#0f766e"}))
-            fig_status.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 40, "r": 20, "t": 10, "b": 35}, yaxis={"title": "%", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.12, "x": 0})
-        else:
-            fig_status = _exec_empty_fig("No status trend data")
-
-        if not stretch_df.empty:
-            fig_stretch = go.Figure()
-            fig_stretch.add_trace(go.Scatter(x=stretch_df["period"], y=stretch_df["readiness_pct"], mode="lines+markers", line={"width": 3, "color": "#d97706"}, name="Readiness %"))
-            if "readiness_km_pct" in stretch_df.columns and pd.to_numeric(stretch_df.get("readiness_km_pct"), errors="coerce").notna().any():
-                fig_stretch.add_trace(
-                    go.Scatter(
-                        x=stretch_df["period"],
-                        y=stretch_df["readiness_km_pct"],
-                        mode="lines+markers",
-                        line={"width": 3, "color": "#0f766e"},
-                        name="Readiness % (km-weighted)",
-                    )
-                )
-            fig_stretch.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 40, "r": 20, "t": 10, "b": 35}, yaxis={"title": "%", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"})
-        else:
-            fig_stretch = _exec_empty_fig("No stretch readiness data")
 
         ranking_columns = []
         ranking_data = []
@@ -12935,17 +14171,56 @@ def register_callbacks(
             ranking_data = ranking_df[["project_display", "line_name", "completion_pct", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg", "overall_rag"]].to_dict("records")
 
         if not risk_df.empty:
-            labels = (risk_df["project_display"].fillna("").astype(str) + " | " + risk_df["line_name"].fillna("").astype(str)).tolist()
-            risk_es_days = pd.to_numeric(
+            risk_df = risk_df.copy()
+            risk_df["project_label"] = risk_df["project_display"].fillna("").astype(str).str.strip()
+            has_line = risk_df.get("line_name", pd.Series("", index=risk_df.index)).fillna("").astype(str).str.strip().astype(bool)
+            risk_df.loc[has_line, "project_label"] = (
+                risk_df.loc[has_line, "project_display"].fillna("").astype(str).str.strip()
+                + " | "
+                + risk_df.loc[has_line, "line_name"].fillna("").astype(str).str.strip()
+            )
+            risk_df["plan_slippage_pct"] = pd.to_numeric(risk_df.get("plan_slippage_pct"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+            risk_df["readiness_gap_pct"] = pd.to_numeric(risk_df.get("readiness_gap_pct"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+            risk_df["manpower_gap_pct"] = pd.to_numeric(risk_df.get("manpower_gap_pct"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+            risk_df["es_gap_days"] = pd.to_numeric(
                 risk_df.get("es_gap_days", risk_df.get("gap_days_avg", pd.Series(0.0, index=risk_df.index))),
                 errors="coerce",
-            ).fillna(0.0)
+            ).fillna(0.0).clip(lower=0.0, upper=100.0)
+            risk_df["risk_total"] = (
+                risk_df["plan_slippage_pct"]
+                + risk_df["readiness_gap_pct"]
+                + risk_df["manpower_gap_pct"]
+                + risk_df["es_gap_days"]
+            )
+            risk_df = risk_df.sort_values("risk_total", ascending=False).head(8).sort_values("risk_total", ascending=True)
             fig_risk = go.Figure()
-            fig_risk.add_bar(x=labels, y=risk_df["plan_slippage_pct"], name="Plan slippage", marker_color="#dc2626")
-            fig_risk.add_bar(x=labels, y=risk_df["readiness_gap_pct"], name="Readiness gap", marker_color="#d97706")
-            fig_risk.add_bar(x=labels, y=risk_df["manpower_gap_pct"], name="Manpower gap", marker_color="#2563eb")
-            fig_risk.add_bar(x=labels, y=risk_es_days, name="E-S lag (days)", marker_color="#7c3aed")
-            fig_risk.update_layout(barmode="stack", template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 75}, xaxis={"tickangle": -30}, yaxis={"title": "Risk contribution (higher is worse)", "gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.16, "x": 0})
+            metrics = [
+                ("Plan Slippage %", "plan_slippage_pct", KEC_SEQUENCE[0]),
+                ("Readiness Gap %", "readiness_gap_pct", KEC_SEQUENCE[1]),
+                ("Manpower Gap %", "manpower_gap_pct", KEC_SEQUENCE[2]),
+                ("E→S Lag (days)", "es_gap_days", KEC_SEQUENCE[3]),
+            ]
+            for name, column, colour in metrics:
+                fig_risk.add_bar(
+                    x=risk_df[column],
+                    y=risk_df["project_label"],
+                    orientation="h",
+                    name=name,
+                    marker_color=colour,
+                    hovertemplate="<b>%{y}</b><br>%{x:.1f}<extra></extra>",
+                )
+            fig_risk.update_layout(
+                **_kec_layout(
+                    height=300,
+                    xaxis_title="Value (0-100)",
+                    yaxis_title="Project",
+                    margin={"l": 180, "r": 20, "t": 10, "b": 40},
+                ),
+                barmode="group",
+                colorway=KEC_SEQUENCE,
+            )
+            fig_risk.update_xaxes(range=[0, 100])
+            fig_risk.update_yaxes(autorange="reversed")
         else:
             fig_risk = _exec_empty_fig("No risk driver data")
 
@@ -12962,38 +14237,51 @@ def register_callbacks(
             coverage_data = coverage_df[["project_display", "line_name", "status_data", "stretch_data", "manpower_data"]].to_dict("records")
 
         callout_children = [html.Li(text) for text in callouts] if callouts else [html.Li("No callouts available.")]
-        manpower_total = int(kpis.get("manpower_projects_total", 0) or 0)
-        manpower_covered = int(kpis.get("manpower_projects_covered", 0) or 0)
-        kpi_atrisk = int(kpis.get("atrisk_projects", 0) or 0)
-        if kpi_atrisk == 0:
-            atrisk_sub = "All projects on track"
+        erection_prod_rows = int(kpis.get("erection_productivity_rows", 0) or 0)
+        stringing_prod_rows = int(kpis.get("stringing_productivity_rows", 0) or 0)
+        if erection_prod_rows <= 0:
+            erection_prod_value = "-"
+            erection_prod_sub = "No erection productivity data"
         else:
-            atrisk_sub = f"{kpi_atrisk} project(s) flagged RED"
+            erection_prod_value = f"{float(kpis.get('erection_productivity_mt_day', 0.0)):.2f} MT/day"
+            erection_prod_sub = f"{erection_prod_rows} record(s) in selected scope"
+        if stringing_prod_rows <= 0:
+            stringing_prod_value = "-"
+            stringing_prod_sub = "No stringing productivity data"
+        else:
+            stringing_prod_value = f"{float(kpis.get('stringing_productivity_km_month', 0.0)):.2f} KM/month"
+            stringing_prod_sub = f"{stringing_prod_rows} record(s) in selected scope"
         plan_green = float(config.exec_plan_green_pct)
         plan_amber = float(config.exec_plan_amber_low_pct)
-        plan_sub = f"≥{plan_green:.0f}% = on track, {plan_amber:.0f}–{plan_green:.0f}% = watch"
-        if manpower_covered == 0:
-            manpower_value = "—"
-            manpower_sub = "No manpower data available"
-        else:
-            manpower_value = f"{float(kpis.get('manpower_availability_pct', 0.0)):.1f}%"
-            manpower_sub = f"{manpower_covered} of {manpower_total} projects have manpower data"
+        plan_sub = f"={plan_green:.0f}% = on track, {plan_amber:.0f}-{plan_green:.0f}% = watch"
+
+        gap_days_median = kpis.get("gap_days_median")
+        gap_pct_over_60 = kpis.get("gap_pct_over_60")
+        gap_value_text = f"{float(gap_days_median):.0f} days" if gap_days_median is not None else "—"
+        gap_sub_text = (
+            f"{float(gap_pct_over_60):.0f}% spans delayed >60 days"
+            if gap_pct_over_60 is not None
+            else "No gap data"
+        )
+        projects_covered = int(kpis.get("projects_covered", 0) or 0)
+        target_month_label = str(safe.get("target_month_label") or "").strip()
+        portfolio_sub = f"{lens} view | {projects_covered} projects"
+        if target_month_label:
+            portfolio_sub = f"{portfolio_sub} | Target month: {target_month_label}"
 
         return (
             f"{float(kpis.get('portfolio_completion_pct', 0.0)):.1f}%",
-            f"{lens} view | {int(kpis.get('projects_covered', 0) or 0)} projects",
+            portfolio_sub,
             f"{float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
             plan_sub,
             f"{float(kpis.get('stretch_readiness_km_pct', 0.0)):.1f}%",
             f"km-weighted | {float(kpis.get('stretch_readiness_pct', 0.0)):.1f}% by section count",
-            f"{float(kpis.get('gap_days_avg', 0.0)):.0f} days",
-            "Avg. delay: ready to P/O start",
-            manpower_value,
-            manpower_sub,
-            str(int(kpis.get("atrisk_projects", 0) or 0)),
-            atrisk_sub,
-            fig_status,
-            fig_stretch,
+            gap_value_text,
+            gap_sub_text,
+            erection_prod_value,
+            erection_prod_sub,
+            stringing_prod_value,
+            stringing_prod_sub,
             ranking_columns,
             ranking_data,
             fig_risk,
@@ -13002,10 +14290,47 @@ def register_callbacks(
             coverage_data,
         )
 
+    def _resolve_selected_project_productivity(
+        payload: dict[str, Any] | None,
+        selected_project_name: str | None,
+    ) -> tuple[float, int, float, int]:
+        project_name = str(selected_project_name or "").strip()
+        if not project_name or DATA_SELECTOR is None:
+            return 0.0, 0, 0.0, 0
+
+        safe = payload or {}
+        filters = safe.get("filters") or {}
+        line_filters = _normalize_str_list(_ensure_list(filters.get("lines")))
+        month_filters = _normalize_str_list(_ensure_list(filters.get("months")))
+        months_ts = resolve_months(month_filters, str(filters.get("quick_range") or ""))
+        gang_filters = _normalize_str_list(_ensure_list(filters.get("gangs")))
+        lens = "weekly" if str(filters.get("lens") or "").strip().lower() == "weekly" else "monthly"
+
+        def _project_scope(mode: str) -> pd.DataFrame:
+            try:
+                frame = DATA_SELECTOR.select(mode)
+            except Exception:
+                return pd.DataFrame()
+            return _exec_filter_frame(
+                frame,
+                projects=[project_name],
+                lines=line_filters,
+                months_ts=months_ts,
+                lens=lens,
+                gangs=gang_filters,
+            )
+
+        erection_scope = _project_scope("erection")
+        stringing_scope = _project_scope("stringing")
+
+        erection_rows = int(len(erection_scope.index))
+        stringing_rows = int(len(stringing_scope.index))
+        erection_prod = _avg_metric_value(erection_scope, "daily_prod_mt", False)
+        stringing_prod = _avg_metric_value(stringing_scope, "daily_km", True)
+        return erection_prod, erection_rows, stringing_prod, stringing_rows
+
     @app.callback(
-        Output("project-overview-scope-label", "children"),
-        Output("project-overview-scope-period", "children"),
-        Output("project-overview-scope-coverage", "children"),
+        Output("proj-overview-last-updated", "children"),
         Output("proj-kpi-completion", "children"),
         Output("proj-kpi-completion-sub", "children"),
         Output("proj-kpi-plan", "children"),
@@ -13016,234 +14341,729 @@ def register_callbacks(
         Output("proj-kpi-gap-sub", "children"),
         Output("proj-kpi-manpower", "children"),
         Output("proj-kpi-manpower-sub", "children"),
-        Output("proj-kpi-rag", "children"),
-        Output("proj-kpi-rag-sub", "children"),
-        Output("proj-status-trend-graph", "figure"),
-        Output("proj-activity-contrib-graph", "figure"),
+        Output("proj-stretch-summary-chip", "children"),
         Output("proj-stretch-state-graph", "figure"),
-        Output("proj-stretch-trend-graph", "figure"),
-        Output("proj-stretch-blocked-table", "columns"),
-        Output("proj-stretch-blocked-table", "data"),
-        Output("proj-se-gap-graph", "figure"),
-        Output("proj-stringing-erection-trend-graph", "figure"),
-        Output("proj-manpower-scatter-graph", "figure"),
-        Output("proj-manpower-availability-graph", "figure"),
-        Output("proj-gang-league-table", "columns"),
-        Output("proj-gang-league-table", "data"),
-        Output("proj-coverage-table", "columns"),
-        Output("proj-coverage-table", "data"),
+        Output("proj-stretch-blocked-summary", "children"),
+        Output("proj-es-lag-chart", "figure"),
+        Output("proj-erection-prod-chart", "figure"),
+        Output("proj-stringing-prod-chart", "figure"),
         Input("project-overview-payload", "data"),
+        Input("proj-overview-project-select", "value"),
     )
-    def _render_project_overview(payload: dict[str, Any] | None):
+    def _render_project_overview(payload: dict[str, Any] | None, selected_project: str | None):
         safe = payload or {}
+        filters = safe.get("filters") or {}
         scope = safe.get("scope") or {}
-        kpis = safe.get("kpis") or {}
+        selected_project_value = str(selected_project or "").strip()
+        selected_project_name = selected_project_value or str(scope.get("project") or "").strip()
+        kpis = dict(safe.get("kpis") or {})
         status = safe.get("status") or {}
         stretch = safe.get("stretch") or {}
-        se = safe.get("stringing_erection") or {}
         mp = safe.get("manpower_productivity") or {}
-        coverage = safe.get("coverage") or {}
+        ranking_df = pd.DataFrame(safe.get("ranking") or [])
+        if selected_project_name and not ranking_df.empty and "project_display" in ranking_df.columns:
+            selected_key = _compact_project_key(selected_project_name)
+            match = ranking_df[ranking_df["project_display"].fillna("").astype(str).map(_compact_project_key).eq(selected_key)]
+            if not match.empty:
+                row = match.iloc[0]
+                for col in ("completion_pct", "plan_attainment_pct", "readiness_pct", "gap_days_avg", "manpower_availability_pct"):
+                    val = pd.to_numeric(row.get(col), errors="coerce")
+                    if pd.notna(val):
+                        kpis[col] = float(val)
+                if str(row.get("overall_rag", "")).strip():
+                    kpis["rag"] = str(row.get("overall_rag")).strip()
 
-        status_df = pd.DataFrame(status.get("trend") or [])
-        act_df = pd.DataFrame(status.get("activity_contribution") or [])
+        if selected_project_name:
+            (
+                selected_erection_prod,
+                selected_erection_rows,
+                selected_stringing_prod,
+                selected_stringing_rows,
+            ) = _resolve_selected_project_productivity(safe, selected_project_name)
+            kpis["erection_productivity_mt_day"] = selected_erection_prod
+            kpis["erection_productivity_rows"] = selected_erection_rows
+            kpis["stringing_productivity_km_month"] = selected_stringing_prod
+            kpis["stringing_productivity_rows"] = selected_stringing_rows
+
+        ready_km = float(pd.to_numeric(stretch.get("ready_km", 0.0), errors="coerce") or 0.0)
+        total_km = float(pd.to_numeric(stretch.get("total_km", 0.0), errors="coerce") or 0.0)
         stretch_state_df = pd.DataFrame(stretch.get("state_split") or [])
-        stretch_trend_df = pd.DataFrame(stretch.get("trend") or [])
         blocked_df = pd.DataFrame(stretch.get("blocked_sections") or [])
-        gap_df = pd.DataFrame(se.get("gap_trend") or [])
         scatter_df = pd.DataFrame(mp.get("scatter") or [])
-        availability_df = pd.DataFrame(mp.get("availability") or [])
-        league_df = pd.DataFrame(mp.get("league") or [])
-        coverage_df = pd.DataFrame(coverage.get("rows") or [])
 
-        if not status_df.empty:
-            fig_proj_status = go.Figure()
-            fig_proj_status.add_trace(go.Scatter(x=status_df["period"], y=status_df["completion_pct"], mode="lines+markers", name="Completion %", line={"width": 3, "color": "#2563eb"}))
-            fig_proj_status.add_trace(go.Scatter(x=status_df["period"], y=status_df["plan_attainment_pct"], mode="lines+markers", name="Plan %", line={"width": 3, "color": "#0f766e"}))
-            fig_proj_status.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 35, "r": 20, "t": 10, "b": 30}, yaxis={"title": "%", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.12, "x": 0})
-        else:
-            fig_proj_status = _exec_empty_fig("No status trend")
+        blocked_summary = "No blocked stretches in current scope."
+        if not blocked_df.empty:
+            blocked_summary = f"Blocked stretches: {len(blocked_df.index)}"
+        stretch_has_data = bool(
+            not stretch_state_df.empty and pd.to_numeric(stretch_state_df.get("count"), errors="coerce").fillna(0.0).sum() > 0
+        )
 
-        if not act_df.empty:
-            if "activity" not in act_df.columns and "activity_group" in act_df.columns:
-                act_df["activity"] = act_df["activity_group"].fillna("").astype(str)
-            if "completion_pct" not in act_df.columns and "value" in act_df.columns:
-                act_df["completion_pct"] = pd.to_numeric(act_df.get("value"), errors="coerce")
-            act_df["completion_pct"] = pd.to_numeric(act_df.get("completion_pct"), errors="coerce")
-            order = {"Foundation": 0, "Tower Erection": 1, "Stringing": 2, "OPGW": 3}
-            palette = {
-                "Foundation": "#102a72",      # navy
-                "Tower Erection": "#1d4ed8",  # blue
-                "Stringing": "#3b82f6",       # medium blue
-                "OPGW": "#0f766e",            # teal
-            }
-            act_df["_order"] = act_df.get("activity", pd.Series("", index=act_df.index)).map(order).fillna(99)
-            act_df = act_df.sort_values("_order", ascending=False)
-            bar_colors = act_df.get("activity", pd.Series("", index=act_df.index)).map(palette).fillna("#0ea5e9").tolist()
-            fig_act = go.Figure()
-            fig_act.add_bar(x=act_df["completion_pct"], y=act_df["activity"], orientation="h", marker_color=bar_colors)
-            fig_act.add_vline(x=100, line_width=2, line_dash="dash", line_color="#475569")
-            fig_act.update_layout(
-                template="plotly_white",
-                paper_bgcolor="white",
-                plot_bgcolor="white",
-                margin={"l": 120, "r": 20, "t": 10, "b": 30},
-                xaxis={"title": "Completion %", "gridcolor": "#e6e9f0", "range": [0, 100]},
-                yaxis={"title": ""},
-            )
-        else:
-            fig_act = _exec_empty_fig("No activity contribution")
+        focus_project = selected_project_name
+        focus_project_key = _compact_project_key(focus_project)
+        if focus_project:
+            stretch_scope = _safe_provider_frame(_STRETCH_SECTION_PROVIDER)
+            if not stretch_scope.empty:
+                key = focus_project_key
+                stretch_scope = stretch_scope[_exec_project_key(stretch_scope).eq(key)].copy()
+                if not stretch_scope.empty:
+                    state = stretch_scope.get("readiness_state", pd.Series("", index=stretch_scope.index)).fillna("").astype(str).str.upper()
+                    stretch_state_df = pd.DataFrame(
+                        [{"state": key_name, "count": int((state == key_name).sum())} for key_name in ("READY", "PARTIAL", "NOT_READY", "UNKNOWN")]
+                    )
+                    stretch_has_data = bool(
+                        pd.to_numeric(stretch_state_df.get("count"), errors="coerce").fillna(0.0).sum() > 0
+                    )
+                    blocked_count = int((~state.eq("READY")).sum())
+                    blocked_summary = "No blocked stretches in current scope." if blocked_count <= 0 else f"Blocked stretches: {blocked_count}"
+                stretch_summary_scope = _safe_provider_frame(_STRETCH_READINESS_SUMMARY_PROVIDER)
+                stretch_summary_scope = stretch_summary_scope[_exec_project_key(stretch_summary_scope).eq(key)].copy() if not stretch_summary_scope.empty else pd.DataFrame()
+                if not stretch_summary_scope.empty:
+                    ready_km = float(pd.to_numeric(stretch_summary_scope.get("ready_km"), errors="coerce").fillna(0.0).sum())
+                    total_km = float(pd.to_numeric(stretch_summary_scope.get("total_km"), errors="coerce").fillna(0.0).sum())
 
         if not stretch_state_df.empty and pd.to_numeric(stretch_state_df.get("count"), errors="coerce").sum() > 0:
-            fig_state = go.Figure(data=[go.Pie(labels=stretch_state_df["state"], values=stretch_state_df["count"], hole=0.45, marker={"colors": ["#16a34a", "#f59e0b", "#dc2626", "#94a3b8"]})])
-            fig_state.update_layout(template="plotly_white", margin={"l": 10, "r": 10, "t": 10, "b": 10})
+            pie_colors = {
+                "READY": KEC_COLOURS["green"],
+                "PARTIAL": KEC_COLOURS["amber"],
+                "NOT_READY": KEC_COLOURS["red"],
+                "UNKNOWN": KEC_COLOURS["grey"],
+            }
+            state_labels = stretch_state_df["state"].fillna("").astype(str).str.upper()
+            fig_state = go.Figure(
+                data=[
+                    go.Pie(
+                        labels=state_labels,
+                        values=stretch_state_df["count"],
+                        hole=0.45,
+                        domain={"x": [0.0, 0.62], "y": [0.02, 0.98]},
+                        marker={"colors": [pie_colors.get(label, KEC_COLOURS["grey"]) for label in state_labels]},
+                    )
+                ]
+            )
+            fig_state.update_layout(
+                **{
+                    **_kec_layout(height=280, legend=True, margin={"l": 10, "r": 140, "t": 10, "b": 10}),
+                    "legend": {
+                        "orientation": "v",
+                        "x": 1.0,
+                        "xanchor": "left",
+                        "y": 0.5,
+                        "yanchor": "middle",
+                        "font": {"size": 12},
+                    },
+                },
+            )
         else:
             fig_state = _exec_empty_fig("No stretch split")
 
-        if not stretch_trend_df.empty:
-            fig_stretch_trend = go.Figure()
-            fig_stretch_trend.add_trace(
-                go.Scatter(
-                    x=stretch_trend_df["period"],
-                    y=stretch_trend_df["readiness_pct"],
-                    mode="lines+markers",
-                    line={"width": 3, "color": "#d97706"},
-                    name="Readiness % (section count)",
-                )
+        projects_filter = _normalize_str_list(_ensure_list(filters.get("projects")))
+        months_filter = _normalize_str_list(_ensure_list(filters.get("months")))
+        months_ts_filter = resolve_months(months_filter, str(filters.get("quick_range") or ""))
+        gangs_filter = _normalize_str_list(_ensure_list(filters.get("gangs")))
+        readiness_hist, _readiness_stats = (
+            _build_project_readiness_histogram(
+                {focus_project_key} if focus_project_key else set(),
+                projects=projects_filter,
+                months=months_ts_filter,
+                gangs=gangs_filter,
+                method_filter="tse",
             )
-            if "readiness_km_pct" in stretch_trend_df.columns and pd.to_numeric(stretch_trend_df.get("readiness_km_pct"), errors="coerce").notna().any():
-                fig_stretch_trend.add_trace(
-                    go.Scatter(
-                        x=stretch_trend_df["period"],
-                        y=stretch_trend_df["readiness_km_pct"],
-                        mode="lines+markers",
-                        line={"width": 3, "color": "#0f766e"},
-                        name="Readiness % (km-weighted)",
-                    )
-                )
-            fig_stretch_trend.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 35, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Readiness %", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"}, legend={"orientation": "h", "y": 1.12, "x": 0})
-        else:
-            fig_stretch_trend = _exec_empty_fig("No stretch trend")
-
-        blocked_columns = [{"name": str(c).replace("_", " ").title(), "id": str(c)} for c in blocked_df.columns] if not blocked_df.empty else []
-        blocked_data = blocked_df.to_dict("records") if not blocked_df.empty else []
-
-        if not gap_df.empty:
-            if "gap_days_avg" not in gap_df.columns:
-                gap_df["gap_days_avg"] = pd.to_numeric(gap_df.get("gap_ratio_pct"), errors="coerce")
-            if "erection_cumulative_mt" not in gap_df.columns:
-                gap_df["erection_cumulative_mt"] = pd.to_numeric(gap_df.get("erection_cumulative"), errors="coerce")
-            if "stringing_cumulative_km" not in gap_df.columns:
-                gap_df["stringing_cumulative_km"] = pd.to_numeric(gap_df.get("stringing_cumulative"), errors="coerce")
-            fig_gap = go.Figure()
-            fig_gap.add_bar(x=gap_df["period"], y=gap_df["gap_days_avg"], marker_color="#7c3aed")
-            fig_gap.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Lag (days)", "gridcolor": "#e6e9f0"}, xaxis={"gridcolor": "#e6e9f0"})
-            fig_se = go.Figure()
-            fig_se.add_trace(
-                go.Scatter(
-                    x=gap_df["period"],
-                    y=gap_df["erection_cumulative_mt"],
-                    mode="lines+markers",
-                    name="Erection (MT)",
-                    line={"width": 3, "color": "#0f766e"},
-                    yaxis="y",
-                )
+            if stretch_has_data
+            else ([], {})
+        )
+        readiness_labels = [str(row.get("bucket", "")).strip() for row in readiness_hist]
+        readiness_counts = [int(pd.to_numeric(row.get("count"), errors="coerce") or 0) for row in readiness_hist]
+        if stretch_has_data and readiness_labels and sum(readiness_counts) > 0:
+            fig_lag = go.Figure()
+            fig_lag.add_bar(
+                x=readiness_labels,
+                y=readiness_counts,
+                marker_color=KEC_COLOURS["blue_light"],
+                hovertemplate="%{y} spans<extra></extra>",
             )
-            fig_se.add_trace(
-                go.Scatter(
-                    x=gap_df["period"],
-                    y=gap_df["stringing_cumulative_km"],
-                    mode="lines+markers",
-                    name="Stringing (km)",
-                    line={"width": 3, "color": "#2563eb"},
-                    yaxis="y2",
-                )
-            )
-            fig_se.update_layout(
-                template="plotly_white",
-                paper_bgcolor="white",
-                plot_bgcolor="white",
-                margin={"l": 30, "r": 40, "t": 10, "b": 30},
-                yaxis={"title": "Erection cumulative (MT)", "gridcolor": "#e6e9f0"},
-                yaxis2={"title": "Stringing cumulative (km)", "overlaying": "y", "side": "right"},
-                xaxis={"gridcolor": "#e6e9f0"},
-                legend={"orientation": "h", "y": 1.12, "x": 0},
+            fig_lag.update_layout(
+                **_kec_layout(
+                    height=260,
+                    xaxis_title="Gap bucket (days)",
+                    yaxis_title="Spans",
+                    legend=False,
+                    margin={"l": 40, "r": 20, "t": 10, "b": 40},
+                ),
             )
         else:
-            fig_gap = _exec_empty_fig("No E-S gap trend")
-            fig_se = _exec_empty_fig("No cumulative detail")
+            fig_lag = _exec_empty_fig("No stretch readiness gap data")
 
+        def _build_productivity_chart(
+            frame: pd.DataFrame,
+            *,
+            project_key: str,
+            project_cols: Sequence[str],
+            gang_cols: Sequence[str],
+            value_cols: Sequence[str],
+            yaxis_title: str,
+            bar_color: str,
+        ) -> go.Figure | None:
+            if frame.empty or not project_key:
+                return None
+            work = frame.copy()
+            project_series = pd.Series("", index=work.index, dtype="string")
+            for col in project_cols:
+                if col in work.columns:
+                    candidate = work[col].fillna("").astype(str).str.strip()
+                    project_series = project_series.where(project_series.astype(bool), candidate)
+            if not project_series.astype(bool).any():
+                return None
+            work = work[project_series.map(_compact_project_key).eq(project_key)].copy()
+            if work.empty:
+                return None
+
+            gang_col = next((col for col in gang_cols if col in work.columns), "")
+            value_col = next(
+                (
+                    col
+                    for col in value_cols
+                    if col in work.columns and pd.to_numeric(work[col], errors="coerce").notna().any()
+                ),
+                "",
+            )
+            if not gang_col or not value_col:
+                return None
+
+            work["_gang"] = work[gang_col].fillna("").astype(str).str.strip()
+            work["_value"] = pd.to_numeric(work[value_col], errors="coerce")
+            _null_gang = work["_gang"].str.lower().isin({"nan", "none", "null", "na", "n/a", "nil", "--", "-"})
+            plot_df = (
+                work[work["_gang"].astype(bool) & ~_null_gang & work["_value"].notna()]
+                .groupby("_gang", dropna=False)
+                .agg(value=("_value", "mean"))
+                .reset_index()
+                .sort_values("value", ascending=False)
+                .head(15)
+            )
+            if plot_df.empty:
+                return None
+            baseline = float(plot_df["value"].median())
+            fig = go.Figure()
+            fig.add_bar(x=plot_df["_gang"], y=plot_df["value"], marker_color=bar_color, name="Actual")
+            fig.add_hline(y=baseline, line_dash="dot", line_color=KEC_COLOURS["red"])
+            fig.update_layout(
+                **_kec_layout(
+                    height=240,
+                    xaxis_title="Gang",
+                    yaxis_title=yaxis_title,
+                    legend=False,
+                    margin={"l": 30, "r": 20, "t": 10, "b": 60},
+                ),
+            )
+            fig.update_xaxes(tickangle=-25)
+            return fig
+
+        erection_fig = _exec_empty_fig("No erection productivity data")
+        focus_key = _compact_project_key(focus_project)
+        if focus_key and DATA_SELECTOR is not None:
+            try:
+                erection_scope = DATA_SELECTOR.select("erection")
+            except Exception:
+                erection_scope = pd.DataFrame()
+            fallback_erection = _build_productivity_chart(
+                erection_scope,
+                project_key=focus_key,
+                project_cols=("Project Scope Key", "Project Display", "Project Name", "Project Code", "project_scope_key", "project_display", "project_name", "project_code"),
+                gang_cols=("Gang name", "gang_name"),
+                value_cols=("Productivity", "daily_prod_mt", "daily_mt", "mt_per_day", "output_mt_per_day"),
+                yaxis_title="MT/day",
+                bar_color=KEC_COLOURS["blue"],
+            )
+            if fallback_erection is not None:
+                erection_fig = fallback_erection
+
+        stringing_fig = _exec_empty_fig("No stringing productivity data")
+        if focus_key:
+            _filtered = False
+            for _proj_col in ("project_scope_key", "project_display", "project_name", "project_code"):
+                if _proj_col in scatter_df.columns:
+                    scatter_df = scatter_df[scatter_df[_proj_col].map(_compact_project_key).eq(focus_key)].copy()
+                    _filtered = True
+                    break
+            if not _filtered:
+                scatter_df = pd.DataFrame()
         if not scatter_df.empty:
             scatter_df["daily_km"] = pd.to_numeric(scatter_df.get("daily_km"), errors="coerce")
-            scatter_df["manpower_gang_strength"] = pd.to_numeric(scatter_df.get("manpower_gang_strength"), errors="coerce")
-            fig_scatter = go.Figure()
-            fig_scatter.add_trace(go.Scatter(x=scatter_df["manpower_gang_strength"], y=scatter_df["daily_km"], mode="markers", marker={"size": 8, "color": "#2563eb", "opacity": 0.7}, text=scatter_df.get("gang_name")))
-            fig_scatter.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 30}, xaxis={"title": "Gang strength", "gridcolor": "#e6e9f0"}, yaxis={"title": "Output (km)", "gridcolor": "#e6e9f0"})
-        else:
-            fig_scatter = _exec_empty_fig("No manpower pairings")
+            if "gang_name" in scatter_df.columns:
+                _sg = scatter_df["gang_name"].fillna("").astype(str).str.strip()
+                _null_sg = _sg.str.lower().isin({"nan", "none", "null", "na", "n/a", "nil", "--", "-"})
+                plot_df = (
+                    scatter_df[_sg.astype(bool) & ~_null_sg & scatter_df["daily_km"].notna()]
+                    .assign(_gang=_sg)
+                    .groupby("_gang", dropna=False)
+                    .agg(value=("daily_km", "mean"))
+                    .reset_index()
+                    .sort_values("value", ascending=False)
+                    .head(15)
+                )
+                if not plot_df.empty:
+                    baseline = float(plot_df["value"].median())
+                    stringing_fig = go.Figure()
+                    stringing_fig.add_bar(x=plot_df["_gang"], y=plot_df["value"], marker_color=KEC_COLOURS["teal"], name="Actual")
+                    stringing_fig.add_hline(y=baseline, line_dash="dot", line_color=KEC_COLOURS["red"])
+                    stringing_fig.update_layout(
+                        **_kec_layout(
+                            height=240,
+                            xaxis_title="Gang",
+                            yaxis_title="km/day",
+                            legend=False,
+                            margin={"l": 30, "r": 20, "t": 10, "b": 60},
+                        ),
+                    )
+                    stringing_fig.update_xaxes(tickangle=-25)
+        if isinstance(stringing_fig, go.Figure) and not stringing_fig.data and focus_key:
+            if DATA_SELECTOR is not None:
+                try:
+                    stringing_daily_scope = DATA_SELECTOR.select("stringing")
+                except Exception:
+                    stringing_daily_scope = pd.DataFrame()
+            else:
+                stringing_daily_scope = pd.DataFrame()
+            fallback_stringing = _build_productivity_chart(
+                stringing_daily_scope,
+                project_key=focus_key,
+                project_cols=("project_scope_key", "project_display", "project_name", "project_code", "project"),
+                gang_cols=("gang_name", "Gang Name", "Gang name"),
+                value_cols=("daily_km", "po_km"),
+                yaxis_title="km/day",
+                bar_color=KEC_COLOURS["teal"],
+            )
+            if fallback_stringing is None:
+                compiled_scope = _safe_provider_frame(stringing_compiled_provider)
+                fallback_stringing = _build_productivity_chart(
+                    compiled_scope,
+                    project_key=focus_key,
+                    project_cols=("project_scope_key", "project_display", "project_name", "project_code", "project"),
+                    gang_cols=("gang_name", "Gang Name", "Gang name"),
+                    value_cols=("po",),
+                    yaxis_title="km/day (derived)",
+                    bar_color=KEC_COLOURS["teal"],
+                )
+            if fallback_stringing is not None:
+                stringing_fig = fallback_stringing
 
-        if not availability_df.empty:
-            fig_avail = go.Figure()
-            fig_avail.add_bar(x=availability_df["availability"], y=availability_df["rows"], marker_color=["#16a34a" if str(v).upper() == "AVAILABLE" else "#94a3b8" for v in availability_df["availability"]])
-            fig_avail.update_layout(template="plotly_white", paper_bgcolor="white", plot_bgcolor="white", margin={"l": 30, "r": 20, "t": 10, "b": 30}, yaxis={"title": "Rows", "gridcolor": "#e6e9f0"})
-        else:
-            fig_avail = _exec_empty_fig("No manpower availability")
-
-        league_columns = []
-        league_data = []
-        if not league_df.empty:
-            for col in ("total_output_km", "avg_output_km", "avg_gang_strength", "avg_fitters"):
-                league_df[col] = pd.to_numeric(league_df.get(col), errors="coerce").round(2)
-            league_columns = [
-                {"name": "Gang", "id": "gang_name"},
-                {"name": "Total km", "id": "total_output_km"},
-                {"name": "Avg km/day", "id": "avg_output_km"},
-                {"name": "Avg strength", "id": "avg_gang_strength"},
-                {"name": "Avg fitters", "id": "avg_fitters"},
-                {"name": "Rows", "id": "rows"},
-            ]
-            league_data = league_df[["gang_name", "total_output_km", "avg_output_km", "avg_gang_strength", "avg_fitters", "rows"]].to_dict("records")
-
-        coverage_columns = [{"name": "Category", "id": "category"}, {"name": "Status", "id": "status"}] if not coverage_df.empty else []
-        coverage_data = coverage_df.to_dict("records") if not coverage_df.empty else []
-
-        proj_readiness_section_pct = float(kpis.get("readiness_pct", 0.0) or 0.0)
-        proj_readiness_km_val = pd.to_numeric(stretch.get("readiness_km_pct"), errors="coerce")
-        if pd.notna(proj_readiness_km_val):
-            proj_readiness_sub = f"km-weighted | {proj_readiness_section_pct:.1f}% by section count"
-        else:
-            proj_readiness_sub = "Sections ready / total sections"
+        proj_readiness_section_pct = _safe_float(kpis.get("readiness_pct", 0.0))
+        proj_readiness_km = _exec_safe_pct(ready_km, total_km)
+        if proj_readiness_km <= 0:
+            proj_readiness_km_val = pd.to_numeric(stretch.get("readiness_km_pct"), errors="coerce")
+            proj_readiness_km = float(proj_readiness_km_val) if pd.notna(proj_readiness_km_val) else 0.0
 
         return (
-            f"Project: {scope.get('project', 'N/A')} | Line: {scope.get('line', 'All lines')}",
-            f"Reporting: {scope.get('period_label', 'N/A')}",
-            scope.get("coverage_label", "Coverage: N/A"),
-            f"{float(kpis.get('completion_pct', 0.0)):.1f}%",
+            f"Latest DPR report: {scope.get('period_label', 'N/A')}",
+            f"{_safe_float(kpis.get('completion_pct', 0.0)):.1f}%",
             "Overall cumulative progress vs total quantity",
-            f"{float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
+            f"{_safe_float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
             "Current-month progress vs current-month plan",
-            f"{float(kpis.get('readiness_pct', 0.0)):.1f}%",
-            proj_readiness_sub,
-            f"{float(kpis.get('gap_days_avg', 0.0)):.0f} days",
+            f"{proj_readiness_km:.1f}%",
+            f"km-weighted | {proj_readiness_section_pct:.1f}% by section count",
+            f"{_safe_float(kpis.get('gap_days_avg', 0.0)):.0f} days",
             "Average delay from READY to P/O start",
-            f"{float(kpis.get('manpower_availability_pct', 0.0)):.1f}%",
-            "Availability across valid manpower pairings",
-            str(kpis.get("rag", "NO_DATA")),
-            "Overall project health classification",
-            fig_proj_status,
-            fig_act,
+            (
+                f"{_safe_float(kpis.get('erection_productivity_mt_day', 0.0)):.2f} MT/day"
+                if int(kpis.get("erection_productivity_rows", 0) or 0) > 0
+                else "-"
+            ),
+            (
+                f"{int(kpis.get('erection_productivity_rows', 0) or 0)} record(s) in selected scope"
+                if int(kpis.get("erection_productivity_rows", 0) or 0) > 0
+                else "No erection productivity data"
+            ),
+            f"Ready {ready_km:.1f}/{total_km:.1f} km ({proj_readiness_km:.1f}%)",
             fig_state,
-            fig_stretch_trend,
-            blocked_columns,
-            blocked_data,
-            fig_gap,
-            fig_se,
-            fig_scatter,
-            fig_avail,
-            league_columns,
-            league_data,
-            coverage_columns,
-            coverage_data,
+            blocked_summary,
+            fig_lag,
+            erection_fig,
+            stringing_fig,
         )
+
+    @app.callback(
+        Output("proj-kpi-stringing-productivity", "children"),
+        Output("proj-kpi-stringing-productivity-sub", "children"),
+        Input("project-overview-payload", "data"),
+        Input("proj-overview-project-select", "value"),
+    )
+    def _render_project_overview_stringing_kpi(payload: dict[str, Any] | None, selected_project: str | None):
+        safe = payload or {}
+        selected_project_value = str(selected_project or "").strip()
+        selected_project_name = selected_project_value or str((safe.get("scope") or {}).get("project") or "").strip()
+        kpis = dict(safe.get("kpis") or {})
+
+        if selected_project_name:
+            (
+                _erection_prod,
+                _erection_rows,
+                stringing_prod,
+                stringing_rows,
+            ) = _resolve_selected_project_productivity(safe, selected_project_name)
+            kpis["stringing_productivity_km_month"] = stringing_prod
+            kpis["stringing_productivity_rows"] = stringing_rows
+
+        value = (
+            f"{_safe_float(kpis.get('stringing_productivity_km_month', 0.0)):.2f} KM/month"
+            if int(kpis.get("stringing_productivity_rows", 0) or 0) > 0
+            else "-"
+        )
+        sub = (
+            f"{int(kpis.get('stringing_productivity_rows', 0) or 0)} record(s) in selected scope"
+            if int(kpis.get("stringing_productivity_rows", 0) or 0) > 0
+            else "No stringing productivity data"
+        )
+        return value, sub
+
+    @app.callback(
+        Output("proj-overview-project-select", "options"),
+        Output("proj-overview-project-select", "value"),
+        Input("executive-overview-payload", "data"),
+        State("proj-overview-project-select", "value"),
+    )
+    def _sync_project_overview_selector(payload: dict[str, Any] | None, current_value: str | None):
+        frame = _safe_provider_frame(_STATUS_SNAPSHOT_PROJECT_PROVIDER)
+        if frame.empty:
+            LOGGER.warning(
+                "proj-overview-project-select source is empty from status_snapshot_project_provider; "
+                "verify StatusSnapshotProject preload/config path in state preload."
+            )
+            return [], None
+
+        LOGGER.info(
+            "proj-overview-project-select source rows=%s cols=%s",
+            len(frame.index),
+            list(frame.columns),
+        )
+        project_col = "project_display" if "project_display" in frame.columns else ("project_name" if "project_name" in frame.columns else ("project_code" if "project_code" in frame.columns else ""))
+        if not project_col:
+            return [], None
+
+        project_values = sorted({str(v).strip() for v in frame[project_col].dropna().astype(str) if str(v).strip()})
+        options = [{"label": value, "value": value} for value in project_values]
+        if not options:
+            return [], None
+        option_values = {option["value"] for option in options}
+
+        current = str(current_value or "").strip()
+        if current and current in option_values:
+            return options, current
+
+        safe = payload or {}
+        ranking_df = pd.DataFrame(safe.get("project_ranking") or [])
+        if ranking_df.empty:
+            return options, options[0]["value"]
+
+        if "project_display" not in ranking_df.columns:
+            return options, options[0]["value"]
+
+        ranking_df = ranking_df.copy()
+        ranking_df["project_display"] = ranking_df["project_display"].fillna("").astype(str).str.strip()
+        ranking_df = ranking_df[ranking_df["project_display"].astype(bool)].copy()
+        if ranking_df.empty:
+            return options, options[0]["value"]
+
+        rag_series = ranking_df.get("overall_rag", pd.Series("", index=ranking_df.index)).fillna("").astype(str).str.upper()
+        red_rows = ranking_df[rag_series.eq("RED")].copy()
+        if not red_rows.empty:
+            red_rows["plan_slippage_pct"] = pd.to_numeric(red_rows.get("plan_slippage_pct"), errors="coerce")
+            red_rows = red_rows.sort_values("plan_slippage_pct", ascending=False, na_position="last")
+            default_project = str(red_rows.iloc[0].get("project_display") or "").strip()
+        else:
+            default_project = options[0]["value"] if options else None
+
+        if default_project and default_project in option_values:
+            return options, default_project
+        return options, (options[0]["value"] if options else None)
+
+    @app.callback(
+        Output("proj-activity-breakdown", "children"),
+        Input("project-overview-payload", "data"),
+        Input("proj-overview-project-select", "value"),
+    )
+    def _render_project_activity_breakdown(payload: dict[str, Any] | None, selected_project: str | None):
+        safe = payload or {}
+        project = str(selected_project or (safe.get("scope") or {}).get("project") or "").strip()
+        if not project:
+            return html.Div("Select a project to view activity breakdown.", className="text-muted")
+
+        status_scope = _safe_provider_frame(_STATUS_ACTIVITY_PROVIDER)
+        if status_scope.empty:
+            return html.Div("No activity data available.", className="text-muted")
+        status_scope = status_scope[_exec_project_key(status_scope).eq(_compact_project_key(project))].copy()
+        if status_scope.empty:
+            return html.Div("No activity data available.", className="text-muted")
+
+        period_col = ""
+        for col in ("_period", "report_date", "date", "month"):
+            if col in status_scope.columns:
+                period_col = col
+                break
+        if period_col:
+            parsed_period = pd.to_datetime(status_scope[period_col], errors="coerce")
+            if parsed_period.notna().any():
+                latest_period = parsed_period.max()
+                status_scope = status_scope[parsed_period.eq(latest_period)].copy()
+        status_scope["activity_norm"] = status_scope.get("activity_norm", pd.Series("", index=status_scope.index)).fillna("").astype(str).str.lower()
+        status_scope["cumulative_progress"] = pd.to_numeric(status_scope.get("cumulative_progress"), errors="coerce")
+        status_scope["quantity_primary"] = pd.to_numeric(status_scope.get("quantity_primary"), errors="coerce")
+
+        def _metrics(mask: pd.Series) -> tuple[float, float, float]:
+            scoped = status_scope[mask].copy()
+            if scoped.empty:
+                return 0.0, 0.0, 0.0
+            actual = float(scoped["cumulative_progress"].fillna(0.0).sum())
+            target = float(scoped["quantity_primary"].fillna(0.0).sum())
+            pct = _exec_safe_pct(actual, target)
+            return actual, target, pct
+
+        rows = [
+            ("Foundation", status_scope["activity_norm"].str.contains("foundation", na=False)),
+            ("Tower Erection", status_scope["activity_norm"].str.contains("erection", na=False)),
+            ("Stringing", status_scope["activity_norm"].str.contains("stringing", na=False) & ~status_scope["activity_norm"].str.contains("opgw", na=False)),
+            ("OPGW", status_scope["activity_norm"].str.contains("opgw", na=False)),
+            ("Earthing", status_scope["activity_norm"].str.contains("earthing", na=False)),
+        ]
+        color_map = {
+            "Foundation": "#002060",
+            "Tower Erection": "#0070c0",
+            "Stringing": "#28a745",
+            "OPGW": "#f0ad4e",
+            "Earthing": "#dc3545",
+        }
+        children = []
+        for label, mask in rows:
+            actual, target, pct = _metrics(mask)
+            children.append(
+                html.Div(
+                    [
+                        html.Div(label, className="act-label"),
+                        html.Div(
+                            html.Div(
+                                className="act-bar-fill",
+                                style={"width": f"{max(0.0, min(100.0, pct)):.1f}%", "background": color_map.get(label, "#0070c0")},
+                            ),
+                            className="act-bar-track",
+                        ),
+                        html.Div(f"{actual:.1f} / {target:.1f}", className="act-numbers"),
+                        html.Div(f"{pct:.1f}%", className="act-pct"),
+                    ],
+                    className="act-row",
+                )
+            )
+        return children
+
+    @app.callback(
+        Output("proj-dpr-strip", "children"),
+        Input("project-overview-payload", "data"),
+        Input("proj-overview-project-select", "value"),
+    )
+    def _render_project_dpr_strip(payload: dict[str, Any] | None, selected_project: str | None):
+        safe = payload or {}
+        project = str(selected_project or (safe.get("scope") or {}).get("project") or "").strip()
+
+        stretch_scope = _safe_provider_frame(_STRETCH_SECTION_PROVIDER)
+        stretch_scope = stretch_scope[_exec_project_key(stretch_scope).eq(_compact_project_key(project))].copy() if (not stretch_scope.empty and project) else pd.DataFrame()
+        status_scope = _safe_provider_frame(_STATUS_ACTIVITY_PROVIDER)
+        status_scope = status_scope[_exec_project_key(status_scope).eq(_compact_project_key(project))].copy() if (not status_scope.empty and project) else pd.DataFrame()
+        latest_report = pd.NaT
+        for frame in (stretch_scope, status_scope):
+            if frame.empty:
+                continue
+            parsed_max = pd.NaT
+            for col in ("report_date", "date", "_period", "month"):
+                if col in frame.columns:
+                    parsed = pd.to_datetime(frame[col], errors="coerce")
+                    if hasattr(parsed, "max"):
+                        candidate_max = parsed.max()
+                        if pd.notna(candidate_max):
+                            parsed_max = max(candidate_max, parsed_max) if pd.notna(parsed_max) else candidate_max
+            if pd.notna(parsed_max):
+                latest_report = max(parsed_max, latest_report) if pd.notna(latest_report) else parsed_max
+        latest_label = latest_report.strftime("%d %b %Y") if pd.notna(latest_report) else "N/A"
+        if latest_label == "N/A":
+            fallback_period = str((safe.get("scope") or {}).get("period_label") or "").strip()
+            if fallback_period:
+                latest_label = fallback_period
+
+        stretch_summary = _safe_provider_frame(_STRETCH_READINESS_SUMMARY_PROVIDER)
+        stretch_summary = stretch_summary[_exec_project_key(stretch_summary).eq(_compact_project_key(project))].copy() if (not stretch_summary.empty and project) else pd.DataFrame()
+        stringing_scope_km = float(pd.to_numeric(stretch_summary.get("total_km"), errors="coerce").fillna(0.0).sum()) if not stretch_summary.empty else 0.0
+        erection_scope_qty = 0.0
+        if not status_scope.empty:
+            status_for_qty = status_scope.copy()
+            date_series = pd.Series(pd.NaT, index=status_for_qty.index)
+            for col in ("report_date", "date", "_period", "month"):
+                if col in status_for_qty.columns:
+                    candidate = pd.to_datetime(status_for_qty[col], errors="coerce")
+                    date_series = date_series.where(date_series.notna(), candidate)
+            latest_status_ts = date_series.max() if hasattr(date_series, "max") else pd.NaT
+            if pd.notna(latest_status_ts):
+                status_for_qty = status_for_qty[date_series.eq(latest_status_ts)].copy()
+            activity_norm = status_for_qty.get("activity_norm", pd.Series("", index=status_for_qty.index)).fillna("").astype(str).str.lower()
+            if activity_norm.eq("").all() and "activity_group" in status_for_qty.columns:
+                activity_norm = status_for_qty.get("activity_group", pd.Series("", index=status_for_qty.index)).fillna("").astype(str).str.lower()
+            status_for_qty["quantity_primary"] = pd.to_numeric(status_for_qty.get("quantity_primary"), errors="coerce").fillna(0.0)
+            erection_scope_qty = float(status_for_qty.loc[activity_norm.str.contains("erection", na=False), "quantity_primary"].sum())
+        scope_label = f"E: {erection_scope_qty:,.0f} | S: {stringing_scope_km:.1f} km"
+
+        rag = str((safe.get("kpis") or {}).get("rag") or "NO_DATA").upper()
+        ranking_df = pd.DataFrame(safe.get("ranking") or [])
+        if project and not ranking_df.empty and "project_display" in ranking_df.columns:
+            match = ranking_df[
+                ranking_df["project_display"].fillna("").astype(str).map(_compact_project_key).eq(_compact_project_key(project))
+            ]
+            if not match.empty and str(match.iloc[0].get("overall_rag", "")).strip():
+                rag = str(match.iloc[0].get("overall_rag")).upper()
+        rag_class = {
+            "GREEN": "dpr-value dpr-value--green",
+            "AMBER": "dpr-value",
+            "RED": "dpr-value dpr-value--red",
+            "NO_DATA": "dpr-value",
+        }.get(rag, "dpr-value")
+        tse_label = "N/A"
+        if project:
+            tse_norm_map, tse_alias_map = _get_stringing_tse_lookup()
+            if tse_norm_map or tse_alias_map:
+                parts = [project]
+                if " : " in project:
+                    left, right = project.split(" : ", 1)
+                    parts.extend([left.strip(), right.strip()])
+                norm_keys: list[str] = []
+                compact_keys: list[str] = []
+                for part in parts:
+                    norm_key = _normalize_lower(part)
+                    if norm_key and norm_key not in norm_keys:
+                        norm_keys.append(norm_key)
+                    compact_key = _compact_project_key(part)
+                    if compact_key and compact_key not in compact_keys:
+                        compact_keys.append(compact_key)
+                match = re.search(r"\b(TA|TB)\s*[-_/ ]?\s*(\d{3,4})\b", project.upper())
+                if match:
+                    compact_key = _compact_project_key(f"{match.group(1)}{match.group(2)}")
+                    if compact_key and compact_key not in compact_keys:
+                        compact_keys.append(compact_key)
+                tse_value, _canonical = _resolve_tse_value(norm_keys, compact_keys, tse_norm_map, tse_alias_map)
+                if tse_value is not None:
+                    tse_label = f"{int(tse_value):,}"
+
+        return [
+            html.Div([html.Label("Project"), html.Div(project or "N/A", className="dpr-value")], className="dpr-field"),
+            html.Div([html.Label("Latest DPR Date"), html.Div(latest_label, className="dpr-value")], className="dpr-field"),
+            html.Div([html.Label("Scope"), html.Div(scope_label, className="dpr-value")], className="dpr-field"),
+            html.Div([html.Label("Number of TSE"), html.Div(tse_label, className="dpr-value")], className="dpr-field"),
+            html.Div([html.Label("RAG"), html.Div(rag.replace("_", " "), className=rag_class)], className="dpr-field"),
+        ]
+
+    @app.callback(
+        Output("proj-overview-rag-badge-container", "children"),
+        Input("project-overview-payload", "data"),
+        Input("proj-overview-project-select", "value"),
+    )
+    def _render_project_rag_badge(payload: dict[str, Any] | None, selected_project: str | None):
+        safe = payload or {}
+        rag = str((safe.get("kpis") or {}).get("rag") or "NO_DATA").upper()
+        ranking_df = pd.DataFrame(safe.get("ranking") or [])
+        project = str(selected_project or (safe.get("scope") or {}).get("project") or "").strip()
+        if project and not ranking_df.empty and "project_display" in ranking_df.columns:
+            match = ranking_df[ranking_df["project_display"].fillna("").astype(str).map(_compact_project_key).eq(_compact_project_key(project))]
+            if not match.empty and str(match.iloc[0].get("overall_rag", "")).strip():
+                rag = str(match.iloc[0].get("overall_rag")).upper()
+        class_map = {
+            "GREEN": "rag-badge rag-badge--green",
+            "AMBER": "rag-badge rag-badge--amber",
+            "RED": "rag-badge rag-badge--red",
+            "NO_DATA": "rag-badge rag-badge--nodata",
+        }
+        return html.Span(rag.replace("_", " "), className=class_map.get(rag, "rag-badge rag-badge--nodata"))
+
+    @app.callback(
+        Output("project-modal-project-select", "options"),
+        Output("project-modal-project-select", "value"),
+        Input("executive-overview-payload", "data"),
+        Input("store-project-surface-focus", "data"),
+        State("project-modal-project-select", "value"),
+    )
+    def _sync_project_modal_selector(
+        payload: dict[str, Any] | None,
+        focus_data: dict[str, Any] | None,
+        current_value: str | None,
+    ):
+        options, default_value = _sync_project_overview_selector(payload, current_value)
+        if not options:
+            return [], None
+        option_values = {str(option.get("value") or "").strip() for option in options}
+        focus_project = str((focus_data or {}).get("project") or "").strip()
+        if focus_project and focus_project in option_values:
+            return options, focus_project
+        current = str(current_value or "").strip()
+        if current and current in option_values:
+            return options, current
+        return options, default_value
+
+    @app.callback(
+        Output("project-modal-last-updated", "children"),
+        Output("project-modal-kpi-completion", "children"),
+        Output("project-modal-kpi-completion-sub", "children"),
+        Output("project-modal-kpi-plan", "children"),
+        Output("project-modal-kpi-plan-sub", "children"),
+        Output("project-modal-kpi-readiness", "children"),
+        Output("project-modal-kpi-readiness-sub", "children"),
+        Output("project-modal-kpi-gap", "children"),
+        Output("project-modal-kpi-gap-sub", "children"),
+        Output("project-modal-kpi-manpower", "children"),
+        Output("project-modal-kpi-manpower-sub", "children"),
+        Output("project-modal-erection-prod-chart", "figure"),
+        Output("project-modal-stringing-prod-chart", "figure"),
+        Input("project-overview-payload", "data"),
+        Input("store-project-surface-focus", "data"),
+    )
+    def _render_project_modal_kpis(
+        payload: dict[str, Any] | None,
+        focus_data: dict[str, Any] | None,
+    ):
+        selected_project = str((focus_data or {}).get("project") or "").strip()
+        values = _render_project_overview(payload, selected_project)
+        return (
+            values[0],
+            values[1],
+            values[2],
+            values[3],
+            values[4],
+            values[5],
+            values[6],
+            values[7],
+            values[8],
+            values[9],
+            values[10],
+            values[15],
+            values[16],
+        )
+
+    @app.callback(
+        Output("project-modal-kpi-stringing-productivity", "children"),
+        Output("project-modal-kpi-stringing-productivity-sub", "children"),
+        Input("project-overview-payload", "data"),
+        Input("store-project-surface-focus", "data"),
+    )
+    def _render_project_modal_stringing_kpi(
+        payload: dict[str, Any] | None,
+        focus_data: dict[str, Any] | None,
+    ):
+        selected_project = str((focus_data or {}).get("project") or "").strip()
+        return _render_project_overview_stringing_kpi(payload, selected_project)
+
+    @app.callback(
+        Output("project-modal-rag-badge-container", "children"),
+        Input("project-overview-payload", "data"),
+        Input("store-project-surface-focus", "data"),
+    )
+    def _render_project_modal_rag_badge(
+        payload: dict[str, Any] | None,
+        focus_data: dict[str, Any] | None,
+    ):
+        selected_project = str((focus_data or {}).get("project") or "").strip()
+        return _render_project_rag_badge(payload, selected_project)
 
     @app.callback(
         Output("download-executive-pdf", "data"),
@@ -13295,7 +15115,12 @@ def register_callbacks(
                             f"Portfolio completion: {float(kpis.get('portfolio_completion_pct', 0.0)):.1f}%",
                             f"Plan attainment: {float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
                             f"Stretch readiness: {float(kpis.get('stretch_readiness_pct', 0.0)):.1f}%",
-                            f"E→S lag: {float(kpis.get('gap_days_avg', 0.0)):.1f} days (sections {int(kpis.get('gap_covered_sections', 0) or 0)})",
+                            (
+                                f"E→S lag: {float(kpis.get('gap_days_median')):.1f} days "
+                                f"({float(kpis.get('gap_pct_over_60') or 0.0):.0f}% spans delayed >60 days)"
+                                if kpis.get("gap_days_median") is not None
+                                else "E→S lag: No gap data"
+                            ),
                             f"Manpower availability: {float(kpis.get('manpower_availability_pct', 0.0)):.1f}%",
                             f"At-risk projects (RED): {int(kpis.get('atrisk_projects', 0) or 0)}",
                         ]
@@ -13558,7 +15383,7 @@ def register_callbacks(
                 fig.add_bar(
                     x=labels,
                     y=values,
-                    marker_color="#0ea5e9",
+                    marker_color=KEC_COLOURS["blue_light"],
                     hovertemplate="%{y} spans<extra></extra>",
                 )
                 fig.update_layout(**_analytics_chart_layout("Gap bucket (days)", "Spans"))
@@ -13583,16 +15408,16 @@ def register_callbacks(
             x=df["median_gap"],
             y=df["project_name"],
             orientation="h",
-            marker_color="#ef4444",
+            marker_color=KEC_COLOURS["red"],
             hovertemplate="%{x:.1f} days<extra></extra>",
         )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 120, "r": 20, "t": 20, "b": 30},
-            xaxis={"title": "Median E->P/O gap (days)", "gridcolor": "#e6e9f0"},
-            yaxis={"title": "", "tickfont": {"size": 11}},
+            **_kec_layout(
+                xaxis_title="Median E->P/O gap (days)",
+                yaxis_title="Project",
+                legend=False,
+                margin={"l": 120, "r": 20, "t": 20, "b": 30},
+            ),
         )
         return fig
 
@@ -13606,12 +15431,16 @@ def register_callbacks(
             return _analytics_empty_fig("No funnel data")
         labels = [row.get("stage") for row in rows]
         values = [int(row.get("count", 0)) for row in rows]
-        fig = go.Figure(go.Funnel(y=labels, x=values, textinfo="value+percent initial"))
+        fig = go.Figure(
+            go.Funnel(
+                y=labels,
+                x=values,
+                textinfo="value+percent initial",
+                marker={"color": KEC_SEQUENCE[: max(1, len(labels))]},
+            )
+        )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 40, "r": 20, "t": 20, "b": 30},
+            **_kec_layout(legend=False, margin={"l": 40, "r": 20, "t": 20, "b": 30}),
         )
         return fig
 
@@ -13635,7 +15464,7 @@ def register_callbacks(
             fig.add_bar(
                 x=labels,
                 y=values,
-                marker_color="#14b8a6",
+                marker_color=KEC_COLOURS["teal"],
                 hovertemplate="%{y} gangs<extra></extra>",
             )
             fig.update_layout(**_analytics_chart_layout("KM/month bucket", "Gangs"))
@@ -13660,14 +15489,14 @@ def register_callbacks(
             x=df["bucket"],
             y=df["gang_share"],
             name="Gang share",
-            marker_color="#2563eb",
+            marker_color=KEC_COLOURS["blue"],
             hovertemplate="%{y:.1f}%<extra></extra>",
         )
         fig.add_bar(
             x=df["bucket"],
             y=df["km_share"],
             name="Output share",
-            marker_color="#22c55e",
+            marker_color=KEC_COLOURS["green"],
             hovertemplate="%{y:.1f}%<extra></extra>",
         )
         fig.update_layout(barmode="group", **_analytics_chart_layout("Bucket", "Share (%)"))
@@ -13751,18 +15580,19 @@ def register_callbacks(
         fig.add_bar(
             x=["Current Avg", "Target Avg"],
             y=[current_avg, target_avg],
-            marker_color=["#94a3b8", "#22c55e"],
+            marker_color=[KEC_COLOURS["grey"], KEC_COLOURS["green"]],
             text=[f"{current_avg:.1f}", f"{target_avg:.1f}"],
             textposition="outside",
             hovertemplate="%{y:.1f} km/mo<extra></extra>",
         )
         fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            margin={"l": 20, "r": 10, "t": 10, "b": 20},
-            xaxis={"title": ""},
-            yaxis={"title": "KM/month"},
+            **_kec_layout(
+                height=220,
+                xaxis_title="",
+                yaxis_title="KM/month",
+                legend=False,
+                margin={"l": 20, "r": 10, "t": 10, "b": 20},
+            ),
         )
         return f"+{unlocked:.1f} km", f"{max(saved, 0.0):.1f} slots freed", fig
 
@@ -13783,7 +15613,7 @@ def register_callbacks(
         fig.add_bar(
             x=labels,
             y=values,
-            marker_color="#f97316",
+            marker_color=KEC_COLOURS["amber"],
             hovertemplate="%{y} spans<extra></extra>",
         )
         fig.update_layout(**_analytics_chart_layout("Gap bucket (days)", "Spans"))
@@ -13806,7 +15636,7 @@ def register_callbacks(
         fig.add_bar(
             x=labels,
             y=values,
-            marker_color="#6366f1",
+            marker_color=KEC_COLOURS["navy"],
             hovertemplate="%{y} spans<extra></extra>",
         )
         fig.update_layout(**_analytics_chart_layout("Cycle bucket (days)", "Spans"))
@@ -13842,7 +15672,7 @@ def register_callbacks(
         fig.add_bar(
             x=df["bucket"],
             y=df["avg_km_month"],
-            marker_color="#0f766e",
+            marker_color=KEC_COLOURS["teal"],
             hovertemplate="%{y:.2f} km/month<extra></extra>",
         )
         fig.update_layout(**_analytics_chart_layout("Readiness bucket", "Avg km/month"))
@@ -14384,6 +16214,8 @@ def _load_stringing_plan_snapshot(
         return frame, completion_keys, [], []
 
     return None, set(), [], []
+
+
 
 
 

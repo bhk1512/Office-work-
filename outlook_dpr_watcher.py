@@ -11,6 +11,10 @@ from dashboard.project_identity import (
     normalize_line_name,
     parse_project_identity_from_filename,
 )
+from dashboard.completed_projects import (
+    is_completed_project,
+    load_completed_project_keys,
+)
 
 # ---------------- CONFIG ----------------
 FOLDER_PATH = "Inbox/DPRs"           # <-- use exact Outlook path for your folder
@@ -159,6 +163,7 @@ def load_email_config(path: pathlib.Path = EMAIL_CONFIG_PATH) -> dict[str, list[
 
 EMAIL_CONFIG = load_email_config()
 ALLOWED_SENDERS = set(EMAIL_CONFIG.keys())
+COMPLETED_PROJECT_KEYS = load_completed_project_keys(pathlib.Path(DOWNLOAD_DIR).parent, pathlib.Path(__file__).resolve().parent)
 
 # --- Outlook helpers ---
 def get_smtp_address(mail) -> str:
@@ -485,6 +490,9 @@ def save_latest_for_mail(mail) -> list[str]:
                 line_name = normalize_line_name(resolved_match.get("line_name"))
         if not project:
             # If no project code, skip (or save with original name if you prefer)
+            continue
+        if is_completed_project(project, COMPLETED_PROJECT_KEYS):
+            logprint(f"[completed-project] skip save for {project}: marked completed")
             continue
 
         ext = os.path.splitext(name)[1].lower()

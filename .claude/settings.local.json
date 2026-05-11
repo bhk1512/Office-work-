@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\kaushikb\\\\Documents\\\\Work\\\\Git\\\\Office-work-\" -Recurse -Include \"*DPR*\", \"*.xlsx\", \"*.csv\")",
+      "Bash(Select-Object -First 50)",
+      "Bash(Get-ChildItem -Directory -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 20)",
+      "Bash(python3)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\kaushikb\\\\Documents\\\\Work\\\\Git\\\\Office-work-\\\\Parquets\\\\ProgressStatus\" | Select-Object Name, @{N=\"Size\";E={\"{0:N0} bytes\" -f $_.Length}} | Format-Table)",
+      "Bash(python3 -c \"import pandas as pd; xl = pd.ExcelFile\\('./Raw Data/DPR_Config.xlsx'\\); print\\('Sheets:', xl.sheet_names\\); ws = pd.read_excel\\('./Raw Data/DPR_Config.xlsx', sheet_name='Sheet Names Check', nrows=10\\); print\\('Headers:'\\); print\\(list\\(ws.columns\\)\\); print\\('\\\\\\\\nFirst 2 rows:'\\); print\\(ws.head\\(2\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(py -c ' *)"
+    ]
+  }
+}

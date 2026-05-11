@@ -29,7 +29,6 @@ CLICK_GRAPH_CONFIG = {
     ],
 }
 
-CURRENT_MONTH_VALUE = datetime.today().strftime("%Y-%m")
 TODAY_DATE = datetime.today().date()
 DEFAULT_COMPLETION_DATE = TODAY_DATE - timedelta(days=1)
 
@@ -183,11 +182,9 @@ def build_controls() -> html.Div:
             dcc.Dropdown(
                 id="f-month",
                 multi=True,
+                value=[],
                 placeholder="Select month(s)",
                 className="filter-select filter-select--compact",
-                value=[CURRENT_MONTH_VALUE],
-                persistence=True,
-                persistence_type="session",
                 style={"width": "220px"},
             ),
             dbc.RadioItems(
@@ -205,25 +202,31 @@ def build_controls() -> html.Div:
                 label_checked_class_name="segment-label--active",
                 input_class_name="segment-input",
             ),
-            dcc.Dropdown(
-                id="f-line",
-                multi=True,
-                placeholder="Select line(s)",
-                className="filter-select filter-select--compact",
-                style={"width": "220px"},
+            html.Div(
+                dcc.Dropdown(
+                    id="f-line",
+                    multi=True,
+                    placeholder="Select line(s)",
+                    className="filter-select filter-select--compact",
+                    style={"width": "220px"},
+                ),
+                style={"display": "none"},
             ),
-            dbc.RadioItems(
-                id="f-time-lens",
-                options=[
-                    {"label": "Monthly", "value": "monthly"},
-                    {"label": "Weekly", "value": "weekly"},
-                ],
-                value="monthly",
-                inline=True,
-                class_name="segment segment--compact",
-                label_class_name="segment-label",
-                label_checked_class_name="segment-label--active",
-                input_class_name="segment-input",
+            html.Div(
+                dbc.RadioItems(
+                    id="f-time-lens",
+                    options=[
+                        {"label": "Monthly", "value": "monthly"},
+                        {"label": "Weekly", "value": "weekly"},
+                    ],
+                    value="monthly",
+                    inline=True,
+                    class_name="segment segment--compact",
+                    label_class_name="segment-label",
+                    label_checked_class_name="segment-label--active",
+                    input_class_name="segment-input",
+                ),
+                style={"display": "none"},
             ),
         ],
         className="topbar__filters",
@@ -255,8 +258,10 @@ def _build_executive_kpi_card(
 def build_executive_overview_layout() -> html.Div:
     return html.Div(
         [
+            html.Div(id="exec-compliance-ticker", className="compliance-ticker", style={"display": "none"}),
             dcc.Interval(id="executive-refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
             dcc.Store(id="executive-overview-payload", data={}),
+            dcc.Store(id="exec-pch-expanded", data=[]),
             dbc.Row(
                 [
                     _build_executive_kpi_card(
@@ -280,12 +285,12 @@ def build_executive_overview_layout() -> html.Div:
                         "exec-kpi-gap-sub",
                     ),
                     _build_executive_kpi_card(
-                        "Manpower Availability",
+                        "Erection Productivity",
                         "exec-kpi-manpower",
                         "exec-kpi-manpower-sub",
                     ),
                     _build_executive_kpi_card(
-                        "At-Risk Projects",
+                        "Stringing Productivity",
                         "exec-kpi-atrisk",
                         "exec-kpi-atrisk-sub",
                     ),
@@ -293,113 +298,58 @@ def build_executive_overview_layout() -> html.Div:
                 className="g-3 mb-3",
             ),
             dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    [
-                                        html.Div("Status Overall Trend", className="section-title"),
-                                        html.Div("Completion and monthly plan attainment", className="section-sub"),
-                                    ]
-                                ),
-                                dbc.CardBody(
-                                    dcc.Graph(
-                                        id="exec-status-trend-graph",
-                                        config=CLICK_GRAPH_CONFIG,
-                                        style={"height": "320px"},
-                                    )
-                                ),
-                            ],
-                            className="viz-card shadow-soft h-100",
-                        ),
-                        md=6,
+                dbc.Col(
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                [
+                                    html.Div("Portfolio Status", className="section-title"),
+                                    html.Div(
+                                        [
+                                            dbc.RadioItems(
+                                                id="exec-portfolio-view",
+                                                options=[
+                                                    {"label": "Cumulative", "value": "cum"},
+                                                    {"label": "This Month", "value": "month"},
+                                                ],
+                                                value="cum",
+                                                inline=True,
+                                                class_name="segment segment--compact",
+                                                label_class_name="segment-label",
+                                                label_checked_class_name="segment-label--active",
+                                                input_class_name="segment-input",
+                                            ),
+                                        ]
+                                    ),
+                                ],
+                                className="d-flex justify-content-between align-items-center",
+                            ),
+                            dbc.CardBody(
+                                html.Div(id="exec-portfolio-table-container", style={"overflowX": "auto"}),
+                                className="p-0",
+                            ),
+                        ],
+                        className="viz-card shadow-soft",
                     ),
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    [
-                                        html.Div("Stretch Readiness Trend", className="section-title"),
-                                        html.Div("Ready sections as share of total sections", className="section-sub"),
-                                    ]
-                                ),
-                                dbc.CardBody(
-                                    dcc.Graph(
-                                        id="exec-stretch-trend-graph",
-                                        config=CLICK_GRAPH_CONFIG,
-                                        style={"height": "320px"},
-                                    )
-                                ),
-                            ],
-                            className="viz-card shadow-soft h-100",
-                        ),
-                        md=6,
-                    ),
-                ],
+                    md=12,
+                ),
                 className="g-3 mb-3",
             ),
-            dbc.Row(
+            html.Div(
                 [
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    [
-                                        html.Div("Project Ranking", className="section-title"),
-                                        html.Div("RAG ranking with component drivers", className="section-sub"),
-                                    ]
-                                ),
-                                dbc.CardBody(
-                                    dash_table.DataTable(
-                                        id="exec-project-ranking-table",
-                                        columns=[],
-                                        data=[],
-                                        page_size=10,
-                                        fixed_rows={"headers": True},
-                                        style_table={"overflowX": "auto", "maxHeight": "380px"},
-                                        style_cell={
-                                            "fontFamily": "Inter, system-ui",
-                                            "fontSize": 12,
-                                            "border": "1px solid var(--border, #e6e9f0)",
-                                            "padding": "6px 8px",
-                                            "textAlign": "left",
-                                        },
-                                        style_header={
-                                            "fontWeight": "600",
-                                            "backgroundColor": "#f6f8fc",
-                                            "border": "1px solid var(--border, #e6e9f0)",
-                                        },
-                                    )
-                                ),
-                            ],
-                            className="viz-card shadow-soft h-100",
-                        ),
-                        md=7,
+                    dash_table.DataTable(
+                        id="exec-project-ranking-table",
+                        columns=[],
+                        data=[],
+                        page_size=10,
                     ),
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    [
-                                        html.Div("Risk Drivers", className="section-title"),
-                                        html.Div("Plan slippage, readiness, manpower, and gap", className="section-sub"),
-                                    ]
-                                ),
-                                dbc.CardBody(
-                                    dcc.Graph(
-                                        id="exec-risk-driver-graph",
-                                        config=CLICK_GRAPH_CONFIG,
-                                        style={"height": "380px"},
-                                    )
-                                ),
-                            ],
-                            className="viz-card shadow-soft h-100",
-                        ),
-                        md=5,
+                    dcc.Graph(
+                        id="exec-risk-driver-graph",
+                        config=CLICK_GRAPH_CONFIG,
+                        style={"height": "1px"},
                     ),
                 ],
-                className="g-3 mb-3",
+                style={"display": "none"},
             ),
             dbc.Row(
                 [
@@ -469,18 +419,245 @@ def build_executive_overview_layout() -> html.Div:
 
 
 def build_project_overview_layout() -> html.Div:
-    return html.Div(
+    def _completed_controls(range_id: str, search_id: str, title: str, subtitle: str) -> dbc.Row:
+        return dbc.Row(
+            [
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.Div(title, className="section-title mb-1"),
+                            html.Div(subtitle, className="section-sub mb-2"),
+                            dcc.DatePickerRange(
+                                id=range_id,
+                                min_date_allowed=datetime(2021, 1, 1),
+                                max_date_allowed=TODAY_DATE,
+                                start_date=DEFAULT_COMPLETION_DATE,
+                                end_date=DEFAULT_COMPLETION_DATE,
+                                display_format="DD-MM-YYYY",
+                                minimum_nights=0,
+                                persistence=True,
+                                persistence_type="session",
+                                className="filter-date",
+                            ),
+                        ],
+                        className="filter-field",
+                    ),
+                    md=6,
+                    lg=4,
+                ),
+                dbc.Col(
+                    html.Div(
+                        dbc.Input(
+                            id=search_id,
+                            placeholder="Filter by project, gang, or location",
+                            type="text",
+                            value="",
+                            className="filter-input",
+                        ),
+                        className="filter-field",
+                    ),
+                    md=4,
+                    lg=4,
+                ),
+                dbc.Col(
+                    dbc.Button(
+                        "Clear",
+                        id=f"{search_id}-reset",
+                        color="secondary",
+                        outline=True,
+                        className="w-100",
+                    ),
+                    md=2,
+                    lg=2,
+                ),
+            ],
+            className="g-3 align-items-end mb-3",
+        )
+
+    def _completed_table(table_id: str, columns: list[dict[str, str]]) -> dash_table.DataTable:
+        return dash_table.DataTable(
+            id=table_id,
+            columns=columns,
+            data=[],
+            page_size=15,
+            sort_action="native",
+            filter_action="native",
+            fixed_rows={"headers": True},
+            style_table={"overflowX": "auto", "maxHeight": "480px"},
+            style_cell={
+                "fontFamily": "Inter, system-ui",
+                "fontSize": 13,
+                "border": "1px solid var(--border, #e6e9f0)",
+            },
+            style_header={"border": "1px solid var(--border, #e6e9f0)"},
+        )
+
+    raw_data_accordion = dbc.Accordion(
         [
-            dcc.Interval(id="project-overview-refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
-            dcc.Store(id="project-overview-payload", data={}),
+            dbc.AccordionItem(
+                [
+                    html.Div(
+                        [
+                            _completed_controls(
+                                "proj-overview-erections-range",
+                                "proj-overview-erections-search",
+                                "Erections Completed",
+                                "Completion date (defaults to yesterday)",
+                            ),
+                            _completed_table(
+                                "proj-overview-erections-table",
+                                [
+                                    {"name": "Completion Date", "id": "completion_date"},
+                                    {"name": "Project", "id": "project_name"},
+                                    {"name": "Location", "id": "location_no"},
+                                    {"name": "Tower Weight (MT)", "id": "tower_weight"},
+                                    {"name": "Productivity (MT/day)", "id": "daily_prod_mt"},
+                                    {"name": "Gang", "id": "gang_name"},
+                                    {"name": "Start Date", "id": "start_date"},
+                                    {"name": "Supervisor", "id": "supervisor_name"},
+                                    {"name": "Section Incharge", "id": "section_incharge_name"},
+                                    {"name": "Revenue", "id": "revenue"},
+                                ],
+                            ),
+                        ],
+                        id="proj-overview-anchor-erections",
+                    ),
+                    html.Hr(className="my-3"),
+                    html.Div(
+                        [
+                            _completed_controls(
+                                "proj-overview-stringing-range",
+                                "proj-overview-stringing-search",
+                                "Stringing Completed",
+                                "Filter by completion span",
+                            ),
+                            _completed_table(
+                                "proj-overview-stringing-table",
+                                [
+                                    {"name": "Completion Date", "id": "completion_date"},
+                                    {"name": "Project", "id": "project_name"},
+                                    {"name": "Span (From-To)", "id": "location_no"},
+                                    {"name": "Length (KM)", "id": "tower_weight"},
+                                    {"name": "Productivity (KM/day)", "id": "daily_prod_mt"},
+                                    {"name": "Gang", "id": "gang_name"},
+                                    {"name": "F/S Start Date", "id": "start_date"},
+                                    {"name": "Supervisor", "id": "supervisor_name"},
+                                    {"name": "Section Incharge", "id": "section_incharge_name"},
+                                    {"name": "Revenue", "id": "revenue"},
+                                ],
+                            ),
+                        ],
+                        id="proj-overview-anchor-stringing",
+                    ),
+                ],
+                title="Raw Data",
+                item_id="raw-data",
+            ),
+        ],
+        start_collapsed=True,
+        always_open=False,
+        className="exec-accordion",
+    )
+
+    perf_panel = dbc.Collapse(
+        [
             dbc.Row(
                 [
-                    dbc.Col(html.Div(id="project-overview-scope-label", className="analytics-scope-chip"), md=5),
-                    dbc.Col(html.Div(id="project-overview-scope-period", className="analytics-scope-chip"), md=4),
-                    dbc.Col(html.Div(id="project-overview-scope-coverage", className="analytics-scope-chip"), md=3),
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(html.Div("Erection Gangs", className="section-title")),
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="proj-overview-avp-list", className="avp-wrap"),
+                                        dcc.Graph(
+                                            id="proj-overview-actual-vs-bench",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"display": "none"},
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="viz-card",
+                        ),
+                        md=6,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(html.Div("Top / Bottom Gangs", className="section-title")),
+                                dbc.CardBody(
+                                    [
+                                        dcc.Graph(
+                                            id="proj-overview-top5",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"height": "140px"},
+                                        ),
+                                        dcc.Graph(
+                                            id="proj-overview-bottom5",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"height": "140px"},
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="viz-card",
+                        ),
+                        md=6,
+                    ),
                 ],
-                className="g-2 mb-3",
+                className="g-3",
             ),
+        ],
+        id="proj-overview-perf-collapse",
+        is_open=False,
+    )
+
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.Label(
+                                "Select Project",
+                                className="fw-700 text-navy",
+                                style={"fontSize": "0.8rem", "marginBottom": "4px"},
+                            ),
+                            dcc.Dropdown(
+                                id="proj-overview-project-select",
+                                options=[],
+                                value=None,
+                                placeholder="Choose a project...",
+                                clearable=False,
+                                className="filter-select filter-select--light",
+                                style={"background": "white", "color": "var(--text)"},
+                            ),
+                        ],
+                        md=4,
+                    ),
+                    dbc.Col(
+                        html.Div(id="proj-overview-rag-badge-container"),
+                        md=2,
+                        className="d-flex align-items-end",
+                    ),
+                    dbc.Col(
+                        html.Div(
+                            id="proj-overview-last-updated",
+                            className="text-muted",
+                            style={"fontSize": "0.78rem", "paddingBottom": "6px"},
+                        ),
+                        md=6,
+                        className="d-flex align-items-end justify-content-end",
+                    ),
+                ],
+                className="mb-3 align-items-end",
+            ),
+            dcc.Interval(id="project-overview-refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
+            dcc.Store(id="project-overview-payload", data={}),
+            dcc.Store(id="store-project-overview-scope", data=None),
+            dcc.Store(id="store-project-overview-performance-mode", data="erection|0"),
+            html.Div(id="proj-dpr-strip", className="dpr-strip"),
             dbc.Row(
                 [
                     _build_executive_kpi_card(
@@ -504,14 +681,76 @@ def build_project_overview_layout() -> html.Div:
                         "proj-kpi-gap-sub",
                     ),
                     _build_executive_kpi_card(
-                        "Manpower Availability",
+                        "Erection Productivity",
                         "proj-kpi-manpower",
                         "proj-kpi-manpower-sub",
                     ),
                     _build_executive_kpi_card(
-                        "Current RAG",
-                        "proj-kpi-rag",
-                        "proj-kpi-rag-sub",
+                        "Stringing Productivity",
+                        "proj-kpi-stringing-productivity",
+                        "proj-kpi-stringing-productivity-sub",
+                    ),
+                ],
+                className="g-3 mb-3",
+            ),
+            dbc.Card(
+                [
+                    dbc.CardHeader(
+                        [
+                            html.Div("Activity Progress", className="section-title"),
+                            html.Div("Cumulative actual vs scope", className="section-sub"),
+                        ]
+                    ),
+                    dbc.CardBody(html.Div(id="proj-activity-breakdown", className="p-0")),
+                ],
+                className="viz-card mb-3",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    [
+                                        html.Div("Stretch Readiness", className="section-title"),
+                                        html.Div(id="proj-stretch-summary-chip", className="section-sub"),
+                                    ]
+                                ),
+                                dbc.CardBody(
+                                    [
+                                        dcc.Graph(
+                                            id="proj-stretch-state-graph",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"height": "280px"},
+                                        ),
+                                        html.Div(id="proj-stretch-blocked-summary"),
+                                    ]
+                                ),
+                            ],
+                            className="viz-card h-100",
+                        ),
+                        md=5,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    [
+                                        html.Div("Stretch Readiness Gap Distribution", className="section-title"),
+                                        html.Div("Distribution of E→S readiness gap buckets for the selected project", className="section-sub"),
+                                    ]
+                                ),
+                                dbc.CardBody(
+                                    dcc.Graph(
+                                        id="proj-es-lag-chart",
+                                        config=CLICK_GRAPH_CONFIG,
+                                        style={"height": "260px"},
+                                    )
+                                ),
+                            ],
+                            className="viz-card h-100",
+                        ),
+                        md=7,
                     ),
                 ],
                 className="g-3 mb-3",
@@ -523,202 +762,79 @@ def build_project_overview_layout() -> html.Div:
                             [
                                 dbc.CardHeader(
                                     [
-                                        html.Div("Status Trend", className="section-title"),
-                                        html.Div("Completion, plan attainment, and progress trend", className="section-sub"),
+                                        html.Div("Erection Productivity", className="section-title"),
+                                        html.Div("MT/day — gang performance vs baseline", className="section-sub"),
                                     ]
                                 ),
                                 dbc.CardBody(
                                     dcc.Graph(
-                                        id="proj-status-trend-graph",
+                                        id="proj-erection-prod-chart",
                                         config=CLICK_GRAPH_CONFIG,
-                                        style={"height": "300px"},
+                                        style={"height": "240px"},
                                     )
                                 ),
                             ],
-                            className="viz-card shadow-soft h-100",
+                            className="viz-card",
                         ),
-                        md=7,
+                        md=6,
                     ),
                     dbc.Col(
                         dbc.Card(
                             [
                                 dbc.CardHeader(
                                     [
-                                        html.Div("Activity Contribution", className="section-title"),
-                                        html.Div("Foundation, Erection, Stringing, OPGW", className="section-sub"),
+                                        html.Div("Stringing Productivity", className="section-title"),
+                                        html.Div("km/day — gang output vs baseline", className="section-sub"),
                                     ]
                                 ),
                                 dbc.CardBody(
                                     dcc.Graph(
-                                        id="proj-activity-contrib-graph",
+                                        id="proj-stringing-prod-chart",
                                         config=CLICK_GRAPH_CONFIG,
-                                        style={"height": "300px"},
+                                        style={"height": "240px"},
                                     )
                                 ),
                             ],
-                            className="viz-card shadow-soft h-100",
+                            className="viz-card",
                         ),
-                        md=5,
+                        md=6,
                     ),
                 ],
                 className="g-3 mb-3",
             ),
-            dbc.Accordion(
+            perf_panel,
+            dbc.Button(
+                "Show Gang Performance",
+                id="proj-overview-perf-toggle",
+                color="link",
+                size="sm",
+                className="text-muted mt-2 mb-3",
+                n_clicks=0,
+            ),
+            html.Div(
                 [
-                    dbc.AccordionItem(
-                        [
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dcc.Graph(
-                                            id="proj-stretch-state-graph",
-                                            config=CLICK_GRAPH_CONFIG,
-                                            style={"height": "260px"},
-                                        ),
-                                        md=5,
-                                    ),
-                                    dbc.Col(
-                                        dcc.Graph(
-                                            id="proj-stretch-trend-graph",
-                                            config=CLICK_GRAPH_CONFIG,
-                                            style={"height": "260px"},
-                                        ),
-                                        md=7,
-                                    ),
-                                ],
-                                className="g-3 mb-3",
-                            ),
-                            dash_table.DataTable(
-                                id="proj-stretch-blocked-table",
-                                columns=[],
-                                data=[],
-                                page_size=8,
-                                fixed_rows={"headers": True},
-                                style_table={"overflowX": "auto", "maxHeight": "320px"},
-                                style_cell={
-                                    "fontFamily": "Inter, system-ui",
-                                    "fontSize": 12,
-                                    "border": "1px solid var(--border, #e6e9f0)",
-                                    "padding": "6px 8px",
-                                    "textAlign": "left",
-                                },
-                                style_header={
-                                    "fontWeight": "600",
-                                    "backgroundColor": "#f6f8fc",
-                                    "border": "1px solid var(--border, #e6e9f0)",
-                                },
-                            ),
+                    dbc.RadioItems(
+                        id="proj-overview-stringing-scope",
+                        options=[
+                            {"label": "All", "value": "all"},
+                            {"label": "Manual", "value": "manual"},
+                            {"label": "TSE", "value": "tse"},
+                            {"label": "Hotline", "value": "hotline"},
                         ],
-                        title="Stretch Readiness",
-                        item_id="stretch",
+                        value="all",
                     ),
-                    dbc.AccordionItem(
-                        [
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dcc.Graph(
-                                            id="proj-se-gap-graph",
-                                            config=CLICK_GRAPH_CONFIG,
-                                            style={"height": "280px"},
-                                        ),
-                                        md=6,
-                                    ),
-                                    dbc.Col(
-                                        dcc.Graph(
-                                            id="proj-stringing-erection-trend-graph",
-                                            config=CLICK_GRAPH_CONFIG,
-                                            style={"height": "280px"},
-                                        ),
-                                        md=6,
-                                    ),
-                                ],
-                                className="g-3",
-                            ),
+                    dbc.RadioItems(
+                        id="proj-overview-topbot-metric",
+                        options=[
+                            {"label": "Productivity", "value": "prod"},
+                            {"label": html.Span("Erection", id="proj-overview-topbot-mode-label"), "value": "erection"},
                         ],
-                        title="Stringing + Erection Detail",
-                        item_id="stringing-erection",
-                    ),
-                    dbc.AccordionItem(
-                        [
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dcc.Graph(
-                                            id="proj-manpower-scatter-graph",
-                                            config=CLICK_GRAPH_CONFIG,
-                                            style={"height": "280px"},
-                                        ),
-                                        md=7,
-                                    ),
-                                    dbc.Col(
-                                        dcc.Graph(
-                                            id="proj-manpower-availability-graph",
-                                            config=CLICK_GRAPH_CONFIG,
-                                            style={"height": "280px"},
-                                        ),
-                                        md=5,
-                                    ),
-                                ],
-                                className="g-3 mb-3",
-                            ),
-                            dash_table.DataTable(
-                                id="proj-gang-league-table",
-                                columns=[],
-                                data=[],
-                                page_size=8,
-                                fixed_rows={"headers": True},
-                                style_table={"overflowX": "auto", "maxHeight": "320px"},
-                                style_cell={
-                                    "fontFamily": "Inter, system-ui",
-                                    "fontSize": 12,
-                                    "border": "1px solid var(--border, #e6e9f0)",
-                                    "padding": "6px 8px",
-                                    "textAlign": "left",
-                                },
-                                style_header={
-                                    "fontWeight": "600",
-                                    "backgroundColor": "#f6f8fc",
-                                    "border": "1px solid var(--border, #e6e9f0)",
-                                },
-                            ),
-                        ],
-                        title="Manpower vs Productivity",
-                        item_id="manpower",
-                    ),
-                    dbc.AccordionItem(
-                        [
-                            dash_table.DataTable(
-                                id="proj-coverage-table",
-                                columns=[],
-                                data=[],
-                                page_size=10,
-                                fixed_rows={"headers": True},
-                                style_table={"overflowX": "auto", "maxHeight": "360px"},
-                                style_cell={
-                                    "fontFamily": "Inter, system-ui",
-                                    "fontSize": 12,
-                                    "border": "1px solid var(--border, #e6e9f0)",
-                                    "padding": "6px 8px",
-                                    "textAlign": "left",
-                                },
-                                style_header={
-                                    "fontWeight": "600",
-                                    "backgroundColor": "#f6f8fc",
-                                    "border": "1px solid var(--border, #e6e9f0)",
-                                },
-                            ),
-                        ],
-                        title="Coverage / Diagnostics",
-                        item_id="coverage",
+                        value="prod",
                     ),
                 ],
-                id="project-overview-accordion",
-                active_item=["stretch"],
-                always_open=True,
-                start_collapsed=True,
-                className="exec-accordion",
+                style={"display": "none"},
             ),
+            raw_data_accordion,
         ],
         className="dashboard-tab-content",
     )
@@ -1122,77 +1238,7 @@ def build_trace_modal() -> dbc.Modal:
 
 
 def build_project_tile_modal() -> dbc.Modal:
-    """Large modal that mirrors key home-screen sections for a single project."""
-
-    summary_placeholder = html.Div(
-        [
-            html.Div("Select a project tile to view its detailed view.", className="mb-2"),
-            html.Div(
-                [
-                    dbc.Button(
-                        "Show Completed Towers",
-                        id="project-modal-btn-erections",
-                        color="primary",
-                        size="lg",
-                        className="modal-section-btn",
-                        n_clicks=0,
-                    ),
-                    dbc.Button(
-                        "Show Gang Performance",
-                        id="project-modal-btn-performance-erection",
-                        color="primary",
-                        size="lg",
-                        className="modal-section-btn",
-                        n_clicks=0,
-                    ),
-                ],
-                className="d-flex gap-2 flex-wrap",
-                style={"display": "none"},
-            ),
-            html.Div(
-                [
-                    dbc.Button(
-                        "Show Completed Stringing",
-                        id="project-modal-btn-stringing",
-                        color="primary",
-                        size="lg",
-                        className="modal-section-btn",
-                        n_clicks=0,
-                    ),
-                    dbc.Button(
-                        "Show Gang Performance",
-                        id="project-modal-btn-performance-stringing",
-                        color="primary",
-                        size="lg",
-                        className="modal-section-btn",
-                        n_clicks=0,
-                    ),
-                ],
-                className="d-flex gap-2 flex-wrap",
-                style={"display": "none"},
-            ),
-            html.Div(
-                dbc.RadioItems(
-                    id="project-modal-stringing-scope",
-                    options=[
-                        {"label": "All", "value": "all"},
-                        {"label": "Manual", "value": "manual"},
-                        {"label": "TSE", "value": "tse"},
-                        {"label": "Hotline", "value": "hotline"},
-                    ],
-                    value="all",
-                ),
-                style={"display": "none"},
-            ),
-        ],
-        id="project-modal-summary",
-        className="project-empty",
-    )
-
-    summary_card = dbc.Card(
-        dbc.CardBody(summary_placeholder),
-        className="shadow-sm mb-4",
-    )
+    """Large project modal with status-first layout and compact raw-data access."""
 
     def _completed_controls(range_id: str, search_id: str, title: str, subtitle: str) -> dbc.Row:
         return dbc.Row(
@@ -1257,8 +1303,6 @@ def build_project_tile_modal() -> dbc.Modal:
             page_size=15,
             sort_action="native",
             filter_action="native",
-            # Keep virtualization disabled because these cards start hidden and
-            # Dash fails to compute row heights when toggled from display:none.
             fixed_rows={"headers": True},
             style_table={"overflowX": "auto", "maxHeight": "480px"},
             style_cell={
@@ -1269,185 +1313,378 @@ def build_project_tile_modal() -> dbc.Modal:
             style_header={"border": "1px solid var(--border, #e6e9f0)"},
         )
 
-    erections_section = dbc.Card(
+    raw_data_accordion = dbc.Accordion(
         [
-            _completed_controls(
-                "project-modal-erections-range",
-                "project-modal-erections-search",
-                "Erections Completed",
-                "Completion date (defaults to yesterday)",
-            ),
-            _completed_table(
-                "project-modal-erections-table",
+            dbc.AccordionItem(
                 [
-                    {"name": "Completion Date", "id": "completion_date"},
-                    {"name": "Project", "id": "project_name"},
-                    {"name": "Location", "id": "location_no"},
-                    {"name": "Tower Weight (MT)", "id": "tower_weight"},
-                    {"name": "Productivity (MT/day)", "id": "daily_prod_mt"},
-                    {"name": "Gang", "id": "gang_name"},
-                    {"name": "Start Date", "id": "start_date"},
-                    {"name": "Supervisor", "id": "supervisor_name"},
-                    {"name": "Section Incharge", "id": "section_incharge_name"},
-                    {"name": "Revenue", "id": "revenue"},
-                ],
-            ),
-        ],
-        className="shadow-sm mb-4",
-        id="project-modal-anchor-erections",
-    )
-
-    stringing_section = dbc.Card(
-        [
-            _completed_controls(
-                "project-modal-stringing-range",
-                "project-modal-stringing-search",
-                "Stringing Completed",
-                "Filter by completion span",
-            ),
-            _completed_table(
-                "project-modal-stringing-table",
-                [
-                    {"name": "Completion Date", "id": "completion_date"},
-                    {"name": "Project", "id": "project_name"},
-                    {"name": "Span (From-To)", "id": "location_no"},
-                    {"name": "Length (KM)", "id": "tower_weight"},
-                    {"name": "Productivity (KM/day)", "id": "daily_prod_mt"},
-                    {"name": "Gang", "id": "gang_name"},
-                    {"name": "F/S Start Date", "id": "start_date"},
-                    {"name": "Supervisor", "id": "supervisor_name"},
-                    {"name": "Section Incharge", "id": "section_incharge_name"},
-                    {"name": "Revenue", "id": "revenue"},
-                ],
-            ),
-        ],
-        className="shadow-sm mb-4",
-        id="project-modal-anchor-stringing",
-    )
-
-    performance_cards = dbc.Row(
-        [
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
+                    html.Div(
                         [
-                            html.Div(
-                                className="section-header",
-                                children=[
-                                    html.Div(
-                                        [
-                                            html.Div("Gang Performance", className="section-title"),
-                                            html.Div("Delivered vs Lost (selected scope)", className="section-sub"),
-                                        ],
-                                        className="d-flex flex-column gap-1",
-                                    ),
-                                    html.Div(
-                                        className="legend",
-                                        children=[
-                                            html.Div([html.Span(className="legend__dot dot--delivered"), "Delivered Output"], className="legend__item"),
-                                            html.Div([html.Span(className="legend__dot dot--lost"), "Lost Potential"], className="legend__item"),
-                                        ],
-                                    ),
-                                ],
+                            _completed_controls(
+                                "project-modal-erections-range",
+                                "project-modal-erections-search",
+                                "Erections Completed",
+                                "Completion date (defaults to yesterday)",
                             ),
-                            html.Hr(style={"borderColor": "var(--border)", "margin": "8px 0 10px"}),
-                            html.Div(id="project-modal-avp-list", className="avp-wrap"),
-                            dcc.Graph(
-                                id="project-modal-actual-vs-bench",
-                                config=CLICK_GRAPH_CONFIG,
-                                style={"display": "none"},
-                            ),
-                        ]
-                    ),
-                    className="viz-card shadow-sm",
-                ),
-                md=6,
-            ),
-            dbc.Col(
-                dbc.Card(
-                    [
-                        dbc.CardHeader(
-                            dbc.Row(
+                            _completed_table(
+                                "project-modal-erections-table",
                                 [
-                                    dbc.Col(
-                                        html.Div(
-                                            [
-                                                html.Div("Performance Rankings", className="section-title"),
-                                                html.Div("Top and bottom gangs", className="section-sub"),
-                                            ]
-                                        ),
-                                        align="center",
-                                    ),
-                                    dbc.Col(
-                                        dbc.RadioItems(
-                                            id="project-modal-topbot-metric",
-                                            options=[
-                                                {"label": "Productivity", "value": "prod"},
-                                                {
-                                                    "label": html.Span(
-                                                        "Erection",
-                                                        id="project-modal-topbot-mode-label",
-                                                    ),
-                                                    "value": "erection",
-                                                },
-                                            ],
-                                            value="prod",
-                                            inline=True,
-                                            class_name="segment",
-                                            label_class_name="segment-label",
-                                            label_checked_class_name="segment-label--active",
-                                            input_class_name="segment-input",
-                                        ),
-                                        width="auto",
-                                        align="center",
-                                    ),
+                                    {"name": "Completion Date", "id": "completion_date"},
+                                    {"name": "Project", "id": "project_name"},
+                                    {"name": "Location", "id": "location_no"},
+                                    {"name": "Tower Weight (MT)", "id": "tower_weight"},
+                                    {"name": "Productivity (MT/day)", "id": "daily_prod_mt"},
+                                    {"name": "Gang", "id": "gang_name"},
+                                    {"name": "Start Date", "id": "start_date"},
+                                    {"name": "Supervisor", "id": "supervisor_name"},
+                                    {"name": "Section Incharge", "id": "section_incharge_name"},
+                                    {"name": "Revenue", "id": "revenue"},
                                 ],
-                                justify="between",
-                                align="center",
-                            )
-                        ),
-                        dbc.CardBody(
+                            ),
+                        ],
+                        id="project-modal-anchor-erections",
+                    ),
+                    html.Hr(className="my-3"),
+                    html.Div(
+                        [
+                            _completed_controls(
+                                "project-modal-stringing-range",
+                                "project-modal-stringing-search",
+                                "Stringing Completed",
+                                "Filter by completion span",
+                            ),
+                            _completed_table(
+                                "project-modal-stringing-table",
+                                [
+                                    {"name": "Completion Date", "id": "completion_date"},
+                                    {"name": "Project", "id": "project_name"},
+                                    {"name": "Span (From-To)", "id": "location_no"},
+                                    {"name": "Length (KM)", "id": "tower_weight"},
+                                    {"name": "Productivity (KM/day)", "id": "daily_prod_mt"},
+                                    {"name": "Gang", "id": "gang_name"},
+                                    {"name": "F/S Start Date", "id": "start_date"},
+                                    {"name": "Supervisor", "id": "supervisor_name"},
+                                    {"name": "Section Incharge", "id": "section_incharge_name"},
+                                    {"name": "Revenue", "id": "revenue"},
+                                ],
+                            ),
+                        ],
+                        id="project-modal-anchor-stringing",
+                    ),
+                ],
+                title="Raw Data",
+                item_id="raw-data",
+            ),
+        ],
+        start_collapsed=True,
+        always_open=False,
+        className="exec-accordion",
+    )
+
+    perf_panel = dbc.Collapse(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
                             [
-                                html.Div("Top 5 Performers", className="text-success fw-semibold mb-2"),
-                                dcc.Graph(id="project-modal-top5", config=CLICK_GRAPH_CONFIG, style={"cursor": "pointer"}),
-                                html.Hr(className="my-3"),
-                                html.Div("Bottom 5 Performers", className="text-danger fw-semibold mb-2"),
-                                dcc.Graph(id="project-modal-bottom5", config=CLICK_GRAPH_CONFIG, style={"cursor": "pointer"}),
-                            ]
+                                dbc.CardHeader(html.Div("Erection Gangs", className="section-title")),
+                                dbc.CardBody(
+                                    [
+                                        html.Div(id="project-modal-avp-list", className="avp-wrap"),
+                                        dcc.Graph(
+                                            id="project-modal-actual-vs-bench",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"display": "none"},
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="viz-card",
+                        ),
+                        md=6,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(html.Div("Top / Bottom Gangs", className="section-title")),
+                                dbc.CardBody(
+                                    [
+                                        dcc.Graph(
+                                            id="project-modal-top5",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"height": "140px"},
+                                        ),
+                                        dcc.Graph(
+                                            id="project-modal-bottom5",
+                                            config=CLICK_GRAPH_CONFIG,
+                                            style={"height": "140px"},
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="viz-card",
+                        ),
+                        md=6,
+                    ),
+                ],
+                className="g-3",
+            ),
+        ],
+        id="project-modal-perf-collapse",
+        is_open=False,
+    )
+
+    compatibility_stubs = html.Div(
+        [
+            html.Div(id="project-modal-summary"),
+            dbc.Collapse(html.Div(), id="project-modal-section-erections", is_open=False),
+            dbc.Collapse(html.Div(), id="project-modal-section-stringing", is_open=False),
+            dbc.Collapse(html.Div(), id="project-modal-section-performance", is_open=False),
+            html.Div(id="project-modal-anchor-performance"),
+            dbc.Button(id="project-modal-btn-erections", style={"display": "none"}, n_clicks=0),
+            dbc.Button(id="project-modal-btn-stringing", style={"display": "none"}, n_clicks=0),
+            dbc.Button(id="project-modal-btn-performance-erection", style={"display": "none"}, n_clicks=0),
+            dbc.Button(id="project-modal-btn-performance-stringing", style={"display": "none"}, n_clicks=0),
+            html.Div(
+                [
+                    dbc.RadioItems(
+                        id="project-modal-stringing-scope",
+                        options=[
+                            {"label": "All", "value": "all"},
+                            {"label": "Manual", "value": "manual"},
+                            {"label": "TSE", "value": "tse"},
+                            {"label": "Hotline", "value": "hotline"},
+                        ],
+                        value="all",
+                    ),
+                    dbc.RadioItems(
+                        id="project-modal-topbot-metric",
+                        options=[
+                            {"label": "Productivity", "value": "prod"},
+                            {"label": html.Span("Erection", id="project-modal-topbot-mode-label"), "value": "erection"},
+                        ],
+                        value="prod",
+                    ),
+                ]
+            ),
+            html.Div(
+                [
+                    html.Div(id="project-modal-trace-anchor"),
+                    *_build_trace_contents(
+                        "project-modal-trace-gang",
+                        "project-modal-btn-export-trace",
+                        "project-modal-tbl-idle-intervals",
+                        "project-modal-tbl-daily-prod",
+                    ),
+                    Download(id="project-modal-download-trace"),
+                ]
+            ),
+        ],
+        style={"display": "none"},
+    )
+
+    body_sections = [
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Label(
+                            "Select Project",
+                            className="fw-700 text-navy",
+                            style={"fontSize": "0.8rem", "marginBottom": "4px"},
+                        ),
+                        dcc.Dropdown(
+                            id="project-modal-project-select",
+                            options=[],
+                            value=None,
+                            placeholder="Choose a project...",
+                            clearable=False,
+                            className="filter-select filter-select--light",
+                            style={"background": "white", "color": "var(--text)"},
                         ),
                     ],
-                    className="viz-card shadow-sm",
+                    md=4,
                 ),
-                md=6,
-            ),
-        ],
-        className="mb-4",
-    )
-
-    trace_contents = [
-        html.Div(id="project-modal-trace-anchor"),
-        *_build_trace_contents(
-            "project-modal-trace-gang",
-            "project-modal-btn-export-trace",
-            "project-modal-tbl-idle-intervals",
-            "project-modal-tbl-daily-prod",
+                dbc.Col(
+                    html.Div(id="project-modal-rag-badge-container"),
+                    md=2,
+                    className="d-flex align-items-end",
+                ),
+                dbc.Col(
+                    html.Div(
+                        id="project-modal-last-updated",
+                        className="text-muted",
+                        style={"fontSize": "0.78rem", "paddingBottom": "6px"},
+                    ),
+                    md=6,
+                    className="d-flex align-items-end justify-content-end",
+                ),
+            ],
+            className="mb-3 align-items-end",
         ),
+        html.Div(
+            [
+                html.Div(id="project-modal-dpr-strip", className="dpr-strip"),
+            ],
+            className="mb-3",
+        ),
+        dbc.Row(
+            [
+                _build_executive_kpi_card(
+                    "Project Completion",
+                    "project-modal-kpi-completion",
+                    "project-modal-kpi-completion-sub",
+                ),
+                _build_executive_kpi_card(
+                    "Plan Attainment",
+                    "project-modal-kpi-plan",
+                    "project-modal-kpi-plan-sub",
+                ),
+                _build_executive_kpi_card(
+                    "Stretch Readiness",
+                    "project-modal-kpi-readiness",
+                    "project-modal-kpi-readiness-sub",
+                ),
+                _build_executive_kpi_card(
+                    "Erection-Stringing Gap",
+                    "project-modal-kpi-gap",
+                    "project-modal-kpi-gap-sub",
+                ),
+                _build_executive_kpi_card(
+                    "Erection Productivity",
+                    "project-modal-kpi-manpower",
+                    "project-modal-kpi-manpower-sub",
+                ),
+                _build_executive_kpi_card(
+                    "Stringing Productivity",
+                    "project-modal-kpi-stringing-productivity",
+                    "project-modal-kpi-stringing-productivity-sub",
+                ),
+            ],
+            className="g-3 mb-3",
+        ),
+        dbc.Card(
+            [
+                dbc.CardHeader(
+                    [
+                        html.Div("Activity Progress", className="section-title"),
+                        html.Div("Cumulative actual vs scope", className="section-sub"),
+                    ]
+                ),
+                dbc.CardBody(html.Div(id="project-modal-activity-rows")),
+            ],
+            className="viz-card mb-3",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                [
+                                    html.Div("Stretch Readiness", className="section-title"),
+                                    html.Div(id="project-modal-stretch-summary-chip", className="section-sub"),
+                                ]
+                            ),
+                            dbc.CardBody(
+                                [
+                                    dcc.Graph(
+                                        id="project-modal-stretch-pie",
+                                        config=CLICK_GRAPH_CONFIG,
+                                        style={"height": "280px"},
+                                    ),
+                                    html.Div(id="project-modal-stretch-blocked-summary"),
+                                ]
+                            ),
+                        ],
+                        className="viz-card h-100",
+                    ),
+                    md=5,
+                ),
+                dbc.Col(
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                [
+                                    html.Div("Stretch Readiness Gap Distribution", className="section-title"),
+                                    html.Div("Distribution of E->S readiness gap buckets for the selected project", className="section-sub"),
+                                ]
+                            ),
+                            dbc.CardBody(
+                                dcc.Graph(
+                                    id="project-modal-es-lag",
+                                    config=CLICK_GRAPH_CONFIG,
+                                    style={"height": "260px"},
+                                )
+                            ),
+                        ],
+                        className="viz-card h-100",
+                    ),
+                    md=7,
+                ),
+            ],
+            className="g-3 mb-3",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                [
+                                    html.Div("Erection Productivity", className="section-title"),
+                                    html.Div("MT/day - gang performance vs baseline", className="section-sub"),
+                                ]
+                            ),
+                            dbc.CardBody(
+                                dcc.Graph(
+                                    id="project-modal-erection-prod-chart",
+                                    config=CLICK_GRAPH_CONFIG,
+                                    style={"height": "240px"},
+                                )
+                            ),
+                        ],
+                        className="viz-card",
+                    ),
+                    md=6,
+                ),
+                dbc.Col(
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                [
+                                    html.Div("Stringing Productivity", className="section-title"),
+                                    html.Div("km/day - gang output vs baseline", className="section-sub"),
+                                ]
+                            ),
+                            dbc.CardBody(
+                                dcc.Graph(
+                                    id="project-modal-stringing-prod-chart",
+                                    config=CLICK_GRAPH_CONFIG,
+                                    style={"height": "240px"},
+                                )
+                            ),
+                        ],
+                        className="viz-card",
+                    ),
+                    md=6,
+                ),
+            ],
+            className="g-3 mb-3",
+        ),
+        perf_panel,
+        dbc.Button(
+            "Show Gang Performance",
+            id="project-modal-perf-toggle",
+            color="link",
+            size="sm",
+            className="text-muted mt-2 mb-3",
+            n_clicks=0,
+        ),
+        raw_data_accordion,
+        compatibility_stubs,
+        html.Div(id="project-modal-scroll-wire", style={"display": "none"}),
     ]
-    trace_block = dbc.Card(
-        dbc.CardBody(trace_contents + [Download(id="project-modal-download-trace")]),
-        className="shadow-sm",
-    )
-
-    performance_section = html.Div(
-        [performance_cards, trace_block], id="project-modal-anchor-performance"
-    )
-
-    sections = [
-        dbc.Collapse(erections_section, id="project-modal-section-erections", is_open=False),
-        dbc.Collapse(stringing_section, id="project-modal-section-stringing", is_open=False),
-        dbc.Collapse(performance_section, id="project-modal-section-performance", is_open=False),
-    ]
-
     return dbc.Modal(
         [
             dbc.ModalHeader(
@@ -1464,10 +1701,7 @@ def build_project_tile_modal() -> dbc.Modal:
                 close_button=False,
                 className="project-modal-header",
             ),
-            dbc.ModalBody(
-                [summary_card, *sections, html.Div(id="project-modal-scroll-wire", style={"display": "none"})],
-                className="project-modal-body",
-            ),
+            dbc.ModalBody(body_sections, className="project-modal-body"),
         ],
         id="project-detail-modal",
         is_open=False,
@@ -1944,7 +2178,7 @@ def build_project_responsibilities_modal() -> dbc.Modal:
     )
 
 def build_header(title: str, last_updated_text: str) -> html.Div:
-    """Top section: title with inline filters and a compact meta row."""
+    """Top section: title, controls, and actions in a single top bar row."""
 
     # Build small inline SVGs as IMG data URIs (Dash-safe across versions)
     cube_svg_str = '''
@@ -1974,17 +2208,12 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
                         className="topbar__left",
                     ),
                     controls,
-                ],
-                className="topbar__row",
-            ),
-            html.Div(
-                [
-                    html.Div(
-                        f"Last updated: {last_updated_text}",
-                        className="topbar__updated",
-                    ),
                     html.Div(
                         [
+                            html.Div(
+                                f"Last updated: {last_updated_text}",
+                                className="topbar__updated",
+                            ),
                             dbc.Button(
                                 "Export Executive PDF",
                                 id="btn-export-executive-pdf",
@@ -2008,10 +2237,10 @@ def build_header(title: str, last_updated_text: str) -> html.Div:
                                 style={"display": "none"},
                             ),
                         ],
-                        className="topbar__actions",
+                        className="topbar__right topbar__actions",
                     ),
                 ],
-                className="topbar__meta-row",
+                className="topbar__row",
             ),
             html.Div(
                 dcc.Dropdown(
@@ -2473,6 +2702,7 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             dcc.Store(id="store-proj-resp-month", data=None),
             dcc.Store(id="store-proj-resp-plan", data=None),
             dcc.Store(id="store-project-tile-focus", data=None),
+            dcc.Store(id="store-project-surface-focus", data=None),
             dcc.Store(id="store-project-modal-focus-cache", data=None),
             dcc.Store(id="store-project-modal-section", data="erections"),
             dcc.Store(id="store-project-modal-click-meta", data=None),
@@ -2521,6 +2751,8 @@ def build_layout(last_updated_text: str) -> dbc.Container:
         fluid=True,
     )
     return layout
+
+
 
 
 

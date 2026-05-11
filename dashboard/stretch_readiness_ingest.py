@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 import re
 
 import pandas as pd
@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 
 from erection_compiled_to_daily_new import load_sheet_with_csv_fallback
 from . import stringing_ingest as ingest
+from .stringing import add_length_units, normalize_stringing_columns
 from .project_identity import (
     build_project_display,
     build_project_scope_key,
@@ -18,6 +19,7 @@ from .project_identity import (
     parse_project_identity_from_filename,
     parse_sheet_line_entries,
 )
+from .completed_projects import is_completed_project
 
 
 DEFAULT_ACTIVITY_ALLOWLIST = (
@@ -1369,6 +1371,17 @@ STRETCH_RAWDATA_COLUMNS = [
     "balance_towers",
     "readiness_state",
     "remarks",
+    "readiness_source",
+    "source_tag",
+    "location_nos_raw",
+    "location_parse_status",
+    "location_parse_issue",
+    "required_location_count",
+    "matched_location_count",
+    "unmatched_location_count",
+    "required_locations",
+    "matched_locations",
+    "unmatched_locations",
 ]
 
 STRETCH_SUMMARY_COLUMNS = [
@@ -1463,6 +1476,13 @@ STRETCH_COVERAGE_COLUMNS = [
 STRETCH_READY_TOKENS_DEFAULT = ("ready", "done", "completed", "complete", "c", "yes")
 STRETCH_NOT_READY_TOKENS_DEFAULT = ("not ready", "pending", "wip", "balance", "row", "hold", "no", "blocked")
 
+STRETCH_SOURCE_DERIVED = "DERIVED_ENDPOINT_TIGHTENING"
+STRETCH_SOURCE_LEGACY = "LEGACY_STRETCH_SHEET"
+
+_LOCATION_TOKEN_SPLIT_RE = re.compile(r"\s*,\s*")
+_LOCATION_FULL_TOKEN_RE = re.compile(r"^\d+[A-Z]*/\d+[A-Z]*$", flags=re.IGNORECASE)
+_LOCATION_SHORTHAND_RE = re.compile(r"^[A-Z0-9]+$", flags=re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class StretchProjectConfig:
@@ -1485,6 +1505,446 @@ class StretchParseResult:
 def _extract_report_date_from_filename(file_name: str) -> str:
     match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", str(file_name or ""))
     return match.group(1) if match else ""
+
+
+def _col_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _scope_key_for_match(scope: object, project_code: object, line_name: object) -> str:
+    scope_text = _as_text(scope)
+    if scope_text:
+        return ingest.normalize_project_code_key(scope_text)
+    return ingest.normalize_project_code_key(f"{_as_text(project_code)}::{normalize_line_name(line_name)}")
+
+
+def _normalize_location_token(value: object) -> str:
+    text = _as_text(value).replace("\u00a0", " ").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^\s*AP[\s\-_./]*", "", text, flags=re.IGNORECASE)
+    text = text.upper()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(\d)\.0\b", r"\1", text)
+    return text
+
+
+def _is_valid_date_value(value: object) -> bool:
+    text = _as_text(value)
+    if not text:
+        return False
+    try:
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+        if pd.isna(parsed):
+            parsed = pd.to_datetime(text, errors="coerce")
+    except Exception:
+        return False
+    return pd.notna(parsed)
+
+
+def _report_date_with_fallback(report_date: object, source_file: object) -> str:
+    text = _as_text(report_date)
+    if text:
+        return text
+    return _extract_report_date_from_filename(_as_text(source_file))
+
+
+def _report_timestamp_with_fallback(report_date: object, source_file: object) -> pd.Timestamp:
+    text = _report_date_with_fallback(report_date, source_file)
+    if not text:
+        return pd.NaT
+    try:
+        return pd.to_datetime(text, errors="coerce").normalize()
+    except Exception:
+        return pd.NaT
+
+
+def _pick_column(work: pd.DataFrame, candidates: Iterable[str]) -> str | None:
+    if work is None or work.empty:
+        return None
+    lookup = {_col_key(col): col for col in work.columns}
+    for candidate in candidates:
+        key = _col_key(candidate)
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
+def _pick_location_nos_column(work: pd.DataFrame) -> str | None:
+    exact = _pick_column(
+        work,
+        (
+            "location nos",
+            "location_no_s",
+            "locations nos",
+            "location numbers",
+            "location list",
+            "locationnos",
+        ),
+    )
+    if exact:
+        return exact
+    for col in work.columns:
+        norm = _col_key(col)
+        if "location" in norm and ("nos" in norm or "numbers" in norm):
+            return col
+    return None
+
+
+def _normalize_required_location_sequence(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = _normalize_location_token(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _derive_stretch_identifier_from_stringing_row(row: pd.Series, from_ap: str, to_ap: str) -> tuple[str, str]:
+    for key in ("stretch_identifier", "section", "section_name", "section_id", "section label", "stretch"):
+        text = _as_text(row.get(key))
+        if text:
+            return text, text
+    if from_ap and to_ap:
+        label = f"{from_ap} - {to_ap}"
+        return label, label
+    section_label = _as_text(row.get("section_label"))
+    if section_label:
+        return section_label, section_label
+    if from_ap or to_ap:
+        label = from_ap or to_ap
+        return label, label
+    return "", ""
+
+
+def _parse_location_nos_extras(location_nos_raw: object) -> tuple[list[str], str, str]:
+    raw_text = _as_text(location_nos_raw)
+    if not raw_text:
+        return [], "EMPTY", ""
+
+    tokens = [token.strip() for token in _LOCATION_TOKEN_SPLIT_RE.split(raw_text) if token.strip()]
+    if not tokens:
+        return [], "EMPTY", ""
+
+    extras: list[str] = []
+    current_anchor_prefix = ""
+    saw_full_anchor = False
+    unparsed_tokens: list[str] = []
+
+    for token in tokens:
+        normalized = _normalize_location_token(token)
+        if not normalized:
+            continue
+        if _LOCATION_FULL_TOKEN_RE.fullmatch(normalized):
+            saw_full_anchor = True
+            current_anchor_prefix = normalized.split("/", 1)[0]
+            extras.append(normalized)
+            continue
+        if _LOCATION_SHORTHAND_RE.fullmatch(normalized):
+            if saw_full_anchor and current_anchor_prefix:
+                extras.append(f"{current_anchor_prefix}/{normalized}")
+            else:
+                unparsed_tokens.append(normalized)
+            continue
+        unparsed_tokens.append(normalized)
+
+    extras = _normalize_required_location_sequence(extras)
+    if unparsed_tokens and not saw_full_anchor:
+        return [], "SHORTHAND_NO_ANCHOR", "Location Nos has shorthand tokens without an explicit anchor token."
+    if unparsed_tokens:
+        return extras, "PARTIAL_PARSE", f"Unparsed tokens: {', '.join(unparsed_tokens[:5])}"
+    return extras, "OK", ""
+
+
+def _build_required_locations(from_ap: object, to_ap: object, location_nos_raw: object) -> tuple[list[str], str, str]:
+    endpoints = _normalize_required_location_sequence((_as_text(from_ap), _as_text(to_ap)))
+    extras, parse_status, parse_issue = _parse_location_nos_extras(location_nos_raw)
+    required = _normalize_required_location_sequence([*endpoints, *extras])
+    if parse_status == "SHORTHAND_NO_ANCHOR":
+        required = endpoints
+    if not endpoints and not required:
+        return [], parse_status, parse_issue
+    return required, parse_status, parse_issue
+
+
+def _build_tightening_completion_maps(erection_raw: pd.DataFrame) -> tuple[dict[tuple[str, str], bool], dict[tuple[str, str], bool]]:
+    if erection_raw is None or erection_raw.empty:
+        return {}, {}
+
+    work = erection_raw.copy()
+    location_col = _pick_column(work, ("location no", "location no.", "location_no", "location number", "location"))
+    tightening_col = _pick_column(work, ("tower tightening", "tower_tightening", "tower tightening date", "tightening date"))
+    if not location_col or not tightening_col:
+        return {}, {}
+
+    for col in ("project_scope_key", "project_code", "line_name", "source_file", "report_date", "source_row_number"):
+        if col not in work.columns:
+            work[col] = ""
+    work["__loc_norm"] = work[location_col].map(_normalize_location_token)
+    work = work[work["__loc_norm"].astype(bool)].copy()
+    if work.empty:
+        return {}, {}
+
+    work["__scope_norm"] = [
+        _scope_key_for_match(scope, code, line)
+        for scope, code, line in zip(work["project_scope_key"], work["project_code"], work["line_name"])
+    ]
+    work["__project_norm"] = work["project_code"].map(ingest.normalize_project_code_key)
+    work["__complete"] = work[tightening_col].map(_is_valid_date_value)
+    work["__report_ts"] = [
+        _report_timestamp_with_fallback(report_date, source_file)
+        for report_date, source_file in zip(work["report_date"], work["source_file"])
+    ]
+    work["__source_row"] = pd.to_numeric(work.get("source_row_number"), errors="coerce").fillna(0).astype(int)
+    work["_seq"] = range(len(work.index))
+    work = work.sort_values(["__scope_norm", "__project_norm", "__loc_norm", "__report_ts", "__source_row", "_seq"])
+    work = work.drop_duplicates(subset=["__scope_norm", "__project_norm", "__loc_norm"], keep="last")
+
+    by_scope: dict[tuple[str, str], bool] = {}
+    by_project: dict[tuple[str, str], bool] = {}
+    for _, row in work.iterrows():
+        loc_norm = _as_text(row.get("__loc_norm"))
+        if not loc_norm:
+            continue
+        complete = bool(row.get("__complete", False))
+        scope_norm = _as_text(row.get("__scope_norm"))
+        if scope_norm:
+            by_scope[(scope_norm, loc_norm)] = complete
+        project_norm = _as_text(row.get("__project_norm"))
+        if project_norm:
+            by_project[(project_norm, loc_norm)] = complete
+    return by_scope, by_project
+
+
+def _build_stretch_section_key_series(frame: pd.DataFrame) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series([], dtype="string")
+    scope_series = [
+        _scope_key_for_match(scope, code, line)
+        for scope, code, line in zip(
+            frame.get("project_scope_key", pd.Series("", index=frame.index)),
+            frame.get("project_code", pd.Series("", index=frame.index)),
+            frame.get("line_name", pd.Series("", index=frame.index)),
+        )
+    ]
+    from_norm = frame.get("from_ap", pd.Series("", index=frame.index)).map(_normalize_location_token)
+    to_norm = frame.get("to_ap", pd.Series("", index=frame.index)).map(_normalize_location_token)
+    identifier_norm = frame.get("stretch_identifier", pd.Series("", index=frame.index)).fillna("").astype(str).map(_normalize_text)
+    section_norm = frame.get("section_label", pd.Series("", index=frame.index)).fillna("").astype(str).map(_normalize_text)
+    keys: list[str] = []
+    for scope, from_loc, to_loc, ident, section in zip(
+        scope_series,
+        from_norm.tolist(),
+        to_norm.tolist(),
+        identifier_norm.tolist(),
+        section_norm.tolist(),
+    ):
+        if from_loc or to_loc:
+            keys.append(f"{scope}|{from_loc}|{to_loc}")
+            continue
+        label = ident or section
+        keys.append(f"{scope}|{label}" if label else "")
+    return pd.Series(keys, index=frame.index, dtype="string")
+
+
+def _merge_stretch_sources_prefer_derived(legacy_df: pd.DataFrame, derived_df: pd.DataFrame) -> pd.DataFrame:
+    if legacy_df is None or legacy_df.empty:
+        return derived_df.reindex(columns=STRETCH_RAWDATA_COLUMNS) if derived_df is not None else pd.DataFrame(columns=STRETCH_RAWDATA_COLUMNS)
+    if derived_df is None or derived_df.empty:
+        return legacy_df.reindex(columns=STRETCH_RAWDATA_COLUMNS)
+
+    legacy = legacy_df.copy()
+    derived = derived_df.copy()
+    legacy["__section_key"] = _build_stretch_section_key_series(legacy)
+    derived["__section_key"] = _build_stretch_section_key_series(derived)
+    derived_keys = {
+        key
+        for key in derived["__section_key"].dropna().astype(str).str.strip().tolist()
+        if key
+    }
+    if derived_keys:
+        legacy = legacy[~legacy["__section_key"].astype(str).isin(derived_keys)].copy()
+    merged = pd.concat([legacy.drop(columns=["__section_key"], errors="ignore"), derived.drop(columns=["__section_key"], errors="ignore")], ignore_index=True)
+    return merged.reindex(columns=STRETCH_RAWDATA_COLUMNS)
+
+
+def _dedupe_stretch_latest_sections(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=STRETCH_RAWDATA_COLUMNS)
+    work = raw_df.copy()
+    work["__section_key"] = _build_stretch_section_key_series(work)
+    blank_key_mask = ~work["__section_key"].fillna("").astype(str).str.strip().astype(bool)
+    if blank_key_mask.any():
+        work.loc[blank_key_mask, "__section_key"] = [
+            f"__row_{idx}" for idx in work.index[blank_key_mask].tolist()
+        ]
+
+    work["__report_ts"] = [
+        _report_timestamp_with_fallback(report_date, source_file)
+        for report_date, source_file in zip(work.get("report_date", pd.Series("", index=work.index)), work.get("source_file", pd.Series("", index=work.index)))
+    ]
+    work["__source_rank"] = work.get("readiness_source", pd.Series("", index=work.index)).fillna("").astype(str).map(
+        lambda v: 2 if v == STRETCH_SOURCE_DERIVED else 1
+    )
+    work["__source_row"] = pd.to_numeric(work.get("source_row_number"), errors="coerce").fillna(0).astype(int)
+    work["_seq"] = range(len(work.index))
+    work = work.sort_values(["__section_key", "__report_ts", "__source_rank", "__source_row", "_seq"])
+    latest = work.drop_duplicates(subset=["__section_key"], keep="last")
+    return latest.reindex(columns=STRETCH_RAWDATA_COLUMNS).reset_index(drop=True)
+
+
+def _load_artifact_frame(
+    root: Path,
+    *,
+    parquet_name: str,
+    workbook_name: str,
+    sheet_name: str,
+) -> pd.DataFrame:
+    parquet_path = root / parquet_name
+    if parquet_path.exists():
+        try:
+            frame = pd.read_parquet(parquet_path)
+            if isinstance(frame, pd.DataFrame):
+                return frame
+        except Exception:
+            pass
+    workbook_path = root / workbook_name
+    if workbook_path.exists():
+        try:
+            with pd.ExcelFile(workbook_path) as xl:
+                target_sheet = sheet_name
+                if target_sheet not in xl.sheet_names:
+                    target_sheet = next((name for name in xl.sheet_names if ingest.normalize_sheet_key(name) == ingest.normalize_sheet_key(sheet_name)), "")
+                if target_sheet:
+                    return xl.parse(target_sheet)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
+def _build_derived_stretch_rows(
+    *,
+    parquets_root: Path,
+    allowed_project_keys: set[str],
+) -> pd.DataFrame:
+    stringing_root = parquets_root / "Stringing"
+    erection_root = parquets_root / "Erection"
+    stringing_compiled = _load_artifact_frame(
+        stringing_root,
+        parquet_name="StringingCompiled.parquet",
+        workbook_name="StringingCompiled_Output.xlsx",
+        sheet_name="Stringing Compiled",
+    )
+    erection_raw = _load_artifact_frame(
+        erection_root,
+        parquet_name="RawData.parquet",
+        workbook_name="ErectionCompiled_Output.xlsx",
+        sheet_name="RawData",
+    )
+    if stringing_compiled.empty or erection_raw.empty:
+        return pd.DataFrame(columns=STRETCH_RAWDATA_COLUMNS)
+
+    compiled, _ = normalize_stringing_columns(stringing_compiled)
+    compiled, _ = add_length_units(compiled)
+    for column in ("project_code", "project_name", "project_display", "project", "line_name", "project_scope_key", "from_ap", "to_ap", "source_file", "source_sheet", "section_readiness", "length_m", "length_km"):
+        if column not in compiled.columns:
+            compiled[column] = ""
+    location_nos_col = _pick_location_nos_column(compiled)
+    if location_nos_col is None:
+        compiled["__location_nos_raw"] = ""
+    else:
+        compiled["__location_nos_raw"] = compiled[location_nos_col]
+
+    by_scope, by_project = _build_tightening_completion_maps(erection_raw)
+    if not by_scope and not by_project:
+        return pd.DataFrame(columns=STRETCH_RAWDATA_COLUMNS)
+
+    rows: list[dict[str, object]] = []
+    for idx, row in compiled.iterrows():
+        project_code = _as_text(row.get("project_code"))
+        if not project_code:
+            project_code = _as_text(row.get("project")) or _as_text(row.get("project_name"))
+        project_key = ingest.normalize_project_code_key(project_code)
+        if allowed_project_keys and project_key not in allowed_project_keys:
+            continue
+        line_name = normalize_line_name(row.get("line_name", ""))
+        project_display = _as_text(row.get("project_display")) or _as_text(row.get("project_name")) or project_code
+        if not project_display:
+            project_display = build_project_display(project_code, line_name, project_code) or project_code
+        project_scope_key = _as_text(row.get("project_scope_key")) or build_project_scope_key(project_code, line_name, project_display)
+        scope_norm = _scope_key_for_match(project_scope_key, project_code, line_name)
+        from_ap = _as_text(row.get("from_ap") or row.get("from"))
+        to_ap = _as_text(row.get("to_ap") or row.get("to"))
+        location_nos_raw = row.get("__location_nos_raw")
+        required_locations, parse_status, parse_issue = _build_required_locations(from_ap, to_ap, location_nos_raw)
+
+        matched_locations: list[str] = []
+        unmatched_locations: list[str] = []
+        for location in required_locations:
+            complete = by_scope.get((scope_norm, location))
+            if complete is None and project_key:
+                complete = by_project.get((project_key, location))
+            if complete is True:
+                matched_locations.append(location)
+            else:
+                unmatched_locations.append(location)
+
+        if not required_locations:
+            readiness_state = "UNKNOWN"
+        else:
+            readiness_state = "READY" if not unmatched_locations else "NOT_READY"
+
+        stretch_identifier, section_label = _derive_stretch_identifier_from_stringing_row(row, from_ap, to_ap)
+        report_date = _report_date_with_fallback(row.get("report_date"), row.get("source_file"))
+        length_km = pd.to_numeric(pd.Series([row.get("length_km")]), errors="coerce").iloc[0]
+        length_m_raw = row.get("length_m")
+        source_row_number = int(pd.to_numeric(pd.Series([row.get("source_row_number", idx + 1)]), errors="coerce").fillna(idx + 1).iloc[0])
+        rows.append(
+            {
+                "project_code": project_code,
+                "project_display": project_display,
+                "project_scope_key": project_scope_key,
+                "line_name": line_name,
+                "line_name_source": "stringing_compiled",
+                "section_label": section_label,
+                "source_file": _as_text(row.get("source_file")),
+                "source_sheet": _as_text(row.get("source_sheet")),
+                "configured_sheet": "",
+                "template_sheet": "",
+                "report_date": report_date,
+                "header_row_number": int(pd.to_numeric(pd.Series([row.get("header_row_number")]), errors="coerce").fillna(0).iloc[0]),
+                "source_row_number": source_row_number,
+                "stretch_identifier": stretch_identifier,
+                "from_ap": from_ap,
+                "to_ap": to_ap,
+                "length_m_raw": length_m_raw,
+                "length_km": float(length_km) if pd.notna(length_km) else None,
+                "readiness_raw": _as_text(row.get("section_readiness")),
+                "final_check_raw": "",
+                "tack_welding_raw": "",
+                "balance_towers": None,
+                "readiness_state": readiness_state,
+                "remarks": parse_issue,
+                "readiness_source": STRETCH_SOURCE_DERIVED,
+                "source_tag": STRETCH_SOURCE_DERIVED,
+                "location_nos_raw": _as_text(location_nos_raw),
+                "location_parse_status": parse_status,
+                "location_parse_issue": parse_issue,
+                "required_location_count": int(len(required_locations)),
+                "matched_location_count": int(len(matched_locations)),
+                "unmatched_location_count": int(len(unmatched_locations)),
+                "required_locations": ", ".join(required_locations),
+                "matched_locations": ", ".join(matched_locations),
+                "unmatched_locations": ", ".join(unmatched_locations),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=STRETCH_RAWDATA_COLUMNS)
+    return pd.DataFrame(rows, columns=STRETCH_RAWDATA_COLUMNS)
 
 
 def _length_km_from_row(row: pd.Series, *, length_unit: str) -> float | None:
@@ -1534,6 +1994,21 @@ def _is_negative_ready_token(value: object, not_ready_tokens: tuple[str, ...]) -
     return False
 
 
+def _is_date_like_completion(value: object) -> bool:
+    """Treat populated completion-style date fields as READY signal."""
+    text = _as_text(value)
+    if not text:
+        return False
+    # Fast path for common spreadsheet date strings.
+    if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text) or re.search(r"\b\d{4}-\d{2}-\d{2}\b", text):
+        return True
+    try:
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    except Exception:
+        return False
+    return pd.notna(parsed)
+
+
 def _normalize_stretch_readiness_state(
     *,
     rule: str,
@@ -1551,8 +2026,8 @@ def _normalize_stretch_readiness_state(
     balance = _coerce_numeric(balance_towers)
 
     if rule_norm == "both_required":
-        final_ready = _is_positive_ready_token(final_check, ready_tokens)
-        tack_ready = _is_positive_ready_token(tack, ready_tokens)
+        final_ready = _is_positive_ready_token(final_check, ready_tokens) or _is_date_like_completion(final_check_raw)
+        tack_ready = _is_positive_ready_token(tack, ready_tokens) or _is_date_like_completion(tack_welding_raw)
         if final_ready and tack_ready:
             return "READY"
         if final_ready or tack_ready:
@@ -1567,8 +2042,8 @@ def _normalize_stretch_readiness_state(
         return "NOT_READY"
     if balance is not None:
         return "READY" if balance <= 0 else "NOT_READY"
-    final_ready = _is_positive_ready_token(final_check, ready_tokens)
-    tack_ready = _is_positive_ready_token(tack, ready_tokens)
+    final_ready = _is_positive_ready_token(final_check, ready_tokens) or _is_date_like_completion(final_check_raw)
+    tack_ready = _is_positive_ready_token(tack, ready_tokens) or _is_date_like_completion(tack_welding_raw)
     if final_ready and tack_ready:
         return "READY"
     if final_ready or tack_ready:
@@ -1903,6 +2378,62 @@ def _pick_best_workbook_for_sheet_stretch(
     return top[1], top[2]
 
 
+def _pick_matching_workbooks_for_sheet_stretch(
+    workbooks: list[Path],
+    workbook_sheets: dict[str, list[str]],
+    configured_sheet: str,
+    configured_line_name: str = "",
+) -> list[tuple[Path, str]]:
+    scored: list[tuple[tuple[int, int, int, int, float], Path, str, str, str]] = []
+    line_hint = ingest.normalize_space_only(configured_line_name)
+    for workbook in workbooks:
+        names = workbook_sheets.get(str(workbook.resolve()), [])
+        if configured_sheet:
+            best_score = (0, 0, 0)
+            best_name = ""
+            for name in names:
+                score = _sheet_match_score_stretch(configured_sheet, name)
+                if score > best_score:
+                    best_score = score
+                    best_name = name
+            if best_score == (0, 0, 0):
+                continue
+        else:
+            best_score = (1, 0, 0)
+            best_name = names[0] if names else ""
+        identity = parse_project_identity_from_filename(workbook.name)
+        wb_line = ingest.normalize_space_only(identity.get("line_name", ""))
+        line_bonus = 1 if line_hint and wb_line and line_hint == wb_line else 0
+        mtime = workbook.stat().st_mtime if workbook.exists() else 0.0
+        report_date = _extract_report_date_from_filename(workbook.name)
+        scored.append(((best_score[0], best_score[1], best_score[2], line_bonus, mtime), workbook, best_name, report_date, wb_line))
+
+    if not scored:
+        return []
+
+    dedup: dict[tuple[str, str, str], tuple[tuple[int, int, int, int, float], Path, str, str, str]] = {}
+    for entry in scored:
+        _, workbook, best_name, report_date, wb_line = entry
+        dedupe_key = (
+            report_date or f"__{workbook.resolve()}",
+            wb_line,
+            ingest.normalize_space_only(best_name),
+        )
+        prev = dedup.get(dedupe_key)
+        if prev is None or entry[0] > prev[0]:
+            dedup[dedupe_key] = entry
+
+    picked = list(dedup.values())
+    picked.sort(
+        key=lambda item: (
+            item[3] if item[3] else "9999-12-31",
+            str(item[1]).lower(),
+            item[2].lower(),
+        )
+    )
+    return [(item[1], item[2]) for item in picked]
+
+
 def _build_exact_sheet_selector_stretch(sheet_name: str):
     expected_space = ingest.normalize_space_only(sheet_name)
     expected_compact = ingest.normalize_sheet_key(sheet_name)
@@ -2021,6 +2552,17 @@ def _build_stretch_rows_from_block(
                 "balance_towers": balance_towers,
                 "readiness_state": readiness_state,
                 "remarks": remarks,
+                "readiness_source": STRETCH_SOURCE_LEGACY,
+                "source_tag": STRETCH_SOURCE_LEGACY,
+                "location_nos_raw": "",
+                "location_parse_status": "",
+                "location_parse_issue": "",
+                "required_location_count": None,
+                "matched_location_count": None,
+                "unmatched_location_count": None,
+                "required_locations": "",
+                "matched_locations": "",
+                "unmatched_locations": "",
             }
         )
     return pd.DataFrame(rows, columns=STRETCH_RAWDATA_COLUMNS)
@@ -2276,7 +2818,13 @@ def _build_stretch_summary(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(columns=STRETCH_SUMMARY_COLUMNS)
 
-    work = raw_df.copy()
+    work = _dedupe_stretch_latest_sections(raw_df)
+    if work.empty:
+        return pd.DataFrame(columns=STRETCH_SUMMARY_COLUMNS)
+
+    readiness = work.get("readiness_state", pd.Series("", index=work.index)).fillna("").astype(str).str.upper().str.strip()
+    readiness_allowed = {"READY", "PARTIAL", "NOT_READY", "UNKNOWN"}
+    work["readiness_state"] = readiness.where(readiness.isin(readiness_allowed), "UNKNOWN")
     work["length_km"] = pd.to_numeric(work.get("length_km"), errors="coerce")
     rows: list[dict[str, object]] = []
     group_cols = ["project_code", "project_display", "project_scope_key", "line_name", "line_name_source"]
@@ -2290,7 +2838,14 @@ def _build_stretch_summary(raw_df: pd.DataFrame) -> pd.DataFrame:
         unknown_count = int(counts.get("UNKNOWN", 0))
         total_km = float(group["length_km"].dropna().sum()) if "length_km" in group.columns else 0.0
         ready_km = float(group.loc[group["readiness_state"] == "READY", "length_km"].dropna().sum())
-        report_dates = sorted({str(v).strip() for v in group.get("report_date", pd.Series(dtype=object)) if str(v).strip()})
+        report_timestamps = [
+            _report_timestamp_with_fallback(report_date, source_file)
+            for report_date, source_file in zip(
+                group.get("report_date", pd.Series("", index=group.index)),
+                group.get("source_file", pd.Series("", index=group.index)),
+            )
+        ]
+        report_dates = [ts for ts in report_timestamps if pd.notna(ts)]
         rows.append(
             {
                 "project_code": project_code,
@@ -2298,7 +2853,7 @@ def _build_stretch_summary(raw_df: pd.DataFrame) -> pd.DataFrame:
                 "project_scope_key": project_scope_key,
                 "line_name": line_name,
                 "line_name_source": line_source,
-                "report_date": report_dates[-1] if report_dates else "",
+                "report_date": max(report_dates).strftime("%Y-%m-%d") if report_dates else "",
                 "source_files": int(group["source_file"].astype(str).nunique()),
                 "source_sheets": int(group["source_sheet"].astype(str).nunique()),
                 "total_count": total_count,
@@ -2334,8 +2889,28 @@ def compile_stretch_readiness_to_workbook(
     output_path: Path,
     *,
     repo_root: Path | None = None,
+    completed_project_keys: set[str] | None = None,
 ) -> Path | None:
+    output_path = Path(output_path)
     candidates = _stretch_candidates(input_dir, files)
+    if completed_project_keys:
+        kept: list[Path] = []
+        skipped_files = 0
+        skipped_projects: set[str] = set()
+        for workbook in candidates:
+            identity = parse_project_identity_from_filename(workbook.name)
+            project_code = str(identity.get("project_code", "")).strip() or workbook.stem
+            if project_code and is_completed_project(project_code, completed_project_keys):
+                skipped_files += 1
+                skipped_projects.add(project_code.upper())
+                continue
+            kept.append(workbook)
+        if skipped_files:
+            print(
+                f"[pipeline] StretchReadiness: skipped_completed_files={skipped_files}, "
+                f"skipped_completed_projects={len(skipped_projects)}"
+            )
+        candidates = kept
     if not candidates:
         print("[pipeline] StretchReadiness: no candidate files found; skipping.")
         return None
@@ -2362,6 +2937,7 @@ def compile_stretch_readiness_to_workbook(
     issue_rows: list[dict[str, object]] = []
     coverage_rows: list[dict[str, object]] = []
     skipped_not_in_config = 0
+    processed_project_keys: set[str] = set()
 
     for project_key, project_workbooks in sorted(workbooks_by_project.items()):
         cfg = stretch_config.get(project_key)
@@ -2370,6 +2946,7 @@ def compile_stretch_readiness_to_workbook(
             continue
         if cfg is None:
             continue
+        processed_project_keys.add(project_key)
 
         identity_base = parse_project_identity_from_filename(project_workbooks[0].name)
         project_code_base = str(identity_base.get("project_code", "")).strip() or project_workbooks[0].stem
@@ -2416,14 +2993,14 @@ def compile_stretch_readiness_to_workbook(
                     configured_stretch_line_keys.add(configured_line_key)
                 else:
                     has_wildcard_stretch_line = True
-                selected_workbook, resolved_sheet_guess = _pick_best_workbook_for_sheet_stretch(
+                selected_workbooks = _pick_matching_workbooks_for_sheet_stretch(
                     project_workbooks,
                     workbook_sheet_cache,
                     configured_sheet,
                     configured_line_name,
                 )
 
-                if selected_workbook is None:
+                if not selected_workbooks:
                     project_display = build_project_display(project_code_base, configured_line_name, project_code_base) or project_code_base
                     coverage_rows.append(
                         {
@@ -2455,172 +3032,152 @@ def compile_stretch_readiness_to_workbook(
                     )
                     continue
 
-                selected_identity = parse_project_identity_from_filename(selected_workbook.name)
-                project_code = str(selected_identity.get("project_code", "")).strip() or selected_workbook.stem
-                line_name = configured_line_name or normalize_line_name(selected_identity.get("line_name", ""))
-                line_source = configured_line_source or ("config" if configured_line_name else "filename")
-                project_display = build_project_display(project_code, line_name, project_code) or project_code
-                project_scope_key = build_project_scope_key(project_code, line_name, project_display)
-                available_sheet_text = "; ".join(workbook_sheet_cache.get(str(selected_workbook.resolve()), []))
+                for selected_workbook, resolved_sheet_guess in selected_workbooks:
+                    selected_identity = parse_project_identity_from_filename(selected_workbook.name)
+                    project_code = str(selected_identity.get("project_code", "")).strip() or selected_workbook.stem
+                    line_name = configured_line_name or normalize_line_name(selected_identity.get("line_name", ""))
+                    line_source = configured_line_source or ("config" if configured_line_name else "filename")
+                    project_display = build_project_display(project_code, line_name, project_code) or project_code
+                    project_scope_key = build_project_scope_key(project_code, line_name, project_display)
+                    available_sheet_text = "; ".join(workbook_sheet_cache.get(str(selected_workbook.resolve()), []))
 
-                if template_error:
-                    coverage_rows.append(
-                        {
-                            "project_code": project_code,
-                            "project_display": project_display,
-                            "category": "stretch",
-                            "status": "TEMPLATE_CONFIG_ERROR",
-                            "reason_code": "TEMPLATE_CONFIG_ERROR",
-                            "reason": template_error,
-                            "workbook": selected_workbook.name,
-                            "configured_sheet": configured_sheet,
-                            "resolved_sheet": resolved_sheet_guess,
-                            "rows": 0,
-                            "available_sheets": available_sheet_text,
-                        }
-                    )
-                    issue_rows.append(
-                        {
-                            "Workbook": selected_workbook.name,
-                            "Project": project_code,
-                            "Category": "stretch",
-                            "Sheet": resolved_sheet_guess,
-                            "ConfiguredSheet": configured_sheet,
-                            "LineName": line_name,
-                            "LineNameSource": line_source,
-                            "Issue": "TEMPLATE_CONFIG_ERROR",
-                            "Reason": template_error,
-                        }
-                    )
-                    continue
+                    if template_error:
+                        coverage_rows.append(
+                            {
+                                "project_code": project_code,
+                                "project_display": project_display,
+                                "category": "stretch",
+                                "status": "TEMPLATE_CONFIG_ERROR",
+                                "reason_code": "TEMPLATE_CONFIG_ERROR",
+                                "reason": template_error,
+                                "workbook": selected_workbook.name,
+                                "configured_sheet": configured_sheet,
+                                "resolved_sheet": resolved_sheet_guess,
+                                "rows": 0,
+                                "available_sheets": available_sheet_text,
+                            }
+                        )
+                        issue_rows.append(
+                            {
+                                "Workbook": selected_workbook.name,
+                                "Project": project_code,
+                                "Category": "stretch",
+                                "Sheet": resolved_sheet_guess,
+                                "ConfiguredSheet": configured_sheet,
+                                "LineName": line_name,
+                                "LineNameSource": line_source,
+                                "Issue": "TEMPLATE_CONFIG_ERROR",
+                                "Reason": template_error,
+                            }
+                        )
+                        continue
 
-                selector = _build_exact_sheet_selector_stretch(configured_sheet) if configured_sheet else (lambda names: names[0] if names else None)
-                try:
-                    df_raw, resolved_sheet, fallback_note = load_sheet_with_csv_fallback(
-                        selected_workbook,
-                        selector,
-                        read_excel_kwargs={"header": None},
-                        read_csv_kwargs={"header": None},
-                    )
-                except Exception as exc:
-                    issue_rows.append(
-                        {
-                            "Workbook": selected_workbook.name,
-                            "Project": project_code,
-                            "Category": "stretch",
-                            "Sheet": resolved_sheet_guess,
-                            "ConfiguredSheet": configured_sheet,
-                            "LineName": line_name,
-                            "LineNameSource": line_source,
-                            "Issue": "READ_FAIL",
-                            "Reason": str(exc),
-                        }
-                    )
-                    coverage_rows.append(
-                        {
-                            "project_code": project_code,
-                            "project_display": project_display,
-                            "category": "stretch",
-                            "status": "READ_FAIL",
-                            "reason_code": "READ_FAIL",
-                            "reason": str(exc),
-                            "workbook": selected_workbook.name,
-                            "configured_sheet": configured_sheet,
-                            "resolved_sheet": resolved_sheet_guess,
-                            "rows": 0,
-                            "available_sheets": available_sheet_text,
-                        }
-                    )
-                    continue
+                    selector = _build_exact_sheet_selector_stretch(configured_sheet) if configured_sheet else (lambda names: names[0] if names else None)
+                    try:
+                        df_raw, resolved_sheet, fallback_note = load_sheet_with_csv_fallback(
+                            selected_workbook,
+                            selector,
+                            read_excel_kwargs={"header": None},
+                            read_csv_kwargs={"header": None},
+                        )
+                    except Exception as exc:
+                        issue_rows.append(
+                            {
+                                "Workbook": selected_workbook.name,
+                                "Project": project_code,
+                                "Category": "stretch",
+                                "Sheet": resolved_sheet_guess,
+                                "ConfiguredSheet": configured_sheet,
+                                "LineName": line_name,
+                                "LineNameSource": line_source,
+                                "Issue": "READ_FAIL",
+                                "Reason": str(exc),
+                            }
+                        )
+                        coverage_rows.append(
+                            {
+                                "project_code": project_code,
+                                "project_display": project_display,
+                                "category": "stretch",
+                                "status": "READ_FAIL",
+                                "reason_code": "READ_FAIL",
+                                "reason": str(exc),
+                                "workbook": selected_workbook.name,
+                                "configured_sheet": configured_sheet,
+                                "resolved_sheet": resolved_sheet_guess,
+                                "rows": 0,
+                                "available_sheets": available_sheet_text,
+                            }
+                        )
+                        continue
 
-                if df_raw is None or resolved_sheet is None:
-                    issue_rows.append(
-                        {
-                            "Workbook": selected_workbook.name,
-                            "Project": project_code,
-                            "Category": "stretch",
-                            "Sheet": resolved_sheet_guess,
-                            "ConfiguredSheet": configured_sheet,
-                            "LineName": line_name,
-                            "LineNameSource": line_source,
-                            "Issue": "MISSING_SOURCE",
-                            "Reason": "Configured stretch readiness sheet not found in selected workbook.",
-                        }
-                    )
-                    coverage_rows.append(
-                        {
-                            "project_code": project_code,
-                            "project_display": project_display,
-                            "category": "stretch",
-                            "status": "MISSING_SOURCE",
-                            "reason_code": "MISSING_SOURCE",
-                            "reason": "Configured stretch readiness sheet not found in selected workbook.",
-                            "workbook": selected_workbook.name,
-                            "configured_sheet": configured_sheet,
-                            "resolved_sheet": "",
-                            "rows": 0,
-                            "available_sheets": available_sheet_text,
-                        }
-                    )
-                    continue
+                    if df_raw is None or resolved_sheet is None:
+                        issue_rows.append(
+                            {
+                                "Workbook": selected_workbook.name,
+                                "Project": project_code,
+                                "Category": "stretch",
+                                "Sheet": resolved_sheet_guess,
+                                "ConfiguredSheet": configured_sheet,
+                                "LineName": line_name,
+                                "LineNameSource": line_source,
+                                "Issue": "MISSING_SOURCE",
+                                "Reason": "Configured stretch readiness sheet not found in selected workbook.",
+                            }
+                        )
+                        coverage_rows.append(
+                            {
+                                "project_code": project_code,
+                                "project_display": project_display,
+                                "category": "stretch",
+                                "status": "MISSING_SOURCE",
+                                "reason_code": "MISSING_SOURCE",
+                                "reason": "Configured stretch readiness sheet not found in selected workbook.",
+                                "workbook": selected_workbook.name,
+                                "configured_sheet": configured_sheet,
+                                "resolved_sheet": "",
+                                "rows": 0,
+                                "available_sheets": available_sheet_text,
+                            }
+                        )
+                        continue
 
-                selected_template = select_stretch_template_for_sheet(
-                    stretch_template_catalog.get(project_key, []),
-                    configured_sheet_name=configured_sheet,
-                    resolved_sheet_name=resolved_sheet,
-                    line_name=line_name,
-                )
-                if selected_template is None:
                     selected_template = select_stretch_template_for_sheet(
-                        stretch_template_all_catalog.get(project_key, []),
+                        stretch_template_catalog.get(project_key, []),
                         configured_sheet_name=configured_sheet,
                         resolved_sheet_name=resolved_sheet,
                         line_name=line_name,
                     )
-                template_map = dict(selected_template.get("column_map", {}) if selected_template else {})
-                guardrails = dict(selected_template.get("guardrails", {}) if selected_template else {})
-                template_sheet = str(selected_template.get("template_sheet", "") if selected_template else "")
+                    if selected_template is None:
+                        selected_template = select_stretch_template_for_sheet(
+                            stretch_template_all_catalog.get(project_key, []),
+                            configured_sheet_name=configured_sheet,
+                            resolved_sheet_name=resolved_sheet,
+                            line_name=line_name,
+                        )
+                    template_map = dict(selected_template.get("column_map", {}) if selected_template else {})
+                    guardrails = dict(selected_template.get("guardrails", {}) if selected_template else {})
+                    template_sheet = str(selected_template.get("template_sheet", "") if selected_template else "")
 
-                parse_result = _parse_stretch_sheet_dataframe(
-                    df_raw,
-                    guardrails=guardrails,
-                    template_map=template_map,
-                    project_code=project_code,
-                    project_display=project_display,
-                    project_scope_key=project_scope_key,
-                    line_name=line_name,
-                    line_name_source=line_source,
-                    source_file=selected_workbook.name,
-                    source_sheet=resolved_sheet,
-                    configured_sheet=configured_sheet,
-                    template_sheet=template_sheet,
-                    report_date=_extract_report_date_from_filename(selected_workbook.name),
-                )
-                if not parse_result.data.empty:
-                    raw_frames.append(parse_result.data)
+                    parse_result = _parse_stretch_sheet_dataframe(
+                        df_raw,
+                        guardrails=guardrails,
+                        template_map=template_map,
+                        project_code=project_code,
+                        project_display=project_display,
+                        project_scope_key=project_scope_key,
+                        line_name=line_name,
+                        line_name_source=line_source,
+                        source_file=selected_workbook.name,
+                        source_sheet=resolved_sheet,
+                        configured_sheet=configured_sheet,
+                        template_sheet=template_sheet,
+                        report_date=_extract_report_date_from_filename(selected_workbook.name),
+                    )
+                    if not parse_result.data.empty:
+                        raw_frames.append(parse_result.data)
 
-                diagnostics_rows.append(
-                    {
-                        "Workbook": selected_workbook.name,
-                        "Project": project_code,
-                        "Category": "stretch",
-                        "Sheet": resolved_sheet,
-                        "ConfiguredSheet": configured_sheet,
-                        "LineName": line_name,
-                        "LineNameSource": line_source,
-                        "TemplateSheet": template_sheet,
-                        "TemplateApplied": bool(template_map),
-                        "TemplateChanges": "; ".join(parse_result.template_changes),
-                        "FallbackNote": fallback_note or "",
-                        "SectionsDetected": int(parse_result.sections_detected),
-                        "HeadersDetected": int(parse_result.headers_detected),
-                        "Rows": int(parse_result.rows_emitted),
-                        "Status": parse_result.parse_status,
-                        "Reason": parse_result.parse_reason,
-                    }
-                )
-                if parse_result.parse_status != "OK":
-                    issue_rows.append(
+                    diagnostics_rows.append(
                         {
                             "Workbook": selected_workbook.name,
                             "Project": project_code,
@@ -2629,25 +3186,46 @@ def compile_stretch_readiness_to_workbook(
                             "ConfiguredSheet": configured_sheet,
                             "LineName": line_name,
                             "LineNameSource": line_source,
-                            "Issue": parse_result.parse_status,
+                            "TemplateSheet": template_sheet,
+                            "TemplateApplied": bool(template_map),
+                            "TemplateChanges": "; ".join(parse_result.template_changes),
+                            "FallbackNote": fallback_note or "",
+                            "SectionsDetected": int(parse_result.sections_detected),
+                            "HeadersDetected": int(parse_result.headers_detected),
+                            "Rows": int(parse_result.rows_emitted),
+                            "Status": parse_result.parse_status,
                             "Reason": parse_result.parse_reason,
                         }
                     )
-                coverage_rows.append(
-                    {
-                        "project_code": project_code,
-                        "project_display": project_display,
-                        "category": "stretch",
-                        "status": parse_result.parse_status,
-                        "reason_code": parse_result.parse_status,
-                        "reason": parse_result.parse_reason,
-                        "workbook": selected_workbook.name,
-                        "configured_sheet": configured_sheet,
-                        "resolved_sheet": resolved_sheet,
-                        "rows": int(parse_result.rows_emitted),
-                        "available_sheets": available_sheet_text,
-                    }
-                )
+                    if parse_result.parse_status != "OK":
+                        issue_rows.append(
+                            {
+                                "Workbook": selected_workbook.name,
+                                "Project": project_code,
+                                "Category": "stretch",
+                                "Sheet": resolved_sheet,
+                                "ConfiguredSheet": configured_sheet,
+                                "LineName": line_name,
+                                "LineNameSource": line_source,
+                                "Issue": parse_result.parse_status,
+                                "Reason": parse_result.parse_reason,
+                            }
+                        )
+                    coverage_rows.append(
+                        {
+                            "project_code": project_code,
+                            "project_display": project_display,
+                            "category": "stretch",
+                            "status": parse_result.parse_status,
+                            "reason_code": parse_result.parse_status,
+                            "reason": parse_result.parse_reason,
+                            "workbook": selected_workbook.name,
+                            "configured_sheet": configured_sheet,
+                            "resolved_sheet": resolved_sheet,
+                            "rows": int(parse_result.rows_emitted),
+                            "available_sheets": available_sheet_text,
+                        }
+                    )
 
             if not has_wildcard_stretch_line:
                 for line_key, line_payload in workbook_lines.items():
@@ -2939,6 +3517,62 @@ def compile_stretch_readiness_to_workbook(
         print(f"[pipeline] StretchReadiness: skipped {skipped_not_in_config} workbook(s) not listed in DPR_Config.")
 
     raw_df = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame(columns=STRETCH_RAWDATA_COLUMNS)
+    if output_path.parent.name.lower() == "stretchreadiness" and output_path.parent.parent.name.lower() == "parquets":
+        parquets_root = output_path.parent.parent
+    elif repo_root is not None:
+        parquets_root = Path(repo_root) / "Parquets"
+    else:
+        parquets_root = output_path.parent.parent
+
+    derived_df = _build_derived_stretch_rows(
+        parquets_root=parquets_root,
+        allowed_project_keys=processed_project_keys,
+    )
+    if not derived_df.empty:
+        raw_df = _merge_stretch_sources_prefer_derived(raw_df, derived_df)
+        diagnostics_rows.append(
+            {
+                "Workbook": "StringingCompiled.parquet; RawData.parquet",
+                "Project": "",
+                "Category": "stretch_derived",
+                "Sheet": "Stringing Compiled",
+                "ConfiguredSheet": "",
+                "LineName": "",
+                "LineNameSource": "derived",
+                "TemplateSheet": "",
+                "TemplateApplied": False,
+                "TemplateChanges": "",
+                "FallbackNote": "",
+                "SectionsDetected": int(derived_df.shape[0]),
+                "HeadersDetected": 0,
+                "Rows": int(derived_df.shape[0]),
+                "Status": "OK",
+                "Reason": "Derived readiness computed using endpoints + Location Nos against erection Tower Tightening dates.",
+            }
+        )
+    else:
+        diagnostics_rows.append(
+            {
+                "Workbook": "StringingCompiled.parquet; RawData.parquet",
+                "Project": "",
+                "Category": "stretch_derived",
+                "Sheet": "",
+                "ConfiguredSheet": "",
+                "LineName": "",
+                "LineNameSource": "derived",
+                "TemplateSheet": "",
+                "TemplateApplied": False,
+                "TemplateChanges": "",
+                "FallbackNote": "",
+                "SectionsDetected": 0,
+                "HeadersDetected": 0,
+                "Rows": 0,
+                "Status": "NO_DERIVED_INPUT",
+                "Reason": "Derived readiness inputs unavailable; legacy stretch readiness (if present) retained.",
+            }
+        )
+
+    raw_df = raw_df.reindex(columns=STRETCH_RAWDATA_COLUMNS)
     summary_df = _build_stretch_summary(raw_df)
     manpower_df = pd.DataFrame(manpower_rows, columns=STRETCH_MANPOWER_COLUMNS)
     diagnostics_df = pd.DataFrame(diagnostics_rows, columns=STRETCH_DIAGNOSTICS_COLUMNS)

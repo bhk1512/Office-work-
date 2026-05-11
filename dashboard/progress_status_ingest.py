@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Optional
 import re
@@ -18,6 +19,7 @@ from .project_identity import (
     parse_project_identity_from_filename,
     parse_sheet_line_entries,
 )
+from .completed_projects import is_completed_project
 
 
 DEFAULT_ACTIVITY_ALLOWLIST = (
@@ -51,6 +53,7 @@ RAWDATA_COLUMNS = [
     "line_name",
     "line_name_source",
     "section_label",
+    "report_date",
     "source_file",
     "source_sheet",
     "configured_sheet",
@@ -86,6 +89,9 @@ DIAGNOSTICS_COLUMNS = [
     "SectionsDetected",
     "HeadersDetected",
     "Rows",
+    "FilenameDate",
+    "InternalDate",
+    "DateQuality",
     "Status",
     "Reason",
 ]
@@ -111,6 +117,9 @@ COVERAGE_COLUMNS = [
     "configured_sheet",
     "resolved_sheet",
     "rows",
+    "filename_date",
+    "internal_date",
+    "date_quality",
     "available_sheets",
 ]
 
@@ -245,6 +254,51 @@ def _row_text(df: pd.DataFrame, row_idx: int, max_cols: int = 30) -> str:
     for col_idx in range(width):
         values.append(_as_text(df.iat[row_idx, col_idx]))
     return " | ".join(values)
+
+
+def _row_primary_text(df: pd.DataFrame, row_idx: int, max_cols: int = 8) -> str:
+    if row_idx < 0 or row_idx >= len(df.index):
+        return ""
+    width = min(len(df.columns), max_cols)
+    for col_idx in range(width):
+        value = _as_text(df.iat[row_idx, col_idx])
+        if value:
+            return value
+    return ""
+
+
+def _looks_like_header_marker(text_norm: str, required_tokens: list[str]) -> bool:
+    if not text_norm:
+        return False
+    if "activity" in text_norm and ("progress" in text_norm or "cumm" in text_norm or "cumulative" in text_norm):
+        return True
+    return bool(required_tokens) and all(token in text_norm for token in required_tokens)
+
+
+def _infer_block_section_label(
+    df: pd.DataFrame,
+    *,
+    header_row: int,
+    section_start: int,
+    base_label: str,
+    required_tokens: list[str],
+) -> str:
+    explicit = re.sub(r"\s+", " ", str(base_label or "").strip())
+    if explicit:
+        return explicit
+
+    for row_idx in range(header_row - 1, max(section_start, header_row - 8) - 1, -1):
+        candidate = _row_primary_text(df, row_idx)
+        candidate_norm = _normalize_text(candidate)
+        if not candidate_norm:
+            continue
+        if _looks_like_header_marker(candidate_norm, required_tokens):
+            continue
+        if re.fullmatch(r"[0-9.\-_/() ]+", candidate_norm):
+            continue
+        return re.sub(r"\s+", " ", candidate).strip()
+
+    return explicit
 
 
 def _row_is_blank(values: list[object]) -> bool:
@@ -428,6 +482,7 @@ def _build_status_rows(
     line_name: str,
     line_name_source: str,
     section_label: str,
+    report_date: str,
     source_file: str,
     source_sheet: str,
     configured_sheet: str,
@@ -474,6 +529,7 @@ def _build_status_rows(
                 "line_name": line_name,
                 "line_name_source": line_name_source,
                 "section_label": section_label,
+                "report_date": report_date,
                 "source_file": source_file,
                 "source_sheet": source_sheet,
                 "configured_sheet": configured_sheet,
@@ -503,6 +559,77 @@ def _sheet_tokens(value: object) -> set[str]:
     if not text:
         return set()
     return {token for token in re.findall(r"[a-z0-9]+", text) if token}
+
+
+def _extract_report_date_from_filename(file_name: str) -> str:
+    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", str(file_name or ""))
+    return match.group(1) if match else ""
+
+
+def _extract_date_token(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return ""
+        return value.normalize().strftime("%Y-%m-%d")
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text:
+        return ""
+    iso_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+    if iso_match:
+        return iso_match.group(1)
+    dm_match = re.search(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", text)
+    if dm_match:
+        parsed = pd.to_datetime(dm_match.group(1), errors="coerce", dayfirst=True)
+        if pd.notna(parsed):
+            return pd.Timestamp(parsed).normalize().strftime("%Y-%m-%d")
+    return ""
+
+
+def _extract_internal_report_date(df_raw: pd.DataFrame) -> str:
+    if df_raw is None or df_raw.empty:
+        return ""
+    max_rows = min(len(df_raw.index), 20)
+    max_cols = min(len(df_raw.columns), 40)
+    disallowed = ("contractual", "revised", "completion", "start")
+
+    for row_idx in range(max_rows):
+        for col_idx in range(max_cols):
+            raw_value = df_raw.iat[row_idx, col_idx]
+            label = _normalize_text(raw_value)
+            if "date" not in label:
+                continue
+            if any(token in label for token in disallowed):
+                continue
+            if not re.search(r"\bdate\b", label):
+                continue
+
+            inline = _extract_date_token(raw_value)
+            if inline:
+                return inline
+
+            for offset in range(1, 6):
+                probe_idx = col_idx + offset
+                if probe_idx >= max_cols:
+                    break
+                probe = df_raw.iat[row_idx, probe_idx]
+                candidate = _extract_date_token(probe)
+                if candidate:
+                    return candidate
+    return ""
+
+
+def _date_quality_flag(filename_date: str, internal_date: str) -> str:
+    if not filename_date:
+        return "UNREADABLE"
+    if not internal_date:
+        return "MISSING_INTERNAL"
+    if filename_date == internal_date:
+        return "MATCH"
+    return "MISMATCH"
 
 
 def _sheet_match_score(configured_sheet: str, workbook_sheet: str) -> tuple[int, int, int]:
@@ -545,6 +672,58 @@ def _pick_best_workbook_for_sheet(
     if top[0][:3] == (0, 0, 0):
         return None, ""
     return top[1], top[2]
+
+
+def _pick_matching_workbooks_for_sheet(
+    workbooks: list[Path],
+    workbook_sheets: dict[str, list[str]],
+    configured_sheet: str,
+    configured_line_name: str = "",
+    file_identifier: str = "",
+) -> list[tuple[Path, str]]:
+    scored: list[tuple[tuple[int, int, int, int, float], Path, str, str]] = []
+    line_hint = ingest.normalize_space_only(configured_line_name)
+    file_id_hint = str(file_identifier or "").strip()
+    for workbook in workbooks:
+        if file_id_hint and file_id_hint.lower() not in workbook.name.lower():
+            continue
+        names = workbook_sheets.get(str(workbook.resolve()), [])
+        if configured_sheet:
+            best_score = (0, 0, 0)
+            best_name = ""
+            for name in names:
+                score = _sheet_match_score(configured_sheet, name)
+                if score > best_score:
+                    best_score = score
+                    best_name = name
+            if best_score == (0, 0, 0):
+                continue
+        else:
+            best_score = (1, 0, 0)
+            best_name = names[0] if names else ""
+        identity = parse_project_identity_from_filename(workbook.name)
+        wb_line = ingest.normalize_space_only(identity.get("line_name", ""))
+        line_bonus = 1 if line_hint and wb_line and line_hint == wb_line else 0
+        mtime = workbook.stat().st_mtime if workbook.exists() else 0.0
+        report_date = _extract_report_date_from_filename(workbook.name)
+        scored.append(((best_score[0], best_score[1], best_score[2], line_bonus, mtime), workbook, best_name, report_date))
+
+    if not scored:
+        return []
+
+    # Choose a single best workbook per configured sheet to avoid cross-file
+    # false NO_TARGET_SHEET noise (e.g. TB 507 MAIN/765 variants).
+    best = max(
+        scored,
+        key=lambda item: (
+            item[0][0],  # exact/contains overlap score part 1
+            item[0][1],  # overlap part 2
+            item[0][2],  # token overlap part 3
+            item[0][3],  # line hint bonus
+            item[0][4],  # mtime
+        ),
+    )
+    return [(best[1], best[2])]
 
 
 def _resolve_named_template_sheet(wb, expected_name: str) -> Optional[str]:
@@ -647,6 +826,7 @@ def load_status_sheet_config(raw_root: Path, *, repo_root: Path | None = None) -
         project_idx = headers.index("project code")
         status_idx = headers.index("status sheet names")
         line_idx = headers.index("status line names") if "status line names" in headers else None
+        file_id_idx = headers.index("status file identifier") if "status file identifier" in headers else None
 
         mapping: dict[str, list[dict[str, str]]] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
@@ -662,12 +842,17 @@ def load_status_sheet_config(raw_root: Path, *, repo_root: Path | None = None) -
                 continue
 
             raw_line_names = row[line_idx] if line_idx is not None and line_idx < len(row) else None
+            raw_file_ids = row[file_id_idx] if file_id_idx is not None and file_id_idx < len(row) else None
             entries = parse_sheet_line_entries(
                 raw_status,
                 raw_line_names,
                 "status",
                 infer_from_sheet_name=False,
             )
+            if raw_file_ids:
+                file_id_parts = _split_tokens(raw_file_ids)
+                for i, entry in enumerate(entries):
+                    entry["file_identifier"] = file_id_parts[i] if i < len(file_id_parts) else ""
             deduped_entries: list[dict[str, str]] = []
             seen_sheet_keys: set[str] = set()
             for entry in entries:
@@ -851,6 +1036,7 @@ def _parse_status_sheet_dataframe(
     project_scope_key: str,
     line_name: str,
     line_name_source: str,
+    report_date: str,
     source_file: str,
     source_sheet: str,
     configured_sheet: str,
@@ -887,71 +1073,87 @@ def _parse_status_sheet_dataframe(
     sections_detected = 0
     template_changes_all: list[str] = []
     for section_label, section_start, section_end in section_ranges:
-        anchor_row = _find_anchor_row(
-            df_raw,
-            section_start,
-            section_end,
-            anchor_text=guardrails.get("block_anchor", ""),
-            anchor_regex=guardrails.get("block_anchor_regex", ""),
-        )
-        header_row, header_span, header_labels = _detect_header(
-            df_raw,
-            start_row=anchor_row,
-            end_row=section_end,
-            required_tokens=required_tokens,
-            header_rows_options=header_rows_options,
-        )
-        if header_row is None or header_span is None:
-            continue
+        cursor = section_start
+        while cursor <= section_end:
+            anchor_row = _find_anchor_row(
+                df_raw,
+                cursor,
+                section_end,
+                anchor_text=guardrails.get("block_anchor", ""),
+                anchor_regex=guardrails.get("block_anchor_regex", ""),
+            )
+            header_row, header_span, header_labels = _detect_header(
+                df_raw,
+                start_row=anchor_row,
+                end_row=section_end,
+                required_tokens=required_tokens,
+                header_rows_options=header_rows_options,
+            )
+            if header_row is None or header_span is None:
+                break
 
-        headers_detected += 1
-        sections_detected += 1
-        width = len(header_labels)
-        data_rows: list[tuple[int, list[object]]] = []
-        blank_run = 0
-        started = False
-        for row_idx in range(header_row + header_span, section_end + 1):
-            row_values = [df_raw.iat[row_idx, col_idx] if col_idx < len(df_raw.columns) else None for col_idx in range(width)]
-            row_text_norm = _normalize_text(" ".join(_as_text(v) for v in row_values[: min(25, width)]))
-            if stop_tokens and any(token in row_text_norm for token in stop_tokens):
-                if started:
-                    break
-                continue
-            if _row_is_blank(row_values):
-                if started:
-                    blank_run += 1
-                    if blank_run >= 2:
-                        break
-                continue
-            started = True
+            headers_detected += 1
+            width = len(header_labels)
+            data_rows: list[tuple[int, list[object]]] = []
             blank_run = 0
-            data_rows.append((row_idx + 1, row_values))
+            started = False
+            hard_stop = False
+            last_row_seen = header_row + header_span - 1
+            for row_idx in range(header_row + header_span, section_end + 1):
+                row_values = [df_raw.iat[row_idx, col_idx] if col_idx < len(df_raw.columns) else None for col_idx in range(width)]
+                row_text_norm = _normalize_text(" ".join(_as_text(v) for v in row_values[: min(25, width)]))
+                if stop_tokens and any(token in row_text_norm for token in stop_tokens):
+                    if started:
+                        hard_stop = True
+                        break
+                    continue
+                if _row_is_blank(row_values):
+                    if started:
+                        blank_run += 1
+                        if blank_run >= 2:
+                            break
+                    continue
+                started = True
+                blank_run = 0
+                data_rows.append((row_idx + 1, row_values))
+                last_row_seen = row_idx
 
-        if not data_rows:
-            continue
+            if data_rows:
+                sections_detected += 1
+                block_df = pd.DataFrame([values for _, values in data_rows], columns=header_labels)
+                block_df["__source_row_number"] = [row_number for row_number, _ in data_rows]
+                block_df, template_changes = _apply_template_column_mapping(block_df, template_map)
+                template_changes_all.extend(template_changes)
+                block_section_label = _infer_block_section_label(
+                    df_raw,
+                    header_row=header_row,
+                    section_start=cursor,
+                    base_label=section_label,
+                    required_tokens=required_tokens,
+                )
+                prepared = _build_status_rows(
+                    block_df,
+                    project_code=project_code,
+                    project_display=project_display,
+                    project_scope_key=project_scope_key,
+                    line_name=line_name,
+                    line_name_source=line_name_source,
+                    section_label=block_section_label,
+                    report_date=report_date,
+                    source_file=source_file,
+                    source_sheet=source_sheet,
+                    configured_sheet=configured_sheet,
+                    template_sheet=template_sheet,
+                    header_row_number=header_row + 1,
+                    activity_allowlist=activity_allowlist,
+                    activity_exclude=activity_exclude,
+                )
+                if not prepared.empty:
+                    all_rows.append(prepared)
 
-        block_df = pd.DataFrame([values for _, values in data_rows], columns=header_labels)
-        block_df["__source_row_number"] = [row_number for row_number, _ in data_rows]
-        block_df, template_changes = _apply_template_column_mapping(block_df, template_map)
-        template_changes_all.extend(template_changes)
-        prepared = _build_status_rows(
-            block_df,
-            project_code=project_code,
-            project_display=project_display,
-            project_scope_key=project_scope_key,
-            line_name=line_name,
-            line_name_source=line_name_source,
-            section_label=section_label,
-            source_file=source_file,
-            source_sheet=source_sheet,
-            configured_sheet=configured_sheet,
-            template_sheet=template_sheet,
-            header_row_number=header_row + 1,
-            activity_allowlist=activity_allowlist,
-            activity_exclude=activity_exclude,
-        )
-        if not prepared.empty:
-            all_rows.append(prepared)
+            cursor = max(last_row_seen + 1, header_row + header_span + 1)
+            if hard_stop:
+                break
 
     if not all_rows:
         reason = "No matching rows after guardrails/activity filters."
@@ -1004,8 +1206,28 @@ def compile_progress_status_to_workbook(
     output_path: Path,
     *,
     repo_root: Path | None = None,
+    completed_project_keys: set[str] | None = None,
 ) -> Path | None:
     candidates = _status_candidates(input_dir, files)
+    if completed_project_keys:
+        kept: list[Path] = []
+        skipped_files = 0
+        skipped_projects: set[str] = set()
+        for workbook in candidates:
+            identity = parse_project_identity_from_filename(workbook.name)
+            project_code = str(identity.get("project_code", "")).strip() or workbook.stem
+            if project_code and is_completed_project(project_code, completed_project_keys):
+                skipped_files += 1
+                skipped_projects.add(project_code.upper())
+                continue
+            kept.append(workbook)
+        if skipped_files:
+            print(
+                f"[pipeline] ProgressStatus: skipped_completed_files={skipped_files}, "
+                f"skipped_completed_projects={len(skipped_projects)}"
+            )
+        candidates = kept
+
     if not candidates:
         print("[pipeline] ProgressStatus: no candidate files found; skipping.")
         return None
@@ -1067,6 +1289,9 @@ def compile_progress_status_to_workbook(
                     "configured_sheet": "",
                     "resolved_sheet": "",
                     "rows": 0,
+                    "filename_date": "",
+                    "internal_date": "",
+                    "date_quality": "UNREADABLE",
                     "available_sheets": "",
                 }
             )
@@ -1078,17 +1303,16 @@ def compile_progress_status_to_workbook(
             configured_sheet = str(request.get("sheet_name", "")).strip()
             configured_line_name = normalize_line_name(request.get("line_name", ""))
             configured_line_source = str(request.get("line_name_source", "")).strip()
-            if configured_sheet:
-                selected_workbook, resolved_sheet_guess = _pick_best_workbook_for_sheet(
-                    project_workbooks,
-                    workbook_sheet_cache,
-                    configured_sheet,
-                )
-            else:
-                selected_workbook = project_workbooks[0] if project_workbooks else None
-                resolved_sheet_guess = ""
+            configured_file_identifier = str(request.get("file_identifier", "")).strip()
+            selected_workbooks = _pick_matching_workbooks_for_sheet(
+                project_workbooks,
+                workbook_sheet_cache,
+                configured_sheet,
+                configured_line_name,
+                configured_file_identifier,
+            )
 
-            if selected_workbook is None:
+            if not selected_workbooks:
                 identity = parse_project_identity_from_filename(project_workbooks[0].name)
                 project_code = str(identity.get("project_code", "")).strip() or project_workbooks[0].stem
                 project_display = build_project_display(project_code, configured_line_name, project_code) or project_code
@@ -1103,6 +1327,9 @@ def compile_progress_status_to_workbook(
                         "configured_sheet": configured_sheet,
                         "resolved_sheet": "",
                         "rows": 0,
+                        "filename_date": "",
+                        "internal_date": "",
+                        "date_quality": "UNREADABLE",
                         "available_sheets": "",
                     }
                 )
@@ -1115,171 +1342,166 @@ def compile_progress_status_to_workbook(
                         "LineName": configured_line_name,
                         "LineNameSource": configured_line_source,
                         "Issue": "NO_TARGET_SHEET",
-                        "Reason": "Configured status sheet not found in project workbooks.",
-                    }
-                )
+                            "Reason": "Configured status sheet not found in project workbooks.",
+                        }
+                    )
                 continue
 
-            selected_identity = parse_project_identity_from_filename(selected_workbook.name)
-            project_code = str(selected_identity.get("project_code", "")).strip() or selected_workbook.stem
-            line_name = configured_line_name or normalize_line_name(selected_identity.get("line_name", ""))
-            line_source = configured_line_source or ("config" if configured_line_name else "filename")
-            project_display = build_project_display(project_code, line_name, project_code) or project_code
-            project_scope_key = build_project_scope_key(project_code, line_name, project_display)
-            available_sheet_text = "; ".join(workbook_sheet_cache.get(str(selected_workbook.resolve()), []))
+            for selected_workbook, resolved_sheet_guess in selected_workbooks:
+                selected_identity = parse_project_identity_from_filename(selected_workbook.name)
+                project_code = str(selected_identity.get("project_code", "")).strip() or selected_workbook.stem
+                line_name = configured_line_name or normalize_line_name(selected_identity.get("line_name", ""))
+                line_source = configured_line_source or ("config" if configured_line_name else "filename")
+                project_display = build_project_display(project_code, line_name, project_code) or project_code
+                project_scope_key = build_project_scope_key(project_code, line_name, project_display)
+                available_sheet_text = "; ".join(workbook_sheet_cache.get(str(selected_workbook.resolve()), []))
+                filename_date = _extract_report_date_from_filename(selected_workbook.name)
 
-            if template_error:
-                coverage_rows.append(
-                    {
-                        "project_code": project_code,
-                        "project_display": project_display,
-                        "status": "TEMPLATE_CONFIG_ERROR",
-                        "reason_code": "TEMPLATE_CONFIG_ERROR",
-                        "reason": template_error,
-                        "workbook": selected_workbook.name,
-                        "configured_sheet": configured_sheet,
-                        "resolved_sheet": resolved_sheet_guess,
-                        "rows": 0,
-                        "available_sheets": available_sheet_text,
-                    }
-                )
-                issue_rows.append(
-                    {
-                        "Workbook": selected_workbook.name,
-                        "Project": project_code,
-                        "Sheet": resolved_sheet_guess,
-                        "ConfiguredSheet": configured_sheet,
-                        "LineName": line_name,
-                        "LineNameSource": line_source,
-                        "Issue": "TEMPLATE_CONFIG_ERROR",
-                        "Reason": template_error,
-                    }
-                )
-                continue
+                if template_error:
+                    coverage_rows.append(
+                        {
+                            "project_code": project_code,
+                            "project_display": project_display,
+                            "status": "TEMPLATE_CONFIG_ERROR",
+                            "reason_code": "TEMPLATE_CONFIG_ERROR",
+                            "reason": template_error,
+                            "workbook": selected_workbook.name,
+                            "configured_sheet": configured_sheet,
+                            "resolved_sheet": resolved_sheet_guess,
+                            "rows": 0,
+                            "filename_date": filename_date,
+                            "internal_date": "",
+                            "date_quality": "UNREADABLE",
+                            "available_sheets": available_sheet_text,
+                        }
+                    )
+                    issue_rows.append(
+                        {
+                            "Workbook": selected_workbook.name,
+                            "Project": project_code,
+                            "Sheet": resolved_sheet_guess,
+                            "ConfiguredSheet": configured_sheet,
+                            "LineName": line_name,
+                            "LineNameSource": line_source,
+                            "Issue": "TEMPLATE_CONFIG_ERROR",
+                            "Reason": template_error,
+                        }
+                    )
+                    continue
 
-            selector = _build_exact_sheet_selector(configured_sheet) if configured_sheet else (
-                lambda names: names[0] if names else None
-            )
-            try:
-                df_raw, resolved_sheet, fallback_note = load_sheet_with_csv_fallback(
-                    selected_workbook,
-                    selector,
-                    read_excel_kwargs={"header": None},
-                    read_csv_kwargs={"header": None},
+                selector = _build_exact_sheet_selector(configured_sheet) if configured_sheet else (
+                    lambda names: names[0] if names else None
                 )
-            except Exception as exc:
-                issue_rows.append(
-                    {
-                        "Workbook": selected_workbook.name,
-                        "Project": project_code,
-                        "Sheet": resolved_sheet_guess,
-                        "ConfiguredSheet": configured_sheet,
-                        "LineName": line_name,
-                        "LineNameSource": line_source,
-                        "Issue": "READ_FAIL",
-                        "Reason": str(exc),
-                    }
-                )
-                coverage_rows.append(
-                    {
-                        "project_code": project_code,
-                        "project_display": project_display,
-                        "status": "READ_FAIL",
-                        "reason_code": "READ_FAIL",
-                        "reason": str(exc),
-                        "workbook": selected_workbook.name,
-                        "configured_sheet": configured_sheet,
-                        "resolved_sheet": resolved_sheet_guess,
-                        "rows": 0,
-                        "available_sheets": available_sheet_text,
-                    }
-                )
-                continue
+                try:
+                    df_raw, resolved_sheet, fallback_note = load_sheet_with_csv_fallback(
+                        selected_workbook,
+                        selector,
+                        read_excel_kwargs={"header": None},
+                        read_csv_kwargs={"header": None},
+                    )
+                except Exception as exc:
+                    issue_rows.append(
+                        {
+                            "Workbook": selected_workbook.name,
+                            "Project": project_code,
+                            "Sheet": resolved_sheet_guess,
+                            "ConfiguredSheet": configured_sheet,
+                            "LineName": line_name,
+                            "LineNameSource": line_source,
+                            "Issue": "READ_FAIL",
+                            "Reason": str(exc),
+                        }
+                    )
+                    coverage_rows.append(
+                        {
+                            "project_code": project_code,
+                            "project_display": project_display,
+                            "status": "READ_FAIL",
+                            "reason_code": "READ_FAIL",
+                            "reason": str(exc),
+                            "workbook": selected_workbook.name,
+                            "configured_sheet": configured_sheet,
+                            "resolved_sheet": resolved_sheet_guess,
+                            "rows": 0,
+                            "filename_date": filename_date,
+                            "internal_date": "",
+                            "date_quality": "UNREADABLE",
+                            "available_sheets": available_sheet_text,
+                        }
+                    )
+                    continue
 
-            if df_raw is None or resolved_sheet is None:
-                issue_rows.append(
-                    {
-                        "Workbook": selected_workbook.name,
-                        "Project": project_code,
-                        "Sheet": resolved_sheet_guess,
-                        "ConfiguredSheet": configured_sheet,
-                        "LineName": line_name,
-                        "LineNameSource": line_source,
-                        "Issue": "NO_TARGET_SHEET",
-                        "Reason": "Configured status sheet not found in selected workbook.",
-                    }
-                )
-                coverage_rows.append(
-                    {
-                        "project_code": project_code,
-                        "project_display": project_display,
-                        "status": "NO_TARGET_SHEET",
-                        "reason_code": "NO_TARGET_SHEET",
-                        "reason": "Configured status sheet not found in selected workbook.",
-                        "workbook": selected_workbook.name,
-                        "configured_sheet": configured_sheet,
-                        "resolved_sheet": "",
-                        "rows": 0,
-                        "available_sheets": available_sheet_text,
-                    }
-                )
-                continue
+                if df_raw is None or resolved_sheet is None:
+                    issue_rows.append(
+                        {
+                            "Workbook": selected_workbook.name,
+                            "Project": project_code,
+                            "Sheet": resolved_sheet_guess,
+                            "ConfiguredSheet": configured_sheet,
+                            "LineName": line_name,
+                            "LineNameSource": line_source,
+                            "Issue": "NO_TARGET_SHEET",
+                            "Reason": "Configured status sheet not found in selected workbook.",
+                        }
+                    )
+                    coverage_rows.append(
+                        {
+                            "project_code": project_code,
+                            "project_display": project_display,
+                            "status": "NO_TARGET_SHEET",
+                            "reason_code": "NO_TARGET_SHEET",
+                            "reason": "Configured status sheet not found in selected workbook.",
+                            "workbook": selected_workbook.name,
+                            "configured_sheet": configured_sheet,
+                            "resolved_sheet": "",
+                            "rows": 0,
+                            "filename_date": filename_date,
+                            "internal_date": "",
+                            "date_quality": "UNREADABLE",
+                            "available_sheets": available_sheet_text,
+                        }
+                    )
+                    continue
 
-            selected_template = select_status_template_for_sheet(
-                status_template_catalog.get(project_key, []),
-                configured_sheet_name=configured_sheet,
-                resolved_sheet_name=resolved_sheet,
-                line_name=line_name,
-            )
-            if selected_template is None:
+                internal_date = _extract_internal_report_date(df_raw)
+                date_quality = _date_quality_flag(filename_date, internal_date)
+
                 selected_template = select_status_template_for_sheet(
-                    status_template_all_catalog.get(project_key, []),
+                    status_template_catalog.get(project_key, []),
                     configured_sheet_name=configured_sheet,
                     resolved_sheet_name=resolved_sheet,
                     line_name=line_name,
                 )
-            template_map = dict(selected_template.get("column_map", {}) if selected_template else {})
-            guardrails = dict(selected_template.get("guardrails", {}) if selected_template else {})
-            template_sheet = str(selected_template.get("template_sheet", "") if selected_template else "")
+                if selected_template is None:
+                    selected_template = select_status_template_for_sheet(
+                        status_template_all_catalog.get(project_key, []),
+                        configured_sheet_name=configured_sheet,
+                        resolved_sheet_name=resolved_sheet,
+                        line_name=line_name,
+                    )
+                template_map = dict(selected_template.get("column_map", {}) if selected_template else {})
+                guardrails = dict(selected_template.get("guardrails", {}) if selected_template else {})
+                template_sheet = str(selected_template.get("template_sheet", "") if selected_template else "")
 
-            parse_result = _parse_status_sheet_dataframe(
-                df_raw,
-                guardrails=guardrails,
-                template_map=template_map,
-                project_code=project_code,
-                project_display=project_display,
-                project_scope_key=project_scope_key,
-                line_name=line_name,
-                line_name_source=line_source,
-                source_file=selected_workbook.name,
-                source_sheet=resolved_sheet,
-                configured_sheet=configured_sheet,
-                template_sheet=template_sheet,
-            )
-            if not parse_result.data.empty:
-                raw_frames.append(parse_result.data)
+                parse_result = _parse_status_sheet_dataframe(
+                    df_raw,
+                    guardrails=guardrails,
+                    template_map=template_map,
+                    project_code=project_code,
+                    project_display=project_display,
+                    project_scope_key=project_scope_key,
+                    line_name=line_name,
+                    line_name_source=line_source,
+                    report_date=filename_date,
+                    source_file=selected_workbook.name,
+                    source_sheet=resolved_sheet,
+                    configured_sheet=configured_sheet,
+                    template_sheet=template_sheet,
+                )
+                if not parse_result.data.empty:
+                    raw_frames.append(parse_result.data)
 
-            diagnostics_rows.append(
-                {
-                    "Workbook": selected_workbook.name,
-                    "Project": project_code,
-                    "Sheet": resolved_sheet,
-                    "ConfiguredSheet": configured_sheet,
-                    "LineName": line_name,
-                    "LineNameSource": line_source,
-                    "TemplateSheet": template_sheet,
-                    "TemplateApplied": bool(template_map),
-                    "TemplateChanges": "; ".join(parse_result.template_changes),
-                    "FallbackNote": fallback_note or "",
-                    "SectionsDetected": int(parse_result.sections_detected),
-                    "HeadersDetected": int(parse_result.headers_detected),
-                    "Rows": int(parse_result.rows_emitted),
-                    "Status": parse_result.parse_status,
-                    "Reason": parse_result.parse_reason,
-                }
-            )
-            if parse_result.parse_status != "OK":
-                issue_rows.append(
+                diagnostics_rows.append(
                     {
                         "Workbook": selected_workbook.name,
                         "Project": project_code,
@@ -1287,24 +1509,50 @@ def compile_progress_status_to_workbook(
                         "ConfiguredSheet": configured_sheet,
                         "LineName": line_name,
                         "LineNameSource": line_source,
-                        "Issue": parse_result.parse_status,
+                        "TemplateSheet": template_sheet,
+                        "TemplateApplied": bool(template_map),
+                        "TemplateChanges": "; ".join(parse_result.template_changes),
+                        "FallbackNote": fallback_note or "",
+                        "SectionsDetected": int(parse_result.sections_detected),
+                        "HeadersDetected": int(parse_result.headers_detected),
+                        "Rows": int(parse_result.rows_emitted),
+                        "FilenameDate": filename_date,
+                        "InternalDate": internal_date,
+                        "DateQuality": date_quality,
+                        "Status": parse_result.parse_status,
                         "Reason": parse_result.parse_reason,
                     }
                 )
-            coverage_rows.append(
-                {
-                    "project_code": project_code,
-                    "project_display": project_display,
-                    "status": parse_result.parse_status,
-                    "reason_code": parse_result.parse_status,
-                    "reason": parse_result.parse_reason,
-                    "workbook": selected_workbook.name,
-                    "configured_sheet": configured_sheet,
-                    "resolved_sheet": resolved_sheet,
-                    "rows": int(parse_result.rows_emitted),
-                    "available_sheets": available_sheet_text,
-                }
-            )
+                if parse_result.parse_status != "OK":
+                    issue_rows.append(
+                        {
+                            "Workbook": selected_workbook.name,
+                            "Project": project_code,
+                            "Sheet": resolved_sheet,
+                            "ConfiguredSheet": configured_sheet,
+                            "LineName": line_name,
+                            "LineNameSource": line_source,
+                            "Issue": parse_result.parse_status,
+                            "Reason": parse_result.parse_reason,
+                        }
+                    )
+                coverage_rows.append(
+                    {
+                        "project_code": project_code,
+                        "project_display": project_display,
+                        "status": parse_result.parse_status,
+                        "reason_code": parse_result.parse_status,
+                        "reason": parse_result.parse_reason,
+                        "workbook": selected_workbook.name,
+                        "configured_sheet": configured_sheet,
+                        "resolved_sheet": resolved_sheet,
+                        "rows": int(parse_result.rows_emitted),
+                        "filename_date": filename_date,
+                        "internal_date": internal_date,
+                        "date_quality": date_quality,
+                        "available_sheets": available_sheet_text,
+                    }
+                )
 
     if skipped_blank_config:
         print(f"[pipeline] ProgressStatus: skipped {skipped_blank_config} workbook(s) per DPR_Config (blank status sheet config).")
@@ -1312,6 +1560,36 @@ def compile_progress_status_to_workbook(
         print(f"[pipeline] ProgressStatus: skipped {skipped_not_in_config} workbook(s) not listed in DPR_Config.")
 
     raw_df = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame(columns=RAWDATA_COLUMNS)
+
+    _CORE_ACTIVITY_NORMS = {"foundation", "tower_erection", "stringing"}
+    if not raw_df.empty:
+        core_mask = raw_df["activity_norm"].isin(_CORE_ACTIVITY_NORMS)
+        for proj_code, grp in raw_df[core_mask].groupby("project_code"):
+            if grp["quantity_primary"].isna().all():
+                diagnostics_rows.append({
+                    "Workbook": grp["source_file"].iloc[0] if "source_file" in grp.columns else "",
+                    "Project": proj_code,
+                    "Sheet": grp["source_sheet"].iloc[0] if "source_sheet" in grp.columns else "",
+                    "ConfiguredSheet": grp["configured_sheet"].iloc[0] if "configured_sheet" in grp.columns else "",
+                    "LineName": "",
+                    "LineNameSource": "",
+                    "TemplateSheet": grp["template_sheet"].iloc[0] if "template_sheet" in grp.columns else "",
+                    "TemplateApplied": False,
+                    "TemplateChanges": "",
+                    "FallbackNote": "",
+                    "SectionsDetected": 0,
+                    "HeadersDetected": 0,
+                    "Rows": len(grp),
+                    "FilenameDate": None,
+                    "InternalDate": None,
+                    "DateQuality": "",
+                    "Status": "WARN",
+                    "Reason": (
+                        f"quantity_primary_all_null: {len(grp)} core activity row(s) have no quantity "
+                        "— template column mapping may be wrong"
+                    ),
+                })
+
     diagnostics_df = pd.DataFrame(diagnostics_rows, columns=DIAGNOSTICS_COLUMNS)
     issues_df = pd.DataFrame(issue_rows, columns=ISSUES_COLUMNS)
     coverage_df = pd.DataFrame(coverage_rows, columns=COVERAGE_COLUMNS)

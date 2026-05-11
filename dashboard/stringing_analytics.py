@@ -83,6 +83,7 @@ def build_stringing_analytics_payload(
     status_snapshot_overall: pd.DataFrame | None = None,
     stretch_section_fact: pd.DataFrame | None = None,
     manpower_productivity_fact: pd.DataFrame | None = None,
+    enable_legacy_es_gap_inference: bool = False,
 ) -> dict:
     """Return a serializable payload for stringing analytics."""
     projects = list(projects or [])
@@ -105,9 +106,10 @@ def build_stringing_analytics_payload(
     scope_spans = _nunique(compiled_po_start, "span_key")
     scope_total_km = float(pd.to_numeric(daily.get("daily_km"), errors="coerce").sum()) if not daily.empty else 0.0
 
-    readiness_table = _build_erection_po_gap_table(
-        compiled_po_start,
-        erection_daily,
+    readiness_table = (
+        _build_erection_po_gap_table(compiled_po_start, erection_daily)
+        if enable_legacy_es_gap_inference
+        else pd.DataFrame()
     )
     readiness_stats = _gap_stats(readiness_table, "gap_days")
     readiness_hist = _bucket_distribution(readiness_table, "gap_days", _READINESS_BUCKETS)

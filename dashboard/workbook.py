@@ -1012,14 +1012,9 @@ def _build_project_meta_lookup(project_info: pd.DataFrame | None) -> dict[str, d
             "pch": normalize_pch(row.get("pch_value", "")),
             "region": _normalize_region(row.get("region_value", "")),
         }
-        keys = {
-            _compact_project_key(row.get("project_code_value")),
-            _compact_project_key(row.get("project_display_value")),
-            _compact_project_key(row.get("key_name", "")),
-        }
-        for key in keys:
-            if key and key not in lookup:
-                lookup[key] = entry
+        key = _compact_project_key(row.get("project_code_value"))
+        if key and key not in lookup:
+            lookup[key] = entry
     return lookup
 
 
@@ -1198,8 +1193,7 @@ def _prepare_month_scope(
 
     if meta_lookup:
         meta_from_code = scope["project_code"].map(_lookup_meta)
-        meta_from_name = scope["project_name"].map(_lookup_meta)
-        meta_series = meta_from_code.where(meta_from_code.notna(), meta_from_name)
+        meta_series = meta_from_code
 
         scope["project_code"] = scope["project_code"].where(
             scope["project_code"].astype(bool),
@@ -1220,7 +1214,6 @@ def _prepare_month_scope(
         scope["pch_display"] = ""
         scope["region_display"] = ""
 
-    scope["pch_display"] = scope["pch_display"].where(scope["pch_display"].astype(bool), scope.get("pch", ""))
     scope["pch_display"] = scope["pch_display"].fillna("").astype(str)
     scope["pch_display"] = scope["pch_display"].map(normalize_pch)
     scope["pch_display"] = scope["pch_display"].where(scope["pch_display"].astype(bool), "Unassigned")

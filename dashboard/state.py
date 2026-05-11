@@ -54,7 +54,70 @@ from .services.responsibilities import (
 from .project_identity import build_project_display, build_project_scope_key, normalize_line_name
 from .stringing import build_tse_lookup_from_df
 
+import re as _re
+
 LOGGER = logging.getLogger(__name__)
+
+
+def _build_erection_scope_key_bridge(config_path: "Path | None") -> "dict[str, str]":
+    """Build a mapping from original erection scope keys to kV-normalized ones.
+
+    For split projects where the DPR file uses a non-kV line name (e.g. "MAIN") but
+    the stringing-summary pipeline normalizes it to a kV value (e.g. "400kV"), the
+    erection data carries the original scope key ("tb507main") while the rest of the
+    dashboard uses the kV-normalized one ("tb507400kv").  This function reads
+    Sheet Names Check in DPR_Config.xlsx and produces the mapping so erection rows
+    can be found under the normalized key.
+    """
+    from pathlib import Path as _Path
+
+    if config_path is None:
+        return {}
+    path = _Path(config_path)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_excel(path, sheet_name="Sheet Names Check")
+        df.columns = [str(c).strip().lower() for c in df.columns]
+    except Exception:
+        return {}
+
+    bridge: dict[str, str] = {}
+    for _, row in df.iterrows():
+        proj_code = str(row.get("project code") or "").strip()
+        rule = str(row.get("consolidation rule") or "").strip().lower()
+        if not proj_code or rule != "split":
+            continue
+        raw_lines = str(row.get("status line names") or "").strip()
+        raw_sheets = str(row.get("status sheet names") or "").strip()
+        if not raw_lines or not raw_sheets:
+            continue
+        line_parts = [p.strip() for p in raw_lines.split(";") if p.strip()]
+        sheet_parts = [p.strip() for p in raw_sheets.split(";") if p.strip()]
+        raw_file_ids_raw = row.get("status file identifier")
+        file_id_parts = (
+            [p.strip() for p in str(raw_file_ids_raw).split(";")]
+            if raw_file_ids_raw and str(raw_file_ids_raw).strip() not in ("", "nan", "None")
+            else []
+        )
+        proj_compact = compact_project_key(proj_code)
+        bare_scope_key = build_project_scope_key(proj_code, "")
+        for i, (line_name, sheet_name) in enumerate(zip(line_parts, sheet_parts)):
+            m = _re.search(r"\b(\d{2,4})\s*k\s*v\b", sheet_name, _re.IGNORECASE)
+            if not m:
+                continue
+            kv_value = f"{m.group(1)}kV"
+            kv_compact = _re.sub(r"[^a-z0-9]", "", kv_value.lower())
+            normalized_key = build_project_scope_key(proj_code, kv_value)
+            line_compact = compact_project_key(line_name)
+            if line_compact != kv_compact:
+                original_key = build_project_scope_key(proj_code, line_name)
+                if original_key and normalized_key and original_key != normalized_key:
+                    bridge[original_key] = normalized_key
+            file_id = file_id_parts[i] if i < len(file_id_parts) else ""
+            if not file_id.strip() and bare_scope_key and normalized_key and bare_scope_key != normalized_key:
+                bridge.setdefault(bare_scope_key, normalized_key)
+    return bridge
 
 DUCKDB_TABLE_ERECTION = "appdata_erection_daily"
 DUCKDB_TABLE_STRINGING = "appdata_stringing_daily"
@@ -189,7 +252,13 @@ class AppDataStore:
         cfg = config or self._config
         LOGGER.info("Bootstrapping AppDataStore (data_path=%s)", cfg.data_path)
 
-        erection_daily = self._prepare_daily_frame(_load_daily(cfg), mode="erection")
+        from pathlib import Path as _Path
+        _data_root = _Path(cfg.data_path).resolve()
+        _repo_root = _data_root.parent.parent if _data_root.name.lower() == "erection" else _data_root.parent
+        _dpr_config_path = _repo_root / "Raw Data" / "DPR_Config.xlsx"
+        _scope_key_bridge = _build_erection_scope_key_bridge(_dpr_config_path if _dpr_config_path.exists() else None)
+
+        erection_daily = self._prepare_daily_frame(_load_daily(cfg), mode="erection", scope_key_bridge=_scope_key_bridge)
         project_info = load_project_details(cfg.data_path)
         erection_daily = self._attach_project_codes(erection_daily, project_info)
 
@@ -582,7 +651,7 @@ class AppDataStore:
         self._prepare_responsibility_store(self._stringing_responsibilities, mode="stringing")
         self._build_stringing_plan_summary(stringing_df)
 
-    def _prepare_daily_frame(self, df: pd.DataFrame, *, mode: str) -> pd.DataFrame:
+    def _prepare_daily_frame(self, df: pd.DataFrame, *, mode: str, scope_key_bridge: "dict[str, str] | None" = None) -> pd.DataFrame:
         if df.empty:
             return df
         working = df.copy()
@@ -630,13 +699,16 @@ class AppDataStore:
             working["project_scope_key"] = existing_scope.where(existing_scope.astype(bool), computed_scope)
         else:
             working["project_scope_key"] = computed_scope
+        if "project" not in working.columns:
+            working["project"] = ""
+        working["project"] = working["project"].fillna("").astype(str).str.strip()
         working["project_name_key"] = working["project_name"].str.lower().str.replace(r"\s+", " ", regex=True)
-        working["project_key"] = working.get("project_code", working["project_name"])
-        working["project_key"] = working["project_key"].fillna("").astype(str)
-        working["project_key"] = working["project_key"].where(
-            working["project_key"].astype(bool),
-            working["project_name"],
-        )
+        project_key = working.get("project_code", pd.Series("", index=working.index)).fillna("").astype(str).str.strip()
+        project_key = project_key.where(project_key.astype(bool), working["project_name"])
+        project_key = project_key.where(project_key.astype(bool), working["project"])
+        project_key = project_key.where(project_key.astype(bool), working["project_display"])
+        project_key = project_key.where(project_key.astype(bool), working["project_scope_key"])
+        working["project_key"] = project_key
         working["project_key_norm"] = working["project_key"].map(compact_project_key)
         working["project_scope_key_norm"] = working["project_scope_key"].map(compact_project_key)
         if "gang_name" not in working.columns:
@@ -647,6 +719,11 @@ class AppDataStore:
             working["daily_km"] = pd.to_numeric(working["daily_km"], errors="coerce")
         if mode == "erection" and "daily_prod_mt" in working.columns:
             working["daily_prod_mt"] = pd.to_numeric(working["daily_prod_mt"], errors="coerce")
+        if mode == "erection" and scope_key_bridge and "project_scope_key" in working.columns:
+            working["project_scope_key"] = working["project_scope_key"].map(
+                lambda k: scope_key_bridge.get(k, k)
+            )
+            working["project_scope_key_norm"] = working["project_scope_key"].map(compact_project_key)
         return working
 
     def _build_gang_summary(
@@ -1117,7 +1194,10 @@ class AppDataStore:
 
         if "month" not in stringing_df.columns:
             stringing_df["month"] = stringing_df["date"].dt.to_period("M").dt.to_timestamp()
-        stringing_df["project_key_norm"] = stringing_df["project_key"].map(compact_project_key)
+        project_key_series = stringing_df.get("project_key", pd.Series("", index=stringing_df.index)).fillna("").astype(str)
+        if "project" in stringing_df.columns:
+            project_key_series = project_key_series.where(project_key_series.str.strip().astype(bool), stringing_df["project"].fillna("").astype(str))
+        stringing_df["project_key_norm"] = project_key_series.map(compact_project_key)
         self.set_stringing(stringing_df)
         LOGGER.info("Preloaded stringing daily rows: %d", len(stringing_df))
 

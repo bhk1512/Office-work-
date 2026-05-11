@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
@@ -9,6 +11,94 @@ from dashboard import progress_status_ingest as status_ingest
 
 
 class ProgressStatusIngestTests(unittest.TestCase):
+    def test_compile_excludes_completed_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            files = [
+                root / "TA 419 - DPR - 2026-04-29.xlsx",
+                root / "TA 505 - DPR - 2026-04-29.xlsx",
+            ]
+            for path in files:
+                df = pd.DataFrame(
+                    [
+                        ["Activity", "Cumulative Progress", "Plan for Month", "Progress for Month", "Quantity"],
+                        ["Foundation", 47, 10, 7, 100],
+                    ]
+                )
+                with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                    df.to_excel(writer, sheet_name="Status", header=False, index=False)
+
+            output_path = root / "ProgressStatus_Output.xlsx"
+            compiled = status_ingest.compile_progress_status_to_workbook(
+                root,
+                None,
+                output_path,
+                completed_project_keys={"ta419"},
+            )  # type: ignore[attr-defined]
+            self.assertIsNotNone(compiled)
+            raw_df = pd.read_excel(output_path, sheet_name="RawData")
+            self.assertTrue(raw_df["project_code"].astype(str).str.contains("TA 505", case=False, na=False).any())
+            self.assertFalse(raw_df["project_code"].astype(str).str.contains("TA 419", case=False, na=False).any())
+
+    def test_compile_includes_report_date_and_backfills_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            files = [
+                root / "TA 419 - DPR - 2026-03-29.xlsx",
+                root / "TA 419 - DPR - 2026-04-29.xlsx",
+            ]
+            for path, progress_value in zip(files, (3, 7)):
+                df = pd.DataFrame(
+                    [
+                        ["Activity", "Cumulative Progress", "Plan for Month", "Progress for Month", "Quantity"],
+                        ["Foundation", 40 + progress_value, 10, progress_value, 100],
+                    ]
+                )
+                with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                    df.to_excel(writer, sheet_name="Status", header=False, index=False)
+
+            output_path = root / "ProgressStatus_Output.xlsx"
+            compiled = status_ingest.compile_progress_status_to_workbook(root, None, output_path)  # type: ignore[attr-defined]
+            self.assertIsNotNone(compiled)
+            self.assertTrue(output_path.exists())
+
+            raw_df = pd.read_excel(output_path, sheet_name="RawData")
+            self.assertIn("report_date", raw_df.columns)
+            report_dates = pd.to_datetime(raw_df["report_date"], errors="coerce").dropna()
+            self.assertGreaterEqual(len(report_dates), 1)
+            self.assertGreaterEqual(report_dates.dt.to_period("M").nunique(), 1)
+
+    def test_filename_date_remains_authoritative_with_internal_date_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "TA 419 - DPR - 2026-04-29.xlsx"
+            df = pd.DataFrame(
+                [
+                    ["Date:", "2026-04-15", "", "", ""],
+                    ["Activity", "Cumulative Progress", "Plan for Month", "Progress for Month", "Quantity"],
+                    ["Foundation", 47, 10, 7, 100],
+                ]
+            )
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="Status", header=False, index=False)
+
+            output_path = root / "ProgressStatus_Output.xlsx"
+            compiled = status_ingest.compile_progress_status_to_workbook(root, None, output_path)  # type: ignore[attr-defined]
+            self.assertIsNotNone(compiled)
+
+            raw_df = pd.read_excel(output_path, sheet_name="RawData")
+            self.assertTrue((raw_df["report_date"].astype(str) == "2026-04-29").any())
+
+            diagnostics_df = pd.read_excel(output_path, sheet_name="Diagnostics")
+            self.assertIn("DateQuality", diagnostics_df.columns)
+            self.assertIn("InternalDate", diagnostics_df.columns)
+            self.assertIn("FilenameDate", diagnostics_df.columns)
+            self.assertTrue((diagnostics_df["DateQuality"].astype(str) == "MISMATCH").any())
+
+            coverage_df = pd.read_excel(output_path, sheet_name="Coverage")
+            self.assertIn("date_quality", coverage_df.columns)
+            self.assertTrue((coverage_df["date_quality"].astype(str) == "MISMATCH").any())
+
     def test_extract_guardrails(self) -> None:
         wb = Workbook()
         ws = wb.active
@@ -119,6 +209,7 @@ class ProgressStatusIngestTests(unittest.TestCase):
             project_scope_key="tb501",
             line_name="",
             line_name_source="",
+            report_date="2026-04-29",
             source_file="TB 501 - DPR.xlsx",
             source_sheet="Summary",
             configured_sheet="Summary",
