@@ -458,10 +458,21 @@ def build_analytics_layout() -> html.Div:
         [
             html.Div(
                 [
-                    html.Div("Tower Erection Analytics", className="section-title"),
-                    scope_strip,
+                    html.Div(
+                        [
+                            html.Div("Tower Erection Analytics", className="section-title"),
+                            scope_strip,
+                        ]
+                    ),
+                    dbc.Button(
+                        "Show Overall Gang Performance",
+                        id="btn-open-global-performance-erection",
+                        color="primary",
+                        size="sm",
+                        className="summary-card__cta",
+                    ),
                 ],
-                className="analytics-header",
+                className="analytics-header d-flex flex-wrap justify-content-between align-items-start gap-2",
             ),
             kpi_cards,
             row2,

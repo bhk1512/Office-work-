@@ -38,6 +38,14 @@ def _load_consolidation_rules(config_path: Path) -> tuple[frozenset[str], frozen
     return frozenset(split_codes), frozenset(merge_codes)
 
 PARQUET_SUFFIXES: tuple[str, ...] = (".parquet", ".parq", ".pq")
+_STRINGING_POLICY_PREFER_FINAL = frozenset(
+    {
+        "prefer_final_else_stringing",
+        "prefer_final_sag_else_stringing",
+        "final_over_rough",
+        "final_sag_priority",
+    }
+)
 
 STRINGING_SUMMARY_SHEETS: tuple[str, ...] = (
     "StatusActivityFact",
@@ -294,6 +302,75 @@ def _coerce_numeric(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame
     return work
 
 
+def _normalize_stringing_resolution_policy(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", _safe_text(value).lower()).strip("_")
+
+
+def _apply_status_stringing_resolution_policy(work: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(work, pd.DataFrame) or work.empty:
+        return work
+    if "stringing_resolution_policy" not in work.columns:
+        return work
+
+    policy = work["stringing_resolution_policy"].map(_normalize_stringing_resolution_policy)
+    enabled = policy.isin(_STRINGING_POLICY_PREFER_FINAL)
+    if not bool(enabled.any()):
+        return work
+
+    raw_text = work["activity_raw"].fillna("").astype(str).str.lower()
+    activity_norm = work["activity_norm"].fillna("").astype(str).str.lower()
+    is_opgw = activity_norm.str.contains("opgw", na=False) | raw_text.str.contains("opgw", na=False)
+    is_final_sag = (~is_opgw) & (
+        raw_text.str.contains("final sag", na=False)
+        | raw_text.str.contains(r"\bf\s*/\s*s\b", regex=True, na=False)
+        | raw_text.str.contains("stringing -f/s", na=False)
+    )
+    is_rough_sag = (~is_opgw) & (
+        raw_text.str.contains("rough sag", na=False)
+        | raw_text.str.contains(r"\br\s*/\s*s\b", regex=True, na=False)
+        | raw_text.str.contains("stringing -r/s", na=False)
+    )
+    is_stringing_candidate = (~is_opgw) & (activity_norm.str.contains("string", na=False) | is_final_sag | is_rough_sag)
+
+    group_cols = [
+        col
+        for col in (
+            "project_scope_key",
+            "report_date",
+            "source_file",
+            "source_sheet",
+            "configured_sheet",
+            "template_sheet",
+            "section_label",
+            "stringing_resolution_policy",
+        )
+        if col in work.columns
+    ]
+    if group_cols:
+        has_final = (enabled & is_final_sag).groupby([work[col] for col in group_cols], dropna=False).transform("any")
+    else:
+        has_final = pd.Series(bool((enabled & is_final_sag).any()), index=work.index)
+
+    drop_mask = enabled & has_final & is_stringing_candidate & (~is_final_sag)
+    filtered = work.loc[~drop_mask].copy()
+
+    if filtered.empty:
+        return filtered
+
+    filtered_policy = filtered["stringing_resolution_policy"].map(_normalize_stringing_resolution_policy)
+    filtered_enabled = filtered_policy.isin(_STRINGING_POLICY_PREFER_FINAL)
+    filtered_raw = filtered["activity_raw"].fillna("").astype(str).str.lower()
+    filtered_norm = filtered["activity_norm"].fillna("").astype(str).str.lower()
+    filtered_opgw = filtered_norm.str.contains("opgw", na=False) | filtered_raw.str.contains("opgw", na=False)
+    filtered_final = (~filtered_opgw) & (
+        filtered_raw.str.contains("final sag", na=False)
+        | filtered_raw.str.contains(r"\bf\s*/\s*s\b", regex=True, na=False)
+        | filtered_raw.str.contains("stringing -f/s", na=False)
+    )
+    filtered.loc[filtered_enabled & filtered_final, "activity_norm"] = "stringing"
+    return filtered
+
+
 def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(progress_raw, pd.DataFrame) or progress_raw.empty:
         return pd.DataFrame(
@@ -322,6 +399,7 @@ def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
                 "source_sheet",
                 "configured_sheet",
                 "template_sheet",
+                "stringing_resolution_policy",
             ]
         )
 
@@ -338,6 +416,7 @@ def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
         "source_sheet",
         "configured_sheet",
         "template_sheet",
+        "stringing_resolution_policy",
     ):
         if column not in work.columns:
             work[column] = ""
@@ -382,6 +461,7 @@ def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
         activity_norm = work["activity_raw"].fillna("").astype(str).str.strip().str.lower()
     activity_norm = activity_norm.str.replace(r"[^a-z0-9]+", "_", regex=True).str.strip("_")
     work["activity_norm"] = activity_norm
+    work = _apply_status_stringing_resolution_policy(work)
 
     def _activity_group(norm_value: str) -> str:
         norm = _safe_text(norm_value).lower()
@@ -423,6 +503,7 @@ def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
         "source_sheet",
         "configured_sheet",
         "template_sheet",
+        "stringing_resolution_policy",
     ]
     for col in output_cols:
         if col not in work.columns:

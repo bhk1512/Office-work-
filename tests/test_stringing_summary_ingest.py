@@ -45,6 +45,132 @@ class StringingSummaryIngestTests(unittest.TestCase):
         self.assertTrue(bool(out.loc[0, "core_activity"]))
         self.assertEqual(str(out.loc[0, "month"])[:7], "2026-04")
 
+    def test_final_sag_preferred_when_rough_and_final_present(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 421",
+                    "project_display": "TA 421",
+                    "project_scope_key": "ta421",
+                    "line_name": "",
+                    "section_label": "Progress Status",
+                    "source_file": "TA 421 - DPR - 2026-05-10.xlsx",
+                    "source_sheet": "Master Sheet",
+                    "configured_sheet": "Master Sheet",
+                    "template_sheet": "TA 421 Status",
+                    "stringing_resolution_policy": "prefer_final_else_stringing",
+                    "report_date": "2026-05-10",
+                    "activity_raw": "Stringing -R/S",
+                    "activity_norm": "stringing",
+                    "cumulative_progress": 111.099,
+                },
+                {
+                    "project_code": "TA 421",
+                    "project_display": "TA 421",
+                    "project_scope_key": "ta421",
+                    "line_name": "",
+                    "section_label": "Progress Status",
+                    "source_file": "TA 421 - DPR - 2026-05-10.xlsx",
+                    "source_sheet": "Master Sheet",
+                    "configured_sheet": "Master Sheet",
+                    "template_sheet": "TA 421 Status",
+                    "stringing_resolution_policy": "prefer_final_else_stringing",
+                    "report_date": "2026-05-10",
+                    "activity_raw": "Stringing -F/S",
+                    "activity_norm": "stringing",
+                    "cumulative_progress": 111.099,
+                },
+            ]
+        )
+        status = summary_ingest._build_status_activity_fact(raw)  # type: ignore[attr-defined]
+        self.assertEqual(int(len(status.index)), 1)
+        self.assertEqual(str(status.loc[0, "activity_group"]), "Stringing")
+        self.assertAlmostEqual(float(status.loc[0, "cumulative_progress"]), 111.099, places=3)
+
+    def test_final_sag_row_used_for_stringing_snapshot(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 505",
+                    "project_display": "TA 505",
+                    "project_scope_key": "ta505",
+                    "line_name": "",
+                    "section_label": "Progress",
+                    "source_file": "TA 505 - DPR - 2026-05-10.xlsx",
+                    "source_sheet": "DPR-Summary",
+                    "configured_sheet": "DPR-Summary",
+                    "template_sheet": "TA 505 Status",
+                    "stringing_resolution_policy": "prefer_final_else_stringing",
+                    "report_date": "2026-05-10",
+                    "activity_raw": "Stringing (Rough Sag)",
+                    "activity_norm": "stringing",
+                    "cumulative_progress": 14.973,
+                },
+                {
+                    "project_code": "TA 505",
+                    "project_display": "TA 505",
+                    "project_scope_key": "ta505",
+                    "line_name": "",
+                    "section_label": "Progress",
+                    "source_file": "TA 505 - DPR - 2026-05-10.xlsx",
+                    "source_sheet": "DPR-Summary",
+                    "configured_sheet": "DPR-Summary",
+                    "template_sheet": "TA 505 Status",
+                    "stringing_resolution_policy": "prefer_final_else_stringing",
+                    "report_date": "2026-05-10",
+                    "activity_raw": "Stringing (Final Sag)",
+                    "activity_norm": "final_sag",
+                    "cumulative_progress": 14.006,
+                },
+            ]
+        )
+        status = summary_ingest._build_status_activity_fact(raw)  # type: ignore[attr-defined]
+        project, _ = summary_ingest._build_status_snapshots(status)  # type: ignore[attr-defined]
+        self.assertEqual(int(len(project.index)), 1)
+        self.assertAlmostEqual(float(project.loc[0, "stringing_cumulative_progress"]), 14.006, places=3)
+
+    def test_final_sag_preference_not_applied_without_policy(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 505",
+                    "project_display": "TA 505",
+                    "project_scope_key": "ta505",
+                    "line_name": "",
+                    "section_label": "Progress",
+                    "source_file": "TA 505 - DPR - 2026-05-10.xlsx",
+                    "source_sheet": "DPR-Summary",
+                    "configured_sheet": "DPR-Summary",
+                    "template_sheet": "TA 505 Status",
+                    "stringing_resolution_policy": "",
+                    "report_date": "2026-05-10",
+                    "activity_raw": "Stringing (Rough Sag)",
+                    "activity_norm": "stringing",
+                    "cumulative_progress": 14.973,
+                },
+                {
+                    "project_code": "TA 505",
+                    "project_display": "TA 505",
+                    "project_scope_key": "ta505",
+                    "line_name": "",
+                    "section_label": "Progress",
+                    "source_file": "TA 505 - DPR - 2026-05-10.xlsx",
+                    "source_sheet": "DPR-Summary",
+                    "configured_sheet": "DPR-Summary",
+                    "template_sheet": "TA 505 Status",
+                    "stringing_resolution_policy": "",
+                    "report_date": "2026-05-10",
+                    "activity_raw": "Stringing (Final Sag)",
+                    "activity_norm": "final_sag",
+                    "cumulative_progress": 14.006,
+                },
+            ]
+        )
+        status = summary_ingest._build_status_activity_fact(raw)  # type: ignore[attr-defined]
+        project, _ = summary_ingest._build_status_snapshots(status)  # type: ignore[attr-defined]
+        self.assertEqual(int(len(project.index)), 1)
+        self.assertAlmostEqual(float(project.loc[0, "stringing_cumulative_progress"]), 14.973, places=3)
+
     def test_status_snapshot_supports_multi_month_from_filename_dates(self) -> None:
         raw = pd.DataFrame(
             [

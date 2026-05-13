@@ -643,10 +643,42 @@ def build_stringing_analytics_layout() -> html.Div:
         [
             html.Div(
                 [
-                    html.Div("Stringing Analytics", className="section-title"),
-                    scope_strip,
+                    html.Div(
+                        [
+                            html.Div("Stringing Analytics", className="section-title"),
+                            scope_strip,
+                            html.Div(
+                                [
+                                    html.Div("Deployment", className="filter-label mb-1 me-2"),
+                                    dbc.RadioItems(
+                                        id="f-stringing-scope",
+                                        options=[
+                                            {"label": "All", "value": "all"},
+                                            {"label": "Manual", "value": "manual"},
+                                            {"label": "TSE", "value": "tse"},
+                                            {"label": "Hotline", "value": "hotline"},
+                                        ],
+                                        value="all",
+                                        inline=True,
+                                        class_name="segment segment--compact",
+                                        label_class_name="segment-label",
+                                        label_checked_class_name="segment-label--active",
+                                        input_class_name="segment-input",
+                                    ),
+                                ],
+                                className="stringing-scope-control d-flex flex-wrap align-items-center gap-2",
+                            ),
+                        ]
+                    ),
+                    dbc.Button(
+                        "Show Overall Gang Performance",
+                        id="btn-open-global-performance-stringing",
+                        color="primary",
+                        size="sm",
+                        className="summary-card__cta",
+                    ),
                 ],
-                className="analytics-header",
+                className="analytics-header d-flex flex-wrap justify-content-between align-items-start gap-2",
             ),
             kpi_cards,
             dbc.Row(

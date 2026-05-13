@@ -840,12 +840,16 @@ def build_project_overview_layout() -> html.Div:
     )
 
 
-def build_mode_summary_cards() -> dbc.Row:
+def build_mode_summary_cards(
+    *,
+    show_global_buttons: bool = True,
+    show_stringing_scope_control: bool = True,
+) -> dbc.Row:
     """Twin overview cards for Erection and Stringing metrics."""
 
     def _card(title: str, rows: list[tuple[str, str, str]], mode_key: str) -> dbc.Col:
         header_controls = None
-        if mode_key == "stringing":
+        if mode_key == "stringing" and show_stringing_scope_control:
             header_controls = html.Div(
                 [
                     html.Div("Deployment", className="filter-label mb-1 me-2"),
@@ -868,12 +872,16 @@ def build_mode_summary_cards() -> dbc.Row:
                 className="stringing-scope-control d-flex flex-wrap align-items-center gap-2",
             )
 
-        button = dbc.Button(
-            "Show Overall Gang Performance",
-            id=f"btn-open-global-performance-{mode_key}",
-            color="primary",
-            size="sm",
-            className="summary-card__cta",
+        button = (
+            dbc.Button(
+                "Show Overall Gang Performance",
+                id=f"btn-open-global-performance-{mode_key}",
+                color="primary",
+                size="sm",
+                className="summary-card__cta",
+            )
+            if show_global_buttons
+            else None
         )
 
         def _header_block() -> html.Div:
@@ -890,7 +898,7 @@ def build_mode_summary_cards() -> dbc.Row:
                 dbc.CardBody(
                     [
                         html.Div(
-                            [_header_block(), button],
+                            [_header_block(), button] if button is not None else [_header_block()],
                             className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3",
                         ),
                         *[
@@ -2271,7 +2279,10 @@ def build_layout(last_updated_text: str) -> dbc.Container:
 
     home_content = html.Div(
         [
-            build_mode_summary_cards(),
+            build_mode_summary_cards(
+                show_global_buttons=False,
+                show_stringing_scope_control=False,
+            ),
             build_kpi_cards(),
             build_project_details_card(),
             # Hide historical graph + plan cards to keep home screen minimal while callbacks remain intact.
@@ -2732,7 +2743,6 @@ def build_layout(last_updated_text: str) -> dbc.Container:
         [
             dbc.Tab(executive_layout, label="Executive Overview", tab_id="executive-overview"),
             dbc.Tab(project_overview_layout, label="Project Overview", tab_id="project-overview"),
-            dbc.Tab(home_content, label="Dashboard", tab_id="dashboard"),
             dbc.Tab(analytics_layout, label="Tower Erection Analytics", tab_id="analytics"),
             dbc.Tab(stringing_analytics_layout, label="Stringing Analytics", tab_id="stringing-analytics"),
         ],
@@ -2747,6 +2757,12 @@ def build_layout(last_updated_text: str) -> dbc.Container:
             build_header("Productivity Dashboard", last_updated_text),
             dcc.Download(id="download-executive-pdf"),
             tabs,
+            html.Div(
+                home_content.children,
+                id="legacy-dashboard-mount",
+                className="dashboard-tab-content",
+                style={"display": "none"},
+            ),
         ],
         fluid=True,
     )

@@ -58,6 +58,7 @@ RAWDATA_COLUMNS = [
     "source_sheet",
     "configured_sheet",
     "template_sheet",
+    "stringing_resolution_policy",
     "header_row_number",
     "source_row_number",
     "activity_raw",
@@ -487,6 +488,7 @@ def _build_status_rows(
     source_sheet: str,
     configured_sheet: str,
     template_sheet: str,
+    stringing_resolution_policy: str,
     header_row_number: int,
     activity_allowlist: list[str],
     activity_exclude: list[str],
@@ -534,6 +536,7 @@ def _build_status_rows(
                 "source_sheet": source_sheet,
                 "configured_sheet": configured_sheet,
                 "template_sheet": template_sheet,
+                "stringing_resolution_policy": stringing_resolution_policy,
                 "header_row_number": int(header_row_number),
                 "source_row_number": int(row.get("__source_row_number", 0) or 0),
                 "activity_raw": raw_activity,
@@ -1041,6 +1044,7 @@ def _parse_status_sheet_dataframe(
     source_sheet: str,
     configured_sheet: str,
     template_sheet: str,
+    stringing_resolution_policy: str,
 ) -> StatusParseResult:
     if df_raw is None or df_raw.empty:
         return StatusParseResult(
@@ -1144,6 +1148,7 @@ def _parse_status_sheet_dataframe(
                     source_sheet=source_sheet,
                     configured_sheet=configured_sheet,
                     template_sheet=template_sheet,
+                    stringing_resolution_policy=stringing_resolution_policy,
                     header_row_number=header_row + 1,
                     activity_allowlist=activity_allowlist,
                     activity_exclude=activity_exclude,
@@ -1482,6 +1487,7 @@ def compile_progress_status_to_workbook(
                 template_map = dict(selected_template.get("column_map", {}) if selected_template else {})
                 guardrails = dict(selected_template.get("guardrails", {}) if selected_template else {})
                 template_sheet = str(selected_template.get("template_sheet", "") if selected_template else "")
+                stringing_resolution_policy = _normalize_key(guardrails.get("stringing_resolution", ""))
 
                 parse_result = _parse_status_sheet_dataframe(
                     df_raw,
@@ -1497,6 +1503,7 @@ def compile_progress_status_to_workbook(
                     source_sheet=resolved_sheet,
                     configured_sheet=configured_sheet,
                     template_sheet=template_sheet,
+                    stringing_resolution_policy=stringing_resolution_policy,
                 )
                 if not parse_result.data.empty:
                     raw_frames.append(parse_result.data)

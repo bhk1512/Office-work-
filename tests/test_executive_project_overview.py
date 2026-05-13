@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from typing import Any, Iterable
+from unittest.mock import patch
 
 import pandas as pd
 from dash import Dash
@@ -46,6 +47,16 @@ def _output_index(entry: dict[str, Any], component_id: str, component_property: 
 
 
 class ExecutiveProjectOverviewTests(unittest.TestCase):
+    @staticmethod
+    def _portfolio_rows(rendered: Any) -> list[Any]:
+        table = rendered
+        children = getattr(rendered, "children", None)
+        if isinstance(children, list) and children:
+            maybe_table = children[0]
+            if getattr(maybe_table, "className", "") == "portfolio-table":
+                table = maybe_table
+        return getattr(getattr(table, "children", [None, None])[1], "children", [])
+
     def _build_app(self, stretch_section: pd.DataFrame | None = None) -> Dash:
         app = Dash(__name__)
         app.layout = build_layout("")
@@ -166,8 +177,8 @@ class ExecutiveProjectOverviewTests(unittest.TestCase):
         self.assertGreaterEqual(len(status_trend), 2, "Expected monthly status trend to include Mar + Apr points")
 
         render_portfolio_cb = app.callback_map["exec-portfolio-table-container.children"]["callback"].__wrapped__
-        table = render_portfolio_cb(exec_payload, "cum")
-        rows = table.children[1].children
+        rendered = render_portfolio_cb(exec_payload, "cum", [])
+        rows = self._portfolio_rows(rendered)
         project_rows = [
             row
             for row in rows
@@ -185,8 +196,8 @@ class ExecutiveProjectOverviewTests(unittest.TestCase):
         exec_payload, _proj_payload = compute_cb([], [], [], None, [], "monthly", 0, 0)
 
         render_portfolio_cb = app.callback_map["exec-portfolio-table-container.children"]["callback"].__wrapped__
-        table = render_portfolio_cb(exec_payload, "month")
-        rows = table.children[1].children
+        rendered = render_portfolio_cb(exec_payload, "month", [])
+        rows = self._portfolio_rows(rendered)
         project_rows = [
             row
             for row in rows
@@ -212,8 +223,8 @@ class ExecutiveProjectOverviewTests(unittest.TestCase):
         self.assertEqual(exec_payload.get("target_month"), "2020-04-01")
 
         render_portfolio_cb = app.callback_map["exec-portfolio-table-container.children"]["callback"].__wrapped__
-        table = render_portfolio_cb(exec_payload, "month")
-        rows = table.children[1].children
+        rendered = render_portfolio_cb(exec_payload, "month", [])
+        rows = self._portfolio_rows(rendered)
         project_rows = [
             row
             for row in rows
@@ -313,6 +324,109 @@ class ExecutiveProjectOverviewTests(unittest.TestCase):
         self.assertAlmostEqual(float(fig_state.layout.legend.x), 1.0, places=2)
         self.assertGreaterEqual(float(fig_state.data[0]["domain"]["x"][1]), 0.62)
         self.assertEqual(int(fig_state.layout.height), 280)
+
+    def test_exec_portfolio_lag_star_marker_and_note(self) -> None:
+        app = self._build_app()
+        render_portfolio_cb = app.callback_map["exec-portfolio-table-container.children"]["callback"].__wrapped__
+        payload = {
+            "kpis": {
+                "gap_per_project": {"TA 419::L1": 34.0},
+                "gap_fallback_per_project": {"TA 419::L1": True, "TA 505::L2": True},
+            },
+            "project_ranking": [
+                {"project_display": "TA 419", "project_code": "TA 419", "line_name": "L1", "overall_rag": "AMBER"},
+                {"project_display": "TA 505", "project_code": "TA 505", "line_name": "L2", "overall_rag": "RED"},
+            ],
+        }
+
+        container = render_portfolio_cb(payload, "cum", [])
+        self.assertEqual(getattr(container, "id", None), None)
+        children = getattr(container, "children", [])
+        self.assertTrue(isinstance(children, list) and len(children) == 2)
+        note = children[1]
+        self.assertEqual(getattr(note, "id", ""), "exec-portfolio-lag-note")
+        self.assertIn("fallback", str(getattr(note, "children", "")).lower())
+
+        rows = self._portfolio_rows(container)
+        project_rows = [
+            row
+            for row in rows
+            if isinstance(getattr(row, "id", None), dict) and row.id.get("type") == "project-tile-trigger"
+        ]
+        by_project = {str(row.id.get("project")): row for row in project_rows}
+        self.assertIn("TA 419", by_project)
+        self.assertIn("TA 505", by_project)
+        lag_419 = str(getattr(by_project["TA 419"].children[6].children, "children", by_project["TA 419"].children[6].children))
+        lag_505 = str(getattr(by_project["TA 505"].children[6].children, "children", by_project["TA 505"].children[6].children))
+        self.assertIn("days*", lag_419)
+        self.assertEqual(lag_505, "-*")
+
+    def test_exec_portfolio_respects_expanded_store_for_row_visibility(self) -> None:
+        app = self._build_app()
+        render_portfolio_cb = app.callback_map["exec-portfolio-table-container.children"]["callback"].__wrapped__
+        payload = {
+            "project_ranking": [
+                {"project_display": "TA 419", "project_code": "TA 419", "overall_rag": "AMBER"},
+                {"project_display": "TA 505", "project_code": "TA 505", "overall_rag": "RED"},
+            ],
+            "kpis": {},
+        }
+
+        rendered = render_portfolio_cb(payload, "cum", ["mr-arun-felbin"])
+        rows = self._portfolio_rows(rendered)
+        project_rows = [
+            row
+            for row in rows
+            if isinstance(getattr(row, "id", None), dict) and row.id.get("type") == "project-tile-trigger"
+        ]
+        by_project = {str(row.id.get("project")): row for row in project_rows}
+
+        self.assertEqual((getattr(by_project["TA 419"], "style", {}) or {}).get("display"), "table-row")
+        self.assertEqual((getattr(by_project["TA 505"], "style", {}) or {}).get("display"), "none")
+
+        pch_rows = [row for row in rows if str(getattr(row, "id", "")).startswith("pch-row-")]
+        by_pch = {str(row.id): row for row in pch_rows}
+        arun_toggle = by_pch["pch-row-mr-arun-felbin"].children[0].children
+        nabajit_toggle = by_pch["pch-row-mr-nabajit-baruah"].children[0].children
+        self.assertIn("open", str(getattr(arun_toggle.children[0], "className", "")))
+        self.assertNotIn("open", str(getattr(nabajit_toggle.children[0], "className", "")))
+        self.assertEqual(getattr(arun_toggle, "type", None), "button")
+
+    def test_exec_pch_toggle_store_multi_expand_and_single_click_toggle(self) -> None:
+        app = self._build_app()
+        sync_cb = _callback_entry(app, "exec-pch-expanded.data")["callback"].__wrapped__
+        payload = {
+            "project_ranking": [
+                {"project_display": "TA 419", "project_code": "TA 419", "overall_rag": "AMBER"},
+                {"project_display": "TA 505", "project_code": "TA 505", "overall_rag": "RED"},
+            ],
+        }
+
+        with patch("dashboard.callbacks._resolve_triggered_id", return_value={"type": "exec-pch-toggle", "pch": "mr-arun-felbin"}):
+            state = sync_cb([1, 0], payload, "cum", [])
+        self.assertEqual(state, ["mr-arun-felbin"])
+
+        with patch("dashboard.callbacks._resolve_triggered_id", return_value={"type": "exec-pch-toggle", "pch": "mr-nabajit-baruah"}):
+            state = sync_cb([1, 1], payload, "cum", state)
+        self.assertEqual(state, ["mr-arun-felbin", "mr-nabajit-baruah"])
+
+        with patch("dashboard.callbacks._resolve_triggered_id", return_value={"type": "exec-pch-toggle", "pch": "mr-arun-felbin"}):
+            state = sync_cb([2, 1], payload, "cum", state)
+        self.assertEqual(state, ["mr-nabajit-baruah"])
+
+    def test_exec_pch_store_prunes_removed_groups_on_payload_refresh(self) -> None:
+        app = self._build_app()
+        sync_cb = _callback_entry(app, "exec-pch-expanded.data")["callback"].__wrapped__
+        payload = {
+            "project_ranking": [
+                {"project_display": "TA 505", "project_code": "TA 505", "overall_rag": "RED"},
+            ],
+        }
+        previous = ["mr-arun-felbin", "mr-nabajit-baruah"]
+
+        with patch("dashboard.callbacks._resolve_triggered_id", return_value="executive-overview-payload"):
+            pruned = sync_cb([0], payload, "cum", previous)
+        self.assertEqual(pruned, ["mr-nabajit-baruah"])
 
     def test_overview_and_modal_dpr_strip_share_union_fields(self) -> None:
         app = self._build_app()

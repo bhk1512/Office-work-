@@ -5486,7 +5486,7 @@ def register_callbacks(
             text = str(raw).strip()
             if not text:
                 return ""
-            if any(marker in text for marker in ("Ã", "Â")):
+            if any(marker in text for marker in ("Ãƒ", "Ã‚")):
                 try:
                     text = text.encode("latin-1").decode("utf-8").strip()
                 except (UnicodeEncodeError, UnicodeDecodeError):
@@ -12293,7 +12293,6 @@ def register_callbacks(
                 pd.DataFrame(),
                 pd.DataFrame(),
                 pd.DataFrame(),
-                enable_legacy_es_gap_inference=config.enable_legacy_es_gap_inference,
             )
         project_list = _normalize_str_list(_ensure_list(projects))
         gang_list = _normalize_str_list(_ensure_list(gangs))
@@ -12345,7 +12344,6 @@ def register_callbacks(
             status_snapshot_overall=status_snapshot_overall,
             stretch_section_fact=stretch_section,
             manpower_productivity_fact=manpower_productivity,
-            enable_legacy_es_gap_inference=config.enable_legacy_es_gap_inference,
         )
         payload["meta"] = {
             "projects": project_list,
@@ -12592,9 +12590,14 @@ def register_callbacks(
         gangs: Sequence[str] | None = None,
         method_filter: str = "tse",
     ) -> dict[str, Any]:
-        """Reuse trusted Stringing Analytics E→S gap computation."""
-        if not config.enable_legacy_es_gap_inference:
-            return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+        """Reuse trusted Stringing Analytics Eâ†’S gap computation."""
+        empty = {
+            "median": None,
+            "pct_over_60": None,
+            "pct_over_15": None,
+            "per_project": {},
+            "per_project_fallback_used": {},
+        }
         from .stringing_analytics import (
             _build_erection_po_gap_table,
             _filter_compiled_by_date,
@@ -12607,11 +12610,11 @@ def register_callbacks(
             compiled_df = _safe_provider_frame(stringing_compiled_provider_local)
             erection_df = _safe_provider_frame(erection_daily_provider)
             if compiled_df.empty or erection_df.empty:
-                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+                return empty
 
             compiled_df = _normalize_stringing_compiled(compiled_df)
             if compiled_df.empty:
-                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+                return empty
 
             compiled_df = _filter_compiled_by_date(
                 compiled_df,
@@ -12622,11 +12625,11 @@ def register_callbacks(
             )
             compiled_df = _filter_method(compiled_df, method_filter)
             if compiled_df.empty:
-                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+                return empty
 
             gap_table = _build_erection_po_gap_table(compiled_df, erection_df)
             if gap_table.empty or "gap_days" not in gap_table.columns:
-                return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+                return empty
 
             stats = _gap_stats(gap_table, "gap_days")
             work = gap_table.copy()
@@ -12639,17 +12642,29 @@ def register_callbacks(
                     .round(0)
                     .to_dict()
                 )
+                fallback_work = gap_table.copy()
+                fallback_work["lag_fallback_used"] = fallback_work.get(
+                    "lag_fallback_used",
+                    pd.Series(False, index=fallback_work.index),
+                ).fillna(False).astype(bool)
+                per_project_fallback_used = (
+                    fallback_work.groupby("project_name", dropna=False)["lag_fallback_used"]
+                    .any()
+                    .to_dict()
+                )
             else:
                 per_project = {}
+                per_project_fallback_used = {}
             return {
                 "median": stats.get("median"),
                 "pct_over_60": stats.get("pct_over_60"),
                 "pct_over_15": stats.get("pct_over_15"),
                 "per_project": per_project,
+                "per_project_fallback_used": per_project_fallback_used,
             }
         except Exception as exc:
             LOGGER.warning("ES gap stats failed: %s", exc)
-            return {"median": None, "pct_over_60": None, "pct_over_15": None, "per_project": {}}
+            return empty
 
     _PROJECT_READINESS_BUCKETS: list[tuple[str, int, int | None]] = [
         ("0-15", 0, 15),
@@ -12679,8 +12694,6 @@ def register_callbacks(
 
         empty_hist = [{"bucket": label, "count": 0, "pct": 0.0} for label, _, _ in _PROJECT_READINESS_BUCKETS]
         empty_stats: dict[str, float | int] = {"n": 0, "median": 0.0, "pct_over_15": 0.0, "pct_over_60": 0.0}
-        if not config.enable_legacy_es_gap_inference:
-            return empty_hist, empty_stats
         if not match_keys:
             return empty_hist, empty_stats
 
@@ -13154,12 +13167,19 @@ def register_callbacks(
 
         if not ranking.empty:
             gap_per_project = es_gap_stats.get("per_project", {}) or {}
+            gap_fallback_per_project = es_gap_stats.get("per_project_fallback_used", {}) or {}
             gap_map = {
                 _compact_project_key(k): float(v)
                 for k, v in gap_per_project.items()
                 if _compact_project_key(k) and pd.notna(v)
             }
+            gap_fallback_map = {
+                _compact_project_key(k): bool(v)
+                for k, v in gap_fallback_per_project.items()
+                if _compact_project_key(k)
+            }
             ranking["gap_days_avg"] = _exec_project_key(ranking).map(gap_map)
+            ranking["gap_inferred_fallback"] = _exec_project_key(ranking).map(gap_fallback_map).fillna(False).astype(bool)
             ranking["gap_covered_sections"] = 0
 
         if not ranking.empty and not stretch_raw.empty:
@@ -13339,10 +13359,10 @@ def register_callbacks(
             f"Portfolio completion: {kpi_completion:.1f}% | Plan attainment: {kpi_plan:.1f}%.",
             f"Stretch readiness: {kpi_readiness_km:.1f}% km-weighted ({kpi_readiness:.1f}% section count) | Manpower availability: {kpi_manpower:.1f}%.",
             (
-                f"Average E→S lag: {float(kpi_gap_days):.1f} days "
+                f"Average Eâ†’S lag: {float(kpi_gap_days):.1f} days "
                 f"({float(kpi_gap_pct_over_60 or 0.0):.0f}% spans delayed >60 days)."
                 if kpi_gap_days is not None
-                else "Average E→S lag: No gap data."
+                else "Average Eâ†’S lag: No gap data."
             ),
         ]
         if not ranking.empty:
@@ -13387,6 +13407,7 @@ def register_callbacks(
                 "gap_pct_over_60": kpi_gap_pct_over_60,
                 "gap_pct_over_15": kpi_gap_pct_over_15,
                 "gap_per_project": es_gap_stats.get("per_project", {}) or {},
+                "gap_fallback_per_project": es_gap_stats.get("per_project_fallback_used", {}) or {},
                 "gap_covered_sections": kpi_gap_covered_sections,
                 "manpower_availability_pct": kpi_manpower,
                 "manpower_projects_total": manpower_projects_total,
@@ -13731,8 +13752,13 @@ def register_callbacks(
         Output("exec-portfolio-table-container", "children"),
         Input("executive-overview-payload", "data"),
         Input("exec-portfolio-view", "value"),
+        Input("exec-pch-expanded", "data"),
     )
-    def _render_exec_portfolio_table(payload: dict[str, Any] | None, view_mode: str | None):
+    def _render_exec_portfolio_table(
+        payload: dict[str, Any] | None,
+        view_mode: str | None,
+        expanded_pch_data: Sequence[str] | None,
+    ):
         safe = payload or {}
         kpis = safe.get("kpis") or {}
         ranking_df = pd.DataFrame(safe.get("project_ranking") or [])
@@ -13770,7 +13796,14 @@ def register_callbacks(
             for k, v in dict(gap_per_project_raw).items()
             if _compact_project_key(k)
         }
+        gap_fallback_raw = kpis.get("gap_fallback_per_project") or {}
+        gap_fallback_per_project = {
+            _compact_project_key(k): _as_bool(v)
+            for k, v in dict(gap_fallback_raw).items()
+            if _compact_project_key(k)
+        }
         ranking_df["gap_days_avg"] = ranking_df["_project_key"].map(gap_per_project)
+        ranking_df["gap_inferred_fallback"] = ranking_df["_project_key"].map(gap_fallback_per_project).fillna(False).astype(bool)
 
         def _build_prog_cell(actual: Any, target: Any):
             actual_value = _safe_number(actual)
@@ -13966,12 +13999,21 @@ def register_callbacks(
             grouped_rows.setdefault(pch_name, []).append(rank_row)
 
         pch_names = sorted(grouped_rows.keys(), key=lambda value: (str(value).strip().lower() == "unassigned", str(value).lower()))
+        valid_pch_keys = [_sanitize_pch_key(name) for name in pch_names]
+        expanded_requested: list[str] = []
+        if isinstance(expanded_pch_data, (list, tuple, set)):
+            for item in expanded_pch_data:
+                token = str(item or "").strip()
+                if token and token not in expanded_requested:
+                    expanded_requested.append(token)
+        expanded_pch_set = {key for key in expanded_requested if key in set(valid_pch_keys)}
         table_rows: list[Any] = []
         rag_rank = {"RED": 3, "AMBER": 2, "GREEN": 1, "NO_DATA": 0}
 
         for pch_name in pch_names:
             project_rows = grouped_rows.get(pch_name) or []
             pch_key = _sanitize_pch_key(pch_name)
+            is_pch_expanded = pch_key in expanded_pch_set
 
             def _sum_activity(activity_key: str) -> tuple[float | None, float | None]:
                 actual_total = 0.0
@@ -14005,11 +14047,12 @@ def register_callbacks(
                         html.Td(
                             html.Button(
                                 [
-                                    html.Span("?", id=f"chevron-{pch_key}", className="toggle-chevron"),
+                                    html.Span("?", id=f"chevron-{pch_key}", className=f"toggle-chevron{' open' if is_pch_expanded else ''}"),
                                     html.Span(str(pch_name), className="fw-700"),
                                 ],
                                 id={"type": "exec-pch-toggle", "pch": pch_key},
                                 n_clicks=0,
+                                type="button",
                                 className="w-100 text-start",
                                 style={
                                     "border": "none",
@@ -14018,6 +14061,7 @@ def register_callbacks(
                                     "display": "flex",
                                     "alignItems": "center",
                                 },
+                                **{"aria-expanded": "true" if is_pch_expanded else "false"},
                             )
                         ),
                         html.Td(_build_prog_cell(*_sum_activity("foundation"))),
@@ -14043,8 +14087,13 @@ def register_callbacks(
                         stale_tag = f"[STALE: last DPR {latest_dpr}]" if latest_dpr else "[STALE: no DPR date]"
                         project_label = f"{project_label} {stale_tag}"
                 lag_value = _safe_number(rank_row.get("gap_days_avg"))
-                if lag_value is None:
+                fallback_used = _as_bool(rank_row.get("gap_inferred_fallback"))
+                if lag_value is None and fallback_used:
+                    lag_cell = html.Div("-*", className="fw-700", style={"textAlign": "center"})
+                elif lag_value is None:
                     lag_cell = html.Div("-", className="text-muted", style={"textAlign": "center"})
+                elif fallback_used:
+                    lag_cell = html.Div(f"{lag_value:.0f} days*", className="fw-700")
                 else:
                     lag_cell = html.Div(f"{lag_value:.0f} days")
 
@@ -14067,11 +14116,9 @@ def register_callbacks(
                         },
                         n_clicks=0,
                         className=f"project-row pch-child-{pch_key}",
-                        style={"display": "none"},
+                        style={"display": "table-row" if is_pch_expanded else "none"},
                     )
-                )
-
-        return html.Table(
+                )        portfolio_table = html.Table(
             [
                 html.Thead(
                     html.Tr(
@@ -14082,7 +14129,7 @@ def register_callbacks(
                             html.Th("Stringing"),
                             html.Th("OPGW"),
                             html.Th("RAG"),
-                            html.Th("E→S Lag"),
+                            html.Th("E->S Lag"),
                         ]
                     )
                 ),
@@ -14090,38 +14137,96 @@ def register_callbacks(
             ],
             className="portfolio-table",
         )
+        lag_note = html.Div(
+            "* E->S lag inferred fully or partially using alphabetic location-order fallback where Location Nos. was unavailable/partial.",
+            className="text-muted small px-3 py-2",
+            id="exec-portfolio-lag-note",
+        )
+        return html.Div([portfolio_table, lag_note])
 
-    app.clientside_callback(
-        """
-        function(_clicks, _store){
-            const C = window.dash_clientside;
-            const NO = C.no_update;
-            const ctx = C.callback_context;
-            if (!ctx || !ctx.triggered || !ctx.triggered.length) return NO;
-            const prop = ctx.triggered[0].prop_id || "";
-            const idPart = prop.split(".")[0];
-            let pch_key = "";
-            try {
-                const parsed = JSON.parse(idPart);
-                pch_key = parsed && parsed.pch ? String(parsed.pch) : "";
-            } catch (e) {
-                return NO;
-            }
-            if (!pch_key) return NO;
-            const rows = document.querySelectorAll(`.pch-child-${pch_key}`);
-            const chevron = document.getElementById(`chevron-${pch_key}`);
-            rows.forEach((r) => {
-                r.style.display = (r.style.display === "none" || r.style.display === "") ? "table-row" : "none";
-            });
-            if (chevron) chevron.classList.toggle("open");
-            return NO;
-        }
-        """,
+    @app.callback(
         Output("exec-pch-expanded", "data"),
         Input({"type": "exec-pch-toggle", "pch": ALL}, "n_clicks"),
+        Input("executive-overview-payload", "data"),
+        Input("exec-portfolio-view", "value"),
         State("exec-pch-expanded", "data"),
         prevent_initial_call=True,
     )
+    def _sync_exec_pch_expanded(
+        _toggle_clicks: Sequence[int] | None,
+        payload: Mapping[str, Any] | None,
+        _view_mode: str | None,
+        expanded_data: Sequence[str] | None,
+    ) -> list[str]:
+        def _sanitize_pch_key(value: Any) -> str:
+            token = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip().lower()).strip("-")
+            return token or "unassigned"
+
+        def _normalized_expanded(values: Sequence[str] | None) -> list[str]:
+            normalized: list[str] = []
+            if not isinstance(values, (list, tuple, set)):
+                return normalized
+            for item in values:
+                token = str(item or "").strip()
+                if token and token not in normalized:
+                    normalized.append(token)
+            return normalized
+
+        def _valid_pch_keys(source_payload: Mapping[str, Any] | None) -> list[str]:
+            safe_payload = source_payload or {}
+            ranking_frame = pd.DataFrame(safe_payload.get("project_ranking") or [])
+            if ranking_frame.empty:
+                return []
+            ranking_frame = ranking_frame.copy()
+            if "project_display" not in ranking_frame.columns:
+                ranking_frame["project_display"] = ranking_frame.get("project_code", "")
+            if "project_code" not in ranking_frame.columns:
+                ranking_frame["project_code"] = ranking_frame.get("project_display", "")
+            ranking_frame["project_display"] = ranking_frame["project_display"].fillna("").astype(str).str.strip()
+            ranking_frame["project_code"] = ranking_frame["project_code"].fillna("").astype(str).str.strip()
+            ranking_frame["_project_key"] = _exec_project_key(ranking_frame)
+            ranking_frame = ranking_frame[ranking_frame["_project_key"].astype(bool)].copy()
+            ranking_frame = ranking_frame.drop_duplicates(subset=["_project_key"], keep="first")
+            if ranking_frame.empty:
+                return []
+
+            pch_by_code = _build_pch_map_from_project_info()
+
+            def _resolve_pch(row: pd.Series) -> str:
+                code_key = str(row.get("_project_key", "")).strip() or _compact_project_key(row.get("project_code"))
+                pch = pch_by_code.get(code_key) or "Unassigned"
+                return _canonical_pch_label(pch)
+
+            ranking_frame["pch_group"] = ranking_frame.apply(_resolve_pch, axis=1)
+            pch_names = sorted(
+                ranking_frame["pch_group"].fillna("").astype(str).map(lambda item: item.strip() or "Unassigned").unique().tolist(),
+                key=lambda value: (str(value).strip().lower() == "unassigned", str(value).lower()),
+            )
+            return [_sanitize_pch_key(name) for name in pch_names]
+
+        trigger = _resolve_triggered_id()
+        valid_keys = _valid_pch_keys(payload)
+        valid_set = set(valid_keys)
+        previous = _normalized_expanded(expanded_data)
+        current = [key for key in previous if key in valid_set]
+
+        if isinstance(trigger, dict) and trigger.get("type") == "exec-pch-toggle":
+            pch_key = str(trigger.get("pch") or "").strip()
+            if pch_key and pch_key in valid_set:
+                next_set = set(current)
+                if pch_key in next_set:
+                    next_set.remove(pch_key)
+                else:
+                    next_set.add(pch_key)
+                next_state = [key for key in valid_keys if key in next_set]
+                if next_state != current:
+                    return next_state
+            raise PreventUpdate
+
+        if current != previous:
+            return current
+        raise PreventUpdate
+
 
     @app.callback(
         Output("exec-kpi-portfolio-completion", "children"),
@@ -14165,7 +14270,7 @@ def register_callbacks(
                 {"name": "Plan %", "id": "plan_attainment_pct"},
                 {"name": "Readiness %", "id": "readiness_pct"},
                 {"name": "Manpower %", "id": "manpower_availability_pct"},
-                {"name": "E→S Lag (days)", "id": "gap_days_avg"},
+                {"name": "Eâ†’S Lag (days)", "id": "gap_days_avg"},
                 {"name": "RAG", "id": "overall_rag"},
             ]
             ranking_data = ranking_df[["project_display", "line_name", "completion_pct", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg", "overall_rag"]].to_dict("records")
@@ -14198,7 +14303,7 @@ def register_callbacks(
                 ("Plan Slippage %", "plan_slippage_pct", KEC_SEQUENCE[0]),
                 ("Readiness Gap %", "readiness_gap_pct", KEC_SEQUENCE[1]),
                 ("Manpower Gap %", "manpower_gap_pct", KEC_SEQUENCE[2]),
-                ("E→S Lag (days)", "es_gap_days", KEC_SEQUENCE[3]),
+                ("Eâ†’S Lag (days)", "es_gap_days", KEC_SEQUENCE[3]),
             ]
             for name, column, colour in metrics:
                 fig_risk.add_bar(
@@ -14257,7 +14362,7 @@ def register_callbacks(
 
         gap_days_median = kpis.get("gap_days_median")
         gap_pct_over_60 = kpis.get("gap_pct_over_60")
-        gap_value_text = f"{float(gap_days_median):.0f} days" if gap_days_median is not None else "—"
+        gap_value_text = f"{float(gap_days_median):.0f} days" if gap_days_median is not None else "â€”"
         gap_sub_text = (
             f"{float(gap_pct_over_60):.0f}% spans delayed >60 days"
             if gap_pct_over_60 is not None
@@ -15116,10 +15221,10 @@ def register_callbacks(
                             f"Plan attainment: {float(kpis.get('plan_attainment_pct', 0.0)):.1f}%",
                             f"Stretch readiness: {float(kpis.get('stretch_readiness_pct', 0.0)):.1f}%",
                             (
-                                f"E→S lag: {float(kpis.get('gap_days_median')):.1f} days "
+                                f"Eâ†’S lag: {float(kpis.get('gap_days_median')):.1f} days "
                                 f"({float(kpis.get('gap_pct_over_60') or 0.0):.0f}% spans delayed >60 days)"
                                 if kpis.get("gap_days_median") is not None
-                                else "E→S lag: No gap data"
+                                else "Eâ†’S lag: No gap data"
                             ),
                             f"Manpower availability: {float(kpis.get('manpower_availability_pct', 0.0)):.1f}%",
                             f"At-risk projects (RED): {int(kpis.get('atrisk_projects', 0) or 0)}",
@@ -15166,7 +15271,7 @@ def register_callbacks(
                         rank[col] = pd.to_numeric(rank[col], errors="coerce").round(1)
                     cols = ["project_display", "line_name", "plan_attainment_pct", "readiness_pct", "manpower_availability_pct", "gap_days_avg", "overall_rag"]
                     rank = rank[cols]
-                    rank.columns = ["Project", "Line", "Plan %", "Readiness %", "Manpower %", "E→S Lag (days)", "RAG"]
+                    rank.columns = ["Project", "Line", "Plan %", "Readiness %", "Manpower %", "Eâ†’S Lag (days)", "RAG"]
                     table = ax_rank.table(cellText=rank.values.tolist(), colLabels=rank.columns.tolist(), loc="center", cellLoc="left")
                     table.auto_set_font_size(False)
                     table.set_fontsize(8)
@@ -15199,7 +15304,7 @@ def register_callbacks(
                                 f"Completion: {float(p_kpis.get('completion_pct', 0.0)):.1f}%",
                                 f"Plan attainment: {float(p_kpis.get('plan_attainment_pct', 0.0)):.1f}%",
                                 f"Readiness: {float(p_kpis.get('readiness_pct', 0.0)):.1f}%",
-                                f"E→S lag: {float(p_kpis.get('gap_days_avg', 0.0)):.1f} days",
+                                f"Eâ†’S lag: {float(p_kpis.get('gap_days_avg', 0.0)):.1f} days",
                                 f"Manpower availability: {float(p_kpis.get('manpower_availability_pct', 0.0)):.1f}%",
                                 f"RAG: {p_kpis.get('rag', 'NO_DATA')}",
                             ]
@@ -16214,6 +16319,8 @@ def _load_stringing_plan_snapshot(
         return frame, completion_keys, [], []
 
     return None, set(), [], []
+
+
 
 
 

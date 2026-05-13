@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Iterable, Sequence
 import re
 
 import numpy as np
@@ -45,6 +45,9 @@ _CYCLE_BUCKETS = [
 _LOCATION_RE = re.compile(r"^\s*(\d+)([A-Za-z]+)?(?:\s*/\s*(\d+))?\s*$")
 _AP_PREFIX_RE = re.compile(r"^\s*ap[\s\-_/]*", flags=re.IGNORECASE)
 _GANTRY_RE = re.compile(r"\b(gantry|gty)\b", flags=re.IGNORECASE)
+_LOCATION_TOKEN_SPLIT_RE = re.compile(r"\s*,\s*")
+_LOCATION_FULL_TOKEN_RE = re.compile(r"^\d+[A-Z]*/\d+[A-Z]*$", flags=re.IGNORECASE)
+_LOCATION_SHORTHAND_RE = re.compile(r"^[A-Z0-9]+$", flags=re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -83,7 +86,6 @@ def build_stringing_analytics_payload(
     status_snapshot_overall: pd.DataFrame | None = None,
     stretch_section_fact: pd.DataFrame | None = None,
     manpower_productivity_fact: pd.DataFrame | None = None,
-    enable_legacy_es_gap_inference: bool = False,
 ) -> dict:
     """Return a serializable payload for stringing analytics."""
     projects = list(projects or [])
@@ -106,11 +108,7 @@ def build_stringing_analytics_payload(
     scope_spans = _nunique(compiled_po_start, "span_key")
     scope_total_km = float(pd.to_numeric(daily.get("daily_km"), errors="coerce").sum()) if not daily.empty else 0.0
 
-    readiness_table = (
-        _build_erection_po_gap_table(compiled_po_start, erection_daily)
-        if enable_legacy_es_gap_inference
-        else pd.DataFrame()
-    )
+    readiness_table = _build_erection_po_gap_table(compiled_po_start, erection_daily)
     readiness_stats = _gap_stats(readiness_table, "gap_days")
     readiness_hist = _bucket_distribution(readiness_table, "gap_days", _READINESS_BUCKETS)
     readiness_project = _project_hotspots(readiness_table, metric="median_gap")
@@ -335,6 +333,90 @@ def _filter_method(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     return work
 
 
+def _normalize_location_token(value: object) -> str:
+    text = normalize_location(value)
+    if not text:
+        return ""
+    text = re.sub(r"^\s*AP[\s\-_./]*", "", text, flags=re.IGNORECASE)
+    text = text.upper()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(\d)\.0\b", r"\1", text)
+    return text
+
+
+def _pick_location_nos_column(work: pd.DataFrame) -> str | None:
+    if work is None or work.empty:
+        return None
+    col_keys = {re.sub(r"[^a-z0-9]+", "", str(col).strip().lower()): col for col in work.columns}
+    for name in ("locationnos", "locationno_s", "locationsnos", "locationnumbers", "locationlist"):
+        if name in col_keys:
+            return col_keys[name]
+    for key, col in col_keys.items():
+        if "location" in key and ("nos" in key or "numbers" in key):
+            return col
+    return None
+
+
+def _normalize_required_location_sequence(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = _normalize_location_token(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _parse_location_nos_extras(location_nos_raw: object) -> tuple[list[str], str, str]:
+    raw_text = str(location_nos_raw or "").strip()
+    if not raw_text:
+        return [], "EMPTY", ""
+    tokens = [token.strip() for token in _LOCATION_TOKEN_SPLIT_RE.split(raw_text) if token.strip()]
+    if not tokens:
+        return [], "EMPTY", ""
+
+    extras: list[str] = []
+    current_anchor_prefix = ""
+    saw_full_anchor = False
+    unparsed_tokens: list[str] = []
+    for token in tokens:
+        normalized = _normalize_location_token(token)
+        if not normalized:
+            continue
+        if _LOCATION_FULL_TOKEN_RE.fullmatch(normalized):
+            saw_full_anchor = True
+            current_anchor_prefix = normalized.split("/", 1)[0]
+            extras.append(normalized)
+            continue
+        if _LOCATION_SHORTHAND_RE.fullmatch(normalized):
+            if saw_full_anchor and current_anchor_prefix:
+                extras.append(f"{current_anchor_prefix}/{normalized}")
+            else:
+                unparsed_tokens.append(normalized)
+            continue
+        unparsed_tokens.append(normalized)
+
+    extras = _normalize_required_location_sequence(extras)
+    if unparsed_tokens and not saw_full_anchor:
+        return [], "SHORTHAND_NO_ANCHOR", "Location Nos has shorthand tokens without an explicit anchor token."
+    if unparsed_tokens:
+        return extras, "PARTIAL_PARSE", f"Unparsed tokens: {', '.join(unparsed_tokens[:5])}"
+    return extras, "OK", ""
+
+
+def _build_required_locations(from_ap: object, to_ap: object, location_nos_raw: object) -> tuple[list[str], str, str]:
+    endpoints = _normalize_required_location_sequence((str(from_ap or ""), str(to_ap or "")))
+    extras, parse_status, parse_issue = _parse_location_nos_extras(location_nos_raw)
+    required = _normalize_required_location_sequence([*endpoints, *extras])
+    if parse_status == "SHORTHAND_NO_ANCHOR":
+        required = endpoints
+    if not endpoints and not required:
+        return [], parse_status, parse_issue
+    return required, parse_status, parse_issue
+
+
 def _letter_rank(value: str) -> int:
     rank = 0
     for ch in value.upper():
@@ -404,6 +486,33 @@ def _span_label(row: pd.Series) -> str:
     return str(row.get("span_key") or "").strip()
 
 
+def _resolve_project_key_norm(frame: pd.DataFrame) -> pd.Series:
+    source = frame.get("project_code")
+    if source is None:
+        source = frame.get("Project Code")
+    if source is None:
+        source = frame.get("project_name")
+    if source is None:
+        source = frame.get("Project Name")
+    if source is None:
+        source = frame.get("project")
+    if source is None:
+        source = frame.get("Project")
+    if source is None:
+        source = pd.Series("", index=frame.index)
+    source = source.fillna("").astype(str).str.strip()
+    fallback = frame.get(
+        "project_name",
+        frame.get(
+            "Project Name",
+            frame.get("project", frame.get("Project", pd.Series("", index=frame.index))),
+        ),
+    )
+    fallback = fallback.fillna("").astype(str).str.strip()
+    resolved = source.where(source.astype(bool), fallback)
+    return resolved.map(compact_project_key)
+
+
 def _apply_filters_safe(df: pd.DataFrame, projects, months, gangs) -> pd.DataFrame:
     from .filters import apply_filters
     if df is None or df.empty:
@@ -450,14 +559,37 @@ def _build_erection_location_map(erection_daily: pd.DataFrame) -> dict[str, pd.D
     if erection_daily is None or erection_daily.empty:
         return {}
     work = erection_daily.copy()
-    work["completion_date"] = pd.to_datetime(work.get("completion_date"), errors="coerce").dt.normalize()
-    work["location_no"] = work.get("location_no", "").fillna("").astype(str).str.strip()
-    work["project_key_norm"] = work.get("project_key_norm", "").fillna("").astype(str)
+    completion = None
+    for col in ("completion_date", "Complete Date", "complete date", "date", "Work Date", "work date"):
+        if col in work.columns:
+            completion = work[col]
+            break
+    if completion is None:
+        return {}
+    work["completion_date"] = pd.to_datetime(completion, errors="coerce").dt.normalize()
+    location_col = ""
+    for col in ("location_no", "Location No.", "location no.", "Location No", "location no", "location"):
+        if col in work.columns:
+            location_col = col
+            break
+    if not location_col:
+        return {}
+    work["location_no"] = work[location_col].fillna("").astype(str).str.strip()
+    project_key_series = work.get("project_key_norm")
+    if project_key_series is None:
+        project_key_series = _resolve_project_key_norm(work)
+    else:
+        project_key_series = project_key_series.fillna("").astype(str)
+        missing_mask = ~project_key_series.astype(bool)
+        if bool(missing_mask.any()):
+            project_key_series = project_key_series.where(~missing_mask, _resolve_project_key_norm(work))
+    work["project_key_norm"] = project_key_series.fillna("").astype(str)
     work = work.dropna(subset=["completion_date"])
     work = work[work["location_no"].astype(bool) & work["project_key_norm"].astype(bool)]
     if work.empty:
         return {}
     work["location_no_norm"] = work["location_no"].map(normalize_location)
+    work["location_token_norm"] = work["location_no"].map(_normalize_location_token)
     work["loc_order"] = work["location_no_norm"].map(_location_order_key)
     work = work.dropna(subset=["loc_order"])
     if work.empty:
@@ -469,7 +601,7 @@ def _build_erection_location_map(erection_daily: pd.DataFrame) -> dict[str, pd.D
     project_map: dict[str, pd.DataFrame] = {}
     for project_key, group in work.groupby("project_key_norm"):
         project_map[str(project_key)] = group[
-            ["loc_order", "completion_date", "location_no_norm", "location_no"]
+            ["loc_order", "completion_date", "location_no_norm", "location_token_norm", "location_no"]
         ].copy()
     return project_map
 
@@ -491,6 +623,18 @@ def _build_erection_po_gap_table(
     work["to_order"] = work["to_ap"].map(_location_order_key)
     work["from_is_gantry"] = work["from_ap"].map(_is_gantry_label)
     work["to_is_gantry"] = work["to_ap"].map(_is_gantry_label)
+    location_nos_col = _pick_location_nos_column(work)
+    if location_nos_col:
+        work["__location_nos_raw"] = work[location_nos_col]
+    else:
+        work["__location_nos_raw"] = ""
+    built = work.apply(
+        lambda row: _build_required_locations(row.get("from_ap"), row.get("to_ap"), row.get("__location_nos_raw")),
+        axis=1,
+    )
+    work["required_locations"] = built.map(lambda item: item[0])
+    work["location_parse_status"] = built.map(lambda item: item[1])
+    work["location_parse_issue"] = built.map(lambda item: item[2])
 
     erection_map = _build_erection_location_map(erection_daily)
 
@@ -504,6 +648,10 @@ def _build_erection_po_gap_table(
         to_ap = row.get("to_ap", "")
         from_is_gantry = bool(row.get("from_is_gantry", False))
         to_is_gantry = bool(row.get("to_is_gantry", False))
+        parse_status = str(row.get("location_parse_status") or "EMPTY").strip().upper() or "EMPTY"
+        parse_issue = str(row.get("location_parse_issue") or "").strip()
+        required_locations = list(row.get("required_locations") or [])
+        location_nos_raw = row.get("__location_nos_raw", "")
 
         base = {
             "project_name": row.get("project_name", ""),
@@ -514,17 +662,20 @@ def _build_erection_po_gap_table(
             "gang_name": row.get("gang_name", ""),
             "po_start_date": po_start,
             "span_key": row.get("span_key", ""),
+            "lag_inference_mode": "ALPHABETIC_FALLBACK",
+            "lag_fallback_used": True,
+            "location_parse_status": parse_status,
+            "location_parse_issue": parse_issue,
+            "required_location_count": int(len(required_locations)),
+            "matched_location_count": 0,
+            "unmatched_location_count": int(len(required_locations)),
+            "required_locations": ", ".join(required_locations),
+            "matched_locations": "",
+            "unmatched_locations": ", ".join(required_locations),
+            "location_nos_raw": str(location_nos_raw or ""),
         }
 
         if pd.isna(po_start):
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA})
-            continue
-
-        if from_is_gantry and to_is_gantry:
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA})
-            continue
-
-        if (not from_is_gantry and pd.isna(from_order)) or (not to_is_gantry and pd.isna(to_order)):
             rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA})
             continue
 
@@ -533,25 +684,70 @@ def _build_erection_po_gap_table(
             rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA})
             continue
 
-        if to_is_gantry and not from_is_gantry:
-            lo = int(from_order)
-            hi = int(project_df["loc_order"].max())
-        elif from_is_gantry and not to_is_gantry:
-            lo = int(project_df["loc_order"].min())
-            hi = int(to_order)
-        else:
-            lo = min(int(from_order), int(to_order))
-            hi = max(int(from_order), int(to_order))
-        span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
-        if span_df.empty:
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA})
-            continue
+        alpha_last_completion = pd.NaT
+        if not (from_is_gantry and to_is_gantry):
+            if (not from_is_gantry and pd.notna(from_order)) or (not to_is_gantry and pd.notna(to_order)):
+                try:
+                    if to_is_gantry and not from_is_gantry and pd.notna(from_order):
+                        lo = int(from_order)
+                        hi = int(project_df["loc_order"].max())
+                    elif from_is_gantry and not to_is_gantry and pd.notna(to_order):
+                        lo = int(project_df["loc_order"].min())
+                        hi = int(to_order)
+                    elif pd.notna(from_order) and pd.notna(to_order):
+                        lo = min(int(from_order), int(to_order))
+                        hi = max(int(from_order), int(to_order))
+                    else:
+                        lo = None
+                        hi = None
+                    if lo is not None and hi is not None:
+                        span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
+                        if not span_df.empty:
+                            alpha_last_completion = span_df["completion_date"].max()
+                except Exception:
+                    alpha_last_completion = pd.NaT
 
-        last_completion = span_df["completion_date"].max()
+        token_series = project_df.get("location_token_norm", pd.Series("", index=project_df.index)).fillna("").astype(str)
+        token_frame = project_df.assign(__token=token_series)
+        token_frame = token_frame[token_frame["__token"].astype(bool)].copy()
+        token_map: dict[str, pd.Timestamp] = (
+            token_frame.set_index("__token")["completion_date"].to_dict() if not token_frame.empty else {}
+        )
+        matched_locations: list[str] = []
+        unmatched_locations: list[str] = []
+        matched_dates: list[pd.Timestamp] = []
+        for token in required_locations:
+            hit = token_map.get(token)
+            if pd.notna(hit):
+                matched_locations.append(token)
+                matched_dates.append(hit)
+            else:
+                unmatched_locations.append(token)
+        loc_last_completion = max(matched_dates) if matched_dates else pd.NaT
+
+        has_location_signal = bool(str(location_nos_raw or "").strip()) and parse_status != "EMPTY"
+        mode = "ALPHABETIC_FALLBACK"
+        fallback_used = True
+        if parse_status == "OK" and required_locations and not unmatched_locations and pd.notna(loc_last_completion):
+            mode = "LOCATION_NOS"
+            fallback_used = False
+            last_completion = loc_last_completion
+        else:
+            if has_location_signal or parse_status in {"PARTIAL_PARSE", "SHORTHAND_NO_ANCHOR"}:
+                mode = "HYBRID_PARTIAL_FALLBACK"
+            candidates = [ts for ts in (loc_last_completion, alpha_last_completion) if pd.notna(ts)]
+            last_completion = max(candidates) if candidates else pd.NaT
+
         gap_days = (po_start - last_completion).days if pd.notna(last_completion) else pd.NA
         rows.append(
             {
                 **base,
+                "lag_inference_mode": mode,
+                "lag_fallback_used": bool(fallback_used),
+                "matched_location_count": int(len(matched_locations)),
+                "unmatched_location_count": int(len(unmatched_locations)),
+                "matched_locations": ", ".join(matched_locations),
+                "unmatched_locations": ", ".join(unmatched_locations),
                 "last_erection_completion_date": last_completion,
                 "gap_days": int(gap_days) if gap_days is not pd.NA else pd.NA,
             }

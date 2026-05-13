@@ -214,6 +214,7 @@ class ProgressStatusIngestTests(unittest.TestCase):
             source_sheet="Summary",
             configured_sheet="Summary",
             template_sheet="TB 501 Status",
+            stringing_resolution_policy="",
         )
         self.assertEqual(result.parse_status, "OK")
         self.assertGreaterEqual(result.rows_emitted, 4)

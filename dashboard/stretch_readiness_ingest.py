@@ -1533,6 +1533,11 @@ def _is_valid_date_value(value: object) -> bool:
     text = _as_text(value)
     if not text:
         return False
+    normalized = text.strip().lower()
+    if normalized in {"yes", "y", "true"}:
+        return True
+    if normalized in {"no", "n", "false"}:
+        return False
     try:
         parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
         if pd.isna(parsed):

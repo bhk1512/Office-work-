@@ -234,6 +234,30 @@ class StretchReadinessIngestTests(unittest.TestCase):
         self.assertEqual(str(derived.loc[0, "readiness_state"]), "NOT_READY")
         self.assertGreater(int(derived.loc[0, "unmatched_location_count"]), 0)
 
+    def test_tower_tightening_accepts_yes_no_and_blank(self) -> None:
+        derived = self._build_derived_rows(
+            stringing_rows=[
+                {
+                    "project_code": "TA 501",
+                    "project_display": "TA 501 - MAIN",
+                    "line_name": "MAIN",
+                    "project_scope_key": "ta501main",
+                    "from_ap": "65/0",
+                    "to_ap": "65/2",
+                    "location nos": "65/1",
+                    "length_m": 1200,
+                    "source_file": "TA 501 - DPR - 2026-05-05.xlsx",
+                }
+            ],
+            erection_rows=[
+                {"project_code": "TA 501", "line_name": "MAIN", "project_scope_key": "ta501main", "Location No.": "65/0", "Tower Tightening": "Yes"},
+                {"project_code": "TA 501", "line_name": "MAIN", "project_scope_key": "ta501main", "Location No.": "65/1", "Tower Tightening": "No"},
+                {"project_code": "TA 501", "line_name": "MAIN", "project_scope_key": "ta501main", "Location No.": "65/2", "Tower Tightening": ""},
+            ],
+        )
+        self.assertEqual(str(derived.loc[0, "readiness_state"]), "NOT_READY")
+        self.assertGreaterEqual(int(derived.loc[0, "unmatched_location_count"]), 1)
+
     def test_merge_prefers_derived_and_summary_dedupes_latest_per_section(self) -> None:
         legacy = pd.DataFrame(
             [

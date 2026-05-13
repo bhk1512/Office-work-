@@ -687,16 +687,19 @@ def normalize_gang_name(name: str) -> str:
       'xyz-4' -> 'Xyz 4'
     """
     if name is None:
-        return ""
+        return "undefined"
     s = str(name).strip().lower()
     # keep letters, digits, spaces â†’ replace other runs with a space
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return "undefined"
     # Title case
     s = s.title()
     # Insert a space before trailing digits if jammed to a letter
     s = re.sub(r"([A-Za-z])(\d+)$", r"\1 \2", s)
-    return s.strip()
+    cleaned = s.strip()
+    return cleaned if cleaned else "undefined"
 
 # --- NEW: tolerant loader for a single source file's "Project Details" ---
 def load_project_details_from_source(dfp: pd.DataFrame, source_file: Path) -> pd.DataFrame:
@@ -1200,7 +1203,7 @@ def process_file(
             diag["template_mapping_changes"] = "; ".join(applied_mapping)
 
         # Only the fields we need for computation. Tower Weight may be absent.
-        needed = ["starting date", "completion date", "gang name", "location no"]
+        needed = ["starting date", "completion date", "location no"]
         missing = [c for c in needed if c not in df.columns]
         if missing:
             issues.append(
@@ -1213,6 +1216,15 @@ def process_file(
             )
             diagnostics.append(diag)
             continue
+
+        if "gang name" not in df.columns:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": "'gang name' header missing; using 'undefined' for affected rows",
+                }
+            )
 
         work = df[needed].copy()
         if "tower weight" in df.columns:
@@ -1271,7 +1283,9 @@ def process_file(
                     "issue": f"Auto-corrected {repaired_dates} ambiguous Start/Complete date row(s)",
                 }
             )
-        work["Gang name"] = work["gang name"].apply(normalize_gang_name)
+        gang_source = df["gang name"] if "gang name" in df.columns else pd.Series("undefined", index=df.index)
+        work["Gang name"] = gang_source.apply(normalize_gang_name)
+        work.loc[work["Gang name"].astype(str).str.strip().eq(""), "Gang name"] = "undefined"
         work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
         work["Project Code"] = project_code_display or project_name
         work["Line Name"] = sheet_line_name
