@@ -20,6 +20,7 @@ from .data_loader import (
     load_foundation_coverage,
     load_foundation_diagnostics,
 )
+from .foundation_delay_analysis import build_foundation_delay_trend_tables_legacy
 from .metrics import (
     calc_idle_and_loss,
     compute_gang_baseline_maps,
@@ -1197,6 +1198,14 @@ def _build_foundation_delay_trend_tables(
     foundation_coverage: pd.DataFrame,
     foundation_diagnostics: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # Delegated to shared module for reuse by standalone foundation-delay export.
+    return build_foundation_delay_trend_tables_legacy(
+        source_daily=source_daily,
+        foundation_completions=foundation_completions,
+        foundation_coverage=foundation_coverage,
+        foundation_diagnostics=foundation_diagnostics,
+    )
+
     phase_columns = [
         "Project",
         "Phase",
