@@ -65,6 +65,28 @@ def _parse_args() -> argparse.Namespace:
         help="Optional YYYY-MM-DD date to treat as 'today' for the export.",
     )
     parser.add_argument(
+        "--week-mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "calendar_sun_sat"],
+        help="Week bucketing mode for weekly sections (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        help="Optional YYYY-MM-DD weekly scope start date (used in calendar_sun_sat mode).",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        help="Optional YYYY-MM-DD weekly scope end date (requires --start-date).",
+    )
+    parser.add_argument(
+        "--previous-week",
+        action="store_true",
+        help="Use the previous completed Sunday-Saturday week (calendar_sun_sat mode).",
+    )
+    parser.add_argument(
         "--start-month",
         type=str,
         help="Optional YYYY-MM start month for a continuous range (used with --end-month).",
@@ -209,6 +231,12 @@ def main() -> int:
     project_pch_df = _load_project_pch_mapping(mapping_path)
 
     as_of = pd.Timestamp(args.as_of_date) if args.as_of_date else None
+    start_date = pd.Timestamp(args.start_date) if args.start_date else None
+    end_date = pd.Timestamp(args.end_date) if args.end_date else None
+    if end_date is not None and start_date is None:
+        raise SystemExit("--end-date requires --start-date.")
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise SystemExit("--start-date must be before or equal to --end-date.")
     range_start = None
     range_end = None
     if args.start_month or args.end_month:
@@ -222,6 +250,10 @@ def main() -> int:
         if range_start > range_end:
             raise SystemExit("--start-month must be before or equal to --end-month.")
     output_path = _resolve_output_path(args.output)
+    week_mode = args.week_mode
+    if week_mode == "legacy" and (args.previous_week or args.start_date or args.end_date):
+        week_mode = "calendar_sun_sat"
+
     export_erection_productivity_summary(
         output_path=output_path,
         data_store=store,
@@ -230,6 +262,10 @@ def main() -> int:
         project_info=project_pch_df if not project_pch_df.empty else None,
         range_start=range_start,
         range_end=range_end,
+        week_mode=week_mode,
+        week_start_date=start_date,
+        week_end_date=end_date,
+        previous_week=bool(args.previous_week),
         gang_min_erections=args.gang_min_erections,
     )
     LOGGER.info("Erection summary exported to %s", output_path)

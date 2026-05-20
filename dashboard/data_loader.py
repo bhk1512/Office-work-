@@ -2776,6 +2776,52 @@ def load_progress_status_coverage(config_or_path: AppConfig | Path | str) -> pd.
     return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
 
 
+def load_foundation_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "Foundation", "FoundationCompiled_Output.xlsx", "FoundationRaw")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_foundation_completions(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(
+        str(data_path.resolve()),
+        "Foundation",
+        "FoundationCompiled_Output.xlsx",
+        "FoundationCompletions",
+    )
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_foundation_coverage(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(str(data_path.resolve()), "Foundation", "FoundationCompiled_Output.xlsx", "Coverage")
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def load_foundation_diagnostics(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(
+        str(data_path.resolve()),
+        "Foundation",
+        "FoundationCompiled_Output.xlsx",
+        "Diagnostics",
+    )
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
 def load_stretch_readiness_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
     if isinstance(config_or_path, AppConfig):
         data_path = Path(config_or_path.data_path)
@@ -2826,6 +2872,10 @@ def load_stringing_summary_table(
 
 load_progress_status_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_progress_status_coverage.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_foundation_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_foundation_completions.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_foundation_coverage.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_foundation_diagnostics.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_stretch_readiness_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_stretch_readiness_summary.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_stretch_readiness_manpower_audit.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]

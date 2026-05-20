@@ -16,6 +16,7 @@ from dashboard import stringing_ingest as ingest
 from dashboard import progress_status_ingest
 from dashboard import stretch_readiness_ingest
 from dashboard import stringing_summary_ingest
+from dashboard import foundation_ingest
 from dashboard.stringing import (
     expand_stringing_to_daily,
     normalize_stringing_columns,
@@ -1299,6 +1300,27 @@ def compile_stringing_summary_to_workbook(
         return None
     return result
 
+
+def compile_foundation_to_workbook(
+    input_dir: Optional[Path],
+    files: Optional[List[Path]],
+    output_path: Path,
+    *,
+    completed_project_keys: Optional[set[str]] = None,
+) -> Optional[Path]:
+    try:
+        result = foundation_ingest.compile_foundation_to_workbook(
+            input_dir,
+            files,
+            output_path,
+            repo_root=BASE_DIR,
+            completed_project_keys=completed_project_keys,
+        )
+    except Exception as exc:
+        print(f"[pipeline] Foundation: failed to compile from DPRs: {exc}")
+        return None
+    return result
+
 def _reload_dashboard_data(dashboard_module: Any, workbook_path: Path) -> None:
     """Reload the dashboard dataframe and recompute derived fields."""
     df = dashboard_module.load_daily(workbook_path)
@@ -1582,6 +1604,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 )
             except Exception as exc:
                 print(f"[pipeline] ProgressStatus: failed to export parquet: {exc}")
+
+        # --- Compile Foundation from DPR sources (detail + status fallback) ---
+        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+            foundation_base = base_dir.parent / "Foundation"
+        else:
+            foundation_base = base_dir / "Foundation" if base_dir.name != "Foundation" else base_dir
+        foundation_base.mkdir(parents=True, exist_ok=True)
+        foundation_out = foundation_base / "FoundationCompiled_Output.xlsx"
+        print(f"[pipeline] Foundation: compiling to {foundation_out}")
+        compiled_foundation = compile_foundation_to_workbook(
+            stringing_input,
+            stringing_files,
+            foundation_out,
+            completed_project_keys=completed_project_keys,
+        )
+        if compiled_foundation and compiled_foundation.exists():
+            try:
+                export_workbook_to_parquet(
+                    compiled_foundation,
+                    sheets=("FoundationRaw", "FoundationCompletions", "Coverage", "Diagnostics", "Issues"),
+                )
+            except Exception as exc:
+                print(f"[pipeline] Foundation: failed to export parquet: {exc}")
 
         # --- Compile Stretch Readiness from DPR sources ---
         if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":

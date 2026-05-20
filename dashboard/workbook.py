@@ -15,6 +15,11 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .config import AppConfig
+from .data_loader import (
+    load_foundation_completions,
+    load_foundation_coverage,
+    load_foundation_diagnostics,
+)
 from .metrics import (
     calc_idle_and_loss,
     compute_gang_baseline_maps,
@@ -85,6 +90,8 @@ MONTHLY_MT_LABEL = "MT Erected"
 _DEFAULT_SHEET_NAME = "Erection Summary"
 _DEFAULT_KV_SHEET_NAME = "KV Productivity"
 _PCH_SORT_ORDER = {name: idx for idx, name in enumerate(CANONICAL_PCH_PRIMARY)}
+WEEK_MODE_LEGACY = "legacy"
+WEEK_MODE_CALENDAR_SUN_SAT = "calendar_sun_sat"
 
 # TODO: Align the week bucket helper below with the dashboard's official week mapping
 # once that logic is exposed outside the callbacks module.
@@ -95,6 +102,47 @@ def _generate_week_labels(month_start: pd.Timestamp, month_end: pd.Timestamp) ->
     days = max(1, int((month_end - month_start).days) + 1)
     week_count = max(1, ceil(days / 7))
     return [f"Week {idx}" for idx in range(1, week_count + 1)]
+
+
+def _normalize_week_mode(value: str | None) -> str:
+    normalized = str(value or WEEK_MODE_LEGACY).strip().lower()
+    if normalized == WEEK_MODE_CALENDAR_SUN_SAT:
+        return WEEK_MODE_CALENDAR_SUN_SAT
+    return WEEK_MODE_LEGACY
+
+
+def _align_to_previous_sunday(value: pd.Timestamp | str) -> pd.Timestamp:
+    ts = pd.Timestamp(value).normalize()
+    days_back = (ts.weekday() + 1) % 7
+    return (ts - pd.Timedelta(days=days_back)).normalize()
+
+
+def _previous_completed_week_window(reference_date: pd.Timestamp | str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    ref = pd.Timestamp(reference_date).normalize()
+    current_week_start = _align_to_previous_sunday(ref)
+    previous_week_start = current_week_start - pd.Timedelta(days=7)
+    previous_week_end = current_week_start - pd.Timedelta(days=1)
+    return previous_week_start.normalize(), previous_week_end.normalize()
+
+
+def _format_calendar_week_label(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    return f"{pd.Timestamp(start).strftime('%Y-%m-%d')} to {pd.Timestamp(end).strftime('%Y-%m-%d')}"
+
+
+def _generate_calendar_week_labels(scope_start: pd.Timestamp, scope_end: pd.Timestamp) -> list[str]:
+    if pd.isna(scope_start) or pd.isna(scope_end):
+        return []
+    start = pd.Timestamp(scope_start).normalize()
+    end = pd.Timestamp(scope_end).normalize()
+    if end < start:
+        return []
+    labels: list[str] = []
+    cursor = start
+    while cursor <= end:
+        week_end = min(cursor + pd.Timedelta(days=6), end)
+        labels.append(_format_calendar_week_label(cursor, week_end))
+        cursor = cursor + pd.Timedelta(days=7)
+    return labels
 
 
 def _normalize_region(value: object) -> str:
@@ -811,6 +859,744 @@ def _apply_project_rollup_columns(df: pd.DataFrame) -> pd.DataFrame:
         project_display.where(project_display.astype(bool), project_name),
     )
     return working
+
+
+def _coerce_mixed_excel_dates_series(values: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(values, errors="coerce")
+    numeric = pd.to_numeric(values, errors="coerce")
+    excel_mask = parsed.isna() & numeric.notna() & numeric.between(20000, 80000)
+    if excel_mask.any():
+        parsed.loc[excel_mask] = pd.to_datetime(
+            numeric.loc[excel_mask],
+            errors="coerce",
+            unit="D",
+            origin="1899-12-30",
+        )
+    return pd.to_datetime(parsed, errors="coerce").dt.normalize()
+
+
+def _build_erection_completion_events_for_gap(source_daily: pd.DataFrame) -> pd.DataFrame:
+    if source_daily is None or source_daily.empty:
+        return pd.DataFrame()
+    work = _apply_project_rollup_columns(source_daily)
+    work["completion_date"] = _coerce_mixed_excel_dates_series(work.get("completion_date", pd.Series(dtype="object")))
+    work = work[work["completion_date"].notna()].copy()
+    if work.empty:
+        return work
+    work = work[work["completion_date"].dt.year >= 1980].copy()
+    if work.empty:
+        return work
+    work["location_no"] = work.get("location_no", "").fillna("").astype(str).str.strip()
+    work["line_name"] = work.get("line_name", "").fillna("").astype(str).str.strip()
+    work["project_code"] = work.get("project_code", "").fillna("").astype(str).str.strip()
+    work["project_code_norm"] = work["project_code"].map(_compact_project_key)
+    work["line_name_norm"] = work["line_name"].map(_compact_project_key)
+    work["location_no_norm"] = work["location_no"].map(_compact_project_key)
+    dedupe_cols = ["project_code_norm", "line_name_norm", "location_no_norm", "completion_date"]
+    work = work.drop_duplicates(subset=dedupe_cols, keep="last")
+    return work
+
+
+def _build_foundation_vs_erection_gap_tables(
+    source_daily: pd.DataFrame,
+    foundation_completions: pd.DataFrame,
+    foundation_coverage: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    monthly_columns = [
+        "Project",
+        "Source Type",
+        "Snapshot Limited",
+        "Month",
+        "Foundations Cumulative",
+        "Erections Cumulative",
+        "Gap Cumulative",
+    ]
+    weekly_columns = [
+        "Project",
+        "Source Type",
+        "Snapshot Limited",
+        "Week Start",
+        "Week End",
+        "Week",
+        "Foundations Cumulative",
+        "Erections Cumulative",
+        "Gap Cumulative",
+    ]
+    coverage_columns = [
+        "Project",
+        "Foundation Source Used",
+        "Coverage Status",
+        "Coverage Reason",
+        "Snapshot Limited",
+        "First Month Available",
+        "Last Month Available",
+        "First Week Available",
+        "Last Week Available",
+        "Detail Rows",
+        "Detail Completions",
+        "Snapshot Rows",
+        "Erection First Month",
+        "Erection Last Month",
+        "Notes",
+    ]
+
+    erections = _build_erection_completion_events_for_gap(source_daily)
+    foundation = _apply_project_rollup_columns(foundation_completions) if isinstance(foundation_completions, pd.DataFrame) else pd.DataFrame()
+    coverage = _apply_project_rollup_columns(foundation_coverage) if isinstance(foundation_coverage, pd.DataFrame) else pd.DataFrame()
+
+    if foundation.empty and erections.empty and coverage.empty:
+        return (
+            pd.DataFrame(columns=monthly_columns),
+            pd.DataFrame(columns=weekly_columns),
+            pd.DataFrame(columns=coverage_columns),
+        )
+
+    if not foundation.empty:
+        foundation["event_date"] = _coerce_mixed_excel_dates_series(foundation.get("event_date", pd.Series(dtype="object")))
+        foundation["report_date"] = _coerce_mixed_excel_dates_series(foundation.get("report_date", pd.Series(dtype="object")))
+        foundation["location_no"] = foundation.get("location_no", "").fillna("").astype(str).str.strip()
+        foundation["line_name"] = foundation.get("line_name", "").fillna("").astype(str).str.strip()
+        foundation["source_type"] = foundation.get("source_type", "").fillna("").astype(str).str.strip().str.lower()
+        foundation["project_code"] = foundation.get("project_code", "").fillna("").astype(str).str.strip()
+        foundation["project_code_norm"] = foundation["project_code"].map(_compact_project_key)
+        foundation["line_name_norm"] = foundation["line_name"].map(_compact_project_key)
+        foundation["location_no_norm"] = foundation["location_no"].map(_compact_project_key)
+        foundation["cumulative_foundation"] = pd.to_numeric(foundation.get("cumulative_foundation"), errors="coerce")
+    else:
+        foundation = pd.DataFrame()
+
+    coverage_by_key: dict[str, dict[str, object]] = {}
+    excluded_gap_projects: set[str] = set()
+    if not coverage.empty:
+        coverage["status"] = coverage.get("status", "").fillna("").astype(str).str.strip()
+        coverage["reason"] = coverage.get("reason", "").fillna("").astype(str).str.strip()
+        coverage["source_used"] = coverage.get("source_used", "").fillna("").astype(str).str.strip()
+        coverage["snapshot_limited"] = coverage.get("snapshot_limited", "").fillna("").astype(str).str.strip()
+        coverage["detail_rows"] = pd.to_numeric(coverage.get("detail_rows"), errors="coerce").fillna(0).astype(int)
+        coverage["detail_completions"] = pd.to_numeric(coverage.get("detail_completions"), errors="coerce").fillna(0).astype(int)
+        coverage["snapshot_rows"] = pd.to_numeric(coverage.get("snapshot_rows"), errors="coerce").fillna(0).astype(int)
+        for project_key, group in coverage.groupby("project_rollup_key", dropna=False):
+            key = str(project_key or "").strip()
+            if not key:
+                continue
+            first = group.iloc[0]
+            coverage_by_key[key] = {
+                "project": str(first.get("project_rollup_display", "")).strip() or str(first.get("project_display", "")).strip(),
+                "status": "; ".join(sorted({str(v).strip() for v in group["status"] if str(v).strip()})),
+                "reason": " | ".join(sorted({str(v).strip() for v in group["reason"] if str(v).strip()})),
+                "source_used": "; ".join(sorted({str(v).strip() for v in group["source_used"] if str(v).strip()})),
+                "snapshot_limited": "Yes" if any(str(v).strip().lower() == "yes" for v in group["snapshot_limited"]) else "No",
+                "detail_rows": int(group["detail_rows"].sum()),
+                "detail_completions": int(group["detail_completions"].sum()),
+                "snapshot_rows": int(group["snapshot_rows"].sum()),
+            }
+            status_text = str(coverage_by_key[key].get("status", "")).upper()
+            if "SKIPPED_BLANK_CONFIG" in status_text:
+                excluded_gap_projects.add(key)
+
+    detail = pd.DataFrame()
+    snapshot = pd.DataFrame()
+    if not foundation.empty:
+        detail = foundation[(foundation["source_type"] == "detail") & foundation["event_date"].notna()].copy()
+        if not detail.empty:
+            detail = detail.drop_duplicates(
+                subset=["project_code_norm", "line_name_norm", "location_no_norm", "event_date"],
+                keep="last",
+            )
+        snapshot = foundation[(foundation["source_type"] != "detail") & foundation["event_date"].notna()].copy()
+        if not snapshot.empty:
+            snapshot = (
+                snapshot.sort_values("event_date")
+                .groupby(["project_rollup_key", "project_rollup_display", "event_date"], as_index=False)
+                .agg(cumulative_foundation=("cumulative_foundation", "max"))
+            )
+
+    projects: dict[str, str] = {}
+    for frame in (erections, detail, snapshot, coverage):
+        if frame is None or frame.empty:
+            continue
+        key_series = frame.get("project_rollup_key")
+        display_series = frame.get("project_rollup_display")
+        if key_series is None or display_series is None:
+            continue
+        for key, display in zip(key_series, display_series):
+            key_text = str(key or "").strip()
+            display_text = str(display or "").strip()
+            if key_text and display_text and key_text not in projects:
+                projects[key_text] = display_text
+    for excluded_key in excluded_gap_projects:
+        projects.pop(excluded_key, None)
+
+    monthly_rows: list[dict[str, object]] = []
+    weekly_rows: list[dict[str, object]] = []
+    coverage_rows: list[dict[str, object]] = []
+
+    for project_key, project_name in sorted(projects.items(), key=lambda item: item[1]):
+        project_erections = erections[erections["project_rollup_key"] == project_key].copy() if not erections.empty else pd.DataFrame()
+        project_detail = detail[detail["project_rollup_key"] == project_key].copy() if not detail.empty else pd.DataFrame()
+        project_snapshot = snapshot[snapshot["project_rollup_key"] == project_key].copy() if not snapshot.empty else pd.DataFrame()
+        coverage_rec = coverage_by_key.get(project_key, {})
+
+        if not project_detail.empty:
+            source_type = "detail"
+            snapshot_limited = "No"
+        elif not project_snapshot.empty:
+            source_type = "snapshot_fallback"
+            snapshot_limited = "Yes"
+        else:
+            source_type = str(coverage_rec.get("source_used", "")).strip() or "missing"
+            snapshot_limited = str(coverage_rec.get("snapshot_limited", "No")).strip() or "No"
+
+        erection_month = (
+            project_erections.assign(period=project_erections["completion_date"].dt.to_period("M").dt.to_timestamp())
+            .groupby("period")
+            .size()
+            if not project_erections.empty
+            else pd.Series(dtype="int64")
+        )
+        erection_week = (
+            project_erections.assign(period=project_erections["completion_date"] - pd.to_timedelta((project_erections["completion_date"].dt.weekday + 1) % 7, unit="D"))
+            .groupby("period")
+            .size()
+            if not project_erections.empty
+            else pd.Series(dtype="int64")
+        )
+        erection_month_cum = erection_month.sort_index().cumsum() if not erection_month.empty else erection_month
+        erection_week_cum = erection_week.sort_index().cumsum() if not erection_week.empty else erection_week
+
+        if source_type == "detail":
+            foundation_month_count = (
+                project_detail.assign(period=project_detail["event_date"].dt.to_period("M").dt.to_timestamp())
+                .groupby("period")
+                .size()
+            )
+            foundation_week_count = (
+                project_detail.assign(period=project_detail["event_date"] - pd.to_timedelta((project_detail["event_date"].dt.weekday + 1) % 7, unit="D"))
+                .groupby("period")
+                .size()
+            )
+            foundation_month_cum = foundation_month_count.sort_index().cumsum()
+            foundation_week_cum = foundation_week_count.sort_index().cumsum()
+        elif source_type == "snapshot_fallback":
+            foundation_month_cum = (
+                project_snapshot.assign(period=project_snapshot["event_date"].dt.to_period("M").dt.to_timestamp())
+                .groupby("period")["cumulative_foundation"]
+                .max()
+                .sort_index()
+            )
+            foundation_week_cum = (
+                project_snapshot.assign(period=project_snapshot["event_date"] - pd.to_timedelta((project_snapshot["event_date"].dt.weekday + 1) % 7, unit="D"))
+                .groupby("period")["cumulative_foundation"]
+                .max()
+                .sort_index()
+            )
+        else:
+            foundation_month_cum = pd.Series(dtype="float64")
+            foundation_week_cum = pd.Series(dtype="float64")
+
+        month_index = sorted(set(erection_month_cum.index.tolist()) | set(foundation_month_cum.index.tolist()))
+        week_index = sorted(set(erection_week_cum.index.tolist()) | set(foundation_week_cum.index.tolist()))
+
+        if source_type == "snapshot_fallback":
+            fm = foundation_month_cum.reindex(month_index).ffill()
+            fw = foundation_week_cum.reindex(week_index).ffill()
+        elif source_type == "missing":
+            fm = pd.Series([float("nan")] * len(month_index), index=month_index, dtype="float64")
+            fw = pd.Series([float("nan")] * len(week_index), index=week_index, dtype="float64")
+        else:
+            fm = foundation_month_cum.reindex(month_index).ffill().fillna(0.0) if month_index else pd.Series(dtype="float64")
+            fw = foundation_week_cum.reindex(week_index).ffill().fillna(0.0) if week_index else pd.Series(dtype="float64")
+
+        em = erection_month_cum.reindex(month_index).ffill().fillna(0.0) if month_index else pd.Series(dtype="float64")
+        ew = erection_week_cum.reindex(week_index).ffill().fillna(0.0) if week_index else pd.Series(dtype="float64")
+        if not em.empty:
+            em = pd.to_numeric(em, errors="coerce").fillna(0.0)
+        if not ew.empty:
+            ew = pd.to_numeric(ew, errors="coerce").fillna(0.0)
+        if source_type == "detail":
+            if not fm.empty:
+                fm = pd.to_numeric(fm, errors="coerce").fillna(0.0)
+            if not fw.empty:
+                fw = pd.to_numeric(fw, errors="coerce").fillna(0.0)
+
+        for period in month_index:
+            foundation_value = fm.loc[period] if period in fm.index else pd.NA
+            erection_value = em.loc[period] if period in em.index else 0.0
+            gap_value = pd.NA if pd.isna(foundation_value) else float(foundation_value) - float(erection_value)
+            monthly_rows.append(
+                {
+                    "Project": project_name,
+                    "Source Type": source_type,
+                    "Snapshot Limited": snapshot_limited,
+                    "Month": pd.Timestamp(period).strftime("%Y-%m"),
+                    "Foundations Cumulative": foundation_value,
+                    "Erections Cumulative": float(erection_value),
+                    "Gap Cumulative": gap_value,
+                }
+            )
+
+        for period in week_index:
+            week_start = pd.Timestamp(period).normalize()
+            week_end = week_start + pd.Timedelta(days=6)
+            foundation_value = fw.loc[period] if period in fw.index else pd.NA
+            erection_value = ew.loc[period] if period in ew.index else 0.0
+            gap_value = pd.NA if pd.isna(foundation_value) else float(foundation_value) - float(erection_value)
+            weekly_rows.append(
+                {
+                    "Project": project_name,
+                    "Source Type": source_type,
+                    "Snapshot Limited": snapshot_limited,
+                    "Week Start": week_start.strftime("%Y-%m-%d"),
+                    "Week End": week_end.strftime("%Y-%m-%d"),
+                    "Week": f"{week_start:%Y-%m-%d} to {week_end:%Y-%m-%d}",
+                    "Foundations Cumulative": foundation_value,
+                    "Erections Cumulative": float(erection_value),
+                    "Gap Cumulative": gap_value,
+                }
+            )
+
+        if not project_erections.empty:
+            ere_first_month = project_erections["completion_date"].min().strftime("%Y-%m")
+            ere_last_month = project_erections["completion_date"].max().strftime("%Y-%m")
+        else:
+            ere_first_month = ""
+            ere_last_month = ""
+
+        month_available = sorted({row["Month"] for row in monthly_rows if row["Project"] == project_name and pd.notna(row["Foundations Cumulative"])})
+        week_available = sorted({row["Week"] for row in weekly_rows if row["Project"] == project_name and pd.notna(row["Foundations Cumulative"])})
+
+        coverage_rows.append(
+            {
+                "Project": project_name,
+                "Foundation Source Used": source_type,
+                "Coverage Status": str(coverage_rec.get("status", "")).strip() or ("OK_DETAIL" if source_type == "detail" else "MISSING"),
+                "Coverage Reason": str(coverage_rec.get("reason", "")).strip(),
+                "Snapshot Limited": snapshot_limited,
+                "First Month Available": month_available[0] if month_available else "",
+                "Last Month Available": month_available[-1] if month_available else "",
+                "First Week Available": week_available[0] if week_available else "",
+                "Last Week Available": week_available[-1] if week_available else "",
+                "Detail Rows": int(coverage_rec.get("detail_rows", 0)),
+                "Detail Completions": int(coverage_rec.get("detail_completions", 0)),
+                "Snapshot Rows": int(coverage_rec.get("snapshot_rows", 0)),
+                "Erection First Month": ere_first_month,
+                "Erection Last Month": ere_last_month,
+                "Notes": "Snapshot values are carry-forwarded between reporting dates." if source_type == "snapshot_fallback" else "",
+            }
+        )
+
+    monthly_df = pd.DataFrame(monthly_rows, columns=monthly_columns)
+    weekly_df = pd.DataFrame(weekly_rows, columns=weekly_columns)
+    coverage_df = pd.DataFrame(coverage_rows, columns=coverage_columns)
+    return monthly_df, weekly_df, coverage_df
+
+
+def _build_foundation_delay_trend_tables(
+    source_daily: pd.DataFrame,
+    foundation_completions: pd.DataFrame,
+    foundation_coverage: pd.DataFrame,
+    foundation_diagnostics: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    phase_columns = [
+        "Project",
+        "Phase",
+        "Foundation Bucket Start %",
+        "Foundation Bucket End %",
+        "Foundation Count",
+        "Matched Count",
+        "Match %",
+        "Median Delay Days",
+        "Average Delay Days",
+        "P90 Delay Days",
+        "Negative Excluded",
+        "Unmatched",
+        "Source Type",
+        "Parser Modes",
+        "Coverage Status",
+    ]
+    monthly_columns = [
+        "Project",
+        "Month",
+        "Foundation Count",
+        "Matched Count",
+        "Match %",
+        "Median Delay Days",
+        "Average Delay Days",
+        "P90 Delay Days",
+        "Negative Excluded",
+        "Unmatched",
+        "Source Type",
+        "Parser Modes",
+        "Coverage Status",
+    ]
+    coverage_columns = [
+        "Project",
+        "Eligible",
+        "Coverage Status",
+        "Source Type",
+        "Parser Modes",
+        "Reason",
+        "Foundation Locations",
+        "Matched Locations",
+        "Negative Excluded",
+        "Unmatched Locations",
+        "Notes",
+    ]
+    anomaly_columns = [
+        "Project",
+        "Location",
+        "Foundation Date",
+        "Erection Start",
+        "Delay Days",
+        "Issue",
+        "Foundation Line",
+        "Erection Line",
+    ]
+
+    coverage = _apply_project_rollup_columns(foundation_coverage) if isinstance(foundation_coverage, pd.DataFrame) else pd.DataFrame()
+    diagnostics = _apply_project_rollup_columns(foundation_diagnostics) if isinstance(foundation_diagnostics, pd.DataFrame) else pd.DataFrame()
+    foundation = _apply_project_rollup_columns(foundation_completions) if isinstance(foundation_completions, pd.DataFrame) else pd.DataFrame()
+    erections = _apply_project_rollup_columns(source_daily) if isinstance(source_daily, pd.DataFrame) else pd.DataFrame()
+
+    if coverage.empty and diagnostics.empty and foundation.empty and erections.empty:
+        return (
+            pd.DataFrame(columns=phase_columns),
+            pd.DataFrame(columns=monthly_columns),
+            pd.DataFrame(columns=coverage_columns),
+            pd.DataFrame(columns=anomaly_columns),
+        )
+
+    coverage_by_key: dict[str, dict[str, str]] = {}
+    if not coverage.empty:
+        coverage["status"] = coverage.get("status", "").fillna("").astype(str).str.strip()
+        coverage["source_used"] = coverage.get("source_used", "").fillna("").astype(str).str.strip().str.lower()
+        coverage["reason"] = coverage.get("reason", "").fillna("").astype(str).str.strip()
+        for project_key, group in coverage.groupby("project_rollup_key", dropna=False):
+            key = str(project_key or "").strip()
+            if not key:
+                continue
+            first = group.iloc[0]
+            coverage_by_key[key] = {
+                "project": str(first.get("project_rollup_display", "")).strip() or str(first.get("project_display", "")).strip(),
+                "status": "; ".join(sorted({str(v).strip() for v in group["status"] if str(v).strip()})),
+                "source_used": "; ".join(sorted({str(v).strip() for v in group["source_used"] if str(v).strip()})),
+                "reason": " | ".join(sorted({str(v).strip() for v in group["reason"] if str(v).strip()})),
+            }
+
+    parser_modes_by_key: dict[str, str] = {}
+    if not diagnostics.empty:
+        if "Project" in diagnostics.columns and "project_code" not in diagnostics.columns:
+            diagnostics["project_code"] = diagnostics["Project"]
+        diagnostics["parser_mode"] = diagnostics.get("ParserMode", "").fillna("").astype(str).str.strip().str.lower()
+        for project_key, group in diagnostics.groupby("project_rollup_key", dropna=False):
+            key = str(project_key or "").strip()
+            if not key:
+                continue
+            parser_modes = sorted({str(v).strip() for v in group["parser_mode"] if str(v).strip()})
+            parser_modes_by_key[key] = ", ".join(parser_modes)
+
+    if not erections.empty:
+        erections["start_date"] = _coerce_mixed_excel_dates_series(erections.get("start_date", pd.Series(dtype="object")))
+        erections = erections[erections["start_date"].notna()].copy()
+        erections = erections[erections["start_date"].dt.year >= 1980].copy()
+        erections["project_rollup_key"] = erections.get("project_rollup_key", "").fillna("").astype(str).str.strip()
+        erections["project_rollup_display"] = erections.get("project_rollup_display", "").fillna("").astype(str).str.strip()
+        erections["line_name"] = erections.get("line_name", "").fillna("").astype(str).str.strip()
+        erections["location_no"] = erections.get("location_no", "").fillna("").astype(str).str.strip()
+        erections["line_name_norm"] = erections["line_name"].map(_compact_project_key)
+        erections["location_no_norm"] = erections["location_no"].map(_compact_project_key)
+        erections = erections[
+            erections["project_rollup_key"].astype(bool)
+            & erections["location_no_norm"].astype(bool)
+        ].copy()
+    if not foundation.empty:
+        foundation["event_date"] = _coerce_mixed_excel_dates_series(foundation.get("event_date", pd.Series(dtype="object")))
+        foundation["source_type"] = foundation.get("source_type", "").fillna("").astype(str).str.strip().str.lower()
+        foundation = foundation[(foundation["source_type"] == "detail") & foundation["event_date"].notna()].copy()
+        foundation = foundation[foundation["event_date"].dt.year >= 1980].copy()
+        foundation["project_rollup_key"] = foundation.get("project_rollup_key", "").fillna("").astype(str).str.strip()
+        foundation["project_rollup_display"] = foundation.get("project_rollup_display", "").fillna("").astype(str).str.strip()
+        foundation["line_name"] = foundation.get("line_name", "").fillna("").astype(str).str.strip()
+        foundation["location_no"] = foundation.get("location_no", "").fillna("").astype(str).str.strip()
+        foundation["line_name_norm"] = foundation["line_name"].map(_compact_project_key)
+        foundation["location_no_norm"] = foundation["location_no"].map(_compact_project_key)
+        foundation = foundation[
+            foundation["project_rollup_key"].astype(bool)
+            & foundation["location_no_norm"].astype(bool)
+        ].copy()
+
+    if foundation.empty:
+        phase_df = pd.DataFrame(columns=phase_columns)
+        monthly_df = pd.DataFrame(columns=monthly_columns)
+        anomaly_df = pd.DataFrame(columns=anomaly_columns)
+        coverage_rows = []
+        project_keys = sorted(coverage_by_key.keys())
+        for project_key in project_keys:
+            cov = coverage_by_key.get(project_key, {})
+            status = str(cov.get("status", "")).strip() or "MISSING"
+            source_used = str(cov.get("source_used", "")).strip() or "missing"
+            parser_modes = parser_modes_by_key.get(project_key, "")
+            reason = str(cov.get("reason", "")).strip() or "No detail foundation completion events available."
+            coverage_rows.append(
+                {
+                    "Project": str(cov.get("project", "")).strip() or project_key.upper(),
+                    "Eligible": "No",
+                    "Coverage Status": status,
+                    "Source Type": source_used,
+                    "Parser Modes": parser_modes,
+                    "Reason": reason,
+                    "Foundation Locations": 0,
+                    "Matched Locations": 0,
+                    "Negative Excluded": 0,
+                    "Unmatched Locations": 0,
+                    "Notes": "",
+                }
+            )
+        return phase_df, monthly_df, pd.DataFrame(coverage_rows, columns=coverage_columns), anomaly_df
+
+    foundation_loc = (
+        foundation.sort_values(["project_rollup_key", "event_date", "line_name", "location_no"])
+        .groupby(["project_rollup_key", "project_rollup_display", "line_name_norm", "location_no_norm"], as_index=False)
+        .agg(
+            foundation_complete=("event_date", "min"),
+            foundation_line=("line_name", "first"),
+            location_no=("location_no", "first"),
+        )
+    )
+
+    if not erections.empty:
+        erection_loc = (
+            erections.sort_values(["project_rollup_key", "start_date", "line_name", "location_no"])
+            .groupby(["project_rollup_key", "line_name_norm", "location_no_norm"], as_index=False)
+            .agg(
+                erection_start=("start_date", "min"),
+                erection_line=("line_name", "first"),
+            )
+        )
+    else:
+        erection_loc = pd.DataFrame(columns=["project_rollup_key", "line_name_norm", "location_no_norm", "erection_start", "erection_line"])
+
+    merged = foundation_loc.merge(
+        erection_loc,
+        on=["project_rollup_key", "line_name_norm", "location_no_norm"],
+        how="left",
+    )
+
+    if not erection_loc.empty:
+        ere_loc_counts = (
+            erection_loc.groupby(["project_rollup_key", "location_no_norm"], as_index=False)
+            .agg(
+                ere_start_fallback=("erection_start", "min"),
+                ere_line_count=("line_name_norm", "nunique"),
+            )
+        )
+    else:
+        ere_loc_counts = pd.DataFrame(columns=["project_rollup_key", "location_no_norm", "ere_start_fallback", "ere_line_count"])
+    fdn_loc_counts = (
+        foundation_loc.groupby(["project_rollup_key", "location_no_norm"], as_index=False)
+        .agg(fdn_line_count=("line_name_norm", "nunique"))
+    )
+    fallback = fdn_loc_counts.merge(
+        ere_loc_counts,
+        on=["project_rollup_key", "location_no_norm"],
+        how="left",
+    )
+    fallback = fallback[(fallback["fdn_line_count"] == 1) & (fallback["ere_line_count"] == 1)].copy()
+    fallback = fallback[["project_rollup_key", "location_no_norm", "ere_start_fallback"]]
+
+    merged = merged.merge(
+        fallback,
+        on=["project_rollup_key", "location_no_norm"],
+        how="left",
+    )
+    merged["erection_start_final"] = merged["erection_start"].where(
+        merged["erection_start"].notna(),
+        merged["ere_start_fallback"],
+    )
+    merged["matched"] = merged["erection_start_final"].notna()
+    merged["delay_days"] = (
+        pd.to_datetime(merged["erection_start_final"], errors="coerce")
+        - pd.to_datetime(merged["foundation_complete"], errors="coerce")
+    ).dt.days
+    merged["negative_delay"] = merged["matched"] & merged["delay_days"].lt(0)
+    merged["delay_for_stats"] = merged["delay_days"].where(merged["matched"] & ~merged["negative_delay"])
+    merged["month"] = pd.to_datetime(merged["foundation_complete"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+
+    def _phase_bucket(total: int) -> list[int]:
+        if total <= 0:
+            return []
+        return [((idx * 5) // total) + 1 for idx in range(total)]
+
+    def _series_stats(delay_series: pd.Series) -> tuple[object, object, object]:
+        values = pd.to_numeric(delay_series, errors="coerce").dropna()
+        if values.empty:
+            return pd.NA, pd.NA, pd.NA
+        return (
+            float(values.median()),
+            float(values.mean()),
+            float(values.quantile(0.9)),
+        )
+
+    all_project_keys = sorted(
+        set(merged["project_rollup_key"].dropna().astype(str).str.strip().tolist())
+        | set(coverage_by_key.keys())
+    )
+    phase_rows: list[dict[str, object]] = []
+    monthly_rows: list[dict[str, object]] = []
+    coverage_rows: list[dict[str, object]] = []
+    anomaly_rows: list[dict[str, object]] = []
+
+    for project_key in all_project_keys:
+        if not project_key:
+            continue
+        cov = coverage_by_key.get(project_key, {})
+        project_rows = merged[merged["project_rollup_key"] == project_key].copy()
+        project_display = str(cov.get("project", "")).strip()
+        if not project_display and not project_rows.empty:
+            project_display = str(project_rows.iloc[0].get("project_rollup_display", "")).strip()
+        if not project_display:
+            project_display = project_key.upper()
+
+        status = str(cov.get("status", "")).strip() or "MISSING"
+        source_used = str(cov.get("source_used", "")).strip() or "missing"
+        parser_modes = parser_modes_by_key.get(project_key, "")
+        status_upper = status.upper()
+        parser_upper = parser_modes.upper()
+
+        foundation_count = int(len(project_rows.index))
+        matched_count = int(project_rows["matched"].sum()) if not project_rows.empty else 0
+        negative_excluded = int(project_rows["negative_delay"].sum()) if not project_rows.empty else 0
+        unmatched = max(foundation_count - matched_count, 0)
+        match_pct = (matched_count / foundation_count * 100.0) if foundation_count else 0.0
+
+        eligible = True
+        reason = ""
+        if "SKIPPED_BLANK_CONFIG" in status_upper:
+            eligible = False
+            reason = "Foundation mapping intentionally blank in DPR_Config."
+        elif "ROWWISE" in parser_upper:
+            eligible = False
+            reason = "Rowwise foundation parser mode is excluded for delay trend."
+        elif "detail" not in source_used.lower():
+            eligible = False
+            reason = "Only snapshot/missing foundation source is available."
+        elif foundation_count == 0:
+            eligible = False
+            reason = "No detail foundation completion events available."
+
+        if not reason:
+            reason = str(cov.get("reason", "")).strip()
+
+        if eligible and foundation_count > 0:
+            ordered = project_rows.sort_values(["foundation_complete", "location_no_norm"]).reset_index(drop=True)
+            ordered["phase_bucket"] = _phase_bucket(len(ordered.index))
+
+            for phase in range(1, 6):
+                phase_scope = ordered[ordered["phase_bucket"] == phase].copy()
+                f_count = int(len(phase_scope.index))
+                m_count = int(phase_scope["matched"].sum()) if f_count else 0
+                n_excl = int(phase_scope["negative_delay"].sum()) if f_count else 0
+                u_count = max(f_count - m_count, 0)
+                m_pct = (m_count / f_count * 100.0) if f_count else 0.0
+                median_delay, avg_delay, p90_delay = _series_stats(phase_scope["delay_for_stats"] if f_count else pd.Series(dtype="float64"))
+                phase_rows.append(
+                    {
+                        "Project": project_display,
+                        "Phase": f"Phase {phase}",
+                        "Foundation Bucket Start %": (phase - 1) * 20,
+                        "Foundation Bucket End %": phase * 20,
+                        "Foundation Count": f_count,
+                        "Matched Count": m_count,
+                        "Match %": round(m_pct, 2),
+                        "Median Delay Days": median_delay,
+                        "Average Delay Days": avg_delay,
+                        "P90 Delay Days": p90_delay,
+                        "Negative Excluded": n_excl,
+                        "Unmatched": u_count,
+                        "Source Type": source_used or "detail",
+                        "Parser Modes": parser_modes,
+                        "Coverage Status": status,
+                    }
+                )
+
+            for month_key, month_scope in ordered.groupby("month", dropna=False):
+                if pd.isna(month_key):
+                    continue
+                f_count = int(len(month_scope.index))
+                m_count = int(month_scope["matched"].sum()) if f_count else 0
+                n_excl = int(month_scope["negative_delay"].sum()) if f_count else 0
+                u_count = max(f_count - m_count, 0)
+                m_pct = (m_count / f_count * 100.0) if f_count else 0.0
+                median_delay, avg_delay, p90_delay = _series_stats(month_scope["delay_for_stats"])
+                monthly_rows.append(
+                    {
+                        "Project": project_display,
+                        "Month": pd.Timestamp(month_key).strftime("%Y-%m"),
+                        "Foundation Count": f_count,
+                        "Matched Count": m_count,
+                        "Match %": round(m_pct, 2),
+                        "Median Delay Days": median_delay,
+                        "Average Delay Days": avg_delay,
+                        "P90 Delay Days": p90_delay,
+                        "Negative Excluded": n_excl,
+                        "Unmatched": u_count,
+                        "Source Type": source_used or "detail",
+                        "Parser Modes": parser_modes,
+                        "Coverage Status": status,
+                    }
+                )
+
+            negatives = ordered[ordered["negative_delay"]].copy()
+            for _, row in negatives.iterrows():
+                anomaly_rows.append(
+                    {
+                        "Project": project_display,
+                        "Location": str(row.get("location_no", "")).strip(),
+                        "Foundation Date": pd.Timestamp(row.get("foundation_complete")).strftime("%Y-%m-%d"),
+                        "Erection Start": pd.Timestamp(row.get("erection_start_final")).strftime("%Y-%m-%d"),
+                        "Delay Days": float(row.get("delay_days")),
+                        "Issue": "NEGATIVE_DELAY_EXCLUDED",
+                        "Foundation Line": str(row.get("foundation_line", "")).strip(),
+                        "Erection Line": str(row.get("erection_line", "")).strip(),
+                    }
+                )
+
+            unresolved = ordered[~ordered["matched"]].copy()
+            for _, row in unresolved.iterrows():
+                anomaly_rows.append(
+                    {
+                        "Project": project_display,
+                        "Location": str(row.get("location_no", "")).strip(),
+                        "Foundation Date": pd.Timestamp(row.get("foundation_complete")).strftime("%Y-%m-%d"),
+                        "Erection Start": "",
+                        "Delay Days": pd.NA,
+                        "Issue": "UNMATCHED_LOCATION",
+                        "Foundation Line": str(row.get("foundation_line", "")).strip(),
+                        "Erection Line": "",
+                    }
+                )
+
+        coverage_rows.append(
+            {
+                "Project": project_display,
+                "Eligible": "Yes" if eligible else "No",
+                "Coverage Status": status,
+                "Source Type": source_used,
+                "Parser Modes": parser_modes,
+                "Reason": reason,
+                "Foundation Locations": foundation_count,
+                "Matched Locations": matched_count,
+                "Negative Excluded": negative_excluded,
+                "Unmatched Locations": unmatched,
+                "Notes": "Negative delays are excluded from trend statistics.",
+            }
+        )
+
+    phase_df = pd.DataFrame(phase_rows, columns=phase_columns)
+    monthly_df = pd.DataFrame(monthly_rows, columns=monthly_columns)
+    coverage_df = pd.DataFrame(coverage_rows, columns=coverage_columns)
+    anomaly_df = pd.DataFrame(anomaly_rows, columns=anomaly_columns)
+    return phase_df, monthly_df, coverage_df, anomaly_df
 
 
 def _prepare_project_voltage_lookup(project_kv: pd.DataFrame | None) -> dict[str, str]:
@@ -1553,13 +2339,37 @@ def _compute_weekly_productivity_maps(scope: pd.DataFrame, week_labels: Sequence
     return maps
 
 
+def _compute_weekly_tower_weight_maps(
+    completions: pd.DataFrame,
+    week_labels: Sequence[str],
+    *,
+    group_column: str,
+) -> dict[str, dict[str, float]]:
+    maps = {label: {} for label in week_labels}
+    if completions is None or completions.empty or group_column not in completions.columns:
+        return maps
+    working = completions.copy()
+    working["_tower_weight"] = pd.to_numeric(working.get("_tower_weight"), errors="coerce").fillna(0.0)
+    working["_week_index"] = pd.to_numeric(working.get("completion_week_index"), errors="coerce").fillna(0).astype(int)
+    for week_idx, label in enumerate(week_labels, start=1):
+        week_scope = working[working["_week_index"] == week_idx]
+        if week_scope.empty:
+            continue
+        grouped = week_scope.groupby(group_column)["_tower_weight"].sum(min_count=1).dropna()
+        if not grouped.empty:
+            maps[label] = {str(project): float(value) for project, value in grouped.items() if not pd.isna(value)}
+    return maps
+
+
 def _build_overall_productivity_table(
     scope: pd.DataFrame,
     completions: pd.DataFrame,
     week_labels: Sequence[str],
     week_maps: dict[str, dict[str, float]],
+    week_mt_totals: dict[str, float] | None = None,
 ) -> pd.DataFrame:
-    columns = [*week_labels, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN, *TOWER_WEIGHT_COLUMNS]
+    week_mt_columns = [f"{label} MT" for label in week_labels]
+    columns = [*week_labels, *week_mt_columns, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN, *TOWER_WEIGHT_COLUMNS]
     if scope is None or scope.empty:
         return pd.DataFrame(columns=columns)
 
@@ -1567,6 +2377,7 @@ def _build_overall_productivity_table(
     for label in week_labels:
         label_map = week_maps.get(label, {})
         row[label] = _safe_average(list(label_map.values()))
+        row[f"{label} MT"] = round(float((week_mt_totals or {}).get(label, 0.0)), 2)
 
     metric_series = scope.get("daily_prod_mt")
     if isinstance(metric_series, pd.Series):
@@ -1594,9 +2405,11 @@ def _build_productivity_tables(
     completions: pd.DataFrame,
     week_labels: Sequence[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    week_mt_columns = [f"{label} MT" for label in week_labels]
     pch_columns = [
         "PCH",
         *week_labels,
+        *week_mt_columns,
         AVG_PRODUCTIVITY_COLUMN,
         TOTAL_MT_COLUMN,
         TOTAL_COUNT_COLUMN,
@@ -1606,6 +2419,7 @@ def _build_productivity_tables(
         "PCH",
         "Project",
         *week_labels,
+        *week_mt_columns,
         AVG_PRODUCTIVITY_COLUMN,
         TOTAL_MT_COLUMN,
         TOTAL_COUNT_COLUMN,
@@ -1616,7 +2430,7 @@ def _build_productivity_tables(
         empty_pch = pd.DataFrame(columns=pch_columns)
         empty_project = pd.DataFrame(columns=project_columns)
         empty_overall = pd.DataFrame(
-            columns=[*week_labels, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN, *TOWER_WEIGHT_COLUMNS]
+            columns=[*week_labels, *week_mt_columns, AVG_PRODUCTIVITY_COLUMN, TOTAL_MT_COLUMN, TOTAL_COUNT_COLUMN, *TOWER_WEIGHT_COLUMNS]
         )
         return empty_overall, empty_pch, empty_project
 
@@ -1656,7 +2470,30 @@ def _build_productivity_tables(
     else:
         completions = pd.DataFrame(columns=["pch_display", project_group_col, "_tower_weight"])
 
-    overall_summary = _build_overall_productivity_table(scope, completions, week_labels, week_maps)
+    project_week_mt_maps = _compute_weekly_tower_weight_maps(
+        completions,
+        week_labels,
+        group_column=project_group_col,
+    )
+    pch_week_mt_maps = _compute_weekly_tower_weight_maps(
+        completions,
+        week_labels,
+        group_column="pch_display",
+    )
+    overall_week_mt_totals: dict[str, float] = {}
+    if isinstance(completions, pd.DataFrame) and not completions.empty:
+        completion_week_index = pd.to_numeric(completions.get("completion_week_index"), errors="coerce").fillna(0).astype(int)
+        tower_weight_series = pd.to_numeric(completions.get("_tower_weight"), errors="coerce").fillna(0.0)
+        for idx, label in enumerate(week_labels, start=1):
+            overall_week_mt_totals[label] = float(tower_weight_series[completion_week_index == idx].sum())
+
+    overall_summary = _build_overall_productivity_table(
+        scope,
+        completions,
+        week_labels,
+        week_maps,
+        week_mt_totals=overall_week_mt_totals,
+    )
 
     tower_metrics_pch = _build_tower_weight_metrics(completions, group_columns=["pch_display"])
     tower_metrics_project = _build_tower_weight_metrics(
@@ -1698,6 +2535,7 @@ def _build_productivity_tables(
             for label in week_labels:
                 project_values = [week_maps.get(label, {}).get(name) for name in projects_in_pch]
                 row[label] = _safe_average(project_values)
+                row[f"{label} MT"] = round(float(pch_week_mt_maps.get(label, {}).get(pch_name, 0.0)), 2)
             avg_value = pch_avg_map.get(pch_name)
             row[AVG_PRODUCTIVITY_COLUMN] = round(float(avg_value), 2) if avg_value is not None and not pd.isna(avg_value) else 0.0
             row[TOTAL_MT_COLUMN] = round(float(mt_totals_by_pch.get(pch_name, 0.0)), 2)
@@ -1721,6 +2559,7 @@ def _build_productivity_tables(
         for label in week_labels:
             value = week_maps.get(label, {}).get(project_name)
             row[label] = round(float(value), 2) if value is not None and not pd.isna(value) else 0.0
+            row[f"{label} MT"] = round(float(project_week_mt_maps.get(label, {}).get(project_name, 0.0)), 2)
         avg_value = project_avg_map.get(project_name)
         row[AVG_PRODUCTIVITY_COLUMN] = round(float(avg_value), 2) if avg_value is not None and not pd.isna(avg_value) else 0.0
         row[TOTAL_MT_COLUMN] = round(float(mt_totals_by_project.get((pch_value, project_name), 0.0)), 2)
@@ -4324,6 +5163,9 @@ def _append_totals_row(df: pd.DataFrame) -> pd.DataFrame:
     totals[AVG_PRODUCTIVITY_COLUMN] = "Total"
     totals[TOTAL_MT_COLUMN] = round(float(total_mt), 2)
     totals[TOTAL_COUNT_COLUMN] = int(total_count)
+    for column in df.columns:
+        if isinstance(column, str) and column.endswith(" MT"):
+            totals[column] = round(float(pd.to_numeric(df[column], errors="coerce").fillna(0.0).sum()), 2)
     return pd.concat([df, pd.DataFrame([totals])], ignore_index=True)
 
 
@@ -4538,7 +5380,8 @@ def _build_group_productivity_table(
 
 
 def _build_gang_weekly_productivity_table(scope: pd.DataFrame, week_labels: Sequence[str]) -> pd.DataFrame:
-    columns = ["Gang Name", *week_labels, "Avg Productivity (MT/day)", "Erections Completed"]
+    week_mt_columns = [f"{label} MT" for label in week_labels]
+    columns = ["Gang Name", *week_labels, *week_mt_columns, "Total MT", "Avg Productivity (MT/day)", "Erections Completed"]
     if scope is None or scope.empty or "gang_name" not in scope.columns:
         return pd.DataFrame(columns=columns)
 
@@ -4550,6 +5393,7 @@ def _build_gang_weekly_productivity_table(scope: pd.DataFrame, week_labels: Sequ
 
     working["derived_productivity"] = _coerce_numeric_series(working, "derived_productivity")
     working["week_index"] = _coerce_numeric_series(working, "week_index").fillna(0).astype(int)
+    working["tower_weight"] = _coerce_numeric_series(working, "tower_weight")
 
     weekly = (
         working.groupby(["gang_name", "week_index"])["derived_productivity"]
@@ -4570,6 +5414,28 @@ def _build_gang_weekly_productivity_table(scope: pd.DataFrame, week_labels: Sequ
     else:
         pivot = pd.DataFrame(columns=["gang_name"])
 
+    weekly_mt = (
+        working.groupby(["gang_name", "week_index"])["tower_weight"]
+        .sum(min_count=1)
+        .reset_index()
+    )
+    if not weekly_mt.empty:
+        weekly_mt["week_label"] = weekly_mt["week_index"].map(
+            lambda idx: week_labels[idx - 1] if 1 <= idx <= len(week_labels) else None
+        )
+        weekly_mt = weekly_mt.dropna(subset=["week_label"])
+        mt_pivot = (
+            weekly_mt.pivot_table(index="gang_name", columns="week_label", values="tower_weight", aggfunc="sum")
+            .reset_index()
+            if not weekly_mt.empty
+            else pd.DataFrame(columns=["gang_name"])
+        )
+        mt_pivot = mt_pivot.rename(
+            columns={label: f"{label} MT" for label in week_labels if label in mt_pivot.columns}
+        )
+    else:
+        mt_pivot = pd.DataFrame(columns=["gang_name"])
+
     def _count_unique_locations(series: pd.Series) -> int:
         normalized = series.fillna("").astype(str).str.strip()
         normalized = normalized.replace("", pd.NA).dropna()
@@ -4580,13 +5446,16 @@ def _build_gang_weekly_productivity_table(scope: pd.DataFrame, week_labels: Sequ
         .agg(
             overall_avg=("derived_productivity", lambda values: values.dropna().mean()),
             completions=("location_no", _count_unique_locations),
+            total_mt=("tower_weight", "sum"),
         )
         .reset_index()
     )
     summary = overall.merge(pivot, on="gang_name", how="left")
+    summary = summary.merge(mt_pivot, on="gang_name", how="left")
     summary = summary.rename(
         columns={
             "gang_name": "Gang Name",
+            "total_mt": "Total MT",
             "overall_avg": "Avg Productivity (MT/day)",
             "completions": "Erections Completed",
         }
@@ -4595,12 +5464,20 @@ def _build_gang_weekly_productivity_table(scope: pd.DataFrame, week_labels: Sequ
     for label in week_labels:
         if label not in summary.columns:
             summary[label] = 0.0
+    for column in week_mt_columns:
+        if column not in summary.columns:
+            summary[column] = 0.0
+    if "Total MT" not in summary.columns:
+        summary["Total MT"] = 0.0
     summary["Avg Productivity (MT/day)"] = summary["Avg Productivity (MT/day)"].fillna(0.0).round(2)
     for label in week_labels:
         summary[label] = summary[label].fillna(0.0).round(2)
+    for column in week_mt_columns:
+        summary[column] = pd.to_numeric(summary[column], errors="coerce").fillna(0.0).round(2)
+    summary["Total MT"] = pd.to_numeric(summary["Total MT"], errors="coerce").fillna(0.0).round(2)
     summary["Erections Completed"] = summary["Erections Completed"].fillna(0).astype(int)
 
-    ordered_columns = ["Gang Name", *week_labels, "Avg Productivity (MT/day)", "Erections Completed"]
+    ordered_columns = ["Gang Name", *week_labels, *week_mt_columns, "Total MT", "Avg Productivity (MT/day)", "Erections Completed"]
     summary = summary.reindex(columns=ordered_columns)
     if summary.empty:
         return summary
@@ -4631,6 +5508,10 @@ def export_erection_productivity_summary(
     as_of_date: pd.Timestamp | str | None = None,
     range_start: pd.Timestamp | str | None = None,
     range_end: pd.Timestamp | str | None = None,
+    week_mode: str = WEEK_MODE_LEGACY,
+    week_start_date: pd.Timestamp | str | None = None,
+    week_end_date: pd.Timestamp | str | None = None,
+    previous_week: bool = False,
     gang_min_erections: int = 4,
     sheet_name: str = _DEFAULT_SHEET_NAME,
     blank_rows_between_tables: int = 3,
@@ -4642,9 +5523,13 @@ def export_erection_productivity_summary(
 
     source_daily = daily_df
     source_project_info = project_info
+    as_of_supplied = as_of_date is not None
     candidate_date = pd.Timestamp(as_of_date) if as_of_date is not None else None
     range_start_ts = pd.Timestamp(range_start) if range_start is not None else None
     range_end_ts = pd.Timestamp(range_end) if range_end is not None else None
+    week_start_ts = pd.Timestamp(week_start_date).normalize() if week_start_date is not None else None
+    week_end_ts = pd.Timestamp(week_end_date).normalize() if week_end_date is not None else None
+    week_mode_norm = _normalize_week_mode(week_mode)
 
     if data_store is not None:
         if source_daily is None:
@@ -4656,6 +5541,8 @@ def export_erection_productivity_summary(
 
     if source_daily is None or source_daily.empty:
         raise ValueError("No erection daily dataframe is available to export.")
+    date_series = pd.to_datetime(source_daily.get("date"), errors="coerce").dropna()
+    latest_data_date = date_series.max().normalize() if not date_series.empty else None
 
     if range_start_ts is not None or range_end_ts is not None:
         if range_start_ts is None or range_end_ts is None:
@@ -4669,7 +5556,6 @@ def export_erection_productivity_summary(
         active_date = month_end
     else:
         if candidate_date is None or pd.isna(candidate_date):
-            date_series = pd.to_datetime(source_daily.get("date"), errors="coerce").dropna()
             if date_series.empty:
                 raise ValueError("Unable to determine the current month for the erection summary export.")
             candidate_date = date_series.max()
@@ -4677,8 +5563,42 @@ def export_erection_productivity_summary(
         month_start = active_date.to_period("M").to_timestamp()
         month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
 
+    if week_end_ts is not None and week_start_ts is None:
+        raise ValueError("week_end_date requires week_start_date.")
+
+    calendar_week_mode = week_mode_norm == WEEK_MODE_CALENDAR_SUN_SAT
+
+    calendar_scope_start: pd.Timestamp | None = None
+    calendar_scope_end: pd.Timestamp | None = None
+    if calendar_week_mode:
+        if previous_week:
+            reference_date = (
+                pd.Timestamp(as_of_date).normalize()
+                if as_of_supplied and as_of_date is not None
+                else pd.Timestamp.now().normalize()
+            )
+            calendar_scope_start, calendar_scope_end = _previous_completed_week_window(reference_date)
+        elif week_start_ts is not None:
+            calendar_scope_start = _align_to_previous_sunday(week_start_ts)
+            if week_end_ts is not None:
+                calendar_scope_end = week_end_ts.normalize()
+            elif latest_data_date is not None and not pd.isna(latest_data_date):
+                calendar_scope_end = latest_data_date
+            else:
+                calendar_scope_end = month_end
+        else:
+            calendar_scope_start = _align_to_previous_sunday(month_start)
+            calendar_scope_end = month_end
+        if calendar_scope_end is None:
+            calendar_scope_end = month_end
+        if calendar_scope_end < calendar_scope_start:
+            raise ValueError("Calendar weekly scope end date must be on/after the scope start date.")
+        month_start = calendar_scope_start
+        month_end = calendar_scope_end
+        active_date = month_end
+
     quarter_mode = False
-    if range_start_ts is not None and range_end_ts is not None:
+    if (not calendar_week_mode) and range_start_ts is not None and range_end_ts is not None:
         start_period = range_start_ts.to_period("M")
         end_period = range_end_ts.to_period("M")
         months_count = (end_period.year - start_period.year) * 12 + (end_period.month - start_period.month) + 1
@@ -4686,7 +5606,14 @@ def export_erection_productivity_summary(
     else:
         months_count = 1
 
-    if quarter_mode:
+    if calendar_week_mode:
+        week_labels = _generate_calendar_week_labels(month_start, month_end)
+        if not week_labels:
+            raise ValueError("No calendar weeks were generated for the selected scope.")
+        offset_days = max(0, (active_date - month_start).days)
+        week_count = len(week_labels)
+        current_week_idx = min(week_count, max(1, (offset_days // 7) + 1))
+    elif quarter_mode:
         week_labels = _generate_quarter_week_labels(month_start, month_end)
         week_index = _assign_quarter_week_bucket(pd.Series([active_date]), month_start, months_count=months_count)
         current_week_idx = int(week_index.iloc[0]) if not week_index.empty else 1
@@ -4720,6 +5647,29 @@ def export_erection_productivity_summary(
         week_labels=week_labels,
     )
     active_config = data_store._config if data_store is not None else AppConfig()
+    foundation_completions = load_foundation_completions(active_config)
+    foundation_coverage = load_foundation_coverage(active_config)
+    foundation_diagnostics = load_foundation_diagnostics(active_config)
+    (
+        foundation_gap_monthly_table,
+        foundation_gap_weekly_table,
+        foundation_gap_coverage_table,
+    ) = _build_foundation_vs_erection_gap_tables(
+        source_daily,
+        foundation_completions,
+        foundation_coverage,
+    )
+    (
+        foundation_delay_phase_table,
+        foundation_delay_monthly_table,
+        foundation_delay_coverage_table,
+        foundation_delay_anomaly_table,
+    ) = _build_foundation_delay_trend_tables(
+        source_daily,
+        foundation_completions,
+        foundation_coverage,
+        foundation_diagnostics,
+    )
     project_gang_metrics = _build_project_gang_metrics(
         scope,
         completions,
@@ -5297,6 +6247,27 @@ def export_erection_productivity_summary(
     idle_bucket_sheet_label = _sanitize_sheet_name("Idle Days Buckets")
     monthly_bucket_sheet_label = _sanitize_sheet_name("Monthly Gang Buckets")
     excluded_sheet_label = _sanitize_sheet_name("Excluded Data Audit")
+    foundation_gap_monthly_sheet_label = _sanitize_sheet_name("Foundation Gap Monthly")
+    foundation_gap_weekly_sheet_label = _sanitize_sheet_name("Foundation Gap Weekly")
+    foundation_gap_coverage_sheet_label = _sanitize_sheet_name("Foundation Gap Coverage")
+    foundation_delay_phase_sheet_label = _sanitize_sheet_name("Foundation Delay Phases")
+    foundation_delay_monthly_sheet_label = _sanitize_sheet_name("Foundation Delay Monthly")
+    foundation_delay_coverage_sheet_label = _sanitize_sheet_name("Foundation Delay Coverage")
+    foundation_delay_anomaly_sheet_label = _sanitize_sheet_name("Foundation Delay Anomalies")
+    if foundation_gap_weekly_sheet_label == foundation_gap_monthly_sheet_label:
+        foundation_gap_weekly_sheet_label = _sanitize_sheet_name("Foundation Gap Weekwise")
+    if foundation_gap_coverage_sheet_label in {foundation_gap_monthly_sheet_label, foundation_gap_weekly_sheet_label}:
+        foundation_gap_coverage_sheet_label = _sanitize_sheet_name("Foundation Gap Source Coverage")
+    if foundation_delay_monthly_sheet_label == foundation_delay_phase_sheet_label:
+        foundation_delay_monthly_sheet_label = _sanitize_sheet_name("Foundation Delay Monthwise")
+    if foundation_delay_coverage_sheet_label in {foundation_delay_phase_sheet_label, foundation_delay_monthly_sheet_label}:
+        foundation_delay_coverage_sheet_label = _sanitize_sheet_name("Foundation Delay Source Coverage")
+    if foundation_delay_anomaly_sheet_label in {
+        foundation_delay_phase_sheet_label,
+        foundation_delay_monthly_sheet_label,
+        foundation_delay_coverage_sheet_label,
+    }:
+        foundation_delay_anomaly_sheet_label = _sanitize_sheet_name("Foundation Delay Data Issues")
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -5399,6 +6370,7 @@ def export_erection_productivity_summary(
         "PCH",
         "Project",
         *week_labels,
+        *[f"{label} MT" for label in week_labels],
         AVG_PRODUCTIVITY_COLUMN,
         TOTAL_MT_COLUMN,
         TOTAL_COUNT_COLUMN,
@@ -5883,9 +6855,14 @@ def export_erection_productivity_summary(
             col_letter = get_column_letter(col_idx)
             worksheet.column_dimensions[col_letter].width = width
 
+    period_label = (
+        f"{month_start:%Y-%m-%d} to {month_end:%Y-%m-%d}"
+        if calendar_week_mode
+        else active_date.strftime("%Y-%m")
+    )
     LOGGER.info(
         "Exporting erection productivity summary for %s (current week: %s) to %s",
-        active_date.strftime("%Y-%m"),
+        period_label,
         current_week_label,
         target_path,
     )
@@ -6383,6 +7360,56 @@ def export_erection_productivity_summary(
         excluded_detail.to_excel(
             writer, sheet_name=excluded_sheet_label, index=False, startrow=audit_row
         )
+
+        _write_scoped_table(
+            writer,
+            foundation_gap_monthly_sheet_label,
+            foundation_gap_monthly_table,
+            "Foundation vs Erection Gap (Monthly Cumulative)",
+            startrow=0,
+        )
+        _write_scoped_table(
+            writer,
+            foundation_gap_weekly_sheet_label,
+            foundation_gap_weekly_table,
+            "Foundation vs Erection Gap (Weekly Cumulative)",
+            startrow=0,
+        )
+        _write_scoped_table(
+            writer,
+            foundation_gap_coverage_sheet_label,
+            foundation_gap_coverage_table,
+            "Foundation Source Coverage & Limits",
+            startrow=0,
+        )
+        _write_scoped_table(
+            writer,
+            foundation_delay_phase_sheet_label,
+            foundation_delay_phase_table,
+            "Foundation to Erection Delay Trend (5 Lifecycle Phases)",
+            startrow=0,
+        )
+        _write_scoped_table(
+            writer,
+            foundation_delay_monthly_sheet_label,
+            foundation_delay_monthly_table,
+            "Foundation to Erection Delay Trend (Monthly)",
+            startrow=0,
+        )
+        _write_scoped_table(
+            writer,
+            foundation_delay_coverage_sheet_label,
+            foundation_delay_coverage_table,
+            "Foundation Delay Coverage & Eligibility",
+            startrow=0,
+        )
+        _write_scoped_table(
+            writer,
+            foundation_delay_anomaly_sheet_label,
+            foundation_delay_anomaly_table,
+            "Foundation Delay Data Issues",
+            startrow=0,
+        )
         _write_scoped_table(
             writer,
             variants_sheet_label,
@@ -6403,6 +7430,13 @@ def export_erection_productivity_summary(
             idle_bucket_sheet_label,
             monthly_bucket_sheet_label,
             excluded_sheet_label,
+            foundation_gap_monthly_sheet_label,
+            foundation_gap_weekly_sheet_label,
+            foundation_gap_coverage_sheet_label,
+            foundation_delay_phase_sheet_label,
+            foundation_delay_monthly_sheet_label,
+            foundation_delay_coverage_sheet_label,
+            foundation_delay_anomaly_sheet_label,
         }
         pch_sheet_names_written: list[str] = []
         if not review_table_raw.empty and "PCH" in review_table_raw.columns and "pch_display" in scope.columns:
@@ -6683,6 +7717,10 @@ def export_weekly_dpr_analysis(
     dpr_folder: str | Path | None = None,
     as_of_date: pd.Timestamp | str | None = None,
     daily_path: str | Path | None = None,
+    week_mode: str = WEEK_MODE_LEGACY,
+    week_start_date: pd.Timestamp | str | None = None,
+    week_end_date: pd.Timestamp | str | None = None,
+    previous_week: bool = False,
     sheet_summary: str = "WeeklySummary",
     sheet_details: str = "WeeklyDetails",
     sheet_context: str = "SelectionContext",
@@ -6696,6 +7734,7 @@ def export_weekly_dpr_analysis(
     project_label = str(project_code or "").strip()
     if not project_label:
         raise ValueError("A project code is required for the DPR weekly analysis.")
+    as_of_supplied = as_of_date is not None
 
     source_labels: list[str] = []
     combined = pd.DataFrame()
@@ -6728,29 +7767,69 @@ def export_weekly_dpr_analysis(
 
         combined = pd.concat(records, ignore_index=True)
         source_labels = [path.name for path in candidate_paths]
-    completion_series = pd.to_datetime(combined["completion_date"], errors="coerce")
+    completion_series = pd.to_datetime(combined["completion_date"], errors="coerce").dt.normalize()
     latest_completion = completion_series.max()
-    candidate_date = pd.Timestamp(as_of_date) if as_of_date is not None else latest_completion
-    if pd.isna(candidate_date):
-        raise ValueError("Unable to determine the reference month; no completion dates were detected.")
+    candidate_date = pd.Timestamp(as_of_date).normalize() if as_of_date is not None else latest_completion
+    week_mode_norm = _normalize_week_mode(week_mode)
+    calendar_week_mode = week_mode_norm == WEEK_MODE_CALENDAR_SUN_SAT
+    week_start_ts = pd.Timestamp(week_start_date).normalize() if week_start_date is not None else None
+    week_end_ts = pd.Timestamp(week_end_date).normalize() if week_end_date is not None else None
+    if week_end_ts is not None and week_start_ts is None:
+        raise ValueError("week_end_date requires week_start_date.")
 
-    active_date = pd.Timestamp(candidate_date).normalize()
-    month_start = active_date.to_period("M").to_timestamp()
-    month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+    if calendar_week_mode:
+        if previous_week:
+            reference_date = (
+                pd.Timestamp(as_of_date).normalize()
+                if as_of_supplied and as_of_date is not None
+                else pd.Timestamp.now().normalize()
+            )
+            scope_start, scope_end = _previous_completed_week_window(reference_date)
+        elif week_start_ts is not None:
+            scope_start = _align_to_previous_sunday(week_start_ts)
+            if week_end_ts is not None:
+                scope_end = week_end_ts
+            elif latest_completion is not None and not pd.isna(latest_completion):
+                scope_end = pd.Timestamp(latest_completion).normalize()
+            else:
+                scope_end = scope_start + pd.Timedelta(days=6)
+        else:
+            if candidate_date is None or pd.isna(candidate_date):
+                raise ValueError("Unable to determine the default reference month; no completion dates were detected.")
+            month_start = pd.Timestamp(candidate_date).to_period("M").to_timestamp()
+            month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+            scope_start = _align_to_previous_sunday(month_start)
+            scope_end = month_end
+        if scope_end < scope_start:
+            raise ValueError("Calendar weekly scope end date must be on/after the scope start date.")
+        active_date = scope_end
+    else:
+        if pd.isna(candidate_date):
+            raise ValueError("Unable to determine the reference month; no completion dates were detected.")
+        active_date = pd.Timestamp(candidate_date).normalize()
+        scope_start = active_date.to_period("M").to_timestamp()
+        scope_end = (scope_start + pd.offsets.MonthEnd(1)).normalize()
 
     scope = combined[
-        (completion_series >= month_start)
-        & (completion_series <= month_end)
+        (completion_series >= scope_start)
+        & (completion_series <= scope_end)
         & completion_series.notna()
     ].copy()
     if scope.empty:
+        if calendar_week_mode:
+            raise ValueError(
+                f"No completed locations for '{project_label}' fall within {scope_start:%Y-%m-%d} to {scope_end:%Y-%m-%d}."
+            )
         raise ValueError(
-            f"No completed locations for '{project_label}' fall within {month_start:%B %Y}. "
+            f"No completed locations for '{project_label}' fall within {scope_start:%B %Y}. "
             "Try adjusting --as-of-date or provide DPR files for the desired month."
         )
 
-    week_labels = _generate_week_labels(month_start, month_end)
-    scope["week_index"] = _assign_week_bucket(scope["completion_date"], month_start, week_labels)
+    if calendar_week_mode:
+        week_labels = _generate_calendar_week_labels(scope_start, scope_end)
+    else:
+        week_labels = _generate_week_labels(scope_start, scope_end)
+    scope["week_index"] = _assign_week_bucket(scope["completion_date"], scope_start, week_labels)
 
     summary_rows: list[dict[str, object]] = []
     for idx, label in enumerate(week_labels, start=1):
@@ -6768,10 +7847,11 @@ def export_weekly_dpr_analysis(
         if pd.isna(productivity_avg):
             productivity_avg = 0.0
         unique_gangs = sorted({name for name in week_scope["gang_name"] if isinstance(name, str) and name})
+        week_range = label if calendar_week_mode else _format_week_range(idx, scope_start, scope_end)
         summary_rows.append(
             {
                 "Week": label,
-                "Week Range": _format_week_range(idx, month_start, month_end),
+                "Week Range": week_range,
                 "Erections Completed": int(len(week_scope)),
                 "Total Tower Weight (MT)": round(float(tower_weight_sum), 2),
                 "Avg Tower Weight (MT)": round(float(tower_weight_avg), 2),
@@ -6842,12 +7922,15 @@ def export_weekly_dpr_analysis(
         [
             {
                 "Project Code": project_label,
-                "Analysis Month": month_start.strftime("%B %Y"),
-                "Month Start": month_start.date(),
-                "Month End": month_end.date(),
+                "Week Mode": week_mode_norm,
+                "Analysis Month": scope_start.strftime("%B %Y"),
+                "Month Start": scope_start.date(),
+                "Month End": scope_end.date(),
+                "Analysis Period Start": scope_start.date(),
+                "Analysis Period End": scope_end.date(),
                 "As Of Date": active_date.date(),
                 "Source DPR Files": ", ".join(source_labels) if source_labels else "",
-                "Total Completions (Month)": len(scope),
+                "Total Completions (Scope)": len(scope),
                 "Unique Locations": scope["location_no"].nunique(),
                 "Unique Gangs": scope["gang_name"].nunique(),
             }

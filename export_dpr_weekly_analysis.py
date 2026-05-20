@@ -58,6 +58,28 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         help="Optional YYYY-MM-DD to anchor the month (default: latest completion date in the DPR).",
     )
+    parser.add_argument(
+        "--week-mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "calendar_sun_sat"],
+        help="Week bucketing mode (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        help="Optional YYYY-MM-DD weekly scope start date (used in calendar_sun_sat mode).",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        help="Optional YYYY-MM-DD weekly scope end date (requires --start-date).",
+    )
+    parser.add_argument(
+        "--previous-week",
+        action="store_true",
+        help="Use the previous completed Sunday-Saturday week (calendar_sun_sat mode).",
+    )
     return parser.parse_args()
 
 
@@ -82,9 +104,19 @@ def main() -> int:
     dpr_paths = [path.expanduser().resolve() for path in args.dpr_path] if args.dpr_path else None
     dpr_folder = args.dpr_folder.expanduser().resolve() if args.dpr_folder else None
     as_of = pd.Timestamp(args.as_of_date) if args.as_of_date else None
+    start_date = pd.Timestamp(args.start_date) if args.start_date else None
+    end_date = pd.Timestamp(args.end_date) if args.end_date else None
+    if end_date is not None and start_date is None:
+        raise SystemExit("--end-date requires --start-date.")
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise SystemExit("--start-date must be before or equal to --end-date.")
     daily_path = None
     if not args.dpr_only and args.daily_path:
         daily_path = args.daily_path.expanduser().resolve()
+
+    week_mode = args.week_mode
+    if week_mode == "legacy" and (args.previous_week or args.start_date or args.end_date):
+        week_mode = "calendar_sun_sat"
 
     export_weekly_dpr_analysis(
         project_code=args.project_code,
@@ -93,6 +125,10 @@ def main() -> int:
         dpr_folder=dpr_folder,
         as_of_date=as_of,
         daily_path=daily_path,
+        week_mode=week_mode,
+        week_start_date=start_date,
+        week_end_date=end_date,
+        previous_week=bool(args.previous_week),
     )
     print(f"[export] Wrote '{output_path}'")
     return 0

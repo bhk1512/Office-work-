@@ -36,6 +36,8 @@ _MONTH_PRODUCTIVITY_FACTOR = 30.0
 MONTHLY_AVG_LABEL = "Avg Productivity (KM/month)"
 MONTHLY_GANGS_LABEL = "No. of Gangs"
 MONTHLY_KM_LABEL = "KM Strung"
+WEEK_MODE_LEGACY = "legacy"
+WEEK_MODE_CALENDAR_SUN_SAT = "calendar_sun_sat"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -69,6 +71,18 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         help="Optional YYYY-MM-DD end date to filter daily rows.",
     )
+    parser.add_argument(
+        "--week-mode",
+        type=str,
+        default=WEEK_MODE_LEGACY,
+        choices=[WEEK_MODE_LEGACY, WEEK_MODE_CALENDAR_SUN_SAT],
+        help="Week bucketing mode for weekly outputs (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--previous-week",
+        action="store_true",
+        help="Use previous completed Sunday-Saturday week (calendar_sun_sat mode).",
+    )
     return parser.parse_args()
 
 
@@ -88,6 +102,31 @@ def _parse_date(value: str | None) -> pd.Timestamp | None:
         return pd.Timestamp(value).normalize()
     except Exception as exc:
         raise SystemExit(f"Invalid date '{value}': {exc}") from exc
+
+
+def _normalize_week_mode(value: str | None) -> str:
+    normalized = str(value or WEEK_MODE_LEGACY).strip().lower()
+    if normalized == WEEK_MODE_CALENDAR_SUN_SAT:
+        return WEEK_MODE_CALENDAR_SUN_SAT
+    return WEEK_MODE_LEGACY
+
+
+def _align_to_previous_sunday(value: pd.Timestamp | str) -> pd.Timestamp:
+    ts = pd.Timestamp(value).normalize()
+    days_back = (ts.weekday() + 1) % 7
+    return (ts - pd.Timedelta(days=days_back)).normalize()
+
+
+def _previous_completed_week_window(reference_date: pd.Timestamp | str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    ref = pd.Timestamp(reference_date).normalize()
+    current_week_start = _align_to_previous_sunday(ref)
+    previous_week_start = current_week_start - pd.Timedelta(days=7)
+    previous_week_end = current_week_start - pd.Timedelta(days=1)
+    return previous_week_start.normalize(), previous_week_end.normalize()
+
+
+def _format_calendar_week_label(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    return f"{pd.Timestamp(start).strftime('%Y-%m-%d')} to {pd.Timestamp(end).strftime('%Y-%m-%d')}"
 
 
 def _filter_by_date(df: pd.DataFrame, column: str, start: pd.Timestamp | None, end: pd.Timestamp | None) -> pd.DataFrame:
@@ -1559,6 +1598,247 @@ def _build_monthly_rollup_tables(
     return overall, pch, project
 
 
+def _build_weekly_group_summary_table(
+    daily_scope: pd.DataFrame,
+    compiled_scope: pd.DataFrame,
+    *,
+    week_windows: list[tuple[pd.Timestamp, pd.Timestamp]],
+    week_labels: list[str],
+    group_columns: list[str],
+    group_labels: list[str],
+) -> pd.DataFrame:
+    ordered_columns, _, _ = _monthly_column_layout(week_labels, group_labels=group_labels)
+
+    def _avg_key(label: str) -> str:
+        return _monthly_avg_column(label)
+
+    def _gang_key(label: str) -> str:
+        return _monthly_gangs_column(label)
+
+    def _km_key(label: str) -> str:
+        return _monthly_km_column(label)
+
+    groups = list(group_columns)
+    overall_avg_key = _avg_key("Overall")
+    overall_gang_key = _gang_key("Overall")
+    overall_km_key = _km_key("Overall")
+    numeric_columns = [overall_avg_key, overall_gang_key, overall_km_key]
+
+    daily = pd.DataFrame()
+    if daily_scope is not None and not daily_scope.empty:
+        daily = daily_scope.copy()
+        daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce").dt.normalize()
+        daily = daily.dropna(subset=["date"])
+        daily_km_source = daily["daily_km"] if "daily_km" in daily.columns else pd.Series(0.0, index=daily.index)
+        daily["daily_km"] = pd.to_numeric(daily_km_source, errors="coerce")
+        daily["gang_name"] = _normalize_gang_series(daily.get("gang_name"), index=daily.index)
+        daily["week_label"] = ""
+        for (week_start, week_end), label in zip(week_windows, week_labels):
+            mask = daily["date"].between(week_start, week_end, inclusive="both")
+            daily.loc[mask, "week_label"] = label
+        daily = daily[daily["week_label"].astype(bool)]
+        for column in groups:
+            if column not in daily.columns:
+                daily[column] = ""
+            daily[column] = daily[column].fillna("").astype(str).str.strip()
+
+    compiled = pd.DataFrame()
+    if compiled_scope is not None and not compiled_scope.empty:
+        compiled = compiled_scope.copy()
+        fs_dates = pd.to_datetime(compiled.get("fs_complete_date"), errors="coerce")
+        if fs_dates.notna().any():
+            compiled["week_date"] = fs_dates.dt.normalize()
+        else:
+            compiled["week_date"] = pd.to_datetime(compiled.get("month"), errors="coerce").dt.normalize()
+        length_source = (
+            compiled["length_km"] if "length_km" in compiled.columns else pd.Series(0.0, index=compiled.index)
+        )
+        compiled["length_km"] = pd.to_numeric(length_source, errors="coerce").fillna(0.0)
+        compiled["week_label"] = ""
+        for (week_start, week_end), label in zip(week_windows, week_labels):
+            mask = compiled["week_date"].between(week_start, week_end, inclusive="both")
+            compiled.loc[mask, "week_label"] = label
+        compiled = compiled[compiled["week_label"].astype(bool)]
+        for column in groups:
+            if column not in compiled.columns:
+                compiled[column] = ""
+            compiled[column] = compiled[column].fillna("").astype(str).str.strip()
+
+    if not groups:
+        row: dict[str, object] = {}
+        for week_label in week_labels:
+            week_daily = daily[daily["week_label"] == week_label] if not daily.empty else pd.DataFrame()
+            week_avg = week_daily["daily_km"].dropna().mean() if not week_daily.empty else 0.0
+            week_gangs = _count_unique_gangs(week_daily.get("gang_name")) if not week_daily.empty else 0
+            week_compiled = compiled[compiled["week_label"] == week_label] if not compiled.empty else pd.DataFrame()
+            week_km = float(week_compiled["length_km"].sum()) if not week_compiled.empty else 0.0
+
+            row[_avg_key(week_label)] = round(
+                float(week_avg) * _MONTH_PRODUCTIVITY_FACTOR if not pd.isna(week_avg) else 0.0,
+                2,
+            )
+            row[_gang_key(week_label)] = week_gangs
+            row[_km_key(week_label)] = round(week_km, 2)
+            numeric_columns.extend([_avg_key(week_label), _gang_key(week_label), _km_key(week_label)])
+
+        overall_avg = daily["daily_km"].dropna().mean() if not daily.empty else 0.0
+        overall_gangs = _count_unique_gangs(daily.get("gang_name")) if not daily.empty else 0
+        overall_km = float(compiled["length_km"].sum()) if not compiled.empty else 0.0
+        row[overall_avg_key] = round(
+            float(overall_avg) * _MONTH_PRODUCTIVITY_FACTOR if not pd.isna(overall_avg) else 0.0,
+            2,
+        )
+        row[overall_gang_key] = overall_gangs
+        row[overall_km_key] = round(overall_km, 2)
+
+        result = pd.DataFrame([row], columns=ordered_columns).fillna(0.0)
+        for key in set(numeric_columns):
+            if key not in result.columns:
+                continue
+            if key.endswith("__gangs"):
+                result[key] = pd.to_numeric(result[key], errors="coerce").fillna(0).astype(int)
+            else:
+                result[key] = pd.to_numeric(result[key], errors="coerce").fillna(0.0).round(2)
+        return result
+
+    key_frames: list[pd.DataFrame] = []
+    if not daily.empty:
+        key_frames.append(daily[groups].drop_duplicates())
+    if not compiled.empty:
+        key_frames.append(compiled[groups].drop_duplicates())
+    if not key_frames:
+        return pd.DataFrame(columns=ordered_columns)
+    summary = pd.concat(key_frames, ignore_index=True).drop_duplicates().reset_index(drop=True)
+
+    if not daily.empty:
+        overall_avg = (
+            daily.groupby(groups, dropna=False)["daily_km"]
+            .mean()
+            .mul(_MONTH_PRODUCTIVITY_FACTOR)
+            .reset_index(name=overall_avg_key)
+        )
+        summary = summary.merge(overall_avg, on=groups, how="left")
+
+        gang_source = daily[daily["gang_name"].astype(bool)]
+        if not gang_source.empty:
+            overall_gangs = (
+                gang_source.groupby(groups, dropna=False)["gang_name"]
+                .nunique()
+                .reset_index(name=overall_gang_key)
+            )
+            summary = summary.merge(overall_gangs, on=groups, how="left")
+        else:
+            summary[overall_gang_key] = 0
+
+        for week_label in week_labels:
+            avg_key = _avg_key(week_label)
+            week_avg = (
+                daily[daily["week_label"] == week_label]
+                .groupby(groups, dropna=False)["daily_km"]
+                .mean()
+                .mul(_MONTH_PRODUCTIVITY_FACTOR)
+                .reset_index(name=avg_key)
+            )
+            summary = summary.merge(week_avg, on=groups, how="left")
+            numeric_columns.append(avg_key)
+
+            gang_key = _gang_key(week_label)
+            week_gang_source = gang_source[gang_source["week_label"] == week_label] if not gang_source.empty else pd.DataFrame()
+            if not week_gang_source.empty:
+                week_gangs = (
+                    week_gang_source.groupby(groups, dropna=False)["gang_name"]
+                    .nunique()
+                    .reset_index(name=gang_key)
+                )
+                summary = summary.merge(week_gangs, on=groups, how="left")
+            else:
+                summary[gang_key] = 0
+            numeric_columns.append(gang_key)
+    else:
+        summary[overall_avg_key] = 0.0
+        summary[overall_gang_key] = 0
+        for week_label in week_labels:
+            summary[_avg_key(week_label)] = 0.0
+            summary[_gang_key(week_label)] = 0
+            numeric_columns.extend([_avg_key(week_label), _gang_key(week_label)])
+
+    if not compiled.empty:
+        overall_km = (
+            compiled.groupby(groups, dropna=False)["length_km"]
+            .sum()
+            .reset_index(name=overall_km_key)
+        )
+        summary = summary.merge(overall_km, on=groups, how="left")
+        for week_label in week_labels:
+            km_key = _km_key(week_label)
+            week_km = (
+                compiled[compiled["week_label"] == week_label]
+                .groupby(groups, dropna=False)["length_km"]
+                .sum()
+                .reset_index(name=km_key)
+            )
+            summary = summary.merge(week_km, on=groups, how="left")
+            numeric_columns.append(km_key)
+    else:
+        summary[overall_km_key] = 0.0
+        for week_label in week_labels:
+            summary[_km_key(week_label)] = 0.0
+            numeric_columns.append(_km_key(week_label))
+
+    summary = summary.rename(columns={src: dst for src, dst in zip(group_columns, group_labels)})
+    for key in set(numeric_columns):
+        if key not in summary.columns:
+            summary[key] = 0.0
+        if key.endswith("__gangs"):
+            summary[key] = pd.to_numeric(summary[key], errors="coerce").fillna(0).astype(int)
+        else:
+            summary[key] = pd.to_numeric(summary[key], errors="coerce").fillna(0.0).round(2)
+
+    summary = summary.reindex(columns=ordered_columns)
+    if group_labels == ["PCH"] and "PCH" in summary.columns:
+        summary = summary.sort_values("PCH", key=lambda series: series.astype(str).str.lower()).reset_index(drop=True)
+    elif group_labels == ["PCH", "Project"] and {"PCH", "Project"}.issubset(summary.columns):
+        summary = summary.sort_values(
+            ["PCH", "Project"],
+            key=lambda series: series.astype(str).str.lower(),
+        ).reset_index(drop=True)
+    return summary
+
+
+def _build_weekly_rollup_tables(
+    daily_scope: pd.DataFrame,
+    compiled_scope: pd.DataFrame,
+    *,
+    week_windows: list[tuple[pd.Timestamp, pd.Timestamp]],
+    week_labels: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    overall = _build_weekly_group_summary_table(
+        daily_scope,
+        compiled_scope,
+        week_windows=week_windows,
+        week_labels=week_labels,
+        group_columns=[],
+        group_labels=[],
+    )
+    pch = _build_weekly_group_summary_table(
+        daily_scope,
+        compiled_scope,
+        week_windows=week_windows,
+        week_labels=week_labels,
+        group_columns=["pch_display"],
+        group_labels=["PCH"],
+    )
+    project = _build_weekly_group_summary_table(
+        daily_scope,
+        compiled_scope,
+        week_windows=week_windows,
+        week_labels=week_labels,
+        group_columns=["pch_display", "project_rollup_display"],
+        group_labels=["PCH", "Project"],
+    )
+    return overall, pch, project
+
+
 def _build_monthly_comprehensive_table(
     daily_scope: pd.DataFrame,
     compiled_scope: pd.DataFrame,
@@ -1756,6 +2036,212 @@ def _build_quarterly_comprehensive_table(
         )
 
     return pd.DataFrame(rows, columns=columns)
+
+
+def _build_week_windows(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[list[tuple[pd.Timestamp, pd.Timestamp]], list[str]]:
+    if pd.isna(start) or pd.isna(end):
+        return [], []
+    start_ts = pd.Timestamp(start).normalize()
+    end_ts = pd.Timestamp(end).normalize()
+    if end_ts < start_ts:
+        return [], []
+    windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    labels: list[str] = []
+    cursor = start_ts
+    while cursor <= end_ts:
+        week_end = min(cursor + pd.Timedelta(days=6), end_ts)
+        windows.append((cursor, week_end))
+        labels.append(_format_calendar_week_label(cursor, week_end))
+        cursor = cursor + pd.Timedelta(days=7)
+    return windows, labels
+
+
+def _build_weekly_comprehensive_table(
+    daily_scope: pd.DataFrame,
+    compiled_scope: pd.DataFrame,
+    *,
+    week_windows: list[tuple[pd.Timestamp, pd.Timestamp]],
+    week_labels: list[str],
+) -> pd.DataFrame:
+    columns = [
+        "Week",
+        "Avg Productivity (KM/month)",
+        "KM Strung",
+        "No. of Gangs",
+        "Number of Projects Active",
+        "Projects Active (List)",
+    ]
+    if not week_windows or not week_labels:
+        return pd.DataFrame(columns=columns)
+
+    daily = pd.DataFrame()
+    if daily_scope is not None and not daily_scope.empty:
+        daily = daily_scope.copy()
+        daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce").dt.normalize()
+        daily = daily.dropna(subset=["date"])
+        daily["daily_km"] = pd.to_numeric(daily.get("daily_km"), errors="coerce")
+        daily["gang_name"] = _normalize_gang_series(daily.get("gang_name"), index=daily.index)
+        daily["project_display"] = daily.get(
+            "project_rollup_display",
+            daily.get("project_display", pd.Series("", index=daily.index)),
+        ).fillna("").astype(str).str.strip()
+        daily["project_display"] = daily["project_display"].where(
+            daily["project_display"].astype(bool),
+            daily.get("project_name", pd.Series("", index=daily.index)),
+        ).fillna("").astype(str).str.strip()
+
+    compiled = pd.DataFrame()
+    if compiled_scope is not None and not compiled_scope.empty:
+        compiled = compiled_scope.copy()
+        fs_dates = pd.to_datetime(compiled.get("fs_complete_date"), errors="coerce")
+        if fs_dates.notna().any():
+            compiled["week_date"] = fs_dates.dt.normalize()
+        else:
+            compiled["week_date"] = pd.to_datetime(compiled.get("month"), errors="coerce").dt.normalize()
+        compiled["length_km"] = pd.to_numeric(compiled.get("length_km"), errors="coerce").fillna(0.0)
+        compiled["project_display"] = compiled.get(
+            "project_rollup_display",
+            compiled.get("project_display", pd.Series("", index=compiled.index)),
+        ).fillna("").astype(str).str.strip()
+        compiled["project_display"] = compiled["project_display"].where(
+            compiled["project_display"].astype(bool),
+            compiled.get("project_name", pd.Series("", index=compiled.index)),
+        ).fillna("").astype(str).str.strip()
+
+    rows: list[dict[str, object]] = []
+    for (week_start, week_end), label in zip(week_windows, week_labels):
+        week_daily = (
+            daily[(daily["date"] >= week_start) & (daily["date"] <= week_end)]
+            if not daily.empty
+            else pd.DataFrame()
+        )
+        week_compiled = (
+            compiled[(compiled["week_date"] >= week_start) & (compiled["week_date"] <= week_end)]
+            if not compiled.empty
+            else pd.DataFrame()
+        )
+
+        if week_daily.empty:
+            avg_prod = 0.0
+            gangs = 0
+            daily_projects: set[str] = set()
+        else:
+            avg_prod = float(week_daily["daily_km"].dropna().mean() * _MONTH_PRODUCTIVITY_FACTOR)
+            gangs = _count_unique_gangs(week_daily.get("gang_name"))
+            daily_projects = set(
+                week_daily.loc[week_daily["project_display"].astype(bool), "project_display"].astype(str)
+            )
+
+        if week_compiled.empty:
+            km_strung = 0.0
+            compiled_projects: set[str] = set()
+        else:
+            km_strung = float(pd.to_numeric(week_compiled["length_km"], errors="coerce").fillna(0.0).sum())
+            compiled_projects = set(
+                week_compiled.loc[week_compiled["project_display"].astype(bool), "project_display"].astype(str)
+            )
+
+        active_projects = daily_projects | compiled_projects
+        rows.append(
+            {
+                "Week": label,
+                "Avg Productivity (KM/month)": round(avg_prod if not pd.isna(avg_prod) else 0.0, 2),
+                "KM Strung": round(km_strung, 2),
+                "No. of Gangs": gangs,
+                "Number of Projects Active": int(len(active_projects)),
+                "Projects Active (List)": ", ".join(sorted(active_projects, key=str.lower)),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _build_weekly_gang_table(
+    daily_scope: pd.DataFrame,
+    *,
+    week_windows: list[tuple[pd.Timestamp, pd.Timestamp]],
+    week_labels: list[str],
+) -> pd.DataFrame:
+    week_km_columns = [f"{label} KM" for label in week_labels]
+    columns = ["Gang Name", *week_labels, *week_km_columns, "Total KM", "Avg Productivity (KM/month)"]
+    if daily_scope is None or daily_scope.empty or not week_windows or not week_labels:
+        return pd.DataFrame(columns=columns)
+
+    working = daily_scope.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"])
+    working["gang_name"] = _normalize_gang_series(working.get("gang_name"), index=working.index)
+    working = working[working["gang_name"] != ""]
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    working["daily_km"] = pd.to_numeric(working.get("daily_km"), errors="coerce")
+    working["_week_label"] = ""
+    for (week_start, week_end), label in zip(week_windows, week_labels):
+        mask = working["date"].between(week_start, week_end, inclusive="both")
+        working.loc[mask, "_week_label"] = label
+    working = working[working["_week_label"].astype(bool)]
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    weekly_avg = (
+        working.groupby(["gang_name", "_week_label"], dropna=False)["daily_km"]
+        .mean()
+        .mul(_MONTH_PRODUCTIVITY_FACTOR)
+        .reset_index(name="_avg_km_month")
+    )
+    weekly_km = (
+        working.groupby(["gang_name", "_week_label"], dropna=False)["daily_km"]
+        .sum(min_count=1)
+        .reset_index(name="_km_total")
+    )
+    overall = (
+        working.groupby("gang_name", dropna=False)["daily_km"]
+        .agg(_avg_daily="mean", _total_km="sum")
+        .reset_index()
+    )
+    overall["_avg_km_month"] = overall["_avg_daily"].fillna(0.0) * _MONTH_PRODUCTIVITY_FACTOR
+
+    avg_pivot = (
+        weekly_avg.pivot_table(index="gang_name", columns="_week_label", values="_avg_km_month", aggfunc="mean")
+        .reset_index()
+    )
+    km_pivot = (
+        weekly_km.pivot_table(index="gang_name", columns="_week_label", values="_km_total", aggfunc="sum")
+        .reset_index()
+    )
+    km_pivot = km_pivot.rename(columns={label: f"{label} KM" for label in week_labels if label in km_pivot.columns})
+
+    summary = overall.rename(
+        columns={
+            "gang_name": "Gang Name",
+            "_total_km": "Total KM",
+            "_avg_km_month": "Avg Productivity (KM/month)",
+        }
+    )[["Gang Name", "Total KM", "Avg Productivity (KM/month)"]]
+    summary = summary.merge(avg_pivot.rename(columns={"gang_name": "Gang Name"}), on="Gang Name", how="left")
+    summary = summary.merge(km_pivot.rename(columns={"gang_name": "Gang Name"}), on="Gang Name", how="left")
+
+    for label in week_labels:
+        if label not in summary.columns:
+            summary[label] = 0.0
+    for column in week_km_columns:
+        if column not in summary.columns:
+            summary[column] = 0.0
+    summary["Total KM"] = pd.to_numeric(summary["Total KM"], errors="coerce").fillna(0.0).round(2)
+    summary["Avg Productivity (KM/month)"] = (
+        pd.to_numeric(summary["Avg Productivity (KM/month)"], errors="coerce").fillna(0.0).round(2)
+    )
+    for label in week_labels:
+        summary[label] = pd.to_numeric(summary[label], errors="coerce").fillna(0.0).round(2)
+    for column in week_km_columns:
+        summary[column] = pd.to_numeric(summary[column], errors="coerce").fillna(0.0).round(2)
+
+    ordered_columns = ["Gang Name", *week_labels, *week_km_columns, "Total KM", "Avg Productivity (KM/month)"]
+    summary = summary.reindex(columns=ordered_columns)
+    return summary.sort_values("Gang Name").reset_index(drop=True)
 
 
 def _build_project_variants_table(
@@ -2688,8 +3174,13 @@ def main() -> int:
     LOGGER.info("Bootstrapping datasets from %s", config.data_path)
     store.bootstrap(config)
 
+    week_mode_norm = _normalize_week_mode(args.week_mode)
+    if week_mode_norm == WEEK_MODE_LEGACY and (args.previous_week or args.start_date or args.end_date):
+        week_mode_norm = WEEK_MODE_CALENDAR_SUN_SAT
     start_date = _parse_date(args.start_date)
     end_date = _parse_date(args.end_date)
+    if end_date and not start_date:
+        raise SystemExit("--end-date requires --start-date.")
     if start_date and end_date and start_date > end_date:
         raise SystemExit("--start-date must be before or equal to --end-date.")
 
@@ -2699,6 +3190,31 @@ def main() -> int:
 
     if stringing_compiled is None or stringing_compiled.empty:
         LOGGER.warning("Stringing compiled dataset not available; some analyses will be empty.")
+
+    if week_mode_norm == WEEK_MODE_CALENDAR_SUN_SAT:
+        if args.previous_week:
+            start_date, end_date = _previous_completed_week_window(pd.Timestamp.now().normalize())
+        elif start_date is not None:
+            start_date = _align_to_previous_sunday(start_date)
+            if end_date is None:
+                latest_candidates: list[pd.Timestamp] = []
+                for frame, column in (
+                    (stringing_daily, "date"),
+                    (stringing_compiled, "fs_complete_date"),
+                    (stringing_compiled, "month"),
+                ):
+                    if frame is None or frame.empty or column not in frame.columns:
+                        continue
+                    series = pd.to_datetime(frame.get(column), errors="coerce").dropna()
+                    if not series.empty:
+                        latest_candidates.append(series.max().normalize())
+                if latest_candidates:
+                    end_date = max(latest_candidates)
+        else:
+            # Keep legacy date filtering behavior when no explicit calendar-week scope is supplied.
+            pass
+        if start_date is not None and end_date is not None and end_date < start_date:
+            raise SystemExit("Resolved weekly date range is invalid: end date is before start date.")
 
     # Overall stringing daily (PO start -> FS complete)
     if stringing_compiled is not None and not stringing_compiled.empty:
@@ -2826,6 +3342,55 @@ def main() -> int:
     else:
         compiled_scope_tse = pd.DataFrame()
 
+    weekly_windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    weekly_labels: list[str] = []
+    weekly_overall = pd.DataFrame()
+    weekly_pch = pd.DataFrame()
+    weekly_project = pd.DataFrame()
+    weekly_tse_overall = pd.DataFrame()
+    weekly_tse_pch = pd.DataFrame()
+    weekly_tse_project = pd.DataFrame()
+    weekly_comprehensive_overall = pd.DataFrame()
+    weekly_comprehensive_tse = pd.DataFrame()
+    weekly_gang_overall = pd.DataFrame()
+    weekly_gang_tse = pd.DataFrame()
+    if week_mode_norm == WEEK_MODE_CALENDAR_SUN_SAT and start_date is not None and end_date is not None:
+        weekly_windows, weekly_labels = _build_week_windows(start_date, end_date)
+        weekly_overall, weekly_pch, weekly_project = _build_weekly_rollup_tables(
+            scope,
+            compiled_scope,
+            week_windows=weekly_windows,
+            week_labels=weekly_labels,
+        )
+        weekly_tse_overall, weekly_tse_pch, weekly_tse_project = _build_weekly_rollup_tables(
+            scope_tse,
+            compiled_scope_tse,
+            week_windows=weekly_windows,
+            week_labels=weekly_labels,
+        )
+        weekly_comprehensive_overall = _build_weekly_comprehensive_table(
+            scope,
+            compiled_scope,
+            week_windows=weekly_windows,
+            week_labels=weekly_labels,
+        )
+        weekly_comprehensive_tse = _build_weekly_comprehensive_table(
+            scope_tse,
+            compiled_scope_tse,
+            week_windows=weekly_windows,
+            week_labels=weekly_labels,
+        )
+        weekly_gang_overall = _build_weekly_gang_table(
+            scope,
+            week_windows=weekly_windows,
+            week_labels=weekly_labels,
+        )
+        weekly_gang_tse = _build_weekly_gang_table(
+            scope_tse,
+            week_windows=weekly_windows,
+            week_labels=weekly_labels,
+        )
+
     overall_rollup, pch_rollup, project_rollup = _build_rollup_tables(scope, scope_tse)
     tse_overall_rollup, tse_pch_rollup, tse_project_rollup = _build_rollup_tables(scope_tse, scope_tse)
     monthly_overall, monthly_pch, monthly_project = _build_monthly_rollup_tables(
@@ -2924,6 +3489,10 @@ def main() -> int:
     monthly_tse_pch = _merge_monthly_pch_with_coverage(monthly_tse_pch, coverage_registry)
     monthly_project = _merge_monthly_project_with_coverage(monthly_project, coverage_registry)
     monthly_tse_project = _merge_monthly_project_with_coverage(monthly_tse_project, coverage_registry)
+    weekly_pch = _merge_monthly_pch_with_coverage(weekly_pch, coverage_registry)
+    weekly_tse_pch = _merge_monthly_pch_with_coverage(weekly_tse_pch, coverage_registry)
+    weekly_project = _merge_monthly_project_with_coverage(weekly_project, coverage_registry)
+    weekly_tse_project = _merge_monthly_project_with_coverage(weekly_tse_project, coverage_registry)
     review_table_raw = project_rollup.reindex(
         columns=[
             "PCH",
@@ -3364,6 +3933,153 @@ def main() -> int:
         )
         monthly_row += 1
         _style_monthly_summary_sheet(writer, stringing_summary_monthly_sheet, monthly_blocks)
+        if (
+            week_mode_norm == WEEK_MODE_CALENDAR_SUN_SAT
+            and start_date is not None
+            and end_date is not None
+            and (
+                not weekly_overall.empty
+                or not weekly_pch.empty
+                or not weekly_project.empty
+                or not weekly_tse_overall.empty
+                or not weekly_tse_pch.empty
+                or not weekly_tse_project.empty
+                or not weekly_comprehensive_overall.empty
+                or not weekly_comprehensive_tse.empty
+                or not weekly_gang_overall.empty
+                or not weekly_gang_tse.empty
+            )
+        ):
+            stringing_summary_weekly_sheet = "Stringing Summary Weekly"
+            weekly_row = 0
+            weekly_blocks: list[dict[str, int]] = []
+            weekly_row = _write_labeled_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                "TSE",
+                pd.DataFrame(),
+                startrow=weekly_row,
+            )
+            scope_label_tse_weekly = _build_scope_label(scope_tse, start_date, end_date).replace("Scope:", "Scope (TSE):")
+            weekly_row, weekly_block = _write_monthly_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_tse_overall,
+                scope_label_tse_weekly,
+                month_headers=weekly_labels,
+                group_headers=[],
+                startrow=weekly_row,
+            )
+            weekly_blocks.append(weekly_block)
+            weekly_row += 2
+            weekly_row, weekly_block = _write_monthly_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_tse_pch,
+                scope_label_tse_weekly,
+                month_headers=weekly_labels,
+                group_headers=["PCH"],
+                startrow=weekly_row,
+            )
+            weekly_blocks.append(weekly_block)
+            weekly_row += 2
+            weekly_row, weekly_block = _write_monthly_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_tse_project,
+                scope_label_tse_weekly,
+                month_headers=weekly_labels,
+                group_headers=["PCH", "Project"],
+                startrow=weekly_row,
+            )
+            weekly_blocks.append(weekly_block)
+            weekly_row += 2
+            weekly_row = _write_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_comprehensive_tse,
+                scope_label_tse_weekly,
+                startrow=weekly_row,
+            )
+            weekly_row += 2
+            weekly_row = _write_labeled_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                "TSE - Gang Weekly",
+                pd.DataFrame(),
+                startrow=weekly_row,
+            )
+            weekly_row = _write_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_gang_tse,
+                scope_label_tse_weekly,
+                startrow=weekly_row,
+            )
+            weekly_row += 2
+            weekly_row = _write_labeled_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                "Overall",
+                pd.DataFrame(),
+                startrow=weekly_row,
+            )
+            weekly_row, weekly_block = _write_monthly_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_overall,
+                _build_scope_label(scope, start_date, end_date),
+                month_headers=weekly_labels,
+                group_headers=[],
+                startrow=weekly_row,
+            )
+            weekly_blocks.append(weekly_block)
+            weekly_row += 2
+            weekly_row, weekly_block = _write_monthly_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_pch,
+                _build_scope_label(scope, start_date, end_date),
+                month_headers=weekly_labels,
+                group_headers=["PCH"],
+                startrow=weekly_row,
+            )
+            weekly_blocks.append(weekly_block)
+            weekly_row += 2
+            weekly_row, weekly_block = _write_monthly_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_project,
+                _build_scope_label(scope, start_date, end_date),
+                month_headers=weekly_labels,
+                group_headers=["PCH", "Project"],
+                startrow=weekly_row,
+            )
+            weekly_blocks.append(weekly_block)
+            weekly_row += 2
+            weekly_row = _write_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_comprehensive_overall,
+                _build_scope_label(scope, start_date, end_date),
+                startrow=weekly_row,
+            )
+            weekly_row += 2
+            weekly_row = _write_labeled_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                "Overall - Gang Weekly",
+                pd.DataFrame(),
+                startrow=weekly_row,
+            )
+            _write_scoped_table(
+                writer,
+                stringing_summary_weekly_sheet,
+                weekly_gang_overall,
+                _build_scope_label(scope, start_date, end_date),
+                startrow=weekly_row,
+            )
+            _style_monthly_summary_sheet(writer, stringing_summary_weekly_sheet, weekly_blocks)
         variants_row = 0
         variants_row = _write_labeled_table(
             writer,
@@ -3404,7 +4120,7 @@ def main() -> int:
         if not issues_df.empty:
             issues_df.to_excel(writer, sheet_name="Data_Issues", index=False)
         for styled_sheet in writer.book.sheetnames:
-            if styled_sheet == stringing_summary_monthly_sheet:
+            if styled_sheet in {stringing_summary_monthly_sheet, "Stringing Summary Weekly"}:
                 continue
             _style_clean_sheet(writer, styled_sheet)
 

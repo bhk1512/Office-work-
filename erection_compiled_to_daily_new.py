@@ -178,12 +178,46 @@ def find_header_row(
 
 
 def _drop_duplicate_columns_keep_first(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
-    duplicated = pd.Index(df.columns).duplicated(keep="first")
-    if not duplicated.any():
-        return df, []
-    dup_names = [str(col) for col in pd.Index(df.columns)[duplicated]]
-    deduped = df.loc[:, ~duplicated].copy()
-    return deduped, dup_names
+    """
+    Drop duplicate column names while keeping the most informative column per name.
+
+    Historically this kept the first duplicate only, but template column mappings can
+    intentionally remap a later column to the same canonical header (for example
+    ``tower weight``). In those cases the first match may be empty while a later one
+    contains the actual values. We therefore keep the duplicate with the highest count
+    of non-empty cells (ties resolved by first occurrence).
+    """
+
+    columns = list(df.columns)
+    groups: dict[object, list[int]] = {}
+    for idx, name in enumerate(columns):
+        groups.setdefault(name, []).append(idx)
+
+    duplicate_names: List[str] = []
+    keep_indexes: set[int] = set()
+
+    for name, idxs in groups.items():
+        if len(idxs) == 1:
+            keep_indexes.add(idxs[0])
+            continue
+
+        duplicate_names.append(str(name))
+        best_idx = idxs[0]
+        best_score = -1
+        for idx in idxs:
+            series = df.iloc[:, idx]
+            non_empty = series.notna()
+            if non_empty.any():
+                as_text = series[non_empty].astype(str).str.strip().str.lower()
+                non_empty = non_empty & ~as_text.isin({"", "nan", "none", "null"})
+            score = int(non_empty.sum())
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        keep_indexes.add(best_idx)
+
+    deduped = df.iloc[:, [idx for idx in range(len(columns)) if idx in keep_indexes]].copy()
+    return deduped, duplicate_names
 
 
 def find_target_sheet(sheet_names: List[str]) -> Optional[str]:
@@ -1287,6 +1321,42 @@ def process_file(
         work["Gang name"] = gang_source.apply(normalize_gang_name)
         work.loc[work["Gang name"].astype(str).str.strip().eq(""), "Gang name"] = "undefined"
         work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
+        assumed_weight_messages: list[str] = []
+        existing_weight_mask = work["Tower Weight"].notna()
+        valid_existing_weight_mask = existing_weight_mask & work["Tower Weight"].between(
+            TOWER_MIN_MT, TOWER_MAX_MT, inclusive="both"
+        )
+        missing_weight_mask = ~existing_weight_mask
+
+        # If a sheet has mixed tower weight quality, impute blanks with the average of
+        # valid entered values. If no usable values exist, keep the historical 45 MT fallback.
+        if missing_weight_mask.any():
+            if valid_existing_weight_mask.any():
+                assumed_weight = float(work.loc[valid_existing_weight_mask, "Tower Weight"].mean())
+                work.loc[missing_weight_mask, "Tower Weight"] = assumed_weight
+                diag["tower_weight_assumed_mt"] = float(assumed_weight)
+                diag["tower_weight_assumption_rows"] = int(missing_weight_mask.sum())
+                assumed_weight_messages.append(
+                    f"Assumed Tower Weight {assumed_weight:.3f} MT for {int(missing_weight_mask.sum())} row(s) "
+                    "with blank/missing tower weight using average of available towers"
+                )
+            else:
+                work.loc[missing_weight_mask, "Tower Weight"] = DEFAULT_TOWER_WEIGHT_ASSUMED_MT
+                diag["tower_weight_assumed_mt"] = float(DEFAULT_TOWER_WEIGHT_ASSUMED_MT)
+                diag["tower_weight_assumption_rows"] = int(missing_weight_mask.sum())
+                assumed_weight_messages.append(
+                    f"No usable tower weights found; assumed {DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT "
+                    f"for {int(missing_weight_mask.sum())} row(s)"
+                )
+
+        for message in assumed_weight_messages:
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": message,
+                }
+            )
         work["Project Code"] = project_code_display or project_name
         work["Line Name"] = sheet_line_name
         work["Project Name"] = project_name
@@ -1635,6 +1705,8 @@ def main(argv=None):
         "- Ambiguous numeric dates (e.g., 1/12/2025) that initially parse as Start > End are retried with month-first before being marked invalid.",
         "- Gang name normalization: remove special characters (digits kept), Title Case words, and insert a space before trailing digits (e.g., 'xyz4' â†’ 'Xyz 4').",
         f"- If 'Tower Weight' header is missing in a sheet, Tower Weight is assumed as {DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT for all rows in that sheet (noted in 'Issues').",
+        "- If some Tower Weight values are present and some are blank in a sheet, blank rows are filled with the average of available in-range tower weights for that sheet (noted in 'Issues').",
+        f"- If a sheet has no usable in-range Tower Weight values at all, blank rows fall back to {DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT (noted in 'Issues').",
         "- DPR_Config support: when multiple erection sheet names are configured for a project, each listed sheet is processed independently, assigned its own line identity, and then concatenated.",
         "- DPR_Config template mapping: for projects with discipline-specific template check marked Yes, column-wise mapping from the discipline template tab is applied before required-field validation.",
         "- Sheets:",
