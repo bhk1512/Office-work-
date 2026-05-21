@@ -1362,6 +1362,8 @@ def process_file(
         work["Project Name"] = project_name
         work["Project Display"] = project_name
         work["Project Scope Key"] = project_scope_key
+        work["Source File"] = path.name
+        work["Source Sheet"] = target
         work["Location No."] = work["location no"].astype(object).map(
             lambda x: str(x).strip() if pd.notna(x) else pd.NA
         )
@@ -1406,6 +1408,8 @@ def process_file(
                         "Project Name",
                         "Project Display",
                         "Project Scope Key",
+                        "Source File",
+                        "Source Sheet",
                         "Location No.",
                         "Tower Tightening Raw",
                         "Tower Tightening",
@@ -1442,6 +1446,8 @@ def process_file(
                 "Project Name",
                 "Project Display",
                 "Project Scope Key",
+                "Source File",
+                "Source Sheet",
                 "Location No.",
                 "Tower Tightening Raw",
                 "Tower Tightening",

@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from dashboard.foundation_delay_analysis import (
+    MechanismConfig,
     build_legacy_erection_source_from_raw,
     build_complete_foundation_analysis_tables,
     build_foundation_delay_analysis_tables,
@@ -83,7 +84,7 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
 
     def test_build_tables_scope_phase_buckets_and_rollups(self) -> None:
         inputs = self._build_inputs()
-        tables = build_foundation_delay_analysis_tables(*inputs)
+        tables = build_foundation_delay_analysis_tables(*inputs, mechanism_config=MechanismConfig(min_foundation_count=1))
 
         expected_sheets = {
             "Delay Phase - Project",
@@ -95,6 +96,13 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
             "Delay Coverage",
             "Delay Anomalies",
             "Scope Snapshot",
+            "Mechanism Summary - Project",
+            "Mechanism Summary - Series",
+            "Mechanism Summary - Ownership",
+            "Mechanism Matrix - Project",
+            "Mechanism Matrix - Overall",
+            "Mechanism Evidence Audit",
+            "Mechanism Config",
         }
         self.assertEqual(set(tables.keys()), expected_sheets)
 
@@ -136,6 +144,24 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
         self.assertTrue((phase_ownership["Ownership"].astype(str).str.strip() == "Government").any())
         self.assertTrue((phase_ownership["Ownership"].astype(str).str.strip() == "Private").any())
 
+        mechanism_project = tables["Mechanism Summary - Project"]
+        ta510_mech = mechanism_project[
+            mechanism_project["Project"].astype(str).str.strip().eq("TA 510")
+            & mechanism_project["Cohort Window"].astype(str).str.strip().eq("Monsoon")
+            & mechanism_project["Start Window"].astype(str).str.strip().eq("Post-Monsoon")
+        ]
+        self.assertFalse(ta510_mech.empty)
+        ta510_row = ta510_mech.iloc[0]
+        self.assertEqual(int(ta510_row["Foundations Total"]), 3)
+        self.assertEqual(int(ta510_row["Matched Non-Negative"]), 2)
+        self.assertEqual(int(ta510_row["Starts In Window"]), 0)
+        self.assertEqual(float(ta510_row["Match Coverage %"]), 66.67)
+        self.assertEqual(float(ta510_row["% Within Matched"]), 0.0)
+
+        mechanism_audit = tables["Mechanism Evidence Audit"]
+        self.assertIn("Foundation Source File", mechanism_audit.columns)
+        self.assertIn("Erection Source File", mechanism_audit.columns)
+
         # Consolidated project-level rollup: TB 501 should appear as one project.
         tb501_project_rows = phase_project[phase_project["Project"].astype(str).str.strip().eq("TB 501")]
         self.assertFalse(tb501_project_rows.empty)
@@ -161,6 +187,13 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
                         "Delay Coverage",
                         "Delay Anomalies",
                         "Scope Snapshot",
+                        "Mechanism Summary - Project",
+                        "Mechanism Summary - Series",
+                        "Mechanism Summary - Ownership",
+                        "Mechanism Matrix - Project",
+                        "Mechanism Matrix - Overall",
+                        "Mechanism Evidence Audit",
+                        "Mechanism Config",
                     },
                 )
 
@@ -191,6 +224,13 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
             "Delay Coverage",
             "Delay Anomalies",
             "Scope Snapshot",
+            "Mechanism Summary - Project",
+            "Mechanism Summary - Series",
+            "Mechanism Summary - Ownership",
+            "Mechanism Matrix - Project",
+            "Mechanism Matrix - Overall",
+            "Mechanism Evidence Audit",
+            "Mechanism Config",
         }
         self.assertTrue(expected.issubset(set(tables.keys())))
         self.assertFalse(tables["Foundation Gap Monthly"].empty)
@@ -364,6 +404,70 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
         self.assertEqual(int(row["Unmatched Locations"]), 2)
         anomalies = tables["Delay Anomalies"]
         self.assertEqual(int((anomalies["Issue"] == "UNMATCHED_LOCATION").sum()), 2)
+
+    def test_mechanism_summary_threshold_and_window_config(self) -> None:
+        inputs = self._build_inputs()
+        default_tables = build_foundation_delay_analysis_tables(*inputs)
+        self.assertTrue(default_tables["Mechanism Summary - Project"].empty)
+
+        tuned = MechanismConfig(
+            min_foundation_count=1,
+            post_monsoon=(7,),
+            post_monsoon_wide=(7, 12),
+        )
+        tuned_tables = build_foundation_delay_analysis_tables(*inputs, mechanism_config=tuned)
+        summary = tuned_tables["Mechanism Summary - Project"]
+        row = summary[
+            summary["Project"].astype(str).str.strip().eq("TA 510")
+            & summary["Cohort Window"].astype(str).str.strip().eq("Monsoon")
+            & summary["Start Window"].astype(str).str.strip().eq("Post-Monsoon")
+        ]
+        self.assertFalse(row.empty)
+        record = row.iloc[0]
+        self.assertEqual(int(record["Foundations Total"]), 3)
+        self.assertEqual(int(record["Matched Non-Negative"]), 2)
+        self.assertEqual(int(record["Starts In Window"]), 1)
+        self.assertEqual(float(record["% of All Foundations"]), 33.33)
+        self.assertEqual(float(record["% Within Matched"]), 50.0)
+
+    def test_mechanism_audit_blank_safe_without_source_columns(self) -> None:
+        foundation_completions = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 510",
+                    "project_display": "TA 510",
+                    "project_scope_key": "ta510",
+                    "line_name": "L1",
+                    "source_type": "detail",
+                    "event_date": "2026-01-01",
+                    "location_no": "1/0",
+                }
+            ]
+        )
+        foundation_coverage = pd.DataFrame(
+            [
+                {"project_code": "TA 510", "project_display": "TA 510", "status": "OK_DETAIL", "source_used": "detail", "reason": "Detail rows parsed"},
+            ]
+        )
+        foundation_diagnostics = pd.DataFrame([{"Project": "TA 510", "ParserMode": "template"}])
+        source_raw = pd.DataFrame(
+            [
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "1/0", "Start Date": "2026-01-02"},
+            ]
+        )
+        tables = build_foundation_delay_analysis_tables(
+            source_raw,
+            foundation_completions,
+            foundation_coverage,
+            foundation_diagnostics,
+            pd.DataFrame(),
+            mechanism_config=MechanismConfig(min_foundation_count=1),
+        )
+        audit = tables["Mechanism Evidence Audit"]
+        self.assertFalse(audit.empty)
+        self.assertIn("Erection Source File", audit.columns)
+        self.assertTrue((audit["Erection Source File"].fillna("").astype(str).str.strip() == "").all())
+        self.assertTrue((audit["Foundation Source File"].fillna("").astype(str).str.strip() == "").all())
 
 
 if __name__ == "__main__":

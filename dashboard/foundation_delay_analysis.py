@@ -26,6 +26,50 @@ PHASE_BANDS: tuple[tuple[int, int, str], ...] = (
 PHASE_ORDER = {label: idx for idx, (_, _, label) in enumerate(PHASE_BANDS, start=1)}
 
 
+@dataclass(frozen=True)
+class MechanismConfig:
+    pre_monsoon: tuple[int, ...] = (4, 5)
+    monsoon: tuple[int, ...] = (6, 7, 8, 9)
+    post_monsoon: tuple[int, ...] = (10, 11)
+    post_monsoon_wide: tuple[int, ...] = (10, 11, 12)
+    dry: tuple[int, ...] = (12, 1, 2, 3)
+    min_foundation_count: int = 5
+
+
+def _normalize_month_tuple(values: object, fallback: tuple[int, ...]) -> tuple[int, ...]:
+    if values is None:
+        return fallback
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in values if isinstance(values, (list, tuple, set)) else [values]:
+        numeric = pd.to_numeric(pd.Series([raw]), errors="coerce").iloc[0]
+        if pd.isna(numeric):
+            continue
+        month = int(numeric)
+        if month < 1 or month > 12 or month in seen:
+            continue
+        seen.add(month)
+        normalized.append(month)
+    return tuple(normalized) if normalized else fallback
+
+
+def _resolve_mechanism_config(config: MechanismConfig | None) -> MechanismConfig:
+    if config is None:
+        return MechanismConfig()
+    min_count_numeric = pd.to_numeric(pd.Series([getattr(config, "min_foundation_count", 5)]), errors="coerce").iloc[0]
+    min_count = int(min_count_numeric) if pd.notna(min_count_numeric) else 5
+    if min_count < 0:
+        min_count = 0
+    return MechanismConfig(
+        pre_monsoon=_normalize_month_tuple(getattr(config, "pre_monsoon", (4, 5)), (4, 5)),
+        monsoon=_normalize_month_tuple(getattr(config, "monsoon", (6, 7, 8, 9)), (6, 7, 8, 9)),
+        post_monsoon=_normalize_month_tuple(getattr(config, "post_monsoon", (10, 11)), (10, 11)),
+        post_monsoon_wide=_normalize_month_tuple(getattr(config, "post_monsoon_wide", (10, 11, 12)), (10, 11, 12)),
+        dry=_normalize_month_tuple(getattr(config, "dry", (12, 1, 2, 3)), (12, 1, 2, 3)),
+        min_foundation_count=min_count,
+    )
+
+
 def _safe_text(value: object) -> str:
     text = "" if value is None else str(value).strip()
     lowered = text.lower()
@@ -69,6 +113,8 @@ def _normalize_erection_source_columns(source: pd.DataFrame) -> pd.DataFrame:
         ("line_name", ("line_name", "Line Name")),
         ("location_no", ("location_no", "Location No.", "Location No", "location no")),
         ("start_date", ("start_date", "Start Date", "starting date", "Starting Date")),
+        ("source_file", ("source_file", "Source File", "_source_file")),
+        ("source_sheet", ("source_sheet", "Source Sheet", "sheet", "configured_sheet")),
     )
     for target, candidates in mappings:
         if target in work.columns:
@@ -198,6 +244,8 @@ def _build_erection_start_events(source_daily: pd.DataFrame) -> pd.DataFrame:
     work = work[work["start_date"].dt.year >= 1980].copy()
     work["location_no"] = work.get("location_no", "").fillna("").astype(str).str.strip()
     work["line_name"] = work.get("line_name", "").fillna("").astype(str).str.strip()
+    work["source_file"] = work.get("source_file", pd.Series("", index=work.index)).fillna("").astype(str).str.strip()
+    work["source_sheet"] = work.get("source_sheet", pd.Series("", index=work.index)).fillna("").astype(str).str.strip()
     work["line_name_norm"] = work["line_name"].map(_compact_project_key)
     work["location_no_norm"] = work["location_no"].map(_compact_project_key)
     work["location_no_alias_norm"] = work["location_no"].map(_normalize_location_alias_text).map(_compact_project_key)
@@ -213,6 +261,8 @@ def _build_erection_start_events(source_daily: pd.DataFrame) -> pd.DataFrame:
         .agg(
             erection_start=("start_date", "min"),
             erection_line=("line_name", "first"),
+            erection_source_file=("source_file", "first"),
+            erection_source_sheet=("source_sheet", "first"),
         )
     )
 
@@ -229,6 +279,11 @@ def _build_foundation_detail_events(foundation_completions: pd.DataFrame) -> pd.
     foundation = foundation[foundation["event_date"].dt.year >= 1980].copy()
     foundation["line_name"] = foundation.get("line_name", "").fillna("").astype(str).str.strip()
     foundation["location_no"] = foundation.get("location_no", "").fillna("").astype(str).str.strip()
+    foundation["source_file"] = foundation.get("source_file", pd.Series("", index=foundation.index)).fillna("").astype(str).str.strip()
+    foundation["source_sheet"] = foundation.get(
+        "source_sheet",
+        foundation.get("configured_sheet", pd.Series("", index=foundation.index)),
+    ).fillna("").astype(str).str.strip()
     foundation["line_name_norm"] = foundation["line_name"].map(_compact_project_key)
     foundation["location_no_norm"] = foundation["location_no"].map(_compact_project_key)
     foundation["location_no_alias_norm"] = foundation["location_no"].map(_normalize_location_alias_text).map(_compact_project_key)
@@ -249,6 +304,8 @@ def _build_foundation_detail_events(foundation_completions: pd.DataFrame) -> pd.
             foundation_line=("line_name", "first"),
             location_no=("location_no", "first"),
             location_no_alias_norm=("location_no_alias_norm", "first"),
+            foundation_source_file=("source_file", "first"),
+            foundation_source_sheet=("source_sheet", "first"),
         )
     )
 
@@ -260,13 +317,23 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
     erection_loc = _build_erection_start_events(source_daily)
     if erection_loc.empty:
         erection_loc = pd.DataFrame(
-            columns=["project_rollup_key", "line_name_norm", "location_no_norm", "erection_start", "erection_line"]
+            columns=[
+                "project_rollup_key",
+                "line_name_norm",
+                "location_no_norm",
+                "erection_start",
+                "erection_line",
+                "erection_source_file",
+                "erection_source_sheet",
+            ]
         )
     merged = foundation_loc.merge(
         erection_loc.rename(
             columns={
                 "erection_start": "erection_start_exact",
                 "erection_line": "erection_line_exact",
+                "erection_source_file": "erection_source_file_exact",
+                "erection_source_sheet": "erection_source_sheet_exact",
             }
         ),
         on=["project_rollup_key", "line_name_norm", "location_no_norm"],
@@ -280,13 +347,31 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
                 "location_no_norm": "location_no_alias_norm",
                 "erection_start": "erection_start_alias",
                 "erection_line": "erection_line_alias",
+                "erection_source_file": "erection_source_file_alias",
+                "erection_source_sheet": "erection_source_sheet_alias",
             }
         )[
-            ["project_rollup_key", "line_name_norm", "location_no_alias_norm", "erection_start_alias", "erection_line_alias"]
+            [
+                "project_rollup_key",
+                "line_name_norm",
+                "location_no_alias_norm",
+                "erection_start_alias",
+                "erection_line_alias",
+                "erection_source_file_alias",
+                "erection_source_sheet_alias",
+            ]
         ]
     if alias_from_foundation.empty:
         alias_from_foundation = pd.DataFrame(
-            columns=["project_rollup_key", "line_name_norm", "location_no_alias_norm", "erection_start_alias", "erection_line_alias"]
+            columns=[
+                "project_rollup_key",
+                "line_name_norm",
+                "location_no_alias_norm",
+                "erection_start_alias",
+                "erection_line_alias",
+                "erection_source_file_alias",
+                "erection_source_sheet_alias",
+            ]
         )
     merged = merged.merge(
         alias_from_foundation,
@@ -302,6 +387,14 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
         merged["erection_line_exact"].astype(bool),
         merged["erection_line_alias"],
     )
+    merged["erection_source_file"] = merged["erection_source_file_exact"].where(
+        merged["erection_source_file_exact"].astype(bool),
+        merged["erection_source_file_alias"],
+    )
+    merged["erection_source_sheet"] = merged["erection_source_sheet_exact"].where(
+        merged["erection_source_sheet_exact"].astype(bool),
+        merged["erection_source_sheet_alias"],
+    )
     merged["match_basis"] = ""
     exact_mask = merged["erection_start_exact"].notna()
     alias_mask = (~exact_mask) & merged["erection_start_alias"].notna()
@@ -310,14 +403,26 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
 
     if not erection_loc.empty:
         ere_loc_counts = (
-            erection_loc.groupby(["project_rollup_key", "location_no_norm"], as_index=False)
+            erection_loc.sort_values(["project_rollup_key", "location_no_norm", "erection_start", "line_name_norm"])
+            .groupby(["project_rollup_key", "location_no_norm"], as_index=False)
             .agg(
                 ere_start_fallback=("erection_start", "min"),
                 ere_line_count=("line_name_norm", "nunique"),
+                ere_source_file_fallback=("erection_source_file", "first"),
+                ere_source_sheet_fallback=("erection_source_sheet", "first"),
             )
         )
     else:
-        ere_loc_counts = pd.DataFrame(columns=["project_rollup_key", "location_no_norm", "ere_start_fallback", "ere_line_count"])
+        ere_loc_counts = pd.DataFrame(
+            columns=[
+                "project_rollup_key",
+                "location_no_norm",
+                "ere_start_fallback",
+                "ere_line_count",
+                "ere_source_file_fallback",
+                "ere_source_sheet_fallback",
+            ]
+        )
     fdn_loc_counts = (
         foundation_loc.groupby(["project_rollup_key", "location_no_norm"], as_index=False)
         .agg(fdn_line_count=("line_name_norm", "nunique"))
@@ -328,7 +433,15 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
         how="left",
     )
     fallback = fallback[(fallback["fdn_line_count"] == 1) & (fallback["ere_line_count"] == 1)].copy()
-    fallback = fallback[["project_rollup_key", "location_no_norm", "ere_start_fallback"]]
+    fallback = fallback[
+        [
+            "project_rollup_key",
+            "location_no_norm",
+            "ere_start_fallback",
+            "ere_source_file_fallback",
+            "ere_source_sheet_fallback",
+        ]
+    ]
     merged = merged.merge(
         fallback,
         on=["project_rollup_key", "location_no_norm"],
@@ -337,6 +450,14 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
     merged["erection_start_final"] = merged["erection_start"].where(
         merged["erection_start"].notna(),
         merged["ere_start_fallback"],
+    )
+    merged["erection_source_file"] = merged["erection_source_file"].where(
+        merged["erection_source_file"].astype(bool),
+        merged["ere_source_file_fallback"],
+    )
+    merged["erection_source_sheet"] = merged["erection_source_sheet"].where(
+        merged["erection_source_sheet"].astype(bool),
+        merged["ere_source_sheet_fallback"],
     )
     fallback_mask = merged["match_basis"].eq("") & merged["ere_start_fallback"].notna()
     merged.loc[fallback_mask, "match_basis"] = "fallback_single_line"
@@ -347,6 +468,12 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
     ).dt.days
     merged["negative_delay"] = merged["matched"] & merged["delay_days"].lt(0)
     merged["delay_for_stats"] = merged["delay_days"].where(merged["matched"] & ~merged["negative_delay"])
+    foundation_month_ts = pd.to_datetime(merged["foundation_complete"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    merged["foundation_month"] = foundation_month_ts.dt.strftime("%Y-%m").where(foundation_month_ts.notna(), "")
+    merged["foundation_month_num"] = foundation_month_ts.dt.month
+    erection_month_ts = pd.to_datetime(merged["erection_start_final"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    merged["erection_start_month"] = erection_month_ts.dt.strftime("%Y-%m").where(erection_month_ts.notna(), "")
+    merged["erection_start_month_num"] = erection_month_ts.dt.month
     return merged
 
 
@@ -1328,6 +1455,262 @@ def _build_bucket_rows(
     return pd.DataFrame(rows, columns=columns)
 
 
+def _month_values_text(months: tuple[int, ...]) -> str:
+    return ",".join(str(int(month)) for month in months)
+
+
+def _mechanism_windows(config: MechanismConfig) -> tuple[list[tuple[str, tuple[int, ...]]], list[tuple[str, tuple[int, ...]]]]:
+    cohort_windows = [
+        ("All Foundations", tuple(range(1, 13))),
+        ("Pre-Monsoon", config.pre_monsoon),
+        ("Monsoon", config.monsoon),
+        ("Dry Season", config.dry),
+    ]
+    start_windows = [
+        ("Post-Monsoon", config.post_monsoon),
+        ("Post-Monsoon Wide", config.post_monsoon_wide),
+    ]
+    return cohort_windows, start_windows
+
+
+def _build_mechanism_summary_rows(
+    facts: pd.DataFrame,
+    *,
+    group_column: str,
+    group_label: str,
+    config: MechanismConfig,
+) -> pd.DataFrame:
+    columns = [
+        group_label,
+        "Cohort Window",
+        "Cohort Months",
+        "Start Window",
+        "Start Months",
+        "Foundations Total",
+        "Matched Non-Negative",
+        "Starts In Window",
+        "% of All Foundations",
+        "% Within Matched",
+        "Match Coverage %",
+        "Min Foundations Threshold",
+        "Threshold Applied",
+    ]
+    if facts.empty:
+        return pd.DataFrame(columns=columns)
+    cohort_windows, start_windows = _mechanism_windows(config)
+    rows: list[dict[str, object]] = []
+    for group_value, group_scope in facts.groupby(group_column, dropna=False):
+        group_value_text = _safe_text(group_value)
+        if not group_value_text:
+            continue
+        month_series = pd.to_numeric(group_scope.get("foundation_month_num"), errors="coerce")
+        start_month_series = pd.to_numeric(group_scope.get("erection_start_month_num"), errors="coerce")
+        for cohort_name, cohort_months in cohort_windows:
+            cohort_scope = group_scope[month_series.isin(list(cohort_months))].copy()
+            foundation_total = int(len(cohort_scope.index))
+            if foundation_total < int(config.min_foundation_count):
+                continue
+            matched_scope = cohort_scope[
+                cohort_scope["matched"]
+                & ~cohort_scope["negative_delay"]
+                & pd.to_numeric(cohort_scope.get("erection_start_month_num"), errors="coerce").notna()
+            ].copy()
+            matched_non_negative = int(len(matched_scope.index))
+            for start_name, start_months in start_windows:
+                starts_in_window = int(start_month_series.loc[matched_scope.index].isin(list(start_months)).sum()) if matched_non_negative else 0
+                pct_all = (starts_in_window / foundation_total * 100.0) if foundation_total else pd.NA
+                pct_matched = (starts_in_window / matched_non_negative * 100.0) if matched_non_negative else pd.NA
+                match_coverage = (matched_non_negative / foundation_total * 100.0) if foundation_total else pd.NA
+                rows.append(
+                    {
+                        group_label: group_value_text,
+                        "Cohort Window": cohort_name,
+                        "Cohort Months": _month_values_text(cohort_months),
+                        "Start Window": start_name,
+                        "Start Months": _month_values_text(start_months),
+                        "Foundations Total": foundation_total,
+                        "Matched Non-Negative": matched_non_negative,
+                        "Starts In Window": starts_in_window,
+                        "% of All Foundations": round(float(pct_all), 2) if pd.notna(pct_all) else pd.NA,
+                        "% Within Matched": round(float(pct_matched), 2) if pd.notna(pct_matched) else pd.NA,
+                        "Match Coverage %": round(float(match_coverage), 2) if pd.notna(match_coverage) else pd.NA,
+                        "Min Foundations Threshold": int(config.min_foundation_count),
+                        "Threshold Applied": "Yes",
+                    }
+                )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _build_mechanism_matrix_project(facts: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "Project",
+        "Foundation Month",
+        "Erection Start Month",
+        "Foundations In Pair",
+        "Foundations Total (Month)",
+        "Matched Non-Negative (Month)",
+        "% of All Foundations In Month",
+        "% of Matched Non-Negative In Month",
+    ]
+    if facts.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = facts.copy()
+    work["foundation_month_period"] = pd.to_datetime(work.get("foundation_complete"), errors="coerce").dt.to_period("M")
+    work["erection_month_period"] = pd.to_datetime(work.get("erection_start_final"), errors="coerce").dt.to_period("M")
+    rows: list[dict[str, object]] = []
+    for project, project_scope in work.groupby("Project", dropna=False):
+        project_name = _safe_text(project)
+        if not project_name:
+            continue
+        month_total = project_scope.groupby("foundation_month_period", dropna=False).size()
+        matched_scope = project_scope[
+            project_scope["matched"]
+            & ~project_scope["negative_delay"]
+            & project_scope["erection_month_period"].notna()
+            & project_scope["foundation_month_period"].notna()
+        ].copy()
+        matched_month_total = matched_scope.groupby("foundation_month_period", dropna=False).size()
+        pair_counts = matched_scope.groupby(["foundation_month_period", "erection_month_period"], dropna=False).size()
+        for (foundation_period, erection_period), count in pair_counts.items():
+            if pd.isna(foundation_period) or pd.isna(erection_period):
+                continue
+            fdn_total = int(month_total.get(foundation_period, 0))
+            matched_total = int(matched_month_total.get(foundation_period, 0))
+            pct_all = (int(count) / fdn_total * 100.0) if fdn_total else pd.NA
+            pct_matched = (int(count) / matched_total * 100.0) if matched_total else pd.NA
+            rows.append(
+                {
+                    "Project": project_name,
+                    "Foundation Month": str(foundation_period),
+                    "Erection Start Month": str(erection_period),
+                    "Foundations In Pair": int(count),
+                    "Foundations Total (Month)": fdn_total,
+                    "Matched Non-Negative (Month)": matched_total,
+                    "% of All Foundations In Month": round(float(pct_all), 2) if pd.notna(pct_all) else pd.NA,
+                    "% of Matched Non-Negative In Month": round(float(pct_matched), 2) if pd.notna(pct_matched) else pd.NA,
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _build_mechanism_matrix_overall(facts: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "Foundation Month",
+        "Erection Start Month",
+        "Foundations In Pair",
+        "Foundations Total (Month)",
+        "Matched Non-Negative (Month)",
+        "% of All Foundations In Month",
+        "% of Matched Non-Negative In Month",
+    ]
+    if facts.empty:
+        return pd.DataFrame(columns=columns)
+    work = facts.copy()
+    work["foundation_month_period"] = pd.to_datetime(work.get("foundation_complete"), errors="coerce").dt.to_period("M")
+    work["erection_month_period"] = pd.to_datetime(work.get("erection_start_final"), errors="coerce").dt.to_period("M")
+    month_total = work.groupby("foundation_month_period", dropna=False).size()
+    matched_scope = work[
+        work["matched"]
+        & ~work["negative_delay"]
+        & work["foundation_month_period"].notna()
+        & work["erection_month_period"].notna()
+    ].copy()
+    matched_month_total = matched_scope.groupby("foundation_month_period", dropna=False).size()
+    pair_counts = matched_scope.groupby(["foundation_month_period", "erection_month_period"], dropna=False).size()
+    rows: list[dict[str, object]] = []
+    for (foundation_period, erection_period), count in pair_counts.items():
+        if pd.isna(foundation_period) or pd.isna(erection_period):
+            continue
+        fdn_total = int(month_total.get(foundation_period, 0))
+        matched_total = int(matched_month_total.get(foundation_period, 0))
+        pct_all = (int(count) / fdn_total * 100.0) if fdn_total else pd.NA
+        pct_matched = (int(count) / matched_total * 100.0) if matched_total else pd.NA
+        rows.append(
+            {
+                "Foundation Month": str(foundation_period),
+                "Erection Start Month": str(erection_period),
+                "Foundations In Pair": int(count),
+                "Foundations Total (Month)": fdn_total,
+                "Matched Non-Negative (Month)": matched_total,
+                "% of All Foundations In Month": round(float(pct_all), 2) if pd.notna(pct_all) else pd.NA,
+                "% of Matched Non-Negative In Month": round(float(pct_matched), 2) if pd.notna(pct_matched) else pd.NA,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _build_mechanism_evidence_audit(facts: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "Project",
+        "Series",
+        "Ownership",
+        "Project Rollup Key",
+        "Location",
+        "Foundation Date",
+        "Foundation Month",
+        "Foundation Month Num",
+        "Erection Start",
+        "Erection Start Month",
+        "Erection Start Month Num",
+        "Delay Days",
+        "Matched",
+        "Negative Excluded",
+        "Match Basis",
+        "Foundation Line",
+        "Erection Line",
+        "Foundation Source File",
+        "Foundation Source Sheet",
+        "Erection Source File",
+        "Erection Source Sheet",
+    ]
+    if facts.empty:
+        return pd.DataFrame(columns=columns)
+    work = facts.copy()
+    work["Foundation Date"] = pd.to_datetime(work.get("foundation_complete"), errors="coerce").dt.strftime("%Y-%m-%d")
+    work["Foundation Date"] = work["Foundation Date"].where(work["Foundation Date"].notna(), "")
+    work["Erection Start"] = pd.to_datetime(work.get("erection_start_final"), errors="coerce").dt.strftime("%Y-%m-%d")
+    work["Erection Start"] = work["Erection Start"].where(work["Erection Start"].notna(), "")
+    audit = pd.DataFrame(
+        {
+            "Project": work.get("Project", "").fillna("").astype(str).str.strip(),
+            "Series": work.get("Series", "").fillna("").astype(str).str.strip(),
+            "Ownership": work.get("Ownership", "").fillna("").astype(str).str.strip(),
+            "Project Rollup Key": work.get("project_rollup_key", "").fillna("").astype(str).str.strip(),
+            "Location": work.get("location_no", "").fillna("").astype(str).str.strip(),
+            "Foundation Date": work["Foundation Date"],
+            "Foundation Month": work.get("foundation_month", "").fillna("").astype(str).str.strip(),
+            "Foundation Month Num": pd.to_numeric(work.get("foundation_month_num"), errors="coerce"),
+            "Erection Start": work["Erection Start"],
+            "Erection Start Month": work.get("erection_start_month", "").fillna("").astype(str).str.strip(),
+            "Erection Start Month Num": pd.to_numeric(work.get("erection_start_month_num"), errors="coerce"),
+            "Delay Days": pd.to_numeric(work.get("delay_days"), errors="coerce"),
+            "Matched": work.get("matched", False).fillna(False).map(lambda value: "Yes" if bool(value) else "No"),
+            "Negative Excluded": work.get("negative_delay", False).fillna(False).map(lambda value: "Yes" if bool(value) else "No"),
+            "Match Basis": work.get("match_basis", "").fillna("").astype(str).str.strip(),
+            "Foundation Line": work.get("foundation_line", "").fillna("").astype(str).str.strip(),
+            "Erection Line": work.get("erection_line", "").fillna("").astype(str).str.strip(),
+            "Foundation Source File": work.get("foundation_source_file", "").fillna("").astype(str).str.strip(),
+            "Foundation Source Sheet": work.get("foundation_source_sheet", "").fillna("").astype(str).str.strip(),
+            "Erection Source File": work.get("erection_source_file", "").fillna("").astype(str).str.strip(),
+            "Erection Source Sheet": work.get("erection_source_sheet", "").fillna("").astype(str).str.strip(),
+        }
+    )
+    return audit.reindex(columns=columns)
+
+
+def _build_mechanism_config_table(config: MechanismConfig) -> pd.DataFrame:
+    rows = [
+        {"Parameter": "pre_monsoon", "Value": _month_values_text(config.pre_monsoon)},
+        {"Parameter": "monsoon", "Value": _month_values_text(config.monsoon)},
+        {"Parameter": "post_monsoon", "Value": _month_values_text(config.post_monsoon)},
+        {"Parameter": "post_monsoon_wide", "Value": _month_values_text(config.post_monsoon_wide)},
+        {"Parameter": "dry", "Value": _month_values_text(config.dry)},
+        {"Parameter": "min_foundation_count", "Value": str(int(config.min_foundation_count))},
+    ]
+    return pd.DataFrame(rows, columns=["Parameter", "Value"])
+
+
 def build_foundation_delay_analysis_tables(
     source_daily: pd.DataFrame,
     foundation_completions: pd.DataFrame,
@@ -1335,8 +1718,10 @@ def build_foundation_delay_analysis_tables(
     foundation_diagnostics: pd.DataFrame,
     progress_status_raw: pd.DataFrame,
     daily_reference: pd.DataFrame | None = None,
+    mechanism_config: MechanismConfig | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Build Foundation Delay Analysis V2 tables."""
+    resolved_mechanism_config = _resolve_mechanism_config(mechanism_config)
     merged = _build_merged_delay_fact(source_daily, foundation_completions)
     daily_merged = (
         _build_merged_delay_fact(daily_reference, foundation_completions)
@@ -1583,6 +1968,29 @@ def build_foundation_delay_analysis_tables(
         meta = coverage_df[["Project", "Source Type", "Parser Modes", "Coverage Status", "Scope Source", "Scope Report Date"]].drop_duplicates(subset=["Project"])
         project_phase = project_phase.merge(meta, on="Project", how="left")
 
+    mechanism_summary_project = _build_mechanism_summary_rows(
+        facts,
+        group_column="Project",
+        group_label="Project",
+        config=resolved_mechanism_config,
+    )
+    mechanism_summary_series = _build_mechanism_summary_rows(
+        facts,
+        group_column="Series",
+        group_label="Series",
+        config=resolved_mechanism_config,
+    )
+    mechanism_summary_ownership = _build_mechanism_summary_rows(
+        facts,
+        group_column="Ownership",
+        group_label="Ownership",
+        config=resolved_mechanism_config,
+    )
+    mechanism_matrix_project = _build_mechanism_matrix_project(facts)
+    mechanism_matrix_overall = _build_mechanism_matrix_overall(facts)
+    mechanism_audit = _build_mechanism_evidence_audit(facts)
+    mechanism_cfg = _build_mechanism_config_table(resolved_mechanism_config)
+
     return {
         "Delay Phase - Project": project_phase,
         "Delay Phase - Series": series_phase,
@@ -1593,6 +2001,13 @@ def build_foundation_delay_analysis_tables(
         "Delay Coverage": coverage_df,
         "Delay Anomalies": anomalies_df,
         "Scope Snapshot": scope_snapshot_df,
+        "Mechanism Summary - Project": mechanism_summary_project,
+        "Mechanism Summary - Series": mechanism_summary_series,
+        "Mechanism Summary - Ownership": mechanism_summary_ownership,
+        "Mechanism Matrix - Project": mechanism_matrix_project,
+        "Mechanism Matrix - Overall": mechanism_matrix_overall,
+        "Mechanism Evidence Audit": mechanism_audit,
+        "Mechanism Config": mechanism_cfg,
     }
 
 
@@ -1604,6 +2019,7 @@ def build_complete_foundation_analysis_tables(
     foundation_diagnostics: pd.DataFrame,
     progress_status_raw: pd.DataFrame,
     daily_reference: pd.DataFrame | None = None,
+    mechanism_config: MechanismConfig | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Build complete foundation analysis bundle (legacy + V2)."""
     legacy_source = build_legacy_erection_source_from_raw(raw_erection_source)
@@ -1626,6 +2042,7 @@ def build_complete_foundation_analysis_tables(
         foundation_diagnostics=foundation_diagnostics,
         progress_status_raw=progress_status_raw,
         daily_reference=daily_reference,
+        mechanism_config=mechanism_config,
     )
     tables = {
         "Foundation Gap Monthly": gap_monthly,
@@ -1664,6 +2081,13 @@ def write_foundation_delay_analysis_workbook(
         "Delay Coverage",
         "Delay Anomalies",
         "Scope Snapshot",
+        "Mechanism Summary - Project",
+        "Mechanism Summary - Series",
+        "Mechanism Summary - Ownership",
+        "Mechanism Matrix - Project",
+        "Mechanism Matrix - Overall",
+        "Mechanism Evidence Audit",
+        "Mechanism Config",
     ]
     seen = set(ordered_sheets)
     for sheet_name in tables.keys():
