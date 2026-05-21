@@ -7,7 +7,10 @@ from pathlib import Path
 import pandas as pd
 
 from dashboard.foundation_delay_analysis import (
+    build_legacy_erection_source_from_raw,
+    build_complete_foundation_analysis_tables,
     build_foundation_delay_analysis_tables,
+    build_v2_erection_source_from_raw,
     write_foundation_delay_analysis_workbook,
 )
 
@@ -161,7 +164,207 @@ class FoundationDelayAnalysisV2Tests(unittest.TestCase):
                     },
                 )
 
+    def test_complete_bundle_contains_legacy_and_v2_tabs(self) -> None:
+        source_daily, foundation_completions, foundation_coverage, foundation_diagnostics, progress_status_raw = self._build_inputs()
+        tables = build_complete_foundation_analysis_tables(
+            raw_erection_source=source_daily,
+            foundation_completions=foundation_completions,
+            foundation_coverage=foundation_coverage,
+            foundation_diagnostics=foundation_diagnostics,
+            progress_status_raw=progress_status_raw,
+            daily_reference=source_daily,
+        )
+        expected = {
+            "Foundation Gap Monthly",
+            "Foundation Gap Weekly",
+            "Foundation Gap Coverage",
+            "Foundation Delay Phases",
+            "Foundation Delay Monthly",
+            "Foundation Delay Coverage",
+            "Foundation Delay Anomalies",
+            "Delay Phase - Project",
+            "Delay Phase - Series",
+            "Delay Phase - Ownership",
+            "Delay Buckets - Project",
+            "Delay Buckets - Series",
+            "Delay Buckets - Ownership",
+            "Delay Coverage",
+            "Delay Anomalies",
+            "Scope Snapshot",
+        }
+        self.assertTrue(expected.issubset(set(tables.keys())))
+        self.assertFalse(tables["Foundation Gap Monthly"].empty)
+        self.assertFalse(tables["Foundation Delay Phases"].empty)
+        self.assertFalse(tables["Delay Phase - Project"].empty)
+
+    def test_legacy_and_v2_raw_source_eligibility_filters(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "1/0", "Start Date": "2026-01-01", "Complete Date": "2026-01-10"},
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "2/0", "Start Date": "2026-01-05", "Complete Date": pd.NA},
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "3/0", "Start Date": pd.NA, "Complete Date": "2026-01-20"},
+            ]
+        )
+        legacy = build_legacy_erection_source_from_raw(raw)
+        v2 = build_v2_erection_source_from_raw(raw)
+        self.assertEqual(len(legacy.index), 1)
+        self.assertEqual(set(legacy["location_no"].astype(str).tolist()), {"1/0"})
+        self.assertEqual(len(v2.index), 2)
+        self.assertEqual(set(v2["location_no"].astype(str).tolist()), {"1/0", "2/0"})
+
+    def test_legacy_and_v2_matching_coherent_when_same_eligibility(self) -> None:
+        foundation_completions = pd.DataFrame(
+            [
+                {"project_code": "TA 510", "project_display": "TA 510", "project_scope_key": "ta510", "line_name": "L1", "source_type": "detail", "event_date": "2026-01-01", "location_no": "1/0"},
+                {"project_code": "TA 510", "project_display": "TA 510", "project_scope_key": "ta510", "line_name": "L1", "source_type": "detail", "event_date": "2026-01-02", "location_no": "2/0"},
+            ]
+        )
+        foundation_coverage = pd.DataFrame(
+            [
+                {"project_code": "TA 510", "project_display": "TA 510", "status": "OK_DETAIL", "source_used": "detail", "reason": "Detail rows parsed"},
+            ]
+        )
+        foundation_diagnostics = pd.DataFrame([{"Project": "TA 510", "ParserMode": "template"}])
+        raw = pd.DataFrame(
+            [
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "1/0", "Start Date": "2026-01-03", "Complete Date": "2026-01-04"},
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "2/0", "Start Date": "2026-01-05", "Complete Date": "2026-01-06"},
+            ]
+        )
+        tables = build_complete_foundation_analysis_tables(
+            raw_erection_source=raw,
+            foundation_completions=foundation_completions,
+            foundation_coverage=foundation_coverage,
+            foundation_diagnostics=foundation_diagnostics,
+            progress_status_raw=pd.DataFrame(),
+            daily_reference=pd.DataFrame(),
+        )
+        legacy_cov = tables["Foundation Delay Coverage"]
+        v2_cov = tables["Delay Coverage"]
+        legacy_row = legacy_cov[legacy_cov["Project"].astype(str).str.strip().eq("TA 510")].iloc[0]
+        v2_row = v2_cov[v2_cov["Project"].astype(str).str.strip().eq("TA 510")].iloc[0]
+        self.assertEqual(int(legacy_row["Matched Locations"]), int(v2_row["Matched Locations"]))
+        self.assertEqual(int(legacy_row["Unmatched Locations"]), int(v2_row["Unmatched Locations"]))
+
+    def test_legacy_tabs_exclude_start_only_rows(self) -> None:
+        foundation_completions = pd.DataFrame(
+            [
+                {"project_code": "TA 510", "project_display": "TA 510", "project_scope_key": "ta510", "line_name": "L1", "source_type": "detail", "event_date": "2026-01-01", "location_no": "1/0"},
+                {"project_code": "TA 510", "project_display": "TA 510", "project_scope_key": "ta510", "line_name": "L1", "source_type": "detail", "event_date": "2026-01-02", "location_no": "2/0"},
+            ]
+        )
+        foundation_coverage = pd.DataFrame(
+            [
+                {"project_code": "TA 510", "project_display": "TA 510", "status": "OK_DETAIL", "source_used": "detail", "reason": "Detail rows parsed", "snapshot_limited": "No", "detail_rows": 2, "detail_completions": 2, "snapshot_rows": 0},
+            ]
+        )
+        foundation_diagnostics = pd.DataFrame([{"Project": "TA 510", "ParserMode": "template"}])
+        raw = pd.DataFrame(
+            [
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "1/0", "Start Date": "2026-01-03", "Complete Date": "2026-01-04"},
+                {"Project Code": "TA 510", "Project Display": "TA 510", "Line Name": "L1", "Location No.": "2/0", "Start Date": "2026-01-05", "Complete Date": pd.NA},
+            ]
+        )
+        tables = build_complete_foundation_analysis_tables(
+            raw_erection_source=raw,
+            foundation_completions=foundation_completions,
+            foundation_coverage=foundation_coverage,
+            foundation_diagnostics=foundation_diagnostics,
+            progress_status_raw=pd.DataFrame(),
+            daily_reference=pd.DataFrame(),
+        )
+        legacy_cov = tables["Foundation Delay Coverage"]
+        v2_cov = tables["Delay Coverage"]
+        legacy_row = legacy_cov[legacy_cov["Project"].astype(str).str.strip().eq("TA 510")].iloc[0]
+        v2_row = v2_cov[v2_cov["Project"].astype(str).str.strip().eq("TA 510")].iloc[0]
+        self.assertEqual(int(legacy_row["Matched Locations"]), 1)
+        self.assertEqual(int(v2_row["Matched Locations"]), 2)
+
+    def test_raw_start_recovery_and_alias_metrics(self) -> None:
+        foundation_completions = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 413",
+                    "project_display": "TA 413",
+                    "project_scope_key": "ta413",
+                    "line_name": "",
+                    "source_type": "detail",
+                    "event_date": "2026-03-05",
+                    "location_no": "N'37A/0",
+                }
+            ]
+        )
+        foundation_coverage = pd.DataFrame(
+            [
+                {"project_code": "TA 413", "project_display": "TA 413", "status": "OK_DETAIL", "source_used": "detail", "reason": "Detail rows parsed"},
+            ]
+        )
+        foundation_diagnostics = pd.DataFrame([{"Project": "TA 413", "ParserMode": "template"}])
+        # Raw erection source has start date but normalized location text is plain "37A/0".
+        source_raw = pd.DataFrame(
+            [
+                {"Project Code": "TA 413", "Project Display": "TA 413", "Line Name": "", "Location No.": "37A/0", "Start Date": "2026-03-20"},
+            ]
+        )
+        # Daily reference intentionally does not contain this location to mark as recovered.
+        source_daily = pd.DataFrame(
+            [
+                {"project_code": "TA 413", "project_display": "TA 413", "line_name": "", "location_no": "20/0", "start_date": "2025-01-01"},
+            ]
+        )
+        progress_status_raw = pd.DataFrame()
+
+        tables = build_foundation_delay_analysis_tables(
+            source_raw,
+            foundation_completions,
+            foundation_coverage,
+            foundation_diagnostics,
+            progress_status_raw,
+            daily_reference=source_daily,
+        )
+        coverage = tables["Delay Coverage"]
+        row = coverage[coverage["Project"].astype(str).str.strip().eq("TA 413")].iloc[0]
+        self.assertEqual(int(row["Matched Locations"]), 1)
+        self.assertEqual(int(row["RawData Start-Date Matches"]), 1)
+        self.assertEqual(int(row["Alias Matches"]), 1)
+        self.assertEqual(int(row["Dropped-by-Daily Recovered"]), 1)
+        anomalies = tables["Delay Anomalies"]
+        self.assertTrue(anomalies.empty)
+
+    def test_multi_line_strict_line_to_line_matching(self) -> None:
+        foundation_completions = pd.DataFrame(
+            [
+                {"project_code": "TA 513", "project_display": "TA 513", "project_scope_key": "ta513", "line_name": "S-F", "source_type": "detail", "event_date": "2026-05-04", "location_no": "30/0"},
+                {"project_code": "TA 513", "project_display": "TA 513", "project_scope_key": "ta513", "line_name": "S-P", "source_type": "detail", "event_date": "2025-09-10", "location_no": "30/0"},
+            ]
+        )
+        foundation_coverage = pd.DataFrame(
+            [
+                {"project_code": "TA 513", "project_display": "TA 513", "status": "OK_DETAIL", "source_used": "detail", "reason": "Detail rows parsed"},
+            ]
+        )
+        foundation_diagnostics = pd.DataFrame([{"Project": "TA 513", "ParserMode": "template"}])
+        source_raw = pd.DataFrame(
+            [
+                {"Project Code": "TA 513", "Project Display": "TA 513", "Line Name": "Ere S-P", "Location No.": "30/0", "Start Date": "2025-12-08"},
+            ]
+        )
+        progress_status_raw = pd.DataFrame()
+
+        tables = build_foundation_delay_analysis_tables(
+            source_raw,
+            foundation_completions,
+            foundation_coverage,
+            foundation_diagnostics,
+            progress_status_raw,
+        )
+        coverage = tables["Delay Coverage"]
+        row = coverage[coverage["Project"].astype(str).str.strip().eq("TA 513")].iloc[0]
+        self.assertEqual(int(row["Matched Locations"]), 0)
+        self.assertEqual(int(row["Unmatched Locations"]), 2)
+        anomalies = tables["Delay Anomalies"]
+        self.assertEqual(int((anomalies["Issue"] == "UNMATCHED_LOCATION").sum()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
-

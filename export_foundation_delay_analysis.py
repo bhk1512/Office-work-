@@ -10,13 +10,14 @@ from pathlib import Path
 from dashboard.config import AppConfig, configure_logging
 from dashboard.data_loader import (
     load_daily,
+    load_erection_raw,
     load_foundation_completions,
     load_foundation_coverage,
     load_foundation_diagnostics,
     load_progress_status_raw,
 )
 from dashboard.foundation_delay_analysis import (
-    build_foundation_delay_analysis_tables,
+    build_complete_foundation_analysis_tables,
     write_foundation_delay_analysis_workbook,
 )
 
@@ -65,18 +66,20 @@ def main() -> int:
     config.validate()
 
     LOGGER.info("Loading source datasets from %s", config.data_path)
+    raw_erection_df = load_erection_raw(config)
     daily_df = load_daily(config)
     foundation_completions = load_foundation_completions(config)
     foundation_coverage = load_foundation_coverage(config)
     foundation_diagnostics = load_foundation_diagnostics(config)
     progress_status_raw = load_progress_status_raw(config)
 
-    tables = build_foundation_delay_analysis_tables(
-        source_daily=daily_df,
+    tables = build_complete_foundation_analysis_tables(
+        raw_erection_source=raw_erection_df,
         foundation_completions=foundation_completions,
         foundation_coverage=foundation_coverage,
         foundation_diagnostics=foundation_diagnostics,
         progress_status_raw=progress_status_raw,
+        daily_reference=daily_df,
     )
     output = _resolve_output_path(args.output)
     written = write_foundation_delay_analysis_workbook(output, tables)
@@ -87,4 +90,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

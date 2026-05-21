@@ -201,42 +201,19 @@ class FoundationGapExportTests(unittest.TestCase):
             )
 
             with pd.ExcelFile(output_path) as xl:
-                self.assertIn("Foundation Gap Monthly", xl.sheet_names)
-                self.assertIn("Foundation Gap Weekly", xl.sheet_names)
-                self.assertIn("Foundation Gap Coverage", xl.sheet_names)
-                self.assertIn("Foundation Delay Phases", xl.sheet_names)
-                self.assertIn("Foundation Delay Monthly", xl.sheet_names)
-                self.assertIn("Foundation Delay Coverage", xl.sheet_names)
                 self.assertIn("Erection Summary Weekly", xl.sheet_names)
                 self.assertIn("Erection Summary Monthly", xl.sheet_names)
+                self.assertNotIn("Foundation Gap Monthly", xl.sheet_names)
+                self.assertNotIn("Foundation Gap Weekly", xl.sheet_names)
+                self.assertNotIn("Foundation Gap Coverage", xl.sheet_names)
+                self.assertNotIn("Foundation Delay Phases", xl.sheet_names)
+                self.assertNotIn("Foundation Delay Monthly", xl.sheet_names)
+                self.assertNotIn("Foundation Delay Coverage", xl.sheet_names)
 
-            monthly = pd.read_excel(output_path, sheet_name="Foundation Gap Monthly", header=1)
-            weekly = pd.read_excel(output_path, sheet_name="Foundation Gap Weekly", header=1)
-            coverage = pd.read_excel(output_path, sheet_name="Foundation Gap Coverage", header=1)
-            delay_phase = pd.read_excel(output_path, sheet_name="Foundation Delay Phases", header=1)
-            delay_coverage = pd.read_excel(output_path, sheet_name="Foundation Delay Coverage", header=1)
-
-            ta_rows = monthly[monthly["Project"].astype(str).str.strip() == "TA 510"]
-            self.assertFalse(ta_rows.empty)
-            self.assertEqual(len(ta_rows["Project"].unique()), 1)
-            may_row = ta_rows[ta_rows["Month"].astype(str).str.strip() == "2026-05"]
-            self.assertFalse(may_row.empty)
-            self.assertEqual(float(may_row.iloc[0]["Foundations Cumulative"]), 2.0)
-            self.assertEqual(float(may_row.iloc[0]["Erections Cumulative"]), 3.0)
-            self.assertEqual(float(may_row.iloc[0]["Gap Cumulative"]), -1.0)
-
-            self.assertTrue((weekly["Project"].astype(str).str.strip() == "TA 510").any())
-            blocked = coverage[
-                coverage["Project"].astype(str).str.strip().eq("TB 408")
-                & coverage["Coverage Status"].astype(str).str.upper().str.contains("BLOCKED_NO_SOURCE")
-            ]
-            self.assertFalse(blocked.empty)
-            self.assertTrue((delay_phase["Project"].astype(str).str.strip() == "TA 510").any())
-            delay_cov_ta510 = delay_coverage[
-                delay_coverage["Project"].astype(str).str.strip().eq("TA 510")
-                & delay_coverage["Eligible"].astype(str).str.strip().eq("Yes")
-            ]
-            self.assertFalse(delay_cov_ta510.empty)
+            weekly_summary = pd.read_excel(output_path, sheet_name="Erection Summary Weekly", header=None)
+            monthly_summary = pd.read_excel(output_path, sheet_name="Erection Summary Monthly", header=None)
+            self.assertGreater(len(weekly_summary.index), 2)
+            self.assertGreater(len(monthly_summary.index), 2)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,76 @@ def _compact_project_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
 
 
+def _pick_series(frame: pd.DataFrame, candidates: tuple[str, ...]) -> pd.Series:
+    for name in candidates:
+        if name in frame.columns:
+            return frame[name]
+    return pd.Series(pd.NA, index=frame.index, dtype="object")
+
+
+def _normalize_location_alias_text(value: object) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    # Conservative cleanup rules for known location notations only.
+    text = re.sub(r"^N['`’]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[A-Za-z](?:\s*,\s*[A-Za-z])+$", "", text)
+    text = re.sub(r"\s+[A-Za-z]$", "", text)
+    return text.strip()
+
+
+def _normalize_erection_source_columns(source: pd.DataFrame) -> pd.DataFrame:
+    if source is None or source.empty:
+        return pd.DataFrame()
+    work = source.copy()
+    mappings: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("project_code", ("project_code", "Project Code")),
+        ("project_display", ("project_display", "Project Display")),
+        ("project_name", ("project_name", "Project Name", "project")),
+        ("line_name", ("line_name", "Line Name")),
+        ("location_no", ("location_no", "Location No.", "Location No", "location no")),
+        ("start_date", ("start_date", "Start Date", "starting date", "Starting Date")),
+    )
+    for target, candidates in mappings:
+        if target in work.columns:
+            continue
+        series = _pick_series(work, candidates)
+        work[target] = series
+    return work
+
+
+def build_legacy_erection_source_from_raw(raw_source: pd.DataFrame) -> pd.DataFrame:
+    """Normalize raw erection rows and keep only records with both start and completion dates."""
+    source = _normalize_erection_source_columns(raw_source)
+    if source.empty:
+        return pd.DataFrame()
+    work = source.copy()
+    work["start_date"] = _coerce_mixed_excel_dates_series(work.get("start_date", pd.Series(dtype="object")))
+    completion_series = _pick_series(
+        work,
+        ("completion_date", "Complete Date", "complete date", "completion date"),
+    )
+    work["completion_date"] = _coerce_mixed_excel_dates_series(completion_series)
+    work = work[work["start_date"].notna() & work["completion_date"].notna()].copy()
+    return work
+
+
+def build_v2_erection_source_from_raw(raw_source: pd.DataFrame) -> pd.DataFrame:
+    """Normalize raw erection rows and keep records with valid start dates."""
+    source = _normalize_erection_source_columns(raw_source)
+    if source.empty:
+        return pd.DataFrame()
+    work = source.copy()
+    work["start_date"] = _coerce_mixed_excel_dates_series(work.get("start_date", pd.Series(dtype="object")))
+    completion_series = _pick_series(
+        work,
+        ("completion_date", "Complete Date", "complete date", "completion date"),
+    )
+    work["completion_date"] = _coerce_mixed_excel_dates_series(completion_series)
+    work = work[work["start_date"].notna()].copy()
+    return work
+
+
 def _coerce_mixed_excel_dates_series(values: pd.Series) -> pd.Series:
     parsed = pd.to_datetime(values, errors="coerce")
     numeric = pd.to_numeric(values, errors="coerce")
@@ -117,7 +187,10 @@ def _apply_project_rollup_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _build_erection_start_events(source_daily: pd.DataFrame) -> pd.DataFrame:
     if source_daily is None or source_daily.empty:
         return pd.DataFrame()
-    work = _apply_project_rollup_columns(source_daily)
+    source = _normalize_erection_source_columns(source_daily)
+    if source.empty:
+        return pd.DataFrame()
+    work = _apply_project_rollup_columns(source)
     work["start_date"] = _coerce_mixed_excel_dates_series(work.get("start_date", pd.Series(dtype="object")))
     work = work[work["start_date"].notna()].copy()
     if work.empty:
@@ -127,6 +200,7 @@ def _build_erection_start_events(source_daily: pd.DataFrame) -> pd.DataFrame:
     work["line_name"] = work.get("line_name", "").fillna("").astype(str).str.strip()
     work["line_name_norm"] = work["line_name"].map(_compact_project_key)
     work["location_no_norm"] = work["location_no"].map(_compact_project_key)
+    work["location_no_alias_norm"] = work["location_no"].map(_normalize_location_alias_text).map(_compact_project_key)
     work = work[
         work["project_rollup_key"].astype(bool)
         & work["location_no_norm"].astype(bool)
@@ -157,6 +231,7 @@ def _build_foundation_detail_events(foundation_completions: pd.DataFrame) -> pd.
     foundation["location_no"] = foundation.get("location_no", "").fillna("").astype(str).str.strip()
     foundation["line_name_norm"] = foundation["line_name"].map(_compact_project_key)
     foundation["location_no_norm"] = foundation["location_no"].map(_compact_project_key)
+    foundation["location_no_alias_norm"] = foundation["location_no"].map(_normalize_location_alias_text).map(_compact_project_key)
     foundation = foundation[
         foundation["project_rollup_key"].astype(bool)
         & foundation["location_no_norm"].astype(bool)
@@ -173,6 +248,7 @@ def _build_foundation_detail_events(foundation_completions: pd.DataFrame) -> pd.
             foundation_complete=("event_date", "min"),
             foundation_line=("line_name", "first"),
             location_no=("location_no", "first"),
+            location_no_alias_norm=("location_no_alias_norm", "first"),
         )
     )
 
@@ -187,10 +263,50 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
             columns=["project_rollup_key", "line_name_norm", "location_no_norm", "erection_start", "erection_line"]
         )
     merged = foundation_loc.merge(
-        erection_loc,
+        erection_loc.rename(
+            columns={
+                "erection_start": "erection_start_exact",
+                "erection_line": "erection_line_exact",
+            }
+        ),
         on=["project_rollup_key", "line_name_norm", "location_no_norm"],
         how="left",
     )
+
+    alias_from_foundation = pd.DataFrame()
+    if not erection_loc.empty:
+        alias_from_foundation = erection_loc.rename(
+            columns={
+                "location_no_norm": "location_no_alias_norm",
+                "erection_start": "erection_start_alias",
+                "erection_line": "erection_line_alias",
+            }
+        )[
+            ["project_rollup_key", "line_name_norm", "location_no_alias_norm", "erection_start_alias", "erection_line_alias"]
+        ]
+    if alias_from_foundation.empty:
+        alias_from_foundation = pd.DataFrame(
+            columns=["project_rollup_key", "line_name_norm", "location_no_alias_norm", "erection_start_alias", "erection_line_alias"]
+        )
+    merged = merged.merge(
+        alias_from_foundation,
+        on=["project_rollup_key", "line_name_norm", "location_no_alias_norm"],
+        how="left",
+    )
+
+    merged["erection_start"] = merged["erection_start_exact"].where(
+        merged["erection_start_exact"].notna(),
+        merged["erection_start_alias"],
+    )
+    merged["erection_line"] = merged["erection_line_exact"].where(
+        merged["erection_line_exact"].astype(bool),
+        merged["erection_line_alias"],
+    )
+    merged["match_basis"] = ""
+    exact_mask = merged["erection_start_exact"].notna()
+    alias_mask = (~exact_mask) & merged["erection_start_alias"].notna()
+    merged.loc[exact_mask, "match_basis"] = "exact"
+    merged.loc[alias_mask, "match_basis"] = "alias"
 
     if not erection_loc.empty:
         ere_loc_counts = (
@@ -222,6 +338,8 @@ def _build_merged_delay_fact(source_daily: pd.DataFrame, foundation_completions:
         merged["erection_start"].notna(),
         merged["ere_start_fallback"],
     )
+    fallback_mask = merged["match_basis"].eq("") & merged["ere_start_fallback"].notna()
+    merged.loc[fallback_mask, "match_basis"] = "fallback_single_line"
     merged["matched"] = merged["erection_start_final"].notna()
     merged["delay_days"] = (
         pd.to_datetime(merged["erection_start_final"], errors="coerce")
@@ -535,6 +653,328 @@ def build_foundation_delay_trend_tables_legacy(
         pd.DataFrame(coverage_rows, columns=coverage_columns),
         pd.DataFrame(anomaly_rows, columns=anomaly_columns),
     )
+
+
+def _build_erection_completion_events_for_gap(source_daily: pd.DataFrame) -> pd.DataFrame:
+    if source_daily is None or source_daily.empty:
+        return pd.DataFrame()
+    source = _normalize_erection_source_columns(source_daily)
+    if source.empty:
+        return pd.DataFrame()
+    work = _apply_project_rollup_columns(source)
+    completion_series = _pick_series(
+        source,
+        ("completion_date", "Complete Date", "complete date", "completion date"),
+    )
+    work["completion_date"] = _coerce_mixed_excel_dates_series(completion_series)
+    work = work[work["completion_date"].notna()].copy()
+    if work.empty:
+        return work
+    work = work[work["completion_date"].dt.year >= 1980].copy()
+    if work.empty:
+        return work
+    work["location_no"] = work.get("location_no", "").fillna("").astype(str).str.strip()
+    work["line_name"] = work.get("line_name", "").fillna("").astype(str).str.strip()
+    work["project_code"] = work.get("project_code", "").fillna("").astype(str).str.strip()
+    work["project_code_norm"] = work["project_code"].map(_compact_project_key)
+    work["line_name_norm"] = work["line_name"].map(_compact_project_key)
+    work["location_no_norm"] = work["location_no"].map(_compact_project_key)
+    dedupe_cols = ["project_code_norm", "line_name_norm", "location_no_norm", "completion_date"]
+    work = work.drop_duplicates(subset=dedupe_cols, keep="last")
+    return work
+
+
+def build_foundation_vs_erection_gap_tables_legacy(
+    source_daily: pd.DataFrame,
+    foundation_completions: pd.DataFrame,
+    foundation_coverage: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    monthly_columns = [
+        "Project",
+        "Source Type",
+        "Snapshot Limited",
+        "Month",
+        "Foundations Cumulative",
+        "Erections Cumulative",
+        "Gap Cumulative",
+    ]
+    weekly_columns = [
+        "Project",
+        "Source Type",
+        "Snapshot Limited",
+        "Week Start",
+        "Week End",
+        "Week",
+        "Foundations Cumulative",
+        "Erections Cumulative",
+        "Gap Cumulative",
+    ]
+    coverage_columns = [
+        "Project",
+        "Foundation Source Used",
+        "Coverage Status",
+        "Coverage Reason",
+        "Snapshot Limited",
+        "First Month Available",
+        "Last Month Available",
+        "First Week Available",
+        "Last Week Available",
+        "Detail Rows",
+        "Detail Completions",
+        "Snapshot Rows",
+        "Erection First Month",
+        "Erection Last Month",
+        "Notes",
+    ]
+
+    erections = _build_erection_completion_events_for_gap(source_daily)
+    foundation = _apply_project_rollup_columns(foundation_completions) if isinstance(foundation_completions, pd.DataFrame) else pd.DataFrame()
+    coverage = _apply_project_rollup_columns(foundation_coverage) if isinstance(foundation_coverage, pd.DataFrame) else pd.DataFrame()
+
+    if foundation.empty and erections.empty and coverage.empty:
+        return (
+            pd.DataFrame(columns=monthly_columns),
+            pd.DataFrame(columns=weekly_columns),
+            pd.DataFrame(columns=coverage_columns),
+        )
+
+    if not foundation.empty:
+        foundation["event_date"] = _coerce_mixed_excel_dates_series(foundation.get("event_date", pd.Series(dtype="object")))
+        foundation["location_no"] = foundation.get("location_no", "").fillna("").astype(str).str.strip()
+        foundation["line_name"] = foundation.get("line_name", "").fillna("").astype(str).str.strip()
+        foundation["source_type"] = foundation.get("source_type", "").fillna("").astype(str).str.strip().str.lower()
+        foundation["project_code"] = foundation.get("project_code", "").fillna("").astype(str).str.strip()
+        foundation["project_code_norm"] = foundation["project_code"].map(_compact_project_key)
+        foundation["line_name_norm"] = foundation["line_name"].map(_compact_project_key)
+        foundation["location_no_norm"] = foundation["location_no"].map(_compact_project_key)
+        foundation["cumulative_foundation"] = pd.to_numeric(foundation.get("cumulative_foundation"), errors="coerce")
+    else:
+        foundation = pd.DataFrame()
+
+    coverage_by_key: dict[str, dict[str, object]] = {}
+    excluded_gap_projects: set[str] = set()
+    if not coverage.empty:
+        coverage["status"] = coverage.get("status", "").fillna("").astype(str).str.strip()
+        coverage["reason"] = coverage.get("reason", "").fillna("").astype(str).str.strip()
+        coverage["source_used"] = coverage.get("source_used", "").fillna("").astype(str).str.strip()
+        coverage["snapshot_limited"] = coverage.get("snapshot_limited", pd.Series("", index=coverage.index)).fillna("").astype(str).str.strip()
+        coverage["detail_rows"] = pd.to_numeric(coverage.get("detail_rows", pd.Series(0, index=coverage.index)), errors="coerce").fillna(0).astype(int)
+        coverage["detail_completions"] = pd.to_numeric(coverage.get("detail_completions", pd.Series(0, index=coverage.index)), errors="coerce").fillna(0).astype(int)
+        coverage["snapshot_rows"] = pd.to_numeric(coverage.get("snapshot_rows", pd.Series(0, index=coverage.index)), errors="coerce").fillna(0).astype(int)
+        for project_key, group in coverage.groupby("project_rollup_key", dropna=False):
+            key = _safe_text(project_key)
+            if not key:
+                continue
+            first = group.iloc[0]
+            coverage_by_key[key] = {
+                "project": _safe_text(first.get("project_rollup_display", "")) or _safe_text(first.get("project_display", "")),
+                "status": "; ".join(sorted({_safe_text(v) for v in group["status"] if _safe_text(v)})),
+                "reason": " | ".join(sorted({_safe_text(v) for v in group["reason"] if _safe_text(v)})),
+                "source_used": "; ".join(sorted({_safe_text(v) for v in group["source_used"] if _safe_text(v)})),
+                "snapshot_limited": "Yes" if any(_safe_text(v).lower() == "yes" for v in group["snapshot_limited"]) else "No",
+                "detail_rows": int(group["detail_rows"].sum()),
+                "detail_completions": int(group["detail_completions"].sum()),
+                "snapshot_rows": int(group["snapshot_rows"].sum()),
+            }
+            status_text = str(coverage_by_key[key].get("status", "")).upper()
+            if "SKIPPED_BLANK_CONFIG" in status_text:
+                excluded_gap_projects.add(key)
+
+    detail = pd.DataFrame()
+    snapshot = pd.DataFrame()
+    if not foundation.empty:
+        detail = foundation[(foundation["source_type"] == "detail") & foundation["event_date"].notna()].copy()
+        if not detail.empty:
+            detail = detail.drop_duplicates(
+                subset=["project_code_norm", "line_name_norm", "location_no_norm", "event_date"],
+                keep="last",
+            )
+        snapshot = foundation[(foundation["source_type"] != "detail") & foundation["event_date"].notna()].copy()
+        if not snapshot.empty:
+            snapshot = (
+                snapshot.sort_values("event_date")
+                .groupby(["project_rollup_key", "project_rollup_display", "event_date"], as_index=False)
+                .agg(cumulative_foundation=("cumulative_foundation", "max"))
+            )
+
+    projects: dict[str, str] = {}
+    for frame in (erections, detail, snapshot, coverage):
+        if frame is None or frame.empty:
+            continue
+        key_series = frame.get("project_rollup_key")
+        display_series = frame.get("project_rollup_display")
+        if key_series is None or display_series is None:
+            continue
+        for key, display in zip(key_series, display_series):
+            key_text = _safe_text(key)
+            display_text = _safe_text(display)
+            if key_text and display_text and key_text not in projects:
+                projects[key_text] = display_text
+    for excluded_key in excluded_gap_projects:
+        projects.pop(excluded_key, None)
+
+    monthly_rows: list[dict[str, object]] = []
+    weekly_rows: list[dict[str, object]] = []
+    coverage_rows: list[dict[str, object]] = []
+
+    for project_key, project_name in sorted(projects.items(), key=lambda item: item[1]):
+        project_erections = erections[erections["project_rollup_key"] == project_key].copy() if not erections.empty else pd.DataFrame()
+        project_detail = detail[detail["project_rollup_key"] == project_key].copy() if not detail.empty else pd.DataFrame()
+        project_snapshot = snapshot[snapshot["project_rollup_key"] == project_key].copy() if not snapshot.empty else pd.DataFrame()
+        coverage_rec = coverage_by_key.get(project_key, {})
+
+        if not project_detail.empty:
+            source_type = "detail"
+            snapshot_limited = "No"
+        elif not project_snapshot.empty:
+            source_type = "snapshot_fallback"
+            snapshot_limited = "Yes"
+        else:
+            source_type = _safe_text(coverage_rec.get("source_used", "")) or "missing"
+            snapshot_limited = _safe_text(coverage_rec.get("snapshot_limited", "No")) or "No"
+
+        erection_month = (
+            project_erections.assign(period=project_erections["completion_date"].dt.to_period("M").dt.to_timestamp())
+            .groupby("period")
+            .size()
+            if not project_erections.empty
+            else pd.Series(dtype="int64")
+        )
+        erection_week = (
+            project_erections.assign(period=project_erections["completion_date"] - pd.to_timedelta((project_erections["completion_date"].dt.weekday + 1) % 7, unit="D"))
+            .groupby("period")
+            .size()
+            if not project_erections.empty
+            else pd.Series(dtype="int64")
+        )
+        erection_month_cum = erection_month.sort_index().cumsum() if not erection_month.empty else erection_month
+        erection_week_cum = erection_week.sort_index().cumsum() if not erection_week.empty else erection_week
+
+        if source_type == "detail":
+            foundation_month_count = (
+                project_detail.assign(period=project_detail["event_date"].dt.to_period("M").dt.to_timestamp())
+                .groupby("period")
+                .size()
+            )
+            foundation_week_count = (
+                project_detail.assign(period=project_detail["event_date"] - pd.to_timedelta((project_detail["event_date"].dt.weekday + 1) % 7, unit="D"))
+                .groupby("period")
+                .size()
+            )
+            foundation_month_cum = foundation_month_count.sort_index().cumsum()
+            foundation_week_cum = foundation_week_count.sort_index().cumsum()
+        elif source_type == "snapshot_fallback":
+            foundation_month_cum = (
+                project_snapshot.assign(period=project_snapshot["event_date"].dt.to_period("M").dt.to_timestamp())
+                .groupby("period")["cumulative_foundation"]
+                .max()
+                .sort_index()
+            )
+            foundation_week_cum = (
+                project_snapshot.assign(period=project_snapshot["event_date"] - pd.to_timedelta((project_snapshot["event_date"].dt.weekday + 1) % 7, unit="D"))
+                .groupby("period")["cumulative_foundation"]
+                .max()
+                .sort_index()
+            )
+        else:
+            foundation_month_cum = pd.Series(dtype="float64")
+            foundation_week_cum = pd.Series(dtype="float64")
+
+        month_index = sorted(set(erection_month_cum.index.tolist()) | set(foundation_month_cum.index.tolist()))
+        week_index = sorted(set(erection_week_cum.index.tolist()) | set(foundation_week_cum.index.tolist()))
+
+        if source_type == "snapshot_fallback":
+            fm = foundation_month_cum.reindex(month_index).ffill()
+            fw = foundation_week_cum.reindex(week_index).ffill()
+        elif source_type == "missing":
+            fm = pd.Series([float("nan")] * len(month_index), index=month_index, dtype="float64")
+            fw = pd.Series([float("nan")] * len(week_index), index=week_index, dtype="float64")
+        else:
+            fm = foundation_month_cum.reindex(month_index).ffill().fillna(0.0) if month_index else pd.Series(dtype="float64")
+            fw = foundation_week_cum.reindex(week_index).ffill().fillna(0.0) if week_index else pd.Series(dtype="float64")
+
+        em = erection_month_cum.reindex(month_index).ffill().fillna(0.0) if month_index else pd.Series(dtype="float64")
+        ew = erection_week_cum.reindex(week_index).ffill().fillna(0.0) if week_index else pd.Series(dtype="float64")
+        if not em.empty:
+            em = pd.to_numeric(em, errors="coerce").fillna(0.0)
+        if not ew.empty:
+            ew = pd.to_numeric(ew, errors="coerce").fillna(0.0)
+        if source_type == "detail":
+            if not fm.empty:
+                fm = pd.to_numeric(fm, errors="coerce").fillna(0.0)
+            if not fw.empty:
+                fw = pd.to_numeric(fw, errors="coerce").fillna(0.0)
+
+        for period in month_index:
+            foundation_value = fm.loc[period] if period in fm.index else pd.NA
+            erection_value = em.loc[period] if period in em.index else 0.0
+            gap_value = pd.NA if pd.isna(foundation_value) else float(foundation_value) - float(erection_value)
+            monthly_rows.append(
+                {
+                    "Project": project_name,
+                    "Source Type": source_type,
+                    "Snapshot Limited": snapshot_limited,
+                    "Month": pd.Timestamp(period).strftime("%Y-%m"),
+                    "Foundations Cumulative": foundation_value,
+                    "Erections Cumulative": float(erection_value),
+                    "Gap Cumulative": gap_value,
+                }
+            )
+
+        for period in week_index:
+            week_start = pd.Timestamp(period).normalize()
+            week_end = week_start + pd.Timedelta(days=6)
+            foundation_value = fw.loc[period] if period in fw.index else pd.NA
+            erection_value = ew.loc[period] if period in ew.index else 0.0
+            gap_value = pd.NA if pd.isna(foundation_value) else float(foundation_value) - float(erection_value)
+            weekly_rows.append(
+                {
+                    "Project": project_name,
+                    "Source Type": source_type,
+                    "Snapshot Limited": snapshot_limited,
+                    "Week Start": week_start.strftime("%Y-%m-%d"),
+                    "Week End": week_end.strftime("%Y-%m-%d"),
+                    "Week": f"{week_start:%Y-%m-%d} to {week_end:%Y-%m-%d}",
+                    "Foundations Cumulative": foundation_value,
+                    "Erections Cumulative": float(erection_value),
+                    "Gap Cumulative": gap_value,
+                }
+            )
+
+        if not project_erections.empty:
+            ere_first_month = project_erections["completion_date"].min().strftime("%Y-%m")
+            ere_last_month = project_erections["completion_date"].max().strftime("%Y-%m")
+        else:
+            ere_first_month = ""
+            ere_last_month = ""
+
+        month_available = sorted({row["Month"] for row in monthly_rows if row["Project"] == project_name and pd.notna(row["Foundations Cumulative"])})
+        week_available = sorted({row["Week"] for row in weekly_rows if row["Project"] == project_name and pd.notna(row["Foundations Cumulative"])})
+
+        coverage_rows.append(
+            {
+                "Project": project_name,
+                "Foundation Source Used": source_type,
+                "Coverage Status": _safe_text(coverage_rec.get("status", "")) or ("OK_DETAIL" if source_type == "detail" else "MISSING"),
+                "Coverage Reason": _safe_text(coverage_rec.get("reason", "")),
+                "Snapshot Limited": snapshot_limited,
+                "First Month Available": month_available[0] if month_available else "",
+                "Last Month Available": month_available[-1] if month_available else "",
+                "First Week Available": week_available[0] if week_available else "",
+                "Last Week Available": week_available[-1] if week_available else "",
+                "Detail Rows": int(coverage_rec.get("detail_rows", 0)),
+                "Detail Completions": int(coverage_rec.get("detail_completions", 0)),
+                "Snapshot Rows": int(coverage_rec.get("snapshot_rows", 0)),
+                "Erection First Month": ere_first_month,
+                "Erection Last Month": ere_last_month,
+                "Notes": "Snapshot values are carry-forwarded between reporting dates." if source_type == "snapshot_fallback" else "",
+            }
+        )
+
+    monthly_df = pd.DataFrame(monthly_rows, columns=monthly_columns)
+    weekly_df = pd.DataFrame(weekly_rows, columns=weekly_columns)
+    coverage_df = pd.DataFrame(coverage_rows, columns=coverage_columns)
+    return monthly_df, weekly_df, coverage_df
 
 
 def _normalize_activity_for_scope(frame: pd.DataFrame) -> pd.Series:
@@ -894,9 +1334,15 @@ def build_foundation_delay_analysis_tables(
     foundation_coverage: pd.DataFrame,
     foundation_diagnostics: pd.DataFrame,
     progress_status_raw: pd.DataFrame,
+    daily_reference: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Build Foundation Delay Analysis V2 tables."""
     merged = _build_merged_delay_fact(source_daily, foundation_completions)
+    daily_merged = (
+        _build_merged_delay_fact(daily_reference, foundation_completions)
+        if isinstance(daily_reference, pd.DataFrame) and not daily_reference.empty
+        else pd.DataFrame()
+    )
     coverage = _apply_project_rollup_columns(foundation_coverage) if isinstance(foundation_coverage, pd.DataFrame) else pd.DataFrame()
     diagnostics = _apply_project_rollup_columns(foundation_diagnostics) if isinstance(foundation_diagnostics, pd.DataFrame) else pd.DataFrame()
     scope_snapshot = _build_scope_snapshot(progress_status_raw if isinstance(progress_status_raw, pd.DataFrame) else pd.DataFrame())
@@ -972,8 +1418,23 @@ def build_foundation_delay_analysis_tables(
 
         foundation_count = int(len(project_scope.index))
         matched_count = int(project_scope["matched"].sum()) if foundation_count else 0
+        raw_start_matches = int(project_scope["matched"].sum()) if foundation_count else 0
+        alias_matches = int(project_scope["match_basis"].astype(str).str.strip().eq("alias").sum()) if foundation_count else 0
         negative_excluded = int(project_scope["negative_delay"].sum()) if foundation_count else 0
         unmatched = max(foundation_count - matched_count, 0)
+        dropped_recovered = 0
+        if not daily_merged.empty and foundation_count:
+            daily_scope = daily_merged[daily_merged["project_rollup_key"] == project_key].copy()
+            if not daily_scope.empty:
+                daily_key = daily_scope[["line_name_norm", "location_no_norm", "foundation_complete", "matched"]].copy()
+                daily_key["daily_matched"] = daily_key["matched"].fillna(False)
+                daily_key = daily_key.drop(columns=["matched"])
+                probe = project_scope.merge(
+                    daily_key,
+                    on=["line_name_norm", "location_no_norm", "foundation_complete"],
+                    how="left",
+                )
+                dropped_recovered = int((probe["matched"] & ~probe["daily_matched"].fillna(False)).sum())
 
         scope_total_value = pd.to_numeric(pd.Series([scope_rec.get("scope_total", pd.NA)]), errors="coerce").iloc[0]
         if pd.notna(scope_total_value) and float(scope_total_value) > 0:
@@ -1083,6 +1544,9 @@ def build_foundation_delay_analysis_tables(
                 "Reason": reason or ("No detail foundation completion events available." if foundation_count == 0 else ""),
                 "Foundation Locations": foundation_count,
                 "Matched Locations": matched_count,
+                "RawData Start-Date Matches": raw_start_matches,
+                "Dropped-by-Daily Recovered": dropped_recovered,
+                "Alias Matches": alias_matches,
                 "Negative Excluded": negative_excluded,
                 "Unmatched Locations": unmatched,
                 "Scope Total": scope_total,
@@ -1132,14 +1596,65 @@ def build_foundation_delay_analysis_tables(
     }
 
 
+def build_complete_foundation_analysis_tables(
+    *,
+    raw_erection_source: pd.DataFrame,
+    foundation_completions: pd.DataFrame,
+    foundation_coverage: pd.DataFrame,
+    foundation_diagnostics: pd.DataFrame,
+    progress_status_raw: pd.DataFrame,
+    daily_reference: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Build complete foundation analysis bundle (legacy + V2)."""
+    legacy_source = build_legacy_erection_source_from_raw(raw_erection_source)
+    v2_source = build_v2_erection_source_from_raw(raw_erection_source)
+    gap_monthly, gap_weekly, gap_coverage = build_foundation_vs_erection_gap_tables_legacy(
+        source_daily=legacy_source,
+        foundation_completions=foundation_completions,
+        foundation_coverage=foundation_coverage,
+    )
+    delay_phase, delay_monthly, delay_coverage, delay_anomalies = build_foundation_delay_trend_tables_legacy(
+        source_daily=legacy_source,
+        foundation_completions=foundation_completions,
+        foundation_coverage=foundation_coverage,
+        foundation_diagnostics=foundation_diagnostics,
+    )
+    v2_tables = build_foundation_delay_analysis_tables(
+        source_daily=v2_source,
+        foundation_completions=foundation_completions,
+        foundation_coverage=foundation_coverage,
+        foundation_diagnostics=foundation_diagnostics,
+        progress_status_raw=progress_status_raw,
+        daily_reference=daily_reference,
+    )
+    tables = {
+        "Foundation Gap Monthly": gap_monthly,
+        "Foundation Gap Weekly": gap_weekly,
+        "Foundation Gap Coverage": gap_coverage,
+        "Foundation Delay Phases": delay_phase,
+        "Foundation Delay Monthly": delay_monthly,
+        "Foundation Delay Coverage": delay_coverage,
+        "Foundation Delay Anomalies": delay_anomalies,
+    }
+    tables.update(v2_tables)
+    return tables
+
+
 def write_foundation_delay_analysis_workbook(
     output_path: str | Path,
     tables: dict[str, pd.DataFrame],
 ) -> Path:
-    """Write Foundation Delay Analysis workbook with one label row per sheet."""
+    """Write Foundation Delay Analysis workbook (legacy + V2 tabs if provided)."""
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     ordered_sheets = [
+        "Foundation Gap Monthly",
+        "Foundation Gap Weekly",
+        "Foundation Gap Coverage",
+        "Foundation Delay Phases",
+        "Foundation Delay Monthly",
+        "Foundation Delay Coverage",
+        "Foundation Delay Anomalies",
         "Delay Phase - Project",
         "Delay Phase - Series",
         "Delay Phase - Ownership",
@@ -1150,8 +1665,15 @@ def write_foundation_delay_analysis_workbook(
         "Delay Anomalies",
         "Scope Snapshot",
     ]
+    seen = set(ordered_sheets)
+    for sheet_name in tables.keys():
+        if sheet_name not in seen:
+            ordered_sheets.append(sheet_name)
+            seen.add(sheet_name)
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet in ordered_sheets:
+            if sheet not in tables:
+                continue
             table = tables.get(sheet, pd.DataFrame())
             pd.DataFrame([[sheet]]).to_excel(
                 writer,
@@ -1167,4 +1689,3 @@ def write_foundation_delay_analysis_workbook(
                 startrow=1,
             )
     return output
-

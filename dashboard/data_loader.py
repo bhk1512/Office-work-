@@ -2799,6 +2799,20 @@ def load_foundation_completions(config_or_path: AppConfig | Path | str) -> pd.Da
     return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
 
 
+def load_erection_raw(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
+    if isinstance(config_or_path, AppConfig):
+        data_path = Path(config_or_path.data_path)
+    else:
+        data_path = Path(config_or_path)
+    frame = _load_sibling_sheet_cached(
+        str(data_path.resolve()),
+        "Erection",
+        "ErectionCompiled_Output.xlsx",
+        "RawData",
+    )
+    return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
 def load_foundation_coverage(config_or_path: AppConfig | Path | str) -> pd.DataFrame:
     if isinstance(config_or_path, AppConfig):
         data_path = Path(config_or_path.data_path)
@@ -2874,6 +2888,7 @@ load_progress_status_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  #
 load_progress_status_coverage.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_foundation_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_foundation_completions.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
+load_erection_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_foundation_coverage.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_foundation_diagnostics.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]
 load_stretch_readiness_raw.cache_clear = _load_sibling_sheet_cached.cache_clear  # type: ignore[attr-defined]

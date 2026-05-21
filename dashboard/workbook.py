@@ -15,11 +15,6 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .config import AppConfig
-from .data_loader import (
-    load_foundation_completions,
-    load_foundation_coverage,
-    load_foundation_diagnostics,
-)
 from .foundation_delay_analysis import build_foundation_delay_trend_tables_legacy
 from .metrics import (
     calc_idle_and_loss,
@@ -5656,29 +5651,6 @@ def export_erection_productivity_summary(
         week_labels=week_labels,
     )
     active_config = data_store._config if data_store is not None else AppConfig()
-    foundation_completions = load_foundation_completions(active_config)
-    foundation_coverage = load_foundation_coverage(active_config)
-    foundation_diagnostics = load_foundation_diagnostics(active_config)
-    (
-        foundation_gap_monthly_table,
-        foundation_gap_weekly_table,
-        foundation_gap_coverage_table,
-    ) = _build_foundation_vs_erection_gap_tables(
-        source_daily,
-        foundation_completions,
-        foundation_coverage,
-    )
-    (
-        foundation_delay_phase_table,
-        foundation_delay_monthly_table,
-        foundation_delay_coverage_table,
-        foundation_delay_anomaly_table,
-    ) = _build_foundation_delay_trend_tables(
-        source_daily,
-        foundation_completions,
-        foundation_coverage,
-        foundation_diagnostics,
-    )
     project_gang_metrics = _build_project_gang_metrics(
         scope,
         completions,
@@ -6256,27 +6228,6 @@ def export_erection_productivity_summary(
     idle_bucket_sheet_label = _sanitize_sheet_name("Idle Days Buckets")
     monthly_bucket_sheet_label = _sanitize_sheet_name("Monthly Gang Buckets")
     excluded_sheet_label = _sanitize_sheet_name("Excluded Data Audit")
-    foundation_gap_monthly_sheet_label = _sanitize_sheet_name("Foundation Gap Monthly")
-    foundation_gap_weekly_sheet_label = _sanitize_sheet_name("Foundation Gap Weekly")
-    foundation_gap_coverage_sheet_label = _sanitize_sheet_name("Foundation Gap Coverage")
-    foundation_delay_phase_sheet_label = _sanitize_sheet_name("Foundation Delay Phases")
-    foundation_delay_monthly_sheet_label = _sanitize_sheet_name("Foundation Delay Monthly")
-    foundation_delay_coverage_sheet_label = _sanitize_sheet_name("Foundation Delay Coverage")
-    foundation_delay_anomaly_sheet_label = _sanitize_sheet_name("Foundation Delay Anomalies")
-    if foundation_gap_weekly_sheet_label == foundation_gap_monthly_sheet_label:
-        foundation_gap_weekly_sheet_label = _sanitize_sheet_name("Foundation Gap Weekwise")
-    if foundation_gap_coverage_sheet_label in {foundation_gap_monthly_sheet_label, foundation_gap_weekly_sheet_label}:
-        foundation_gap_coverage_sheet_label = _sanitize_sheet_name("Foundation Gap Source Coverage")
-    if foundation_delay_monthly_sheet_label == foundation_delay_phase_sheet_label:
-        foundation_delay_monthly_sheet_label = _sanitize_sheet_name("Foundation Delay Monthwise")
-    if foundation_delay_coverage_sheet_label in {foundation_delay_phase_sheet_label, foundation_delay_monthly_sheet_label}:
-        foundation_delay_coverage_sheet_label = _sanitize_sheet_name("Foundation Delay Source Coverage")
-    if foundation_delay_anomaly_sheet_label in {
-        foundation_delay_phase_sheet_label,
-        foundation_delay_monthly_sheet_label,
-        foundation_delay_coverage_sheet_label,
-    }:
-        foundation_delay_anomaly_sheet_label = _sanitize_sheet_name("Foundation Delay Data Issues")
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -7372,55 +7323,6 @@ def export_erection_productivity_summary(
 
         _write_scoped_table(
             writer,
-            foundation_gap_monthly_sheet_label,
-            foundation_gap_monthly_table,
-            "Foundation vs Erection Gap (Monthly Cumulative)",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
-            foundation_gap_weekly_sheet_label,
-            foundation_gap_weekly_table,
-            "Foundation vs Erection Gap (Weekly Cumulative)",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
-            foundation_gap_coverage_sheet_label,
-            foundation_gap_coverage_table,
-            "Foundation Source Coverage & Limits",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
-            foundation_delay_phase_sheet_label,
-            foundation_delay_phase_table,
-            "Foundation to Erection Delay Trend (5 Lifecycle Phases)",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
-            foundation_delay_monthly_sheet_label,
-            foundation_delay_monthly_table,
-            "Foundation to Erection Delay Trend (Monthly)",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
-            foundation_delay_coverage_sheet_label,
-            foundation_delay_coverage_table,
-            "Foundation Delay Coverage & Eligibility",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
-            foundation_delay_anomaly_sheet_label,
-            foundation_delay_anomaly_table,
-            "Foundation Delay Data Issues",
-            startrow=0,
-        )
-        _write_scoped_table(
-            writer,
             variants_sheet_label,
             project_variants_table,
             "Project Variants Mapping",
@@ -7439,13 +7341,6 @@ def export_erection_productivity_summary(
             idle_bucket_sheet_label,
             monthly_bucket_sheet_label,
             excluded_sheet_label,
-            foundation_gap_monthly_sheet_label,
-            foundation_gap_weekly_sheet_label,
-            foundation_gap_coverage_sheet_label,
-            foundation_delay_phase_sheet_label,
-            foundation_delay_monthly_sheet_label,
-            foundation_delay_coverage_sheet_label,
-            foundation_delay_anomaly_sheet_label,
         }
         pch_sheet_names_written: list[str] = []
         if not review_table_raw.empty and "PCH" in review_table_raw.columns and "pch_display" in scope.columns:
