@@ -150,17 +150,7 @@ def _parse_date_series(series: pd.Series) -> pd.Series:
     return parsed.dt.normalize()
 
 
-_LOCATION_RE = re.compile(r"^\s*(\d+)([A-Za-z]+)?(?:\s*/\s*(\d+))?\s*$")
 _AP_PREFIX_RE = re.compile(r"^\s*ap[\s\-_/]*", flags=re.IGNORECASE)
-_GANTRY_RE = re.compile(r"\b(gantry|gty)\b", flags=re.IGNORECASE)
-
-
-def _letter_rank(value: str) -> int:
-    rank = 0
-    for ch in value.upper():
-        if "A" <= ch <= "Z":
-            rank = (rank * 26) + (ord(ch) - ord("A") + 1)
-    return rank
 
 
 def _strip_ap_prefix(value: object) -> str:
@@ -168,28 +158,6 @@ def _strip_ap_prefix(value: object) -> str:
     if not text:
         return ""
     return _AP_PREFIX_RE.sub("", text).strip()
-
-
-def _is_gantry_label(value: object) -> bool:
-    text = normalize_location(value)
-    if not text:
-        return False
-    cleaned = re.sub(r"[^a-z]+", " ", text.lower()).strip()
-    return bool(_GANTRY_RE.search(cleaned))
-
-
-def _location_order_key(value: object) -> int | None:
-    text = _strip_ap_prefix(value)
-    if not text:
-        return None
-    match = _LOCATION_RE.match(text)
-    if not match:
-        return None
-    main = int(match.group(1))
-    letters = match.group(2) or ""
-    sub = int(match.group(3) or 0)
-    letter_rank = _letter_rank(letters) if letters else 0
-    return (main * 1_000_000) + (letter_rank * 1_000) + sub
 
 
 def _ensure_project_fields(df: pd.DataFrame) -> pd.DataFrame:
@@ -2851,314 +2819,6 @@ def _normalize_stringing_compiled(df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _build_gap_summary(df: pd.DataFrame, gap_column: str) -> pd.DataFrame:
-    if df is None or df.empty or gap_column not in df.columns:
-        return pd.DataFrame(
-            [
-                {
-                    "count": 0,
-                    "negative_gap_count": 0,
-                    "negative_gap_pct": 0.0,
-                    "avg_gap_days": 0.0,
-                    "median_gap_days": 0.0,
-                    "min_gap_days": 0,
-                    "min_gap_days_raw": 0,
-                    "max_gap_days": 0,
-                }
-            ]
-        )
-    series = pd.to_numeric(df[gap_column], errors="coerce").dropna()
-    if series.empty:
-        return pd.DataFrame(
-            [
-                {
-                    "count": 0,
-                    "negative_gap_count": 0,
-                    "negative_gap_pct": 0.0,
-                    "avg_gap_days": 0.0,
-                    "median_gap_days": 0.0,
-                    "min_gap_days": 0,
-                    "min_gap_days_raw": 0,
-                    "max_gap_days": 0,
-                }
-            ]
-        )
-    stats_series = series.clip(lower=0)
-    negative_gap_count = int((series < 0).sum())
-    return pd.DataFrame(
-        [
-            {
-                "count": int(stats_series.size),
-                "negative_gap_count": negative_gap_count,
-                "negative_gap_pct": round(negative_gap_count / len(series), 4) if len(series) > 0 else 0.0,
-                "avg_gap_days": round(float(stats_series.mean()), 2),
-                "median_gap_days": round(float(stats_series.median()), 2),
-                "min_gap_days": int(stats_series.min()),
-                "min_gap_days_raw": int(series.min()) if not series.empty else 0,
-                "max_gap_days": int(stats_series.max()),
-            }
-        ]
-    )
-
-
-def _build_po_fs_gap_table(
-    compiled: pd.DataFrame,
-    *,
-    start_date: pd.Timestamp | None,
-    end_date: pd.Timestamp | None,
-    issues: list[dict[str, object]],
-) -> pd.DataFrame:
-    work = _normalize_stringing_compiled(compiled)
-    if work.empty:
-        return pd.DataFrame()
-    work["po_start_date"] = _parse_date_series(work.get("po_start_date"))
-    work["po_completion_date"] = _parse_date_series(work.get("po_completion_date"))
-    work["fs_starting_date"] = _parse_date_series(work.get("fs_starting_date"))
-    work["fs_complete_date"] = _parse_date_series(work.get("fs_complete_date"))
-
-    scoped = work.copy()
-    if start_date is not None:
-        scoped = scoped[scoped["po_completion_date"] >= start_date]
-    if end_date is not None:
-        scoped = scoped[scoped["po_completion_date"] <= end_date]
-    if scoped.empty:
-        return pd.DataFrame()
-
-    gap = (scoped["fs_starting_date"] - scoped["po_completion_date"]).dt.days
-    negative_mask = gap < 0
-    if negative_mask.any():
-        for _, row in scoped.loc[negative_mask].iterrows():
-            issues.append(
-                {
-                    "issue_type": "PO_FS_NEGATIVE_GAP",
-                    "project": row.get("project_name", ""),
-                    "from_ap": row.get("from_ap", ""),
-                    "to_ap": row.get("to_ap", ""),
-                    "po_start_date": row.get("po_start_date", pd.NaT),
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "FS start is before PO completion",
-                }
-            )
-    scoped["gap_days"] = gap
-    scoped["negative_gap_flag"] = negative_mask.fillna(False)
-
-    return scoped[
-        [
-            "project_name",
-            "from_ap",
-            "to_ap",
-            "gang_name",
-            "po_completion_date",
-            "fs_starting_date",
-            "gap_days",
-            "negative_gap_flag",
-            "source_file",
-        ]
-    ].copy()
-
-
-def _build_erection_location_map(erection_daily: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    if erection_daily is None or erection_daily.empty:
-        return {}
-    working = erection_daily.copy()
-    working["completion_date"] = pd.to_datetime(working.get("completion_date"), errors="coerce").dt.normalize()
-    working["location_no"] = working.get("location_no", "").fillna("").astype(str).str.strip()
-    working["project_key_norm"] = working.get("project_key_norm", "").fillna("").astype(str)
-    working = working.dropna(subset=["completion_date"])
-    working = working[working["location_no"].astype(bool) & working["project_key_norm"].astype(bool)]
-    if working.empty:
-        return {}
-    working["location_no_norm"] = working["location_no"].map(normalize_location)
-    working["loc_order"] = working["location_no_norm"].map(_location_order_key)
-    working = working.dropna(subset=["loc_order"])
-    if working.empty:
-        return {}
-    working = (
-        working.sort_values("completion_date")
-        .drop_duplicates(subset=["project_key_norm", "location_no_norm", "loc_order"], keep="last")
-    )
-    project_map: dict[str, pd.DataFrame] = {}
-    for project_key, group in working.groupby("project_key_norm"):
-        project_map[str(project_key)] = group[
-            ["loc_order", "completion_date", "location_no_norm", "location_no"]
-        ].copy()
-    return project_map
-
-
-def _build_erection_po_gap_table(
-    compiled: pd.DataFrame,
-    erection_daily: pd.DataFrame,
-    *,
-    start_date: pd.Timestamp | None,
-    end_date: pd.Timestamp | None,
-    issues: list[dict[str, object]],
-) -> pd.DataFrame:
-    work = _normalize_stringing_compiled(compiled)
-    if work.empty:
-        return pd.DataFrame()
-    work["po_start_date"] = _parse_date_series(work.get("po_start_date"))
-    if start_date is not None:
-        work = work[work["po_start_date"] >= start_date]
-    if end_date is not None:
-        work = work[work["po_start_date"] <= end_date]
-    if work.empty:
-        return pd.DataFrame()
-
-    work["from_ap_norm"] = work["from_ap"].map(_strip_ap_prefix)
-    work["to_ap_norm"] = work["to_ap"].map(_strip_ap_prefix)
-    work["from_order"] = work["from_ap_norm"].map(_location_order_key)
-    work["to_order"] = work["to_ap_norm"].map(_location_order_key)
-    work["from_is_gantry"] = work["from_ap"].map(_is_gantry_label)
-    work["to_is_gantry"] = work["to_ap"].map(_is_gantry_label)
-
-    erection_map = _build_erection_location_map(erection_daily)
-
-    rows: list[dict[str, object]] = []
-    for _, row in work.iterrows():
-        project_key = row.get("project_key_norm", "")
-        po_start = row.get("po_start_date")
-        from_order = row.get("from_order")
-        to_order = row.get("to_order")
-        from_ap = row.get("from_ap", "")
-        to_ap = row.get("to_ap", "")
-        from_is_gantry = bool(row.get("from_is_gantry", False))
-        to_is_gantry = bool(row.get("to_is_gantry", False))
-        base = {
-            "project_name": row.get("project_name", ""),
-            "from_ap": from_ap,
-            "to_ap": to_ap,
-            "gang_name": row.get("gang_name", ""),
-            "po_start_date": po_start,
-            "source_file": row.get("source_file", ""),
-        }
-
-        if pd.isna(po_start):
-            issues.append(
-                {
-                    "issue_type": "PO_START_MISSING",
-                    "project": row.get("project_name", ""),
-                    "from_ap": from_ap,
-                    "to_ap": to_ap,
-                    "po_start_date": po_start,
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "Missing PO start date",
-                }
-            )
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
-            continue
-
-        if from_is_gantry and to_is_gantry:
-            issues.append(
-                {
-                    "issue_type": "GANTRY_BOTH_SIDES",
-                    "project": row.get("project_name", ""),
-                    "from_ap": from_ap,
-                    "to_ap": to_ap,
-                    "po_start_date": po_start,
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "Both From_AP and To_AP marked as gantry/end",
-                }
-            )
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
-            continue
-
-        if (not from_is_gantry and pd.isna(from_order)) or (not to_is_gantry and pd.isna(to_order)):
-            issues.append(
-                {
-                    "issue_type": "LOCATION_PARSE_FAILED",
-                    "project": row.get("project_name", ""),
-                    "from_ap": from_ap,
-                    "to_ap": to_ap,
-                    "po_start_date": po_start,
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "Unable to parse span location ordering",
-                }
-            )
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
-            continue
-
-        project_df = erection_map.get(str(project_key))
-        if project_df is None or project_df.empty:
-            issues.append(
-                {
-                    "issue_type": "ERECTION_PROJECT_NOT_FOUND",
-                    "project": row.get("project_name", ""),
-                    "from_ap": from_ap,
-                    "to_ap": to_ap,
-                    "po_start_date": po_start,
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "No erection data for project",
-                }
-            )
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
-            continue
-
-        if to_is_gantry and not from_is_gantry:
-            lo = int(from_order)
-            hi = int(project_df["loc_order"].max())
-        elif from_is_gantry and not to_is_gantry:
-            lo = int(project_df["loc_order"].min())
-            hi = int(to_order)
-        else:
-            lo = min(int(from_order), int(to_order))
-            hi = max(int(from_order), int(to_order))
-        span_df = project_df[(project_df["loc_order"] >= lo) & (project_df["loc_order"] <= hi)]
-        if span_df.empty:
-            issues.append(
-                {
-                    "issue_type": "ERECTION_SPAN_EMPTY",
-                    "project": row.get("project_name", ""),
-                    "from_ap": from_ap,
-                    "to_ap": to_ap,
-                    "po_start_date": po_start,
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "No erection locations found in span range",
-                }
-            )
-            rows.append({**base, "last_erection_completion_date": pd.NaT, "gap_days": pd.NA, "erection_locations": 0})
-            continue
-
-        last_completion = span_df["completion_date"].max()
-        gap_days = (po_start - last_completion).days if pd.notna(last_completion) else pd.NA
-        if gap_days is not pd.NA and gap_days < 0:
-            issues.append(
-                {
-                    "issue_type": "ERECTION_PO_NEGATIVE_GAP",
-                    "project": row.get("project_name", ""),
-                    "from_ap": from_ap,
-                    "to_ap": to_ap,
-                    "po_start_date": po_start,
-                    "po_completion_date": row.get("po_completion_date", pd.NaT),
-                    "fs_starting_date": row.get("fs_starting_date", pd.NaT),
-                    "fs_complete_date": row.get("fs_complete_date", pd.NaT),
-                    "details": "PO start is before last erection completion in span",
-                }
-            )
-
-        rows.append(
-            {
-                **base,
-                "last_erection_completion_date": last_completion,
-                "gap_days": int(gap_days) if gap_days is not pd.NA else pd.NA,
-                "erection_locations": int(span_df["location_no_norm"].nunique()),
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
 def main() -> int:
     args = _parse_args()
     configure_logging()
@@ -3269,42 +2929,6 @@ def main() -> int:
     )
 
     issues: list[dict[str, object]] = []
-
-    po_fs_gap = _build_po_fs_gap_table(
-        stringing_compiled,
-        start_date=start_date,
-        end_date=end_date,
-        issues=issues,
-    )
-    po_fs_gap_summary = _build_gap_summary(po_fs_gap, "gap_days")
-    po_fs_gap_tse = _build_po_fs_gap_table(
-        _filter_tse_rows(stringing_compiled),
-        start_date=start_date,
-        end_date=end_date,
-        issues=[],
-    )
-    if po_fs_gap_tse.empty and not po_fs_gap.empty:
-        po_fs_gap_tse = po_fs_gap.head(0)
-    po_fs_gap_summary_tse = _build_gap_summary(po_fs_gap_tse, "gap_days")
-
-    erection_po_gap = _build_erection_po_gap_table(
-        stringing_compiled,
-        erection_daily,
-        start_date=start_date,
-        end_date=end_date,
-        issues=issues,
-    )
-    erection_po_gap_summary = _build_gap_summary(erection_po_gap, "gap_days")
-    erection_po_gap_tse = _build_erection_po_gap_table(
-        _filter_tse_rows(stringing_compiled),
-        erection_daily,
-        start_date=start_date,
-        end_date=end_date,
-        issues=[],
-    )
-    if erection_po_gap_tse.empty and not erection_po_gap.empty:
-        erection_po_gap_tse = erection_po_gap.head(0)
-    erection_po_gap_summary_tse = _build_gap_summary(erection_po_gap_tse, "gap_days")
 
     # Stringing rollups (overall / PCH / project) and review format
     project_info = store.get_project_info()
@@ -3621,14 +3245,6 @@ def main() -> int:
             "Details": "Overall uses PO start to FS complete. P/O uses PO start to PO completion with PO length as primary metric (fallback to span length). F/S uses FS start to FS complete with span length.",
         },
         {
-            "Assumption": "PO-FS gap",
-            "Details": "gap_days = fs_starting_date - po_completion_date. Negative gaps are flagged in Data_Issues and retained in PO_FS_Gap; summary stats clamp negatives to 0. Missing dates are excluded from stats. Summary tables also expose negative_gap_count, negative_gap_pct, and min_gap_days_raw alongside the clamped statistics.",
-        },
-        {
-            "Assumption": "Erection-PO gap",
-            "Details": "gap_days = po_start_date - last erection completion date within the span (inclusive). Negative gaps are flagged and clamped to 0. Missing dates or unmatched spans are logged in Data_Issues. Summary tables also expose negative_gap_count, negative_gap_pct, and min_gap_days_raw alongside the clamped statistics.",
-        },
-        {
             "Assumption": "Location parsing",
             "Details": "From/To AP values strip a leading 'AP' (case-insensitive) with optional separators. Parsed as main number + optional letters + optional '/sub'. Order key = main*1,000,000 + letter_rank*1,000 + sub.",
         },
@@ -3647,10 +3263,6 @@ def main() -> int:
         {
             "Assumption": "Project matching",
             "Details": "Projects are matched using a compact key (lowercase, alphanumeric only).",
-        },
-        {
-            "Assumption": "Date filters",
-            "Details": "PO-FS gaps are filtered by PO completion date; Erection-PO gaps are filtered by PO start date; daily outputs are filtered by the daily date column.",
         },
         {
             "Assumption": "Date parsing",
@@ -3700,26 +3312,6 @@ def main() -> int:
             writer,
             "Gang_Productivity",
             [("TSE", gang_rows_tse), ("Overall", gang_rows)],
-        )
-        _write_scoped_concat_table(
-            writer,
-            "PO_FS_Gap",
-            [("TSE", po_fs_gap_tse), ("Overall", po_fs_gap)],
-        )
-        _write_scoped_concat_table(
-            writer,
-            "PO_FS_Gap_Summary",
-            [("TSE", po_fs_gap_summary_tse), ("Overall", po_fs_gap_summary)],
-        )
-        _write_scoped_concat_table(
-            writer,
-            "Erection_PO_Gap",
-            [("TSE", erection_po_gap_tse), ("Overall", erection_po_gap)],
-        )
-        _write_scoped_concat_table(
-            writer,
-            "Erection_PO_Gap_Summary",
-            [("TSE", erection_po_gap_summary_tse), ("Overall", erection_po_gap_summary)],
         )
         if not method_summary.empty:
             current_row = 0

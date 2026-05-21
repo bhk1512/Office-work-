@@ -2011,6 +2011,397 @@ def build_foundation_delay_analysis_tables(
     }
 
 
+def _normalize_monitoring_project_code(value: object) -> str:
+    code = extract_base_project_code(value)
+    if code:
+        return code
+    text = _safe_text(value)
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).upper()
+
+
+def _normalize_activity_text(value: object) -> str:
+    text = _safe_text(value)
+    return text.lower()
+
+
+def _as_numeric(series: pd.Series | object) -> pd.Series:
+    if isinstance(series, pd.Series):
+        return pd.to_numeric(series, errors="coerce")
+    return pd.to_numeric(pd.Series([series]), errors="coerce")
+
+
+def _first_valid_number(series: pd.Series) -> float | None:
+    numeric = _as_numeric(series).dropna()
+    if numeric.empty:
+        return None
+    return float(numeric.iloc[0])
+
+
+def _sum_number(series: pd.Series) -> float | None:
+    numeric = _as_numeric(series).dropna()
+    if numeric.empty:
+        return None
+    return float(numeric.sum())
+
+
+def _build_stringing_monitoring_tables(
+    *,
+    status_activity_fact: pd.DataFrame | None,
+    manpower_fact: pd.DataFrame | None,
+    stringing_compiled_raw: pd.DataFrame | None,
+    stretch_summary: pd.DataFrame | None,
+    stretch_manpower_audit: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    numeric_columns = [
+        "project_code",
+        "row_type",
+        "gang_name",
+        "report_month",
+        "project_total_scope_km",
+        "monthly_plan_km",
+        "fs_achieved_month_km",
+        "%_achieved",
+        "wip_km",
+        "rough_sag_completed_km",
+        "rough_sag_balance_km",
+        "final_sag_completed_km",
+        "final_sag_balance_km",
+        "stretch_readiness_pct",
+        "existing_manpower",
+        "fitter_count",
+    ]
+    audit_columns = [
+        "project_code",
+        "status_final_sag_available",
+        "status_paying_out_available",
+        "stretch_readiness_available",
+        "manpower_available",
+        "fitter_available",
+        "location_nos_available",
+        "status_final_sag_fill_pct",
+        "status_paying_out_fill_pct",
+        "stretch_readiness_fill_pct",
+        "manpower_fill_pct",
+        "fitter_fill_pct",
+        "location_nos_fill_pct",
+        "missing_data_tags",
+    ]
+
+    status = status_activity_fact.copy() if isinstance(status_activity_fact, pd.DataFrame) else pd.DataFrame()
+    manpower = manpower_fact.copy() if isinstance(manpower_fact, pd.DataFrame) else pd.DataFrame()
+    compiled = stringing_compiled_raw.copy() if isinstance(stringing_compiled_raw, pd.DataFrame) else pd.DataFrame()
+    stretch = stretch_summary.copy() if isinstance(stretch_summary, pd.DataFrame) else pd.DataFrame()
+    stretch_audit = (
+        stretch_manpower_audit.copy() if isinstance(stretch_manpower_audit, pd.DataFrame) else pd.DataFrame()
+    )
+
+    if not status.empty:
+        status["project_code"] = status.get("project_code", "").map(_normalize_monitoring_project_code)
+        status = status[status["project_code"].astype(bool)].copy()
+        status["month"] = pd.to_datetime(status.get("month"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+        status["report_date"] = pd.to_datetime(status.get("report_date"), errors="coerce")
+        status["activity_norm_text"] = status.get("activity_norm", "").map(_normalize_activity_text)
+        status["activity_raw_text"] = status.get("activity_raw", "").map(_normalize_activity_text)
+        status["activity_group_text"] = status.get("activity_group", "").map(_normalize_activity_text)
+
+    if not manpower.empty:
+        manpower["project_code"] = manpower.get("project_code", "").map(_normalize_monitoring_project_code)
+        manpower = manpower[manpower["project_code"].astype(bool)].copy()
+        manpower["date"] = pd.to_datetime(manpower.get("date"), errors="coerce")
+        manpower["month"] = pd.to_datetime(manpower.get("month"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+        manpower["gang_name"] = manpower.get("gang_name", "").fillna("").astype(str).str.strip()
+        manpower["manpower_gang_strength"] = _as_numeric(manpower.get("manpower_gang_strength", pd.Series(dtype="object")))
+        manpower["manpower_fitters"] = _as_numeric(manpower.get("manpower_fitters", pd.Series(dtype="object")))
+        manpower["daily_km"] = _as_numeric(manpower.get("daily_km", pd.Series(dtype="object")))
+
+    if not compiled.empty:
+        compiled["project_code"] = compiled.get("project_code", "").map(_normalize_monitoring_project_code)
+        compiled = compiled[compiled["project_code"].astype(bool)].copy()
+        compiled["gang_name"] = compiled.get("gang_name", "").fillna("").astype(str).str.strip()
+        location_series = compiled.get("location nos", pd.Series("", index=compiled.index)).fillna("").astype(str).str.strip()
+        from_series = compiled.get("from_ap", pd.Series("", index=compiled.index)).fillna("").astype(str).str.strip()
+        to_series = compiled.get("to_ap", pd.Series("", index=compiled.index)).fillna("").astype(str).str.strip()
+        compiled["__is_span_row"] = (
+            location_series.astype(bool)
+            | from_series.astype(bool)
+            | to_series.astype(bool)
+        )
+        compiled["__has_location_nos"] = location_series.astype(bool)
+
+    if not stretch.empty:
+        stretch["project_code"] = stretch.get("project_code", "").map(_normalize_monitoring_project_code)
+        stretch = stretch[stretch["project_code"].astype(bool)].copy()
+        stretch["ready_km"] = _as_numeric(stretch.get("ready_km", pd.Series(dtype="object")))
+        stretch["total_km"] = _as_numeric(stretch.get("total_km", pd.Series(dtype="object")))
+        stretch["readiness_pct"] = _as_numeric(stretch.get("readiness_pct", pd.Series(dtype="object")))
+
+    if not stretch_audit.empty:
+        stretch_audit["project_code"] = stretch_audit.get("project_code", "").map(_normalize_monitoring_project_code)
+        stretch_audit = stretch_audit[stretch_audit["project_code"].astype(bool)].copy()
+        stretch_audit["status_text"] = stretch_audit.get("status", "").map(_normalize_activity_text)
+
+    project_codes: set[str] = set()
+    for frame in (status, manpower, compiled, stretch, stretch_audit):
+        if not frame.empty and "project_code" in frame.columns:
+            project_codes.update(
+                frame["project_code"].fillna("").astype(str).str.strip().tolist()
+            )
+    project_codes = {code for code in project_codes if code}
+
+    if not project_codes:
+        return pd.DataFrame(columns=numeric_columns), pd.DataFrame(columns=audit_columns)
+
+    numeric_rows: list[dict[str, object]] = []
+    audit_rows: list[dict[str, object]] = []
+
+    for project_code in sorted(project_codes):
+        status_project = status[status["project_code"] == project_code].copy() if not status.empty else pd.DataFrame()
+        manpower_project = manpower[manpower["project_code"] == project_code].copy() if not manpower.empty else pd.DataFrame()
+        compiled_project = compiled[compiled["project_code"] == project_code].copy() if not compiled.empty else pd.DataFrame()
+        stretch_project = stretch[stretch["project_code"] == project_code].copy() if not stretch.empty else pd.DataFrame()
+        stretch_audit_project = (
+            stretch_audit[stretch_audit["project_code"] == project_code].copy()
+            if not stretch_audit.empty
+            else pd.DataFrame()
+        )
+
+        latest_month = (
+            status_project["month"].dropna().max() if not status_project.empty else pd.NaT
+        )
+        if pd.isna(latest_month) and not manpower_project.empty:
+            latest_month = manpower_project["month"].dropna().max()
+
+        if not status_project.empty and pd.notna(latest_month):
+            status_scope = status_project[status_project["month"] == latest_month].copy()
+        else:
+            status_scope = status_project.copy()
+
+        final_mask = (
+            status_scope["activity_raw_text"].str.contains("final sag", regex=False)
+            | status_scope["activity_norm_text"].str.contains("final_sag", regex=False)
+        ) if not status_scope.empty else pd.Series(dtype="bool")
+        stringing_mask = (
+            status_scope["activity_group_text"].str.contains("stringing", regex=False)
+            | status_scope["activity_norm_text"].str.contains("stringing", regex=False)
+        ) if not status_scope.empty else pd.Series(dtype="bool")
+        paying_mask = (
+            status_scope["activity_raw_text"].str.contains("paying out", regex=False)
+            | status_scope["activity_norm_text"].str.contains("paying_out", regex=False)
+        ) if not status_scope.empty else pd.Series(dtype="bool")
+
+        final_rows = status_scope[final_mask].copy() if not status_scope.empty else pd.DataFrame()
+        string_rows = status_scope[stringing_mask].copy() if not status_scope.empty else pd.DataFrame()
+        paying_rows = status_scope[paying_mask].copy() if not status_scope.empty else pd.DataFrame()
+
+        final_or_string_rows = final_rows if not final_rows.empty else string_rows
+
+        project_total_scope_km = _sum_number(final_or_string_rows.get("quantity_primary", pd.Series(dtype="object")))
+        monthly_plan_km = _sum_number(final_or_string_rows.get("plan_for_month", pd.Series(dtype="object")))
+        fs_achieved_month_km = _sum_number(final_or_string_rows.get("progress_for_month", pd.Series(dtype="object")))
+        final_sag_completed_km = _sum_number(final_or_string_rows.get("cumulative_progress", pd.Series(dtype="object")))
+        final_sag_balance_km = _sum_number(final_or_string_rows.get("balance_progress", pd.Series(dtype="object")))
+        rough_sag_completed_km = _sum_number(paying_rows.get("cumulative_progress", pd.Series(dtype="object")))
+        rough_sag_balance_km = _sum_number(paying_rows.get("balance_progress", pd.Series(dtype="object")))
+
+        pct_achieved = None
+        if monthly_plan_km is not None and fs_achieved_month_km is not None and monthly_plan_km > 0:
+            pct_achieved = float(fs_achieved_month_km / monthly_plan_km)
+
+        wip_km = None
+        if rough_sag_completed_km is not None and final_sag_completed_km is not None:
+            delta = rough_sag_completed_km - final_sag_completed_km
+            if delta >= 0:
+                wip_km = float(delta)
+
+        stretch_readiness_pct = None
+        if not stretch_project.empty:
+            total_km = _as_numeric(stretch_project.get("total_km", pd.Series(dtype="object"))).fillna(0).sum()
+            ready_km = _as_numeric(stretch_project.get("ready_km", pd.Series(dtype="object"))).fillna(0).sum()
+            if total_km > 0:
+                stretch_readiness_pct = float((ready_km / total_km) * 100.0)
+            else:
+                stretch_readiness_pct = _first_valid_number(
+                    _as_numeric(stretch_project.get("readiness_pct", pd.Series(dtype="object")))
+                )
+
+        manpower_latest_scope = pd.DataFrame()
+        if not manpower_project.empty:
+            latest_date = manpower_project["date"].dropna().max()
+            if pd.notna(latest_date):
+                manpower_latest_scope = manpower_project[manpower_project["date"] == latest_date].copy()
+            else:
+                manpower_latest_scope = manpower_project.copy()
+
+        existing_manpower = None
+        fitter_count = None
+        if not manpower_latest_scope.empty:
+            grouped = manpower_latest_scope.copy()
+            grouped["__gang_key"] = grouped["gang_name"].astype(str).str.strip()
+            grouped["__gang_key"] = grouped["__gang_key"].where(grouped["__gang_key"].astype(bool), "__UNKNOWN__")
+            manpower_by_gang = grouped.groupby("__gang_key", dropna=False)["manpower_gang_strength"].max()
+            fitters_by_gang = grouped.groupby("__gang_key", dropna=False)["manpower_fitters"].max()
+            if manpower_by_gang.notna().any():
+                existing_manpower = float(manpower_by_gang.dropna().sum())
+            if fitters_by_gang.notna().any():
+                fitter_count = float(fitters_by_gang.dropna().sum())
+
+        report_month_text = ""
+        if pd.notna(latest_month):
+            report_month_text = pd.Timestamp(latest_month).strftime("%Y-%m")
+
+        numeric_rows.append(
+            {
+                "project_code": project_code,
+                "row_type": "project",
+                "gang_name": "",
+                "report_month": report_month_text,
+                "project_total_scope_km": project_total_scope_km,
+                "monthly_plan_km": monthly_plan_km,
+                "fs_achieved_month_km": fs_achieved_month_km,
+                "%_achieved": pct_achieved,
+                "wip_km": wip_km,
+                "rough_sag_completed_km": rough_sag_completed_km,
+                "rough_sag_balance_km": rough_sag_balance_km,
+                "final_sag_completed_km": final_sag_completed_km,
+                "final_sag_balance_km": final_sag_balance_km,
+                "stretch_readiness_pct": stretch_readiness_pct,
+                "existing_manpower": existing_manpower,
+                "fitter_count": fitter_count,
+            }
+        )
+
+        gang_names = []
+        if not compiled_project.empty:
+            gang_names = (
+                compiled_project["gang_name"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .loc[lambda x: x.astype(bool)]
+                .drop_duplicates()
+                .tolist()
+            )
+        for gang_name in gang_names:
+            gang_scope = manpower_project[manpower_project["gang_name"] == gang_name].copy() if not manpower_project.empty else pd.DataFrame()
+            gang_existing_manpower = None
+            gang_fitter_count = None
+            gang_fs_achieved = None
+            if not gang_scope.empty:
+                latest_gang_date = gang_scope["date"].dropna().max()
+                if pd.notna(latest_gang_date):
+                    gang_day = gang_scope[gang_scope["date"] == latest_gang_date].copy()
+                else:
+                    gang_day = gang_scope.copy()
+                gang_existing_manpower = _first_valid_number(gang_day["manpower_gang_strength"])
+                gang_fitter_count = _first_valid_number(gang_day["manpower_fitters"])
+                if pd.notna(latest_month):
+                    gang_month = gang_scope[gang_scope["month"] == latest_month].copy()
+                else:
+                    gang_month = gang_scope.copy()
+                gang_fs_achieved = _sum_number(gang_month["daily_km"])
+            numeric_rows.append(
+                {
+                    "project_code": project_code,
+                    "row_type": "gang",
+                    "gang_name": gang_name,
+                    "report_month": report_month_text,
+                    "project_total_scope_km": pd.NA,
+                    "monthly_plan_km": pd.NA,
+                    "fs_achieved_month_km": gang_fs_achieved,
+                    "%_achieved": pd.NA,
+                    "wip_km": pd.NA,
+                    "rough_sag_completed_km": pd.NA,
+                    "rough_sag_balance_km": pd.NA,
+                    "final_sag_completed_km": pd.NA,
+                    "final_sag_balance_km": pd.NA,
+                    "stretch_readiness_pct": pd.NA,
+                    "existing_manpower": gang_existing_manpower,
+                    "fitter_count": gang_fitter_count,
+                }
+            )
+
+        status_final_sag_available = not final_or_string_rows.empty
+        status_paying_out_available = not paying_rows.empty
+        stretch_readiness_available = not stretch_project.empty
+
+        manpower_total_rows = int(len(manpower_project.index))
+        manpower_available_count = int(manpower_project["manpower_gang_strength"].notna().sum()) if manpower_total_rows else 0
+        fitter_available_count = int(manpower_project["manpower_fitters"].notna().sum()) if manpower_total_rows else 0
+        manpower_fill_pct = (manpower_available_count / manpower_total_rows * 100.0) if manpower_total_rows else 0.0
+        fitter_fill_pct = (fitter_available_count / manpower_total_rows * 100.0) if manpower_total_rows else 0.0
+        manpower_available = manpower_available_count > 0
+        fitter_available = fitter_available_count > 0
+
+        location_total = 0
+        location_filled = 0
+        if not compiled_project.empty:
+            span_scope = compiled_project[compiled_project["__is_span_row"]].copy()
+            location_total = int(len(span_scope.index))
+            location_filled = int(span_scope["__has_location_nos"].sum())
+        location_fill_pct = (location_filled / location_total * 100.0) if location_total else 0.0
+        location_nos_available = location_filled > 0
+
+        stretch_fill_pct = 0.0
+        if not stretch_project.empty:
+            if stretch_readiness_pct is not None:
+                stretch_fill_pct = 100.0
+            else:
+                stretch_fill_pct = float((stretch_project["readiness_pct"].notna().sum() / len(stretch_project)) * 100.0)
+
+        status_final_fill = 0.0
+        if not final_or_string_rows.empty:
+            final_vals = final_or_string_rows[["quantity_primary", "plan_for_month", "progress_for_month", "cumulative_progress", "balance_progress"]]
+            status_final_fill = float((final_vals.notna().sum().sum() / (len(final_vals.index) * len(final_vals.columns))) * 100.0) if len(final_vals.index) else 0.0
+
+        status_paying_fill = 0.0
+        if not paying_rows.empty:
+            paying_vals = paying_rows[["cumulative_progress", "balance_progress"]]
+            status_paying_fill = float((paying_vals.notna().sum().sum() / (len(paying_vals.index) * len(paying_vals.columns))) * 100.0) if len(paying_vals.index) else 0.0
+
+        missing_tags: list[str] = []
+        if not status_final_sag_available:
+            missing_tags.append("MISSING_STATUS_FINAL_SAG")
+        if not status_paying_out_available:
+            missing_tags.append("MISSING_STATUS_PAYING_OUT")
+        if not stretch_readiness_available:
+            missing_tags.append("MISSING_STRETCH_READINESS")
+        if not manpower_available:
+            missing_tags.append("MISSING_MANPOWER")
+        if not fitter_available:
+            missing_tags.append("MISSING_FITTER")
+        if not location_nos_available:
+            missing_tags.append("MISSING_LOCATION_NOS")
+        if not stretch_audit_project.empty:
+            has_absent = stretch_audit_project["status_text"].str.contains("absent", regex=False).any()
+            if has_absent and "MISSING_STRETCH_MANPOWER_SIGNAL" not in missing_tags:
+                missing_tags.append("MISSING_STRETCH_MANPOWER_SIGNAL")
+
+        audit_rows.append(
+            {
+                "project_code": project_code,
+                "status_final_sag_available": "Yes" if status_final_sag_available else "No",
+                "status_paying_out_available": "Yes" if status_paying_out_available else "No",
+                "stretch_readiness_available": "Yes" if stretch_readiness_available else "No",
+                "manpower_available": "Yes" if manpower_available else "No",
+                "fitter_available": "Yes" if fitter_available else "No",
+                "location_nos_available": "Yes" if location_nos_available else "No",
+                "status_final_sag_fill_pct": round(status_final_fill, 1),
+                "status_paying_out_fill_pct": round(status_paying_fill, 1),
+                "stretch_readiness_fill_pct": round(stretch_fill_pct, 1),
+                "manpower_fill_pct": round(manpower_fill_pct, 1),
+                "fitter_fill_pct": round(fitter_fill_pct, 1),
+                "location_nos_fill_pct": round(location_fill_pct, 1),
+                "missing_data_tags": ";".join(missing_tags),
+            }
+        )
+
+    numeric_df = pd.DataFrame(numeric_rows, columns=numeric_columns)
+    audit_df = pd.DataFrame(audit_rows, columns=audit_columns)
+    return numeric_df, audit_df
+
+
 def build_complete_foundation_analysis_tables(
     *,
     raw_erection_source: pd.DataFrame,
@@ -2018,6 +2409,11 @@ def build_complete_foundation_analysis_tables(
     foundation_coverage: pd.DataFrame,
     foundation_diagnostics: pd.DataFrame,
     progress_status_raw: pd.DataFrame,
+    stringing_status_activity_fact: pd.DataFrame | None = None,
+    stringing_manpower_fact: pd.DataFrame | None = None,
+    stringing_compiled_raw: pd.DataFrame | None = None,
+    stretch_readiness_summary: pd.DataFrame | None = None,
+    stretch_readiness_manpower_audit: pd.DataFrame | None = None,
     daily_reference: pd.DataFrame | None = None,
     mechanism_config: MechanismConfig | None = None,
 ) -> dict[str, pd.DataFrame]:
@@ -2054,6 +2450,15 @@ def build_complete_foundation_analysis_tables(
         "Foundation Delay Anomalies": delay_anomalies,
     }
     tables.update(v2_tables)
+    monitoring_numeric, monitoring_audit = _build_stringing_monitoring_tables(
+        status_activity_fact=stringing_status_activity_fact,
+        manpower_fact=stringing_manpower_fact,
+        stringing_compiled_raw=stringing_compiled_raw,
+        stretch_summary=stretch_readiness_summary,
+        stretch_manpower_audit=stretch_readiness_manpower_audit,
+    )
+    tables["Stringing Monitoring Numeric"] = monitoring_numeric
+    tables["Stringing Monitoring Audit"] = monitoring_audit
     return tables
 
 
@@ -2088,6 +2493,8 @@ def write_foundation_delay_analysis_workbook(
         "Mechanism Matrix - Overall",
         "Mechanism Evidence Audit",
         "Mechanism Config",
+        "Stringing Monitoring Numeric",
+        "Stringing Monitoring Audit",
     ]
     seen = set(ordered_sheets)
     for sheet_name in tables.keys():
