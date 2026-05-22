@@ -255,6 +255,166 @@ class ErectionStringingDelayAnalysisTests(unittest.TestCase):
         anomalies = tables["ES Delay Anomalies"]
         self.assertEqual(int((anomalies["Issue"].astype(str) == "PROJECT_SCOPE_KEY_NO_ERECTION_MATCH").sum()), 1)
 
+    def test_stringing_monitoring_tables_project_code_blanking_and_audit_tags(self) -> None:
+        stringing_compiled_raw = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 413",
+                    "project_name": "TA 413 - L1",
+                    "project_scope_key": "ta413::l1",
+                    "gang_name": "G1",
+                    "from_ap": "1/0",
+                    "to_ap": "1/1",
+                    "location nos": "1/0,1/1",
+                    "method": "TSE",
+                    "po_start_date": "2026-05-01",
+                },
+                {
+                    "project_code": "TA 414",
+                    "project_name": "TA 414 - L1",
+                    "project_scope_key": "ta414::l1",
+                    "gang_name": "G2",
+                    "from_ap": "2/0",
+                    "to_ap": "2/1",
+                    "location nos": "",
+                    "method": "TSE",
+                    "po_start_date": "2026-05-01",
+                },
+            ]
+        )
+        status_activity = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 413",
+                    "month": "2026-05-01",
+                    "report_date": "2026-05-20",
+                    "activity_raw": "Final Sag",
+                    "activity_norm": "final_sag",
+                    "activity_group": "Stringing",
+                    "quantity_primary": 118.0,
+                    "plan_for_month": 18.0,
+                    "progress_for_month": 6.0,
+                    "cumulative_progress": 74.0,
+                    "balance_progress": 44.0,
+                },
+                {
+                    "project_code": "TA 413",
+                    "month": "2026-05-01",
+                    "report_date": "2026-05-20",
+                    "activity_raw": "Paying Out",
+                    "activity_norm": "paying_out",
+                    "activity_group": "Other",
+                    "cumulative_progress": 80.0,
+                    "balance_progress": 38.0,
+                },
+                {
+                    "project_code": "TA 414",
+                    "month": "2026-05-01",
+                    "report_date": "2026-05-21",
+                    "activity_raw": "Stringing (Km)",
+                    "activity_norm": "stringing",
+                    "activity_group": "Stringing",
+                    "quantity_primary": 127.8,
+                    "plan_for_month": pd.NA,
+                    "progress_for_month": pd.NA,
+                    "cumulative_progress": 10.4,
+                    "balance_progress": 117.4,
+                },
+                {
+                    "project_code": "TA 777",
+                    "month": "2026-05-01",
+                    "report_date": "2026-05-20",
+                    "activity_raw": "Final Sag",
+                    "activity_norm": "final_sag",
+                    "activity_group": "Stringing",
+                    "quantity_primary": 10.0,
+                    "plan_for_month": 2.0,
+                    "progress_for_month": 1.0,
+                    "cumulative_progress": 5.0,
+                    "balance_progress": 5.0,
+                },
+            ]
+        )
+        manpower_fact = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 413",
+                    "date": "2026-05-20",
+                    "month": "2026-05-01",
+                    "gang_name": "G1",
+                    "daily_km": 1.2,
+                    "manpower_gang_strength": 50,
+                    "manpower_fitters": 10,
+                },
+                {
+                    "project_code": "TA 414",
+                    "date": "2026-05-21",
+                    "month": "2026-05-01",
+                    "gang_name": "G2",
+                    "daily_km": 0.4,
+                    "manpower_gang_strength": pd.NA,
+                    "manpower_fitters": pd.NA,
+                },
+            ]
+        )
+        stretch_summary = pd.DataFrame(
+            [
+                {"project_code": "TA 413", "ready_km": 50.0, "total_km": 100.0, "readiness_pct": 50.0},
+            ]
+        )
+        stretch_manpower_audit = pd.DataFrame(
+            [
+                {"project_code": "TA 414", "status": "ABSENT"},
+            ]
+        )
+
+        tables = build_erection_stringing_delay_tables(
+            stringing_compiled_raw=stringing_compiled_raw,
+            erection_daily=pd.DataFrame(),
+            stringing_status_activity_fact=status_activity,
+            stringing_manpower_fact=manpower_fact,
+            stretch_readiness_summary=stretch_summary,
+            stretch_readiness_manpower_audit=stretch_manpower_audit,
+        )
+
+        self.assertIn("Stringing Monitoring Numeric", tables)
+        self.assertIn("Stringing Monitoring Audit", tables)
+
+        numeric = tables["Stringing Monitoring Numeric"]
+        audit = tables["Stringing Monitoring Audit"]
+
+        ta413_project = numeric[
+            (numeric["project_code"].astype(str).str.strip() == "TA 413")
+            & (numeric["row_type"].astype(str).str.strip() == "project")
+        ]
+        self.assertFalse(ta413_project.empty)
+
+        ta414_project = numeric[
+            (numeric["project_code"].astype(str).str.strip() == "TA 414")
+            & (numeric["row_type"].astype(str).str.strip() == "project")
+        ]
+        self.assertFalse(ta414_project.empty)
+        self.assertTrue(pd.isna(ta414_project.iloc[0]["monthly_plan_km"]))
+        self.assertTrue(pd.isna(ta414_project.iloc[0]["fs_achieved_month_km"]))
+
+        ta413_gang = numeric[
+            (numeric["project_code"].astype(str).str.strip() == "TA 413")
+            & (numeric["row_type"].astype(str).str.strip() == "gang")
+            & (numeric["gang_name"].astype(str).str.strip() == "G1")
+        ]
+        self.assertFalse(ta413_gang.empty)
+
+        self.assertTrue((numeric["project_code"].astype(str).str.strip() == "TA 777").any())
+
+        ta414_audit = audit[audit["project_code"].astype(str).str.strip() == "TA 414"]
+        self.assertFalse(ta414_audit.empty)
+        self.assertEqual(str(ta414_audit.iloc[0]["location_nos_available"]).strip(), "No")
+        tags = str(ta414_audit.iloc[0]["missing_data_tags"])
+        self.assertIn("MISSING_STRETCH_READINESS", tags)
+        self.assertIn("MISSING_MANPOWER", tags)
+        self.assertIn("MISSING_FITTER", tags)
+        self.assertIn("MISSING_LOCATION_NOS", tags)
+
     def test_workbook_writer_persists_expected_sheets_and_columns(self) -> None:
         stringing_compiled_raw = pd.DataFrame(
             [
@@ -296,6 +456,8 @@ class ErectionStringingDelayAnalysisTests(unittest.TestCase):
                         "POFS Delay Coverage",
                         "POFS Delay Anomalies",
                         "POFS Delay Detail",
+                        "Stringing Monitoring Numeric",
+                        "Stringing Monitoring Audit",
                     ],
                 )
             for sheet_name, frame in tables.items():

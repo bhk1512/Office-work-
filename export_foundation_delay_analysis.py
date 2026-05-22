@@ -15,10 +15,6 @@ from dashboard.data_loader import (
     load_foundation_coverage,
     load_foundation_diagnostics,
     load_progress_status_raw,
-    load_stringing_compiled_raw,
-    load_stringing_summary_table,
-    load_stretch_readiness_manpower_audit,
-    load_stretch_readiness_summary,
 )
 from dashboard.foundation_delay_analysis import (
     MechanismConfig,
@@ -127,11 +123,6 @@ def main() -> int:
     foundation_coverage = load_foundation_coverage(config)
     foundation_diagnostics = load_foundation_diagnostics(config)
     progress_status_raw = load_progress_status_raw(config)
-    stringing_status_activity = load_stringing_summary_table(config, "StatusActivityFact")
-    stringing_manpower_fact = load_stringing_summary_table(config, "ManpowerProductivityFact")
-    stringing_compiled_raw = load_stringing_compiled_raw(config)
-    stretch_readiness_summary = load_stretch_readiness_summary(config)
-    stretch_manpower_audit = load_stretch_readiness_manpower_audit(config)
     mechanism_config = MechanismConfig(
         pre_monsoon=_parse_month_list(args.pre_monsoon_months, (4, 5)),
         monsoon=_parse_month_list(args.monsoon_months, (6, 7, 8, 9)),
@@ -147,11 +138,6 @@ def main() -> int:
         foundation_coverage=foundation_coverage,
         foundation_diagnostics=foundation_diagnostics,
         progress_status_raw=progress_status_raw,
-        stringing_status_activity_fact=stringing_status_activity,
-        stringing_manpower_fact=stringing_manpower_fact,
-        stringing_compiled_raw=stringing_compiled_raw,
-        stretch_readiness_summary=stretch_readiness_summary,
-        stretch_readiness_manpower_audit=stretch_manpower_audit,
         daily_reference=daily_df,
         mechanism_config=mechanism_config,
     )

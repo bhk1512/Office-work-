@@ -10,7 +10,13 @@ from pathlib import Path
 import pandas as pd
 
 from dashboard.config import AppConfig, configure_logging
-from dashboard.data_loader import load_daily, load_stringing_compiled_raw
+from dashboard.data_loader import (
+    load_daily,
+    load_stringing_compiled_raw,
+    load_stringing_summary_table,
+    load_stretch_readiness_manpower_audit,
+    load_stretch_readiness_summary,
+)
 from dashboard.erection_stringing_delay_analysis import (
     build_erection_stringing_delay_tables,
     write_erection_stringing_delay_workbook,
@@ -94,11 +100,19 @@ def main() -> int:
     LOGGER.info("Loading erection daily dataset from %s", config.data_path)
     erection_daily = load_daily(config)
     LOGGER.info("Loading stringing compiled dataset from %s", config.stringing_data_path)
-    stringing_compiled_raw = load_stringing_compiled_raw(config.stringing_data_path)
+    stringing_compiled_raw = load_stringing_compiled_raw(config)
+    stringing_status_activity = load_stringing_summary_table(config, "StatusActivityFact")
+    stringing_manpower_fact = load_stringing_summary_table(config, "ManpowerProductivityFact")
+    stretch_readiness_summary = load_stretch_readiness_summary(config)
+    stretch_manpower_audit = load_stretch_readiness_manpower_audit(config)
 
     tables = build_erection_stringing_delay_tables(
         stringing_compiled_raw=stringing_compiled_raw,
         erection_daily=erection_daily,
+        stringing_status_activity_fact=stringing_status_activity,
+        stringing_manpower_fact=stringing_manpower_fact,
+        stretch_readiness_summary=stretch_readiness_summary,
+        stretch_readiness_manpower_audit=stretch_manpower_audit,
         start_date=start_date,
         end_date=end_date,
         method_scope="all",
