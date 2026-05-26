@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 import re
+import warnings
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -1534,14 +1535,16 @@ def _is_valid_date_value(value: object) -> bool:
     if not text:
         return False
     normalized = text.strip().lower()
-    if normalized in {"yes", "y", "true"}:
+    if normalized in {"yes", "y", "true", "ok", "done", "completed", "complete", "c"}:
         return True
-    if normalized in {"no", "n", "false"}:
+    if normalized in {"no", "n", "false", "pending", "wip", "balance", "row", "hold", "blocked"}:
         return False
     try:
-        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
-        if pd.isna(parsed):
-            parsed = pd.to_datetime(text, errors="coerce")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+            if pd.isna(parsed):
+                parsed = pd.to_datetime(text, errors="coerce")
     except Exception:
         return False
     return pd.notna(parsed)
