@@ -69,6 +69,13 @@ SPAN_READINESS_COLUMNS = [
     "ready_to_string",
     "readiness_reason",
 ]
+SPAN_BUCKET_COLUMNS = [
+    "project_code",
+    "project_display",
+    "Bucket",
+    "Definition",
+    "Count",
+]
 TOWER_GAP_COLUMNS = [
     "project_code",
     "project_display",
@@ -384,6 +391,51 @@ def _build_tower_gap(towers: pd.DataFrame) -> pd.DataFrame:
     return gap.reindex(columns=TOWER_GAP_COLUMNS).reset_index(drop=True)
 
 
+def _build_span_bucket_summary(spans: pd.DataFrame) -> pd.DataFrame:
+    if spans.empty:
+        return pd.DataFrame(columns=SPAN_BUCKET_COLUMNS)
+
+    bucket_defs = [
+        ("Stringing Ready", "All towers erected + all towers tightened"),
+        ("Tightening not started", "All towers erected, 0 towers tightened"),
+        ("Tightening partial", "All towers erected, some but not all towers tightened"),
+        ("Erection Gap", "Erection itself not complete"),
+    ]
+    work = spans.copy()
+    for column in ("required_location_count", "erected_location_count", "tightened_location_count"):
+        work[column] = pd.to_numeric(work.get(column), errors="coerce").fillna(0).astype(int)
+    work["all_erected"] = work.get("all_erected", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+    work["all_tightened"] = work.get("all_tightened", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+
+    rows: list[dict[str, object]] = []
+    for (project_code, project_display), group in work.groupby(["project_code", "project_display"], dropna=False):
+        all_erected = group["all_erected"]
+        all_tightened = group["all_tightened"]
+        tightened_count = group["tightened_location_count"]
+        required_count = group["required_location_count"]
+        counts = {
+            "Stringing Ready": int((all_erected & all_tightened).sum()),
+            "Tightening not started": int((all_erected & tightened_count.eq(0)).sum()),
+            "Tightening partial": int((all_erected & tightened_count.gt(0) & tightened_count.lt(required_count)).sum()),
+            "Erection Gap": int((~all_erected).sum()),
+        }
+        for bucket, definition in bucket_defs:
+            rows.append(
+                {
+                    "project_code": _safe_text(project_code),
+                    "project_display": _safe_text(project_display) or _safe_text(project_code),
+                    "Bucket": bucket,
+                    "Definition": definition,
+                    "Count": counts[bucket],
+                }
+            )
+    out = pd.DataFrame(rows, columns=SPAN_BUCKET_COLUMNS)
+    bucket_order = {bucket: idx for idx, (bucket, _) in enumerate(bucket_defs)}
+    out["__bucket_order"] = out["Bucket"].map(bucket_order).fillna(len(bucket_order)).astype(int)
+    out = out.sort_values(["project_code", "__bucket_order"]).drop(columns=["__bucket_order"])
+    return out.reset_index(drop=True)
+
+
 def _coverage_reason(bucket: str, tightened: int, usable_spans: int) -> str:
     if bucket == "INCLUDED":
         return "Erection tower tightening and usable stringing spans are available."
@@ -554,6 +606,7 @@ def build_stretch_tightening_readiness_tables(
     towers = _normalize_erection_towers(erection_raw)
     stringing_spans = _normalize_stringing_spans(stringing_compiled_raw)
     span_readiness = _build_span_readiness(towers, stringing_spans)
+    span_buckets = _build_span_bucket_summary(span_readiness)
     tower_gap = _build_tower_gap(towers)
     project_summary = _build_project_summary(towers, span_readiness)
     coverage = _build_coverage(project_summary)
@@ -562,6 +615,7 @@ def build_stretch_tightening_readiness_tables(
     return {
         "Executive Summary": executive_summary,
         "Project Summary": project_summary,
+        "Span Buckets": span_buckets,
         "Span Readiness": span_readiness,
         "Tower Gap": tower_gap,
         "Coverage": coverage,
@@ -579,6 +633,7 @@ def write_stretch_tightening_readiness_workbook(
     ordered = [
         "Executive Summary",
         "Project Summary",
+        "Span Buckets",
         "Span Readiness",
         "Tower Gap",
         "Coverage",

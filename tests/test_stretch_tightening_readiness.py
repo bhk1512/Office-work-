@@ -58,6 +58,13 @@ class StretchTighteningReadinessTests(unittest.TestCase):
         self.assertEqual(int(project["ready_to_string_spans"]), 1)
         self.assertAlmostEqual(float(project["ready_to_string_km"]), 1.0)
 
+        buckets = tables["Span Buckets"]
+        counts = dict(zip(buckets["Bucket"].astype(str), buckets["Count"].astype(int)))
+        self.assertEqual(counts["Stringing Ready"], 2)
+        self.assertEqual(counts["Tightening not started"], 1)
+        self.assertEqual(counts["Tightening partial"], 0)
+        self.assertEqual(counts["Erection Gap"], 0)
+
     def test_location_nos_must_all_be_tightened(self) -> None:
         erection_raw = pd.DataFrame(
             [
@@ -88,6 +95,9 @@ class StretchTighteningReadinessTests(unittest.TestCase):
         span = tables["Span Readiness"].iloc[0]
         self.assertFalse(bool(span["ready_to_string"]))
         self.assertEqual(str(span["missing_tightening_locations"]), "65/2")
+        buckets = tables["Span Buckets"]
+        counts = dict(zip(buckets["Bucket"].astype(str), buckets["Count"].astype(int)))
+        self.assertEqual(counts["Tightening partial"], 1)
 
     def test_workbook_export_contains_expected_sheets(self) -> None:
         tables = build_stretch_tightening_readiness_tables(
@@ -111,6 +121,7 @@ class StretchTighteningReadinessTests(unittest.TestCase):
                     [
                         "Executive Summary",
                         "Project Summary",
+                        "Span Buckets",
                         "Span Readiness",
                         "Tower Gap",
                         "Coverage",
