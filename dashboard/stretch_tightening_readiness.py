@@ -70,11 +70,13 @@ SPAN_READINESS_COLUMNS = [
     "readiness_reason",
 ]
 SPAN_BUCKET_COLUMNS = [
-    "project_code",
-    "project_display",
-    "Bucket",
-    "Definition",
-    "Count",
+    "Project",
+    "Total Spans",
+    "Already Strung spans",
+    "Stringing Ready",
+    "Tightening not started",
+    "Tightening partial",
+    "Erection Gap",
 ]
 TOWER_GAP_COLUMNS = [
     "project_code",
@@ -106,6 +108,7 @@ ASSUMPTION_COLUMNS = ["Topic", "Assumption"]
 
 READY_TIGHTENING_TOKENS = "dates; yes; y; true; ok; done; completed; complete; c"
 BLOCKED_TIGHTENING_TOKENS = "no; n; false; pending; wip; balance; row; hold; blocked"
+ASSUME_TIGHTENING_DONE_PROJECT_KEYS = {"ta413", "ta416"}
 
 
 def _safe_text(value: object) -> str:
@@ -229,6 +232,9 @@ def _normalize_erection_towers(erection_raw: pd.DataFrame) -> pd.DataFrame:
         _completion_signal(raw, parsed_date=parsed)
         for raw, parsed in zip(out["tower_tightening_raw"], out["tower_tightening"])
     ]
+    assumed_done_mask = out["project_key"].isin(ASSUME_TIGHTENING_DONE_PROJECT_KEYS) & out["erected"].astype(bool)
+    if assumed_done_mask.any():
+        out.loc[assumed_done_mask, "tightened"] = True
     out["report_ts"] = [
         _report_timestamp_with_fallback("", source_file)
         for source_file in out["source_file"]
@@ -288,6 +294,13 @@ def _build_lookup_maps(towers: pd.DataFrame) -> tuple[dict[tuple[str, str], pd.S
         if project_key:
             by_project[(project_key, loc)] = row
     return by_scope, by_project
+
+
+def _project_analysis_key(project_scope_key: object, project_code: object, line_name: object, project_display: object) -> str:
+    scope = _safe_text(project_scope_key)
+    if scope:
+        return ingest.normalize_project_code_key(scope)
+    return _scope_key_for_match("", project_code, line_name) or ingest.normalize_project_code_key(project_display)
 
 
 def _build_span_readiness(towers: pd.DataFrame, stringing_spans: pd.DataFrame) -> pd.DataFrame:
@@ -352,6 +365,7 @@ def _build_span_readiness(towers: pd.DataFrame, stringing_spans: pd.DataFrame) -
                 "project_code": project_code,
                 "project_display": project_display,
                 "project_scope_key": project_scope_key,
+                "analysis_key": _project_analysis_key(project_scope_key, project_code, line_name, project_display),
                 "line_name": line_name,
                 "source_file": _safe_text(row.get("source_file")) or _safe_text(row.get("_source_file")),
                 "source_sheet": _safe_text(row.get("source_sheet")),
@@ -395,45 +409,41 @@ def _build_span_bucket_summary(spans: pd.DataFrame) -> pd.DataFrame:
     if spans.empty:
         return pd.DataFrame(columns=SPAN_BUCKET_COLUMNS)
 
-    bucket_defs = [
-        ("Stringing Ready", "All towers erected + all towers tightened"),
-        ("Tightening not started", "All towers erected, 0 towers tightened"),
-        ("Tightening partial", "All towers erected, some but not all towers tightened"),
-        ("Erection Gap", "Erection itself not complete"),
-    ]
     work = spans.copy()
     for column in ("required_location_count", "erected_location_count", "tightened_location_count"):
         work[column] = pd.to_numeric(work.get(column), errors="coerce").fillna(0).astype(int)
     work["all_erected"] = work.get("all_erected", pd.Series(False, index=work.index)).fillna(False).astype(bool)
     work["all_tightened"] = work.get("all_tightened", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+    work["already_strung"] = work.get("already_strung", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+    work["ready_to_string"] = work.get("ready_to_string", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+    if "analysis_key" not in work.columns:
+        work["analysis_key"] = [
+            _project_analysis_key(scope, code, line, display)
+            for scope, code, line, display in zip(
+                work.get("project_scope_key", pd.Series("", index=work.index)),
+                work.get("project_code", pd.Series("", index=work.index)),
+                work.get("line_name", pd.Series("", index=work.index)),
+                work.get("project_display", pd.Series("", index=work.index)),
+            )
+        ]
 
     rows: list[dict[str, object]] = []
-    for (project_code, project_display), group in work.groupby(["project_code", "project_display"], dropna=False):
+    for _, group in work.groupby("analysis_key", dropna=False):
         all_erected = group["all_erected"]
-        all_tightened = group["all_tightened"]
         tightened_count = group["tightened_location_count"]
         required_count = group["required_location_count"]
-        counts = {
-            "Stringing Ready": int((all_erected & all_tightened).sum()),
-            "Tightening not started": int((all_erected & tightened_count.eq(0)).sum()),
-            "Tightening partial": int((all_erected & tightened_count.gt(0) & tightened_count.lt(required_count)).sum()),
-            "Erection Gap": int((~all_erected).sum()),
-        }
-        for bucket, definition in bucket_defs:
-            rows.append(
-                {
-                    "project_code": _safe_text(project_code),
-                    "project_display": _safe_text(project_display) or _safe_text(project_code),
-                    "Bucket": bucket,
-                    "Definition": definition,
-                    "Count": counts[bucket],
-                }
-            )
-    out = pd.DataFrame(rows, columns=SPAN_BUCKET_COLUMNS)
-    bucket_order = {bucket: idx for idx, (bucket, _) in enumerate(bucket_defs)}
-    out["__bucket_order"] = out["Bucket"].map(bucket_order).fillna(len(bucket_order)).astype(int)
-    out = out.sort_values(["project_code", "__bucket_order"]).drop(columns=["__bucket_order"])
-    return out.reset_index(drop=True)
+        rows.append(
+            {
+                "Project": _safe_text(group["project_display"].iloc[0]) or _safe_text(group["project_code"].iloc[0]),
+                "Total Spans": int(len(group.index)),
+                "Already Strung spans": int(group["already_strung"].sum()),
+                "Stringing Ready": int(group["ready_to_string"].sum()),
+                "Tightening not started": int((all_erected & tightened_count.eq(0)).sum()),
+                "Tightening partial": int((all_erected & tightened_count.gt(0) & tightened_count.lt(required_count)).sum()),
+                "Erection Gap": int((~all_erected).sum()),
+            }
+        )
+    return pd.DataFrame(rows, columns=SPAN_BUCKET_COLUMNS).sort_values("Project").reset_index(drop=True)
 
 
 def _coverage_reason(bucket: str, tightened: int, usable_spans: int) -> str:
@@ -449,11 +459,21 @@ def _coverage_reason(bucket: str, tightened: int, usable_spans: int) -> str:
 def _build_project_summary(towers: pd.DataFrame, spans: pd.DataFrame) -> pd.DataFrame:
     tower_rows: list[dict[str, object]] = []
     if not towers.empty:
-        for project_key, group in towers.groupby("project_key", dropna=False):
+        towers = towers.copy()
+        towers["analysis_key"] = [
+            _project_analysis_key(scope, code, line, display)
+            for scope, code, line, display in zip(
+                towers["project_scope_key"],
+                towers["project_code"],
+                towers["line_name"],
+                towers["project_display"],
+            )
+        ]
+        for analysis_key, group in towers.groupby("analysis_key", dropna=False):
             project_code = _safe_text(group["project_code"].iloc[0])
             tower_rows.append(
                 {
-                    "project_key": project_key,
+                    "analysis_key": analysis_key,
                     "project_code": project_code,
                     "project_display": _safe_text(group["project_display"].iloc[0]) or project_code,
                     "project_scope_keys": "; ".join(sorted(set(group["project_scope_key"].dropna().astype(str).str.strip()))),
@@ -466,17 +486,26 @@ def _build_project_summary(towers: pd.DataFrame, spans: pd.DataFrame) -> pd.Data
             )
     tower_summary = pd.DataFrame(tower_rows)
     if tower_summary.empty:
-        tower_summary = pd.DataFrame(columns=["project_key"])
+        tower_summary = pd.DataFrame(columns=["analysis_key"])
 
     span_rows: list[dict[str, object]] = []
     if not spans.empty:
         work = spans.copy()
-        work["project_key"] = work["project_code"].map(ingest.normalize_project_code_key)
-        for project_key, group in work.groupby("project_key", dropna=False):
+        if "analysis_key" not in work.columns:
+            work["analysis_key"] = [
+                _project_analysis_key(scope, code, line, display)
+                for scope, code, line, display in zip(
+                    work.get("project_scope_key", pd.Series("", index=work.index)),
+                    work.get("project_code", pd.Series("", index=work.index)),
+                    work.get("line_name", pd.Series("", index=work.index)),
+                    work.get("project_display", pd.Series("", index=work.index)),
+                )
+            ]
+        for analysis_key, group in work.groupby("analysis_key", dropna=False):
             ready_mask = group["ready_to_string"].astype(bool)
             span_rows.append(
                 {
-                    "project_key": project_key,
+                    "analysis_key": analysis_key,
                     "project_code_span": _safe_text(group["project_code"].iloc[0]),
                     "project_display_span": _safe_text(group["project_display"].iloc[0]),
                     "usable_stringing_spans": int(len(group.index)),
@@ -489,11 +518,11 @@ def _build_project_summary(towers: pd.DataFrame, spans: pd.DataFrame) -> pd.Data
             )
     span_summary = pd.DataFrame(span_rows)
     if span_summary.empty:
-        span_summary = pd.DataFrame(columns=["project_key"])
+        span_summary = pd.DataFrame(columns=["analysis_key"])
 
     if tower_summary.empty and span_summary.empty:
         return pd.DataFrame(columns=PROJECT_SUMMARY_COLUMNS)
-    merged = pd.merge(tower_summary, span_summary, on="project_key", how="outer")
+    merged = pd.merge(tower_summary, span_summary, on="analysis_key", how="outer")
     if "project_code" not in merged.columns:
         merged["project_code"] = ""
     if "project_code_span" not in merged.columns:
@@ -592,6 +621,8 @@ def _build_assumptions() -> pd.DataFrame:
         ("Tightening complete tokens", READY_TIGHTENING_TOKENS),
         ("Tightening blocker tokens", BLOCKED_TIGHTENING_TOKENS),
         ("Ready-to-string rule", "All required locations erected and tightened, and no paying-out/final-sag/status completion recorded."),
+        ("Span Buckets Stringing Ready", "Uses ready_to_string, so already-strung spans are excluded from the leadership-ready count."),
+        ("Assumed tightening complete", "TA 413 and TA 416 are treated as tightened wherever tower erection is complete."),
         ("Location matching", "Stringing endpoints plus Location Nos are matched to normalized erection location numbers by project scope, then project fallback."),
     ]
     return pd.DataFrame(rows, columns=ASSUMPTION_COLUMNS)

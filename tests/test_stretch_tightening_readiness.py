@@ -59,11 +59,13 @@ class StretchTighteningReadinessTests(unittest.TestCase):
         self.assertAlmostEqual(float(project["ready_to_string_km"]), 1.0)
 
         buckets = tables["Span Buckets"]
-        counts = dict(zip(buckets["Bucket"].astype(str), buckets["Count"].astype(int)))
-        self.assertEqual(counts["Stringing Ready"], 2)
-        self.assertEqual(counts["Tightening not started"], 1)
-        self.assertEqual(counts["Tightening partial"], 0)
-        self.assertEqual(counts["Erection Gap"], 0)
+        bucket = buckets.iloc[0]
+        self.assertEqual(int(bucket["Total Spans"]), 3)
+        self.assertEqual(int(bucket["Already Strung spans"]), 1)
+        self.assertEqual(int(bucket["Stringing Ready"]), 1)
+        self.assertEqual(int(bucket["Tightening not started"]), 1)
+        self.assertEqual(int(bucket["Tightening partial"]), 0)
+        self.assertEqual(int(bucket["Erection Gap"]), 0)
 
     def test_location_nos_must_all_be_tightened(self) -> None:
         erection_raw = pd.DataFrame(
@@ -96,8 +98,43 @@ class StretchTighteningReadinessTests(unittest.TestCase):
         self.assertFalse(bool(span["ready_to_string"]))
         self.assertEqual(str(span["missing_tightening_locations"]), "65/2")
         buckets = tables["Span Buckets"]
-        counts = dict(zip(buckets["Bucket"].astype(str), buckets["Count"].astype(int)))
-        self.assertEqual(counts["Tightening partial"], 1)
+        self.assertEqual(int(buckets.iloc[0]["Tightening partial"]), 1)
+
+    def test_ta413_and_ta416_tightening_is_assumed_done_when_erected(self) -> None:
+        tables = build_stretch_tightening_readiness_tables(
+            erection_raw=pd.DataFrame(
+                [
+                    {"Project Code": "TA 413", "Project Scope Key": "ta413", "Location No.": "1/0", "Complete Date": "2026-05-01", "Tower Tightening Raw": ""},
+                    {"Project Code": "TA 413", "Project Scope Key": "ta413", "Location No.": "1/1", "Complete Date": "2026-05-02", "Tower Tightening Raw": ""},
+                ]
+            ),
+            stringing_compiled_raw=pd.DataFrame(
+                [{"project_code": "TA 413", "project_scope_key": "ta413", "from_ap": "1/0", "to_ap": "1/1", "length_m": 1000, "status": "Balance"}]
+            ),
+        )
+        buckets = tables["Span Buckets"]
+        self.assertEqual(int(buckets.iloc[0]["Stringing Ready"]), 1)
+        self.assertEqual(int(tables["Project Summary"].iloc[0]["tightened_towers"]), 2)
+
+    def test_project_variants_are_split_by_scope(self) -> None:
+        tables = build_stretch_tightening_readiness_tables(
+            erection_raw=pd.DataFrame(
+                [
+                    {"Project Code": "TB 507", "Project Display": "TB 507", "Project Scope Key": "tb507", "Line Name": "", "Location No.": "1/0", "Complete Date": "2026-05-01", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TB 507", "Project Display": "TB 507", "Project Scope Key": "tb507", "Line Name": "", "Location No.": "1/1", "Complete Date": "2026-05-02", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TB 507", "Project Display": "TB 507 - MAIN", "Project Scope Key": "tb507main", "Line Name": "MAIN", "Location No.": "2/0", "Complete Date": "2026-05-01", "Tower Tightening Raw": ""},
+                    {"Project Code": "TB 507", "Project Display": "TB 507 - MAIN", "Project Scope Key": "tb507main", "Line Name": "MAIN", "Location No.": "2/1", "Complete Date": "2026-05-02", "Tower Tightening Raw": ""},
+                ]
+            ),
+            stringing_compiled_raw=pd.DataFrame(
+                [
+                    {"project_code": "TB 507", "project_display": "TB 507", "project_scope_key": "tb507", "line_name": "", "from_ap": "1/0", "to_ap": "1/1", "length_m": 1000, "status": "Balance"},
+                    {"project_code": "TB 507", "project_display": "TB 507 - MAIN", "project_scope_key": "tb507main", "line_name": "MAIN", "from_ap": "2/0", "to_ap": "2/1", "length_m": 1000, "status": "Balance"},
+                ]
+            ),
+        )
+        projects = set(tables["Span Buckets"]["Project"].astype(str))
+        self.assertEqual(projects, {"TB 507", "TB 507 - MAIN"})
 
     def test_workbook_export_contains_expected_sheets(self) -> None:
         tables = build_stretch_tightening_readiness_tables(

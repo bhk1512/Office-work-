@@ -389,6 +389,20 @@ def find_stringing_sheet_name_from_list(
             hit = by_sheet_key.get(normalize_sheet_key(candidate))
             if hit:
                 return hit
+        candidate_keys = {normalize_sheet_key(candidate) for candidate in project_candidates}
+        if candidate_keys <= {"stringing", ""}:
+            stringing_sheets = [
+                name
+                for name in names
+                if "stringing" in normalize_space_only(name)
+            ]
+            compiled_sheets = [
+                name
+                for name in stringing_sheets
+                if "compiled" in normalize_space_only(name)
+            ]
+            if len(stringing_sheets) == 1 and len(compiled_sheets) == 1:
+                return compiled_sheets[0]
         return None
     if preferred:
         target = preferred.strip().lower()
@@ -521,10 +535,13 @@ def load_stringing_sheet_frame(
                 raise ValueError("NO_TARGET_SHEET")
             df_raw = xl.parse(sheet_name=found, header=None)
             frame, header_row, header_labels = materialize_stringing_data(df_raw, min_columns=min_columns)
+            fallback_note = ""
+            if configured_sheet_name and normalize_sheet_key(found) != normalize_sheet_key(configured_sheet_name):
+                fallback_note = f"Configured sheet '{configured_sheet_name}' not found; used '{found}'."
             return StringingSheetLoadResult(
                 frame=frame,
                 resolved_sheet=found,
-                fallback_note="",
+                fallback_note=fallback_note,
                 header_row=header_row,
                 header_labels=header_labels,
             )
@@ -538,10 +555,14 @@ def load_stringing_sheet_frame(
         if found is None or df_raw is None or df_raw.empty:
             raise ValueError("NO_TARGET_SHEET")
         frame, header_row, header_labels = materialize_stringing_data(df_raw, min_columns=min_columns)
+        note = fallback_note or ""
+        if configured_sheet_name and normalize_sheet_key(found) != normalize_sheet_key(configured_sheet_name):
+            sheet_note = f"Configured sheet '{configured_sheet_name}' not found; used '{found}'."
+            note = f"{note}; {sheet_note}" if note else sheet_note
         return StringingSheetLoadResult(
             frame=frame,
             resolved_sheet=found,
-            fallback_note=fallback_note or "",
+            fallback_note=note,
             header_row=header_row,
             header_labels=header_labels,
         )

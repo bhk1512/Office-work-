@@ -1000,6 +1000,51 @@ def _infer_length_unit(values: pd.Series) -> str:
     return "m"
 
 
+def _summary_or_header_marker(value: object) -> bool:
+    text = "" if value is None else str(value).strip().lower()
+    if text in {"", "nan", "none", "null"}:
+        return False
+    compact = re.sub(r"[^a-z0-9]+", "", text)
+    return compact in {
+        "from",
+        "to",
+        "fromap",
+        "toap",
+        "total",
+        "grandtotal",
+        "subtotal",
+        "section",
+        "length",
+        "lengthinkm",
+        "lengthinkms",
+        "lengthinm",
+        "lengthinmeters",
+    }
+
+
+def _row_level_length_mask(frame: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(True, index=frame.index, dtype="bool")
+    if "from_ap" in frame.columns and "to_ap" in frame.columns:
+        from_blank = _blank_like_mask(frame["from_ap"])
+        to_blank = _blank_like_mask(frame["to_ap"])
+        from_marker = frame["from_ap"].map(_summary_or_header_marker)
+        to_marker = frame["to_ap"].map(_summary_or_header_marker)
+        mask = ~(from_blank | to_blank | from_marker | to_marker)
+    elif "to_ap" in frame.columns:
+        to_blank = _blank_like_mask(frame["to_ap"])
+        to_marker = frame["to_ap"].map(_summary_or_header_marker)
+        mask = ~(to_blank | to_marker)
+    elif "from_ap" in frame.columns:
+        from_blank = _blank_like_mask(frame["from_ap"])
+        from_marker = frame["from_ap"].map(_summary_or_header_marker)
+        mask = ~(from_blank | from_marker)
+
+    if "status" in frame.columns:
+        status_marker = frame["status"].map(_summary_or_header_marker)
+        mask = mask & ~status_marker
+    return mask
+
+
 def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Add ``length_km`` derived from length values and compute sanity metrics.
 
@@ -1057,14 +1102,11 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
                 merged_values = merged_values.where(~_blank_like_mask(merged_values), candidate)
             series_values = merged_values
         numeric = pd.to_numeric(series_values, errors="coerce")
-        if "from_ap" in frame.columns and "to_ap" in frame.columns:
-            from_blank = _blank_like_mask(frame["from_ap"])
-            to_blank = _blank_like_mask(frame["to_ap"])
-            span_like = ~(from_blank & to_blank)
-            if bool(span_like.any()):
-                filtered = numeric.where(span_like)
-                if filtered.notna().any():
-                    return filtered
+        row_level = _row_level_length_mask(frame)
+        if bool(row_level.any()):
+            filtered = numeric.where(row_level)
+            if filtered.notna().any():
+                return filtered
         return numeric
 
     if group_key:
@@ -1081,7 +1123,7 @@ def add_length_units(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
     out["length_m"] = raw_values.where(~is_km, raw_values * 1000.0)
     out["length_unit"] = unit_series
 
-    km = out["length_km"].dropna()
+    km = out["length_km"].where(_row_level_length_mask(out)).dropna()
     total_km = float(km.sum()) if len(km) else 0.0
     min_km = float(km.min()) if len(km) else 0.0
     max_km = float(km.max()) if len(km) else 0.0

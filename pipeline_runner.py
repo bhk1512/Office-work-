@@ -27,6 +27,7 @@ from dashboard.stringing import (
     find_stringing_header_row,
     infer_missing_methods_from_erection,
     extract_stringing_number_of_tse,
+    _to_datetime_normalize,
 )
 from microplan_compile import (
     compile_microplans_to_workbook,
@@ -423,6 +424,146 @@ def _apply_template_column_mapping(
     return ingest.apply_template_column_mapping(df, template_map)
 
 
+def _classify_stringing_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, Dict[str, object], Dict[str, object]]:
+    try:
+        normalized, report = normalize_stringing_columns(df)
+    except Exception:
+        normalized = df.copy()
+        report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
+    return normalized, report, classify_stringing_missing_headers(report)
+
+
+def _template_missing_score(report: Dict[str, object], classification: Dict[str, object]) -> tuple[int, int, int]:
+    critical = len(list(classification.get("critical_missing", []) or []))
+    missing = len(list(report.get("missing", []) or []))
+    normalized_ok_penalty = 0 if bool(report.get("normalized_columns_ok", False)) else 1
+    return critical, missing, normalized_ok_penalty
+
+
+def _apply_template_if_improves(
+    df: pd.DataFrame,
+    template_map: Dict[int, str] | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, object], Dict[str, object], List[str], bool]:
+    base_norm, base_report, base_classification = _classify_stringing_frame(df)
+    if not template_map:
+        return df, base_norm, base_report, base_classification, [], False
+    if bool(base_report.get("normalized_columns_ok", False)):
+        return df, base_norm, base_report, base_classification, [], False
+
+    candidate_df, changes = _apply_template_column_mapping(df, template_map)
+    candidate_norm, candidate_report, candidate_classification = _classify_stringing_frame(candidate_df)
+    if _template_missing_score(candidate_report, candidate_classification) < _template_missing_score(base_report, base_classification):
+        return candidate_df, candidate_norm, candidate_report, candidate_classification, changes, True
+    return df, base_norm, base_report, base_classification, [], False
+
+
+def _parse_normalized_date_series(series: pd.Series) -> pd.Series:
+    parsed = series.map(_to_datetime_normalize)
+    return pd.to_datetime(parsed, errors="coerce").dt.normalize()
+
+
+def _build_may_exclusion_rows(
+    work: pd.DataFrame,
+    *,
+    target_month: pd.Period,
+    workbook: str,
+    project: str,
+    configured_sheet: str,
+    resolved_sheet: str,
+    line_name: str,
+) -> pd.DataFrame:
+    if work is None or work.empty:
+        return pd.DataFrame()
+
+    frame = work.copy()
+    for column in (
+        "project_code",
+        "project_name",
+        "line_name",
+        "from_ap",
+        "to_ap",
+        "gang_name",
+        "method",
+        "status",
+        "length_m",
+        "length_km",
+        "po_start_date",
+        "po_completion_date",
+        "fs_starting_date",
+        "fs_complete_date",
+    ):
+        if column not in frame.columns:
+            frame[column] = pd.NA
+
+    date_cols = ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date")
+    parsed_dates = {column: _parse_normalized_date_series(frame[column]) for column in date_cols}
+    duration_days = (parsed_dates["fs_complete_date"] - parsed_dates["po_start_date"]).dt.days + 1
+    completed_valid = (
+        parsed_dates["po_start_date"].notna()
+        & parsed_dates["fs_complete_date"].notna()
+        & (duration_days > 0)
+    )
+
+    has_target_month_date = pd.Series(False, index=frame.index, dtype="bool")
+    for parsed in parsed_dates.values():
+        has_target_month_date |= parsed.dt.to_period("M").eq(target_month)
+    excluded = frame.loc[has_target_month_date & ~completed_valid].copy()
+    if excluded.empty:
+        return pd.DataFrame()
+
+    for column, parsed in parsed_dates.items():
+        excluded[column] = parsed.loc[excluded.index]
+
+    def _reason(row: pd.Series) -> str:
+        messages: list[str] = []
+        if pd.isna(row.get("po_start_date")):
+            messages.append("Missing/invalid PO start date")
+        if pd.isna(row.get("fs_complete_date")):
+            messages.append("Missing/invalid F/S completion date")
+        try:
+            if pd.notna(row.get("po_start_date")) and pd.notna(row.get("fs_complete_date")):
+                if (row["fs_complete_date"] - row["po_start_date"]).days + 1 <= 0:
+                    messages.append("PO start after F/S completion")
+        except Exception:
+            pass
+        return "; ".join(messages) or "Not eligible for completed daily stringing"
+
+    excluded["target_month"] = str(target_month)
+    excluded["workbook"] = workbook
+    excluded["project"] = project
+    excluded["configured_sheet"] = configured_sheet
+    excluded["resolved_sheet"] = resolved_sheet
+    excluded["line_name"] = excluded["line_name"].fillna("").astype(str).where(
+        excluded["line_name"].fillna("").astype(str).str.strip().astype(bool),
+        line_name,
+    )
+    excluded["exclusion_reason"] = excluded.apply(_reason, axis=1)
+    return excluded[
+        [
+            "target_month",
+            "workbook",
+            "project",
+            "project_code",
+            "project_name",
+            "configured_sheet",
+            "resolved_sheet",
+            "line_name",
+            "from_ap",
+            "to_ap",
+            "gang_name",
+            "method",
+            "status",
+            "length_m",
+            "length_km",
+            "po_start_date",
+            "po_completion_date",
+            "fs_starting_date",
+            "fs_complete_date",
+            "exclusion_reason",
+        ]
+    ].reset_index(drop=True)
+
+
 def _clean_stringing_header_label(label: object) -> str:
     if label is None:
         return ""
@@ -555,6 +696,7 @@ def _write_stringing_artifacts(
     diagnostics_df: Optional[pd.DataFrame] = None,
     issues_df: Optional[pd.DataFrame] = None,
     data_issues_df: Optional[pd.DataFrame] = None,
+    may_exclusions_df: Optional[pd.DataFrame] = None,
 ) -> Path:
     # Output workbook + parquet dirs
     output_path = output_path.resolve()
@@ -646,6 +788,8 @@ def _write_stringing_artifacts(
             diagnostics_df.to_excel(writer, sheet_name="Diagnostics", index=False)
             if data_issues_df is not None and not data_issues_df.empty:
                 data_issues_df.to_excel(writer, sheet_name="Data Issues", index=False)
+            if may_exclusions_df is not None and not may_exclusions_df.empty:
+                may_exclusions_df.to_excel(writer, sheet_name="May Exclusions", index=False)
             if issues_df is not None and not issues_df.empty:
                 issues_df.to_excel(writer, sheet_name="Issues", index=False)
             readme_df.to_excel(writer, sheet_name="README_Assumptions", index=False)
@@ -667,6 +811,11 @@ def _write_stringing_artifacts(
     compiled_ready = _normalize_stringing_dates_for_parquet(raw_df)
     _write_parquet(compiled_ready, compiled_parquet)
     print(f"[pipeline] Stringing: wrote compiled parquet {compiled_parquet}")
+    if may_exclusions_df is not None and not may_exclusions_df.empty:
+        may_exclusions_ready = _normalize_stringing_dates_for_parquet(may_exclusions_df)
+        may_exclusions_parquet = output_path.parent / "MayExclusions.parquet"
+        _write_parquet(may_exclusions_ready, may_exclusions_parquet)
+        print(f"[pipeline] Stringing: wrote May exclusions parquet {may_exclusions_parquet}")
 
     # Precompute daily parquet to mirror dashboard artifact layout.
     try:
@@ -702,16 +851,22 @@ def compile_stringing_to_workbook(
         return None
 
     stringing_sheet_config = _load_stringing_sheet_config(input_dir)
-    stringing_template_config, stringing_template_errors = _load_stringing_template_mapping_config(input_dir)
-    stringing_template_all_config, _ = _load_stringing_template_mapping_config(input_dir, include_unchecked=True)
+    raw_root = input_dir if input_dir is not None else (BASE_DIR / "Raw Data" / "DPRs")
+    stringing_template_catalog, stringing_template_errors = ingest.load_stringing_template_mapping_catalog(
+        raw_root,
+        repo_root=BASE_DIR,
+    )
+    stringing_template_all_catalog, _ = ingest.load_stringing_template_mapping_catalog(
+        raw_root,
+        repo_root=BASE_DIR,
+        include_unchecked=True,
+    )
     erection_daily_reference = _load_erection_daily_reference()
     selected_candidates: List[
         Tuple[
             Path,
             str,
             Optional[Dict[str, str]],
-            Optional[Dict[int, str]],
-            Optional[str],
             Optional[str],
         ]
     ] = []
@@ -722,9 +877,6 @@ def compile_stringing_to_workbook(
         project = parse_project_code_from_filename(candidate.name) or "UNKNOWN"
         project_key = _normalize_project_code_key(project)
         configured_sheets = stringing_sheet_config.get(project_key)
-        template_pair = stringing_template_config.get(project_key)
-        template_map = template_pair[0] if template_pair else None
-        template_sheet_name = template_pair[1] if template_pair else None
         template_error = stringing_template_errors.get(project_key)
         if has_stringing_config and configured_sheets is None:
             skipped_not_in_config += 1
@@ -735,10 +887,10 @@ def compile_stringing_to_workbook(
                 continue
             for configured_sheet in configured_sheets:
                 selected_candidates.append(
-                    (candidate, project, configured_sheet, template_map, template_sheet_name, template_error)
+                    (candidate, project, configured_sheet, template_error)
                 )
         else:
-            selected_candidates.append((candidate, project, None, template_map, template_sheet_name, template_error))
+            selected_candidates.append((candidate, project, None, template_error))
 
     if skipped_no_stringing:
         print(f"[pipeline] Stringing: skipped {skipped_no_stringing} workbook(s) per DPR_Config (no stringing sheet configured).")
@@ -755,10 +907,12 @@ def compile_stringing_to_workbook(
     diag_rows: List[Dict[str, Any]] = []
     issue_rows: List[Dict[str, Any]] = []
     data_issue_rows: List[pd.DataFrame] = []
+    may_exclusion_rows: List[pd.DataFrame] = []
     today = pd.Timestamp.today().normalize()
+    may_exclusion_month = today.to_period("M")
     template_error_logged: set[str] = set()
 
-    for f, project, configured_sheet_entry, template_map, template_sheet_name, template_error in selected_candidates:
+    for f, project, configured_sheet_entry, template_error in selected_candidates:
         found = None
         header_row = None
         header_labels: List[str] = []
@@ -769,13 +923,17 @@ def compile_stringing_to_workbook(
         line_name_override = normalize_line_name(configured_sheet_entry.get("line_name", "")) if configured_sheet_entry else ""
         line_name_source = str(configured_sheet_entry.get("line_name_source", "")).strip() if configured_sheet_entry else ""
         project_key = _normalize_project_code_key(project)
-        fallback_template_pair = stringing_template_all_config.get(project_key)
-        fallback_template_map = fallback_template_pair[0] if fallback_template_pair else None
-        fallback_template_sheet = fallback_template_pair[1] if fallback_template_pair else ""
-        min_columns = (max((template_map or fallback_template_map).keys()) + 1) if (template_map or fallback_template_map) else None
+        template_options = stringing_template_catalog.get(project_key)
+        fallback_template_options = stringing_template_all_catalog.get(project_key)
+        initial_template_pair = ingest.select_template_map_for_sheet(
+            fallback_template_options,
+            configured_sheet_name=configured_sheet_name,
+            line_name=line_name_override,
+        )
+        min_columns = (max(initial_template_pair[0].keys()) + 1) if initial_template_pair else None
         template_applied = False
         template_fallback_used = False
-        template_sheet_used = template_sheet_name or ""
+        template_sheet_used = ""
         tse_value: int | None = None
 
         if template_error:
@@ -816,6 +974,7 @@ def compile_stringing_to_workbook(
                     "FallbackNote": "",
                     "TemplateSheet": "",
                     "TemplateApplied": "",
+                    "TemplateFallbackUsed": "",
                     "TemplateChanges": "",
                 }
             )
@@ -876,8 +1035,9 @@ def compile_stringing_to_workbook(
                     "DailyRows": 0,
                     "Status": "NO_TARGET_SHEET" if is_no_target else "READ_FAIL",
                     "FallbackNote": "",
-                    "TemplateSheet": template_sheet_name or "",
+                    "TemplateSheet": template_sheet_used or "",
                     "TemplateApplied": "",
+                    "TemplateFallbackUsed": "",
                     "TemplateChanges": "",
                 }
             )
@@ -916,18 +1076,13 @@ def compile_stringing_to_workbook(
                     "DailyRows": 0,
                     "Status": "EMPTY_SHEET",
                     "FallbackNote": fallback_note or "",
-                    "TemplateSheet": template_sheet_name or "",
+                    "TemplateSheet": template_sheet_used or "",
                     "TemplateApplied": "",
+                    "TemplateFallbackUsed": "",
                     "TemplateChanges": "",
                 }
             )
             continue
-
-        if template_map:
-            df, template_changes = _apply_template_column_mapping(df, template_map)
-            header_labels = [str(col) for col in df.columns]
-            template_applied = True
-            template_sheet_used = template_sheet_name or template_sheet_used
 
         df = _sanitize_stringing_columns(df)
         header_labels = [str(col) for col in df.columns]
@@ -961,32 +1116,32 @@ def compile_stringing_to_workbook(
         df["_source_file"] = f.name
         df["source_sheet"] = found or ""
 
-        try:
-            compiled_norm, norm_report = normalize_stringing_columns(df)
-        except Exception:
-            compiled_norm = df.copy()
-            norm_report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
-        classification = classify_stringing_missing_headers(norm_report)
+        selected_template_pair = ingest.select_template_map_for_sheet(
+            template_options,
+            configured_sheet_name=configured_sheet_name,
+            resolved_sheet_name=found or "",
+            line_name=line_name,
+        )
+        fallback_template_pair = ingest.select_template_map_for_sheet(
+            fallback_template_options,
+            configured_sheet_name=configured_sheet_name,
+            resolved_sheet_name=found or "",
+            line_name=line_name,
+        )
+        template_pair = selected_template_pair or fallback_template_pair
+        template_map = template_pair[0] if template_pair else None
+        template_sheet_name = template_pair[1] if template_pair else ""
+        template_sheet_used = template_sheet_name
+
+        df, compiled_norm, norm_report, classification, template_changes, template_applied = _apply_template_if_improves(
+            df,
+            template_map,
+        )
+        header_labels = [str(col) for col in df.columns]
+        if template_applied and selected_template_pair is None and fallback_template_pair is not None:
+            template_fallback_used = True
         critical_missing = list(classification.get("critical_missing", []))
         non_critical_missing = list(classification.get("non_critical_missing", []))
-        if critical_missing and fallback_template_map and not template_applied:
-            fallback_df, fallback_changes = _apply_template_column_mapping(df, fallback_template_map)
-            try:
-                fallback_norm, fallback_report = normalize_stringing_columns(fallback_df)
-            except Exception:
-                fallback_norm = fallback_df.copy()
-                fallback_report = {"normalized_columns_ok": False, "present": [], "missing": [], "applied_map": {}}
-            fallback_classification = classify_stringing_missing_headers(fallback_report)
-            fallback_critical = list(fallback_classification.get("critical_missing", []))
-            if len(fallback_critical) < len(critical_missing):
-                compiled_norm = fallback_norm
-                norm_report = fallback_report
-                classification = fallback_classification
-                critical_missing = fallback_critical
-                non_critical_missing = list(fallback_classification.get("non_critical_missing", []))
-                template_fallback_used = True
-                template_changes = fallback_changes
-                template_sheet_used = fallback_template_sheet or template_sheet_used
 
         missing_headers = list(norm_report.get("missing", []))
         if critical_missing:
@@ -1032,14 +1187,14 @@ def compile_stringing_to_workbook(
         compiled.append(compiled_norm)
 
         try:
-            work = compiled_norm.copy()
+            work, _ = add_length_units(compiled_norm)
             has_po_start = "po_start_date" in work.columns
             has_po_complete = "po_completion_date" in work.columns
             has_fs_start = "fs_starting_date" in work.columns
             has_fs_complete = "fs_complete_date" in work.columns
             for col in ("po_start_date", "po_completion_date", "fs_starting_date", "fs_complete_date"):
                 if col in work.columns:
-                    work[col] = pd.to_datetime(work[col], errors="coerce").dt.normalize()
+                    work[col] = _parse_normalized_date_series(work[col])
                 else:
                     work[col] = pd.NaT
 
@@ -1147,6 +1302,18 @@ def compile_stringing_to_workbook(
                 issue_df["Issues"] = issue_df.apply(_mk_issue, axis=1)
                 data_issue_rows.append(issue_df)
 
+            may_exclusions = _build_may_exclusion_rows(
+                work,
+                target_month=may_exclusion_month,
+                workbook=f.name,
+                project=project,
+                configured_sheet=configured_sheet_name,
+                resolved_sheet=found or "",
+                line_name=line_name,
+            )
+            if not may_exclusions.empty:
+                may_exclusion_rows.append(may_exclusions)
+
             if has_po_start and has_fs_complete:
                 stage_days = (work["fs_complete_date"] - work["po_start_date"]).dt.days + 1
                 valid_stage = (
@@ -1219,6 +1386,7 @@ def compile_stringing_to_workbook(
             diagnostics_df=pd.DataFrame(diag_rows),
             issues_df=pd.DataFrame(issue_rows),
             data_issues_df=pd.concat(data_issue_rows, ignore_index=True) if data_issue_rows else pd.DataFrame(),
+            may_exclusions_df=pd.concat(may_exclusion_rows, ignore_index=True) if may_exclusion_rows else pd.DataFrame(),
         )
         print("[pipeline] Stringing: no sheets found; wrote empty diagnostics workbook.")
         return None
@@ -1232,10 +1400,11 @@ def compile_stringing_to_workbook(
         output_path,
         all_df,
         used_name or preferred or "Stringing Compiled",
-        source_files=list(dict.fromkeys(path for path, _, _, _, _, _ in selected_candidates)),
+        source_files=list(dict.fromkeys(path for path, _, _, _ in selected_candidates)),
         diagnostics_df=pd.DataFrame(diag_rows),
         issues_df=pd.DataFrame(issue_rows),
         data_issues_df=pd.concat(data_issue_rows, ignore_index=True) if data_issue_rows else pd.DataFrame(),
+        may_exclusions_df=pd.concat(may_exclusion_rows, ignore_index=True) if may_exclusion_rows else pd.DataFrame(),
     )
     return parquet_dir
 

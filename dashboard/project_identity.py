@@ -19,6 +19,8 @@ _GENERIC_LINE_TOKENS = {
     "compile",
     "stringing",
     "erection",
+    "tightening",
+    "tower tightening",
 }
 
 _NULL_TEXT_TOKENS = {
