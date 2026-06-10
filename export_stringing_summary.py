@@ -83,6 +83,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use previous completed Sunday-Saturday week (calendar_sun_sat mode).",
     )
+    parser.add_argument(
+        "--exact-date-range",
+        action="store_true",
+        help="Preserve --start-date/--end-date exactly instead of aligning to Sunday-Saturday weeks.",
+    )
     return parser.parse_args()
 
 
@@ -2835,7 +2840,11 @@ def main() -> int:
     store.bootstrap(config)
 
     week_mode_norm = _normalize_week_mode(args.week_mode)
-    if week_mode_norm == WEEK_MODE_LEGACY and (args.previous_week or args.start_date or args.end_date):
+    if (
+        week_mode_norm == WEEK_MODE_LEGACY
+        and not args.exact_date_range
+        and (args.previous_week or args.start_date or args.end_date)
+    ):
         week_mode_norm = WEEK_MODE_CALENDAR_SUN_SAT
     start_date = _parse_date(args.start_date)
     end_date = _parse_date(args.end_date)

@@ -56,16 +56,30 @@ class StretchTighteningReadinessTests(unittest.TestCase):
         project = tables["Project Summary"].iloc[0]
         self.assertEqual(int(project["usable_stringing_spans"]), 3)
         self.assertEqual(int(project["ready_to_string_spans"]), 1)
+        self.assertAlmostEqual(float(project["already_strung_km"]), 1.5)
         self.assertAlmostEqual(float(project["ready_to_string_km"]), 1.0)
+        self.assertAlmostEqual(float(project["tightening_not_started_km"]), 2.0)
+        self.assertTrue(pd.isna(project["tightening_partial_km"]))
 
         buckets = tables["Span Buckets"]
         bucket = buckets.iloc[0]
         self.assertEqual(int(bucket["Total Spans"]), 3)
         self.assertEqual(int(bucket["Already Strung spans"]), 1)
+        self.assertAlmostEqual(float(bucket["Already Strung km"]), 1.5)
         self.assertEqual(int(bucket["Stringing Ready"]), 1)
+        self.assertAlmostEqual(float(bucket["Stringing Ready km"]), 1.0)
         self.assertEqual(int(bucket["Tightening not started"]), 1)
+        self.assertAlmostEqual(float(bucket["Tightening not started km"]), 2.0)
         self.assertEqual(int(bucket["Tightening partial"]), 0)
+        self.assertTrue(pd.isna(bucket["Tightening partial km"]))
         self.assertEqual(int(bucket["Erection Gap"]), 0)
+
+        executive = tables["Executive Summary"]
+        exec_map = dict(zip(executive["Metric"], executive["Value"]))
+        self.assertAlmostEqual(float(exec_map["Already strung km"]), 1.5)
+        self.assertAlmostEqual(float(exec_map["Stringing ready km"]), 1.0)
+        self.assertAlmostEqual(float(exec_map["Tightening not started km"]), 2.0)
+        self.assertTrue(pd.isna(exec_map["Tightening partial km"]))
 
     def test_location_nos_must_all_be_tightened(self) -> None:
         erection_raw = pd.DataFrame(
@@ -136,6 +150,41 @@ class StretchTighteningReadinessTests(unittest.TestCase):
         projects = set(tables["Span Buckets"]["Project"].astype(str))
         self.assertEqual(projects, {"TB 507", "TB 507 - MAIN"})
 
+    def test_km_aggregation_excludes_unknown_lengths_and_blanks_when_no_known(self) -> None:
+        tables = build_stretch_tightening_readiness_tables(
+            erection_raw=pd.DataFrame(
+                [
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "1/0", "Complete Date": "2026-05-01", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "1/1", "Complete Date": "2026-05-02", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "2/0", "Complete Date": "2026-05-03", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "2/1", "Complete Date": "2026-05-04", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "3/0", "Complete Date": "2026-05-05", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "3/1", "Complete Date": "2026-05-06", "Tower Tightening Raw": "Pending"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "4/0", "Complete Date": "2026-05-07", "Tower Tightening Raw": "Done"},
+                    {"Project Code": "TA 501", "Project Scope Key": "ta501", "Location No.": "4/1", "Complete Date": "2026-05-08", "Tower Tightening Raw": "Pending"},
+                ]
+            ),
+            stringing_compiled_raw=pd.DataFrame(
+                [
+                    {"project_code": "TA 501", "project_scope_key": "ta501", "from_ap": "1/0", "to_ap": "1/1", "length_m": 1200, "status": "Completed"},
+                    {"project_code": "TA 501", "project_scope_key": "ta501", "from_ap": "2/0", "to_ap": "2/1", "length_m": "", "status": "Completed"},
+                    {"project_code": "TA 501", "project_scope_key": "ta501", "from_ap": "3/0", "to_ap": "3/1", "length_m": 1800, "status": "Balance"},
+                    {"project_code": "TA 501", "project_scope_key": "ta501", "from_ap": "4/0", "to_ap": "4/1", "length_m": "", "status": "Balance"},
+                ]
+            ),
+        )
+        bucket = tables["Span Buckets"].iloc[0]
+        self.assertEqual(int(bucket["Already Strung spans"]), 2)
+        self.assertAlmostEqual(float(bucket["Already Strung km"]), 1.2)
+        self.assertEqual(int(bucket["Tightening partial"]), 2)
+        self.assertAlmostEqual(float(bucket["Tightening partial km"]), 1.8)
+        self.assertTrue(pd.isna(bucket["Tightening not started km"]))
+
+        project = tables["Project Summary"].iloc[0]
+        self.assertAlmostEqual(float(project["already_strung_km"]), 1.2)
+        self.assertAlmostEqual(float(project["tightening_partial_km"]), 1.8)
+        self.assertTrue(pd.isna(project["tightening_not_started_km"]))
+
     def test_workbook_export_contains_expected_sheets(self) -> None:
         tables = build_stretch_tightening_readiness_tables(
             erection_raw=pd.DataFrame(
@@ -165,6 +214,15 @@ class StretchTighteningReadinessTests(unittest.TestCase):
                         "Assumptions",
                     ],
                 )
+                span_bucket_headers = [cell for cell in next(wb["Span Buckets"].iter_rows(min_row=2, max_row=2, values_only=True))]
+                self.assertIn("Already Strung km", span_bucket_headers)
+                self.assertIn("Stringing Ready km", span_bucket_headers)
+                self.assertIn("Tightening not started km", span_bucket_headers)
+                self.assertIn("Tightening partial km", span_bucket_headers)
+                project_headers = [cell for cell in next(wb["Project Summary"].iter_rows(min_row=2, max_row=2, values_only=True))]
+                self.assertIn("already_strung_km", project_headers)
+                self.assertIn("tightening_not_started_km", project_headers)
+                self.assertIn("tightening_partial_km", project_headers)
             finally:
                 wb.close()
 

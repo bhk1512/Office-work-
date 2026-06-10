@@ -171,6 +171,86 @@ class StringingSummaryIngestTests(unittest.TestCase):
         self.assertEqual(int(len(project.index)), 1)
         self.assertAlmostEqual(float(project.loc[0, "stringing_cumulative_progress"]), 14.973, places=3)
 
+    def test_final_sag_backfills_blank_stringing_status_row(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "project_code": "TB 507",
+                    "project_display": "TB 507 - 400kV",
+                    "project_scope_key": "tb507400kv",
+                    "line_name": "400kV",
+                    "section_label": "Progress Summary",
+                    "source_file": "TB 507 [MAIN] - DPR - 2026-05-30.xlsx",
+                    "source_sheet": "400kV Summery",
+                    "configured_sheet": "400kV Summery",
+                    "template_sheet": "TB 507 400kV Status",
+                    "report_date": "2026-05-30",
+                    "activity_raw": "Stringing (Kms)",
+                    "activity_norm": "stringing",
+                    "cumulative_progress": pd.NA,
+                },
+                {
+                    "project_code": "TB 507",
+                    "project_display": "TB 507 - 400kV",
+                    "project_scope_key": "tb507400kv",
+                    "line_name": "400kV",
+                    "section_label": "Progress Summary",
+                    "source_file": "TB 507 [MAIN] - DPR - 2026-05-30.xlsx",
+                    "source_sheet": "400kV Summery",
+                    "configured_sheet": "400kV Summery",
+                    "template_sheet": "TB 507 400kV Status",
+                    "report_date": "2026-05-30",
+                    "activity_raw": "Final Sag (Kms)",
+                    "activity_norm": "final_sag",
+                    "cumulative_progress": 21.360,
+                },
+            ]
+        )
+        status = summary_ingest._build_status_activity_fact(raw)  # type: ignore[attr-defined]
+        project, _ = summary_ingest._build_status_snapshots(status)  # type: ignore[attr-defined]
+        self.assertEqual(int(len(project.index)), 1)
+        self.assertAlmostEqual(float(project.loc[0, "stringing_cumulative_progress"]), 21.360, places=3)
+
+    def test_paying_out_backfills_blank_stringing_when_final_sag_missing(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "project_code": "TB 507",
+                    "project_display": "TB 507 - 765kV",
+                    "project_scope_key": "tb507765kv",
+                    "line_name": "765kV",
+                    "section_label": "Progress Summary",
+                    "source_file": "TB 507 - DPR - 2026-05-30.xlsx",
+                    "source_sheet": "765kV Summery",
+                    "configured_sheet": "765kV Summery",
+                    "template_sheet": "TB 507 765kV Status",
+                    "report_date": "2026-05-30",
+                    "activity_raw": "Stringing (Kms)",
+                    "activity_norm": "stringing",
+                    "cumulative_progress": pd.NA,
+                },
+                {
+                    "project_code": "TB 507",
+                    "project_display": "TB 507 - 765kV",
+                    "project_scope_key": "tb507765kv",
+                    "line_name": "765kV",
+                    "section_label": "Progress Summary",
+                    "source_file": "TB 507 - DPR - 2026-05-30.xlsx",
+                    "source_sheet": "765kV Summery",
+                    "configured_sheet": "765kV Summery",
+                    "template_sheet": "TB 507 765kV Status",
+                    "report_date": "2026-05-30",
+                    "activity_raw": "Paying Out (Kms)",
+                    "activity_norm": "paying_out",
+                    "cumulative_progress": 7.250,
+                },
+            ]
+        )
+        status = summary_ingest._build_status_activity_fact(raw)  # type: ignore[attr-defined]
+        project, _ = summary_ingest._build_status_snapshots(status)  # type: ignore[attr-defined]
+        self.assertEqual(int(len(project.index)), 1)
+        self.assertAlmostEqual(float(project.loc[0, "stringing_cumulative_progress"]), 7.250, places=3)
+
     def test_status_snapshot_supports_multi_month_from_filename_dates(self) -> None:
         raw = pd.DataFrame(
             [

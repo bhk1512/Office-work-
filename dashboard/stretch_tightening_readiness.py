@@ -34,8 +34,11 @@ PROJECT_SUMMARY_COLUMNS = [
     "all_erected_spans",
     "all_tightened_spans",
     "already_strung_spans",
+    "already_strung_km",
     "ready_to_string_spans",
     "ready_to_string_km",
+    "tightening_not_started_km",
+    "tightening_partial_km",
     "data_bucket",
     "coverage_reason",
 ]
@@ -73,9 +76,13 @@ SPAN_BUCKET_COLUMNS = [
     "Project",
     "Total Spans",
     "Already Strung spans",
+    "Already Strung km",
     "Stringing Ready",
+    "Stringing Ready km",
     "Tightening not started",
+    "Tightening not started km",
     "Tightening partial",
+    "Tightening partial km",
     "Erection Gap",
 ]
 TOWER_GAP_COLUMNS = [
@@ -166,6 +173,22 @@ def _derive_stretch_identifier(row: pd.Series, from_ap: str, to_ap: str) -> str:
 
 def _join_locations(values: Iterable[str]) -> str:
     return ", ".join([value for value in values if value])
+
+
+def _rounded_km_sum(values: pd.Series, *, span_count: int) -> object:
+    numeric = pd.to_numeric(values, errors="coerce")
+    known = numeric.dropna()
+    if known.empty:
+        return pd.NA
+    return round(float(known.sum()), 2)
+
+
+def _rounded_km_total_or_blank(values: pd.Series) -> object:
+    numeric = pd.to_numeric(values, errors="coerce")
+    known = numeric.dropna()
+    if known.empty:
+        return pd.NA
+    return round(float(known.sum()), 2)
 
 
 def _normalize_erection_towers(erection_raw: pd.DataFrame) -> pd.DataFrame:
@@ -416,6 +439,7 @@ def _build_span_bucket_summary(spans: pd.DataFrame) -> pd.DataFrame:
     work["all_tightened"] = work.get("all_tightened", pd.Series(False, index=work.index)).fillna(False).astype(bool)
     work["already_strung"] = work.get("already_strung", pd.Series(False, index=work.index)).fillna(False).astype(bool)
     work["ready_to_string"] = work.get("ready_to_string", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+    work["length_km"] = pd.to_numeric(work.get("length_km"), errors="coerce")
     if "analysis_key" not in work.columns:
         work["analysis_key"] = [
             _project_analysis_key(scope, code, line, display)
@@ -432,14 +456,28 @@ def _build_span_bucket_summary(spans: pd.DataFrame) -> pd.DataFrame:
         all_erected = group["all_erected"]
         tightened_count = group["tightened_location_count"]
         required_count = group["required_location_count"]
+        already_mask = group["already_strung"]
+        ready_mask = group["ready_to_string"]
+        tightening_not_started_mask = all_erected & tightened_count.eq(0)
+        tightening_partial_mask = all_erected & tightened_count.gt(0) & tightened_count.lt(required_count)
         rows.append(
             {
                 "Project": _safe_text(group["project_display"].iloc[0]) or _safe_text(group["project_code"].iloc[0]),
                 "Total Spans": int(len(group.index)),
-                "Already Strung spans": int(group["already_strung"].sum()),
-                "Stringing Ready": int(group["ready_to_string"].sum()),
-                "Tightening not started": int((all_erected & tightened_count.eq(0)).sum()),
-                "Tightening partial": int((all_erected & tightened_count.gt(0) & tightened_count.lt(required_count)).sum()),
+                "Already Strung spans": int(already_mask.sum()),
+                "Already Strung km": _rounded_km_sum(group.loc[already_mask, "length_km"], span_count=int(already_mask.sum())),
+                "Stringing Ready": int(ready_mask.sum()),
+                "Stringing Ready km": _rounded_km_sum(group.loc[ready_mask, "length_km"], span_count=int(ready_mask.sum())),
+                "Tightening not started": int(tightening_not_started_mask.sum()),
+                "Tightening not started km": _rounded_km_sum(
+                    group.loc[tightening_not_started_mask, "length_km"],
+                    span_count=int(tightening_not_started_mask.sum()),
+                ),
+                "Tightening partial": int(tightening_partial_mask.sum()),
+                "Tightening partial km": _rounded_km_sum(
+                    group.loc[tightening_partial_mask, "length_km"],
+                    span_count=int(tightening_partial_mask.sum()),
+                ),
                 "Erection Gap": int((~all_erected).sum()),
             }
         )
@@ -501,8 +539,21 @@ def _build_project_summary(towers: pd.DataFrame, spans: pd.DataFrame) -> pd.Data
                     work.get("project_display", pd.Series("", index=work.index)),
                 )
             ]
+        for column in ("required_location_count", "tightened_location_count"):
+            work[column] = pd.to_numeric(work.get(column), errors="coerce").fillna(0).astype(int)
+        work["all_erected"] = work.get("all_erected", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+        work["already_strung"] = work.get("already_strung", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+        work["ready_to_string"] = work.get("ready_to_string", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+        work["length_km"] = pd.to_numeric(work.get("length_km"), errors="coerce")
         for analysis_key, group in work.groupby("analysis_key", dropna=False):
             ready_mask = group["ready_to_string"].astype(bool)
+            already_mask = group["already_strung"].astype(bool)
+            tightening_not_started_mask = group["all_erected"] & group["tightened_location_count"].eq(0)
+            tightening_partial_mask = (
+                group["all_erected"]
+                & group["tightened_location_count"].gt(0)
+                & group["tightened_location_count"].lt(group["required_location_count"])
+            )
             span_rows.append(
                 {
                     "analysis_key": analysis_key,
@@ -511,9 +562,24 @@ def _build_project_summary(towers: pd.DataFrame, spans: pd.DataFrame) -> pd.Data
                     "usable_stringing_spans": int(len(group.index)),
                     "all_erected_spans": int(group["all_erected"].sum()),
                     "all_tightened_spans": int(group["all_tightened"].sum()),
-                    "already_strung_spans": int(group["already_strung"].sum()),
+                    "already_strung_spans": int(already_mask.sum()),
+                    "already_strung_km": _rounded_km_sum(
+                        group.loc[already_mask, "length_km"],
+                        span_count=int(already_mask.sum()),
+                    ),
                     "ready_to_string_spans": int(ready_mask.sum()),
-                    "ready_to_string_km": float(pd.to_numeric(group.loc[ready_mask, "length_km"], errors="coerce").fillna(0.0).sum()),
+                    "ready_to_string_km": _rounded_km_sum(
+                        group.loc[ready_mask, "length_km"],
+                        span_count=int(ready_mask.sum()),
+                    ),
+                    "tightening_not_started_km": _rounded_km_sum(
+                        group.loc[tightening_not_started_mask, "length_km"],
+                        span_count=int(tightening_not_started_mask.sum()),
+                    ),
+                    "tightening_partial_km": _rounded_km_sum(
+                        group.loc[tightening_partial_mask, "length_km"],
+                        span_count=int(tightening_partial_mask.sum()),
+                    ),
                 }
             )
     span_summary = pd.DataFrame(span_rows)
@@ -554,9 +620,10 @@ def _build_project_summary(towers: pd.DataFrame, spans: pd.DataFrame) -> pd.Data
         if column not in merged.columns:
             merged[column] = 0
         merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0).astype(int)
-    if "ready_to_string_km" not in merged.columns:
-        merged["ready_to_string_km"] = 0.0
-    merged["ready_to_string_km"] = pd.to_numeric(merged["ready_to_string_km"], errors="coerce").fillna(0.0)
+    for column in ("already_strung_km", "ready_to_string_km", "tightening_not_started_km", "tightening_partial_km"):
+        if column not in merged.columns:
+            merged[column] = pd.NA
+        merged[column] = pd.to_numeric(merged[column], errors="coerce")
     if "project_scope_keys" not in merged.columns:
         merged["project_scope_keys"] = ""
     merged["project_scope_keys"] = merged["project_scope_keys"].fillna("").astype(str)
@@ -610,7 +677,11 @@ def _build_executive_summary(project_summary: pd.DataFrame) -> pd.DataFrame:
         ("Erected not tightened towers", int(pd.to_numeric(project_summary["erected_not_tightened_towers"], errors="coerce").fillna(0).sum())),
         ("Usable stringing spans", int(pd.to_numeric(project_summary["usable_stringing_spans"], errors="coerce").fillna(0).sum())),
         ("Ready to string spans", int(pd.to_numeric(project_summary["ready_to_string_spans"], errors="coerce").fillna(0).sum())),
-        ("Ready to string km", round(float(pd.to_numeric(project_summary["ready_to_string_km"], errors="coerce").fillna(0.0).sum()), 3)),
+        ("Ready to string km", _rounded_km_total_or_blank(project_summary["ready_to_string_km"])),
+        ("Already strung km", _rounded_km_total_or_blank(project_summary["already_strung_km"])),
+        ("Stringing ready km", _rounded_km_total_or_blank(project_summary["ready_to_string_km"])),
+        ("Tightening not started km", _rounded_km_total_or_blank(project_summary["tightening_not_started_km"])),
+        ("Tightening partial km", _rounded_km_total_or_blank(project_summary["tightening_partial_km"])),
     ]
     return pd.DataFrame(rows, columns=EXECUTIVE_SUMMARY_COLUMNS)
 
@@ -622,6 +693,8 @@ def _build_assumptions() -> pd.DataFrame:
         ("Tightening blocker tokens", BLOCKED_TIGHTENING_TOKENS),
         ("Ready-to-string rule", "All required locations erected and tightened, and no paying-out/final-sag/status completion recorded."),
         ("Span Buckets Stringing Ready", "Uses ready_to_string, so already-strung spans are excluded from the leadership-ready count."),
+        ("KM source", "All KM values are derived from span-level length_km."),
+        ("KM missing-length handling", "Unknown span lengths are excluded from KM sums; span counts are unchanged."),
         ("Assumed tightening complete", "TA 413 and TA 416 are treated as tightened wherever tower erection is complete."),
         ("Location matching", "Stringing endpoints plus Location Nos are matched to normalized erection location numbers by project scope, then project fallback."),
     ]

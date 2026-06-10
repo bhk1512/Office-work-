@@ -371,6 +371,62 @@ def _apply_status_stringing_resolution_policy(work: pd.DataFrame) -> pd.DataFram
     return filtered
 
 
+def _apply_status_stringing_value_fallback(work: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(work, pd.DataFrame) or work.empty:
+        return work
+
+    raw_text = work["activity_raw"].fillna("").astype(str).str.lower()
+    activity_norm = work["activity_norm"].fillna("").astype(str).str.lower()
+    is_opgw = activity_norm.str.contains("opgw", na=False) | raw_text.str.contains("opgw", na=False)
+    is_final_sag = (~is_opgw) & (
+        (activity_norm == "final_sag")
+        | raw_text.str.contains("final sag", na=False)
+        | raw_text.str.contains(r"\bf\s*/\s*s\b", regex=True, na=False)
+        | raw_text.str.contains("stringing -f/s", na=False)
+    )
+    is_paying_out = (~is_opgw) & (
+        (activity_norm == "paying_out")
+        | raw_text.str.contains("paying out", na=False)
+    )
+    is_stringing = (~is_opgw) & (activity_norm == "stringing")
+
+    if "cumulative_progress" in work.columns:
+        value = pd.to_numeric(work["cumulative_progress"], errors="coerce")
+    else:
+        value = pd.Series(pd.NA, index=work.index)
+    has_value = value.notna()
+
+    group_cols = [
+        col
+        for col in (
+            "project_scope_key",
+            "report_date",
+            "source_file",
+            "source_sheet",
+            "configured_sheet",
+            "template_sheet",
+            "section_label",
+        )
+        if col in work.columns
+    ]
+    if group_cols:
+        grouped = [work[col] for col in group_cols]
+        has_stringing_value = (is_stringing & has_value).groupby(grouped, dropna=False).transform("any")
+        has_final_value = (is_final_sag & has_value).groupby(grouped, dropna=False).transform("any")
+    else:
+        has_stringing_value = pd.Series(bool((is_stringing & has_value).any()), index=work.index)
+        has_final_value = pd.Series(bool((is_final_sag & has_value).any()), index=work.index)
+
+    fallback_to_final = (~has_stringing_value) & is_final_sag & has_value
+    fallback_to_paying_out = (~has_stringing_value) & (~has_final_value) & is_paying_out & has_value
+    if not bool((fallback_to_final | fallback_to_paying_out).any()):
+        return work
+
+    out = work.copy()
+    out.loc[fallback_to_final | fallback_to_paying_out, "activity_norm"] = "stringing"
+    return out
+
+
 def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(progress_raw, pd.DataFrame) or progress_raw.empty:
         return pd.DataFrame(
@@ -462,6 +518,7 @@ def _build_status_activity_fact(progress_raw: pd.DataFrame) -> pd.DataFrame:
     activity_norm = activity_norm.str.replace(r"[^a-z0-9]+", "_", regex=True).str.strip("_")
     work["activity_norm"] = activity_norm
     work = _apply_status_stringing_resolution_policy(work)
+    work = _apply_status_stringing_value_fallback(work)
 
     def _activity_group(norm_value: str) -> str:
         norm = _safe_text(norm_value).lower()

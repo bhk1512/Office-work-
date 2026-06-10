@@ -32,7 +32,7 @@ SUBJECT_PATTERNS = [
 ATTACHMENT_MUST_CONTAIN = [r"d\W*p\W*r"]   # dpr, d.p.r, d p r, d-p-r, etc.
 
 # Allowed extensions (set to None to allow all)
-ALLOWED_EXTS = {".xlsx",".xls"}
+ALLOWED_EXTS = {".xlsx", ".xls", ".xlsm"}
 
 # Backfill window
 BACKFILL_DAYS = 4

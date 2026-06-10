@@ -226,18 +226,8 @@ def _coerce_excel_date_series(series: pd.Series) -> pd.Series:
     if series is None:
         return pd.Series([], dtype="datetime64[ns]")
     work = pd.Series(series)
-    parsed = pd.to_datetime(work, errors="coerce")
-    numeric = pd.to_numeric(work, errors="coerce")
-    use_excel = numeric.notna() & parsed.isna()
-    if use_excel.any():
-        excel = pd.to_datetime(
-            numeric[use_excel],
-            errors="coerce",
-            unit="D",
-            origin="1899-12-30",
-        )
-        parsed.loc[use_excel] = excel
-    return parsed.dt.normalize()
+    parsed = work.map(_to_datetime_normalize)
+    return pd.to_datetime(parsed, errors="coerce").dt.normalize()
 
 
 def _normalize_stringing_dates_for_parquet(frame: pd.DataFrame) -> pd.DataFrame:

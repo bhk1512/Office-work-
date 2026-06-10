@@ -1,0 +1,13 @@
+from_ap,to_ap,length_km,sheet_state,ready_to_string,readiness_reason,required_location_count,erected_location_count,tightened_location_count,missing_erection_locations,missing_tightening_locations,__location_nos_raw,location_nos_present,insulator hoisting_1,po,jumpering_1,spacering_1,clipping_1,hindrance,remarks,gang_name,method
+214/0,215/0,2.9872165,Not Ready,True,READY_TO_STRING,9,9,9,,,"214/1,214/2,214/3,214/4,214/5,214/6,214/7",True,,,,,,,,,TSE
+220/0,221/0,0.8192699999999999,Not Ready,True,READY_TO_STRING,3,3,3,,,220/1,True,,,,,,,,,Manual
+221/0,222/0,0.19181,Not Ready,True,READY_TO_STRING,2,2,2,,,,False,,,,,,,,,Hotline
+224/2,225/0,0.43119999999999997,Not Ready,True,READY_TO_STRING,2,2,2,,,,False,,,,,,,,,Manual
+255/0,256/0,0.73676,Not Ready,True,READY_TO_STRING,3,3,3,,,255/1,True,,,,,,,,,Manual
+117/0,118/0,1.1427619999999998,Ready,False,ERECTION_NOT_COMPLETE,4,3,3,117/0,117/0,"117/1,117/2",True,,,,,,,,,TSE
+126/0,127/0,1.58422,WIP,True,READY_TO_STRING,5,5,5,,,"126/1,126/2,126/3",True,Done,,,,,,,,TSE
+174/0,175/0,2.633369,WIP,True,READY_TO_STRING,8,8,8,,,"174/1,174/2,174/3,174/4,174/5,174/6",True,Done,,,,,,,,TSE
+190/0,191/0,0.22648,WIP,True,READY_TO_STRING,2,2,2,,,,False,Done,,,,,,,,Hotline
+191/0,191/1,0.46547000000000005,WIP,True,READY_TO_STRING,2,2,2,,,,False,Done,,,,,,,,Manual
+191/1,192/0,0.38950999999999997,WIP,True,READY_TO_STRING,2,2,2,,,,False,Done,,,,,,,,Manual
+197/0,198/0,0.98372,WIP,True,READY_TO_STRING,4,4,4,,,"197/1,197/2",True,Done,,,,,,,,Manual

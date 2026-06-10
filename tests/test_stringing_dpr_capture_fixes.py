@@ -8,7 +8,7 @@ import pandas as pd
 
 from dashboard import stringing_ingest as ingest
 from dashboard.stringing import add_length_units
-from pipeline_runner import _apply_template_if_improves, _build_may_exclusion_rows
+from pipeline_runner import _apply_template_if_improves, _build_may_exclusion_rows, _coerce_excel_date_series
 
 
 class StringingDprCaptureFixesTests(unittest.TestCase):
@@ -126,6 +126,17 @@ class StringingDprCaptureFixesTests(unittest.TestCase):
         self.assertEqual(len(out.index), 1)
         self.assertEqual(str(out.loc[0, "from_ap"]), "35/0")
         self.assertIn("Missing/invalid F/S completion date", str(out.loc[0, "exclusion_reason"]))
+
+    def test_parquet_date_coercion_handles_mixed_dotted_dpr_dates(self) -> None:
+        dates = pd.Series(["06.05.2024", "10.05.24", "25.12.25", "01.12.245", 45500])
+
+        parsed = _coerce_excel_date_series(dates)
+
+        self.assertEqual(parsed.iloc[0], pd.Timestamp("2024-05-06"))
+        self.assertEqual(parsed.iloc[1], pd.Timestamp("2024-05-10"))
+        self.assertEqual(parsed.iloc[2], pd.Timestamp("2025-12-25"))
+        self.assertTrue(pd.isna(parsed.iloc[3]))
+        self.assertEqual(parsed.iloc[4], pd.Timestamp("2024-07-27"))
 
 
 if __name__ == "__main__":

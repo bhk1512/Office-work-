@@ -1,0 +1,41 @@
+project_code,project_display,line_name,from_ap,to_ap,length_km,section_readiness,status,status__2,sheet_ready_for_stringing,sheet_completed_rule,sheet_ready_signal,sheet_completion_basis,tower_ready_same_completion_rule,readiness_reason,required_locations,missing_erection_locations,missing_tightening_locations,__location_nos_raw
+TA 413,TA 413,,11/0,12/0,0.24289,,,,False,False,,,True,READY_TO_STRING,"11/0, 12/0",,,
+TA 413,TA 413,,13/0,13A/0,0.4168779999999999,,,,False,False,,,True,READY_TO_STRING,"13/0, 13A/0",,,
+TA 413,TA 413,,14/0,15/0,0.22382,,,,False,False,,,True,READY_TO_STRING,"14/0, 15/0",,,
+TA 413,TA 413,,35/0,36/0,4.916293,,,,False,False,,,True,READY_TO_STRING,"35/0, 36/0",,,
+TA 414,TA 414,,117/0,118/0,1.1427619999999998,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"117/0, 118/0, 117/1, 117/2",117/0,117/0,"117/1,117/2"
+TA 414,TA 414,,126/0,127/0,1.58422,WIP,,,False,False,,,True,READY_TO_STRING,"126/0, 127/0, 126/1, 126/2, 126/3",,,"126/1,126/2,126/3"
+TA 414,TA 414,,174/0,175/0,2.633369,WIP,,,False,False,,,True,READY_TO_STRING,"174/0, 175/0, 174/1, 174/2, 174/3, 174/4, 174/5, 174/6",,,"174/1,174/2,174/3,174/4,174/5,174/6"
+TA 414,TA 414,,190/0,191/0,0.22648,WIP,,,False,False,,,True,READY_TO_STRING,"190/0, 191/0",,,
+TA 414,TA 414,,191/0,191/1,0.46547000000000005,WIP,,,False,False,,,True,READY_TO_STRING,"191/0, 191/1",,,
+TA 414,TA 414,,191/1,192/0,0.38950999999999997,WIP,,,False,False,,,True,READY_TO_STRING,"191/1, 192/0",,,
+TA 414,TA 414,,197/0,198/0,0.98372,WIP,,,False,False,,,True,READY_TO_STRING,"197/0, 198/0, 197/1, 197/2",,,"197/1,197/2"
+TA 414,TA 414,,214/0,215/0,2.9872165,Not Ready,,,False,False,,,True,READY_TO_STRING,"214/0, 215/0, 214/1, 214/2, 214/3, 214/4, 214/5, 214/6, 214/7",,,"214/1,214/2,214/3,214/4,214/5,214/6,214/7"
+TA 414,TA 414,,220/0,221/0,0.8192699999999999,Not Ready,,,False,False,,,True,READY_TO_STRING,"220/0, 221/0, 220/1",,,220/1
+TA 414,TA 414,,221/0,222/0,0.19181,Not Ready,,,False,False,,,True,READY_TO_STRING,"221/0, 222/0",,,
+TA 414,TA 414,,224/2,225/0,0.43119999999999997,Not Ready,,,False,False,,,True,READY_TO_STRING,"224/2, 225/0",,,
+TA 414,TA 414,,255/0,256/0,0.73676,Not Ready,,,False,False,,,True,READY_TO_STRING,"255/0, 256/0, 255/1",,,255/1
+TA 418,TA 418,,49/0,AP50,0.41722000000000004,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"49/0, 50, 50/0",50,50,"49/0,50/0"
+TA 418,TA 418,,59/0,60/0,0.7028,Ready,,,True,False,section_readiness=Ready,,False,TIGHTENING_PENDING,"59/0, 60/0, 59/1",,59/1,"59/0,59/1,60/0"
+TA 418,TA 418,,63/0,GNTY,0.135,Ready,,,True,False,section_readiness=Ready,,False,ALREADY_STRUNG,"63/0, GNTY, 63/GNTY","GNTY, 63/GNTY","GNTY, 63/GNTY","63/0,GNTY"
+TA 418,TA 418,,AP38,AP39,1.30076,Ready,wip,,True,False,section_readiness=Ready,,False,ALREADY_STRUNG,"38, 39, 38/0, 38/1, 38/2, 39/0","38, 39","38, 39","38/0, 38/1, 38/2, 39/0"
+TA 418,TA 418,,AP47/0,AP48,0.81345,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"47/0, 48, 47/1, 48/0",48,48,"47/0,47/1,48/0"
+TA 418,TA 418,,AP48,48A/0,1.2570599999999998,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"48, 48A/0, 48/0, 48/1, 48/2",48,48,"48/0,48/1,48/2,48A/0"
+TA 418,TA 418,,AP50,AP51,0.2496,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"50, 51, 50/0, 51/0","50, 51","50, 51","50/0,51/0"
+TA 418,TA 418,,AP51,AP52,0.3336,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"51, 52, 51/0, 52/0","51, 52","51, 52","51/0,52/0"
+TA 418,TA 418,,AP52,AP53,1.0341,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"52, 53, 52/0, 52/1, 52/2, 53/0","52, 53","52, 53","52/0,52/1,52/2,53/0"
+TA 418,TA 418,,AP53,AP54,0.25862,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"53, 54, 53/0, 54/0","53, 54","53, 54","53/0,54/0"
+TA 418,TA 418,,AP54,AP55,1.8366900000000002,Ready,,,True,False,section_readiness=Ready,,False,ERECTION_NOT_COMPLETE,"54, 55, 54/0, 54/1, 54/2, 54/3, 54/4, 55/0","54, 55","54, 55","54/0,54/1,54/2,54/3,54/4,55/0"
+TA 418,TA 418,,AP55,AP56,2.70449,Ready,,,True,False,section_readiness=Ready,,False,ALREADY_STRUNG,"55, 56, 55/0, 55/1, 55/2, 55/3, 55/4, 55/5, 55/6, 56/0","55, 56","55, 56","55/0,55/1,55/2,55/3,55/4,55/5,55/6,56/0"
+TA 418,TA 418,,AP56,56/3,1.23,Ready,,,True,False,section_readiness=Ready,,False,ALREADY_STRUNG,"56, 56/3, 56/0, 56/1, 56/2",56,56,"56/0,56/1,56/2,56/3"
+TA 421,TA 421,,33/0,34/0,0.966,Ready ,,,True,False,section_readiness=Ready,,False,ALREADY_STRUNG,"33/0, 34/0, 33/1",,34/0,"33/0,1,2 & 33/0 "
+TA 421,TA 421,,34/0,34/1,0.248,Ready ,,,True,False,section_readiness=Ready,,False,TIGHTENING_PENDING,"34/0, 34/1",,"34/0, 34/1","34/0 ,34/1"
+TA 421,TA 421,,34/1,34/2,0.43,Ready ,,,True,False,section_readiness=Ready,,False,TIGHTENING_PENDING,"34/1, 34/2",,34/1,"34/1 , 34/2 "
+TB 501,TB 501 - 132kV,132kV,1/0,2/0,0.27814999999999995,,,,True,False,TB501 blank active span,,False,ERECTION_NOT_COMPLETE,"1/0, 2/0","1/0, 2/0","1/0, 2/0",
+TB 501,TB 501 - 132kV,132kV,2/0,2/1,0.23456,,,,True,False,TB501 blank active span,,False,ERECTION_NOT_COMPLETE,"2/0, 2/1","2/0, 2/1","2/0, 2/1",
+TB 501,TB 501 - 132kV,132kV,2/1,3/0,0.24903999999999998,,,,True,False,TB501 blank active span,,False,ERECTION_NOT_COMPLETE,"2/1, 3/0",2/1,"2/1, 3/0",
+TB 501,TB 501 - 220kV,220kV,33/0,34/0,0.209,,,,True,False,TB501 blank active span,,False,ERECTION_NOT_COMPLETE,"33/0, 34/0","33/0, 34/0","33/0, 34/0",
+TB 501,TB 501 - 220kV,220kV,4/6,4/7,0.36,,,,True,False,TB501 blank active span,,False,TIGHTENING_PENDING,"4/6, 4/7",,"4/6, 4/7",
+TB 501,TB 501 - 220kV,220kV,4/7,4/8,0.46,,,,True,False,TB501 blank active span,,False,TIGHTENING_PENDING,"4/7, 4/8",,"4/7, 4/8",
+TB 501,TB 501 - 220kV,220kV,4/8,4/9,0.23,,,,True,False,TB501 blank active span,,False,TIGHTENING_PENDING,"4/8, 4/9",,"4/8, 4/9",
+TB 507,TB 507 - MAIN,MAIN,115/0,115/1,0.425,Ready,wip,,True,False,section_readiness=Ready,,False,TIGHTENING_PENDING,"115/0, 115/1",,"115/0, 115/1",
