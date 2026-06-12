@@ -196,11 +196,27 @@ def _activity_status(
     if work.empty:
         return pd.DataFrame(columns=columns)
 
-    latest_dates = work.groupby("project_key")["report_date"].transform("max")
-    work = work[work["report_date"] == latest_dates].copy()
-
     for col in ("plan_for_month", "progress_for_month", "quantity_primary", "cumulative_progress"):
         work[col] = pd.to_numeric(work.get(col), errors="coerce")
+
+    snapshots = (
+        work.groupby(["project_key", "report_date"], dropna=False)
+        .agg(
+            SnapshotPlan=("plan_for_month", lambda values: values.sum(min_count=1)),
+            SnapshotActual=("progress_for_month", lambda values: values.sum(min_count=1)),
+        )
+        .reset_index()
+    )
+    prior_positive_plan = (
+        snapshots[pd.to_numeric(snapshots["SnapshotPlan"], errors="coerce").gt(0)]
+        .sort_values(["project_key", "report_date"])
+        .drop_duplicates("project_key", keep="last")
+        [["project_key", "SnapshotPlan"]]
+        .rename(columns={"SnapshotPlan": "PriorPositivePlan"})
+    )
+
+    latest_dates = work.groupby("project_key")["report_date"].transform("max")
+    work = work[work["report_date"] == latest_dates].copy()
 
     grouped = (
         work.groupby("project_key", dropna=False)
@@ -214,6 +230,12 @@ def _activity_status(
         )
         .reset_index()
     )
+    grouped = grouped.merge(prior_positive_plan, on="project_key", how="left")
+    latest_plan = pd.to_numeric(grouped["Plan"], errors="coerce")
+    latest_actual = pd.to_numeric(grouped["Actual"], errors="coerce")
+    carry_forward = latest_plan.fillna(0).le(0) & latest_actual.fillna(0).gt(0)
+    grouped.loc[carry_forward, "Plan"] = grouped.loc[carry_forward, "PriorPositivePlan"]
+    grouped = grouped.drop(columns="PriorPositivePlan")
     return grouped.reindex(columns=columns)
 
 

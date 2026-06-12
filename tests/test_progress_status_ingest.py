@@ -115,6 +115,9 @@ class ProgressStatusIngestTests(unittest.TestCase):
         self.assertEqual(parsed.get("block_anchor"), "Progress Status")
         self.assertEqual(parsed.get("header_rows"), "2")
 
+    def test_extract_date_token_ignores_nat(self) -> None:
+        self.assertEqual(status_ingest._extract_date_token(pd.NaT), "")  # type: ignore[attr-defined]
+
     def test_detect_header_single_two_three_row(self) -> None:
         single = pd.DataFrame(
             [
@@ -219,6 +222,72 @@ class ProgressStatusIngestTests(unittest.TestCase):
         self.assertEqual(result.parse_status, "OK")
         self.assertGreaterEqual(result.rows_emitted, 4)
         self.assertGreaterEqual(result.sections_detected, 2)
+
+    def test_parse_vertical_progress_summary_blocks(self) -> None:
+        df = pd.DataFrame(
+            [
+                ["TOWER ERECTION PROGRESS SUMMARY", "", "", "", "", ""],
+                ["TOTAL QTY", "COMPLETED UP TO PREV MONTH", "COMP. IN CURRENT MONTH", "CUMULATIVE", "BAL.QTY", ""],
+                [480, 52, 9, 61, 419, ""],
+                ["STRINGING PROGRESS SUMMARY", "", "", "", "", ""],
+                ["TOTAL QTY", "COMPLETED UP TO PREV MONTH", "COMP. IN CURRENT MONTH", "CUMULATIVE", "BAL.QTY(KM)", ""],
+                [184.986, 0, 0, 0, 184.986, ""],
+            ]
+        )
+
+        result = status_ingest._parse_status_sheet_dataframe(  # type: ignore[attr-defined]
+            df,
+            guardrails={
+                "required_tokens": "activity; progress; cum",
+                "activity_allowlist": "tower erection; stringing",
+            },
+            template_map={},
+            project_code="TA 602",
+            project_display="TA 602",
+            project_scope_key="ta602",
+            line_name="",
+            line_name_source="",
+            report_date="2026-06-09",
+            source_file="TA 602 - DPR - 2026-06-09.xlsx",
+            source_sheet="DPR Sheet",
+            configured_sheet="DPR-KEC",
+            template_sheet="TA 602 Status",
+            stringing_resolution_policy="",
+        )
+
+        self.assertEqual(result.parse_status, "OK")
+        erection = result.data[result.data["activity_norm"] == "tower_erection"].iloc[0]
+        self.assertEqual(erection["quantity_primary"], 480)
+        self.assertEqual(erection["progress_for_month"], 9)
+        self.assertEqual(erection["cumulative_progress"], 61)
+
+    def test_merge_status_history_keeps_prior_report_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "ProgressStatus_Output.xlsx"
+            previous = pd.DataFrame(
+                [
+                    {
+                        "project_scope_key": "tb605",
+                        "report_date": "2026-06-07",
+                        "source_sheet": "TB-605",
+                        "configured_sheet": "TB-605",
+                        "section_label": "Progress Summary",
+                        "activity_norm": "tower_erection",
+                        "source_row_number": 10,
+                        "plan_for_month": 80,
+                    }
+                ]
+            )
+            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+                previous.to_excel(writer, sheet_name="RawData", index=False)
+
+            current = previous.copy()
+            current["report_date"] = "2026-06-09"
+            current["plan_for_month"] = 0
+            merged = status_ingest._merge_status_history(current, output_path)  # type: ignore[attr-defined]
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(set(pd.to_datetime(merged["report_date"]).dt.day), {7, 9})
 
 
 if __name__ == "__main__":

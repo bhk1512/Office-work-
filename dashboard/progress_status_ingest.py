@@ -1,11 +1,13 @@
 """Config-driven DPR progress/status ingestion."""
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Optional
 import re
+import subprocess
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -557,6 +559,103 @@ def _build_status_rows(
     return pd.DataFrame(rows, columns=RAWDATA_COLUMNS)
 
 
+def _build_vertical_progress_summary_rows(
+    df_raw: pd.DataFrame,
+    *,
+    project_code: str,
+    project_display: str,
+    project_scope_key: str,
+    line_name: str,
+    line_name_source: str,
+    report_date: str,
+    source_file: str,
+    source_sheet: str,
+    configured_sheet: str,
+    template_sheet: str,
+    stringing_resolution_policy: str,
+    activity_allowlist: list[str],
+    activity_exclude: list[str],
+) -> pd.DataFrame:
+    """Parse DPR sheets where each activity is a separate vertical summary block."""
+    rows: list[dict[str, object]] = []
+    allowlist_norm = [_normalize_text(token) for token in activity_allowlist if _normalize_text(token)]
+    exclude_norm = [_normalize_text(token) for token in activity_exclude if _normalize_text(token)]
+
+    for row_idx in range(max(len(df_raw.index) - 2, 0)):
+        heading = _row_text(df_raw, row_idx, max_cols=12)
+        match = re.search(r"(.+?)\s+progress\s+summary", heading, flags=re.IGNORECASE)
+        if not match:
+            continue
+
+        raw_activity = re.sub(r"\s+", " ", match.group(1)).strip(" |:-")
+        activity_text = _normalize_text(raw_activity)
+        if not raw_activity:
+            continue
+        if allowlist_norm and not any(token in activity_text for token in allowlist_norm):
+            continue
+        if exclude_norm and any(token in activity_text for token in exclude_norm):
+            continue
+
+        header_idx = row_idx + 1
+        value_idx = row_idx + 2
+        headers = [
+            _normalize_text(df_raw.iat[header_idx, col_idx])
+            for col_idx in range(len(df_raw.columns))
+        ]
+        values = [
+            df_raw.iat[value_idx, col_idx]
+            for col_idx in range(len(df_raw.columns))
+        ]
+
+        def value_for(*required_tokens: str) -> float | None:
+            for col_idx, header in enumerate(headers):
+                if header and all(token in header for token in required_tokens):
+                    return _coerce_numeric(values[col_idx])
+            return None
+
+        quantity = value_for("total", "qty")
+        previous = value_for("completed", "prev", "month")
+        current_month = value_for("current", "month")
+        cumulative = value_for("cumulative")
+        balance = value_for("bal")
+        if all(value is None for value in (quantity, previous, current_month, cumulative, balance)):
+            continue
+
+        rows.append(
+            {
+                "project_code": project_code,
+                "project_display": project_display,
+                "project_scope_key": project_scope_key,
+                "line_name": line_name,
+                "line_name_source": line_name_source,
+                "section_label": raw_activity,
+                "report_date": report_date,
+                "source_file": source_file,
+                "source_sheet": source_sheet,
+                "configured_sheet": configured_sheet,
+                "template_sheet": template_sheet,
+                "stringing_resolution_policy": stringing_resolution_policy,
+                "header_row_number": header_idx + 1,
+                "source_row_number": value_idx + 1,
+                "activity_raw": raw_activity,
+                "activity_norm": _normalize_activity(raw_activity),
+                "quantity_loa": None,
+                "quantity_estimated_or_total": quantity,
+                "quantity_primary": quantity,
+                "cumulative_last_month": previous,
+                "plan_for_month": None,
+                "progress_for_month": current_month,
+                "today_progress": None,
+                "cumulative_progress": cumulative,
+                "balance_progress": balance,
+                "gangs_working": "",
+                "remarks": "",
+            }
+        )
+
+    return pd.DataFrame(rows, columns=RAWDATA_COLUMNS)
+
+
 def _sheet_tokens(value: object) -> set[str]:
     text = str(value or "").strip().lower()
     if not text:
@@ -572,9 +671,12 @@ def _extract_report_date_from_filename(file_name: str) -> str:
 def _extract_date_token(value: object) -> str:
     if value is None:
         return ""
-    if isinstance(value, pd.Timestamp):
+    try:
         if pd.isna(value):
             return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
         return value.normalize().strftime("%Y-%m-%d")
     if isinstance(value, (datetime, date)):
         return value.strftime("%Y-%m-%d")
@@ -1161,6 +1263,33 @@ def _parse_status_sheet_dataframe(
                 break
 
     if not all_rows:
+        vertical_rows = _build_vertical_progress_summary_rows(
+            df_raw,
+            project_code=project_code,
+            project_display=project_display,
+            project_scope_key=project_scope_key,
+            line_name=line_name,
+            line_name_source=line_name_source,
+            report_date=report_date,
+            source_file=source_file,
+            source_sheet=source_sheet,
+            configured_sheet=configured_sheet,
+            template_sheet=template_sheet,
+            stringing_resolution_policy=stringing_resolution_policy,
+            activity_allowlist=activity_allowlist,
+            activity_exclude=activity_exclude,
+        )
+        if not vertical_rows.empty:
+            return StatusParseResult(
+                data=vertical_rows.reindex(columns=RAWDATA_COLUMNS),
+                parse_status="OK",
+                parse_reason="",
+                sections_detected=int(len(vertical_rows.index)),
+                headers_detected=int(len(vertical_rows.index)),
+                rows_emitted=int(len(vertical_rows.index)),
+                template_changes=template_changes_all,
+            )
+
         reason = "No matching rows after guardrails/activity filters."
         status = "NO_MATCHED_ROWS" if headers_detected > 0 else "HEADER_NOT_FOUND"
         return StatusParseResult(
@@ -1183,6 +1312,63 @@ def _parse_status_sheet_dataframe(
         rows_emitted=int(len(combined.index)),
         template_changes=template_changes_all,
     )
+
+
+def _merge_status_history(current: pd.DataFrame, output_path: Path) -> pd.DataFrame:
+    previous_frames: list[pd.DataFrame] = []
+    if output_path.exists():
+        try:
+            previous_frames.append(pd.read_excel(output_path, sheet_name="RawData"))
+        except Exception:
+            pass
+
+    try:
+        repo_root_text = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=output_path.parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        repo_root = Path(repo_root_text)
+        relative_path = output_path.resolve().relative_to(repo_root.resolve()).as_posix()
+        committed_bytes = subprocess.check_output(
+            ["git", "show", f"HEAD:{relative_path}"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        )
+        previous_frames.append(pd.read_excel(io.BytesIO(committed_bytes), sheet_name="RawData"))
+    except Exception:
+        pass
+
+    previous_frames = [frame for frame in previous_frames if not frame.empty]
+    if not previous_frames:
+        return current.reindex(columns=RAWDATA_COLUMNS)
+    previous = pd.concat(previous_frames, ignore_index=True)
+
+    for column in RAWDATA_COLUMNS:
+        if column not in previous.columns:
+            previous[column] = pd.NA
+        if column not in current.columns:
+            current[column] = pd.NA
+
+    previous = previous.reindex(columns=RAWDATA_COLUMNS).copy()
+    current = current.reindex(columns=RAWDATA_COLUMNS).copy()
+    previous["_current_snapshot"] = 0
+    current["_current_snapshot"] = 1
+    combined = pd.concat([previous, current], ignore_index=True)
+    combined["report_date"] = pd.to_datetime(combined["report_date"], errors="coerce").dt.normalize()
+
+    key_columns = [
+        "project_scope_key",
+        "report_date",
+        "source_sheet",
+        "configured_sheet",
+        "section_label",
+        "activity_norm",
+        "source_row_number",
+    ]
+    combined = combined.sort_values("_current_snapshot").drop_duplicates(key_columns, keep="last")
+    return combined.drop(columns="_current_snapshot").reindex(columns=RAWDATA_COLUMNS).reset_index(drop=True)
 
 
 def _status_candidates(input_dir: Optional[Path], files: Optional[list[Path]]) -> list[Path]:
@@ -1394,7 +1580,8 @@ def compile_progress_status_to_workbook(
                     )
                     continue
 
-                selector = _build_exact_sheet_selector(configured_sheet) if configured_sheet else (
+                selector_name = resolved_sheet_guess or configured_sheet
+                selector = _build_exact_sheet_selector(selector_name) if selector_name else (
                     lambda names: names[0] if names else None
                 )
                 try:
@@ -1567,6 +1754,7 @@ def compile_progress_status_to_workbook(
         print(f"[pipeline] ProgressStatus: skipped {skipped_not_in_config} workbook(s) not listed in DPR_Config.")
 
     raw_df = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame(columns=RAWDATA_COLUMNS)
+    raw_df = _merge_status_history(raw_df, Path(output_path))
 
     _CORE_ACTIVITY_NORMS = {"foundation", "tower_erection", "stringing"}
     if not raw_df.empty:

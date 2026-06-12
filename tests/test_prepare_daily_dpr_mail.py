@@ -9,6 +9,46 @@ import prepare_daily_dpr_mail as mail
 
 
 class PrepareDailyDprMailTests(unittest.TestCase):
+    def test_activity_status_carries_prior_positive_plan_when_latest_plan_is_zero(self) -> None:
+        status = pd.DataFrame(
+            [
+                {
+                    "project_code": "TB 605",
+                    "month": pd.Timestamp("2026-06-01"),
+                    "report_date": pd.Timestamp("2026-06-07"),
+                    "activity_group": "Tower Erection",
+                    "core_activity": True,
+                    "plan_for_month": 80,
+                    "progress_for_month": 9,
+                    "quantity_primary": 523,
+                    "cumulative_progress": 212,
+                },
+                {
+                    "project_code": "TB 605",
+                    "month": pd.Timestamp("2026-06-01"),
+                    "report_date": pd.Timestamp("2026-06-09"),
+                    "activity_group": "Tower Erection",
+                    "core_activity": True,
+                    "plan_for_month": 0,
+                    "progress_for_month": 11,
+                    "quantity_primary": 523,
+                    "cumulative_progress": 214,
+                },
+            ]
+        )
+
+        with patch.object(mail, "_read_parquet", return_value=status):
+            result = mail._activity_status(
+                "Tower Erection",
+                pd.Timestamp("2026-06-01"),
+                pd.Timestamp("2026-06-30"),
+                pd.Timestamp("2026-06-09"),
+            )
+
+        row = result.iloc[0]
+        self.assertEqual(row["Plan"], 80)
+        self.assertEqual(row["Actual"], 11)
+
     def test_erection_actual_ignores_rows_without_location_number(self) -> None:
         status = pd.DataFrame(
             [
