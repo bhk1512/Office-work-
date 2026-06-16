@@ -32,6 +32,8 @@ class MailArtifacts:
     as_of_date: pd.Timestamp
     erection: pd.DataFrame
     stringing: pd.DataFrame
+    foundation_by_gang: pd.DataFrame
+    foundation_by_project: pd.DataFrame
 
 
 def _parse_args() -> argparse.Namespace:
@@ -438,12 +440,99 @@ def _build_stringing_table(
     return _round_numeric(_sort_rows(table[keep]))
 
 
+def _foundation_completion_work(
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    as_of_date: pd.Timestamp,
+) -> pd.DataFrame:
+    completions = _read_parquet(PARQUET_DIR / "Foundation" / "FoundationCompletions.parquet")
+    if completions.empty:
+        return pd.DataFrame()
+
+    work = completions.copy()
+    work["event_date"] = pd.to_datetime(work.get("event_date"), errors="coerce").dt.normalize()
+    cutoff = min(as_of_date, month_end)
+    work = work[
+        (work["event_date"].notna())
+        & (work["event_date"] >= month_start)
+        & (work["event_date"] <= cutoff)
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    work["project_key"] = work.get("project_code", "").map(_compact_project)
+    work["Project"] = work.get("project_display", work.get("project_code", "")).map(_display_project)
+    work["Month"] = work["event_date"].dt.strftime("%b-%Y")
+    work["period_month"] = work["event_date"].dt.to_period("M").dt.to_timestamp()
+    if "gang_name" in work.columns:
+        gang = work["gang_name"].fillna("").astype(str).str.strip()
+    else:
+        gang = pd.Series("", index=work.index)
+    work["Gang"] = gang.mask(gang.eq(""), "Unassigned")
+    work["has_gang"] = work["Gang"].ne("Unassigned")
+    work["event_value"] = pd.to_numeric(work.get("event_value"), errors="coerce").fillna(1.0)
+    work = work[work["project_key"].astype(bool)]
+    return work
+
+
+def _build_foundation_gang_month_table(
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    as_of_date: pd.Timestamp,
+    mapping: pd.DataFrame,
+) -> pd.DataFrame:
+    work = _foundation_completion_work(month_start, month_end, as_of_date)
+    columns = ["PCH", "Project", "Month", "Gang", "Foundations"]
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = (
+        work.groupby(["project_key", "Project", "period_month", "Month", "Gang"], dropna=False)
+        .agg(Foundations=("event_value", "sum"))
+        .reset_index()
+    )
+    table = _merge_identity(grouped, mapping)
+    table = table.reindex(columns=columns + ["period_month"])
+    table = _sort_rows(table)
+    table = table.sort_values(["PCH", "Project", "period_month", "Gang"]).drop(columns=["period_month"])
+    table["Foundations"] = pd.to_numeric(table["Foundations"], errors="coerce").round(0).astype("Int64")
+    return table
+
+
+def _build_foundation_project_month_table(
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    as_of_date: pd.Timestamp,
+    mapping: pd.DataFrame,
+) -> pd.DataFrame:
+    work = _foundation_completion_work(month_start, month_end, as_of_date)
+    columns = ["PCH", "Project", "Month", "Foundations", "Unique Gangs"]
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = (
+        work.groupby(["project_key", "Project", "period_month", "Month"], dropna=False)
+        .agg(
+            Foundations=("event_value", "sum"),
+            **{"Unique Gangs": ("Gang", lambda values: values[values.ne("Unassigned")].nunique())},
+        )
+        .reset_index()
+    )
+    table = _merge_identity(grouped, mapping)
+    table = table.reindex(columns=columns + ["period_month"])
+    table = _sort_rows(table)
+    table = table.sort_values(["PCH", "Project", "period_month"]).drop(columns=["period_month"])
+    for column in ["Foundations", "Unique Gangs"]:
+        table[column] = pd.to_numeric(table[column], errors="coerce").round(0).astype("Int64")
+    return table
+
+
 def _round_numeric(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     for column in out.columns:
         if column == "Actual Towers (Nos.)":
             out[column] = pd.to_numeric(out[column], errors="coerce").round(0).astype("Int64")
-        elif column not in {"PCH", "Project"}:
+        elif column not in {"PCH", "Project", "Month", "Gang"}:
             values = pd.to_numeric(out[column], errors="coerce")
             values = values.mask(values.abs().lt(0.005), 0.0)
             out[column] = values.round(2)
@@ -486,10 +575,12 @@ def _totals_row(frame: pd.DataFrame, kind: str) -> dict[str, object]:
     return row
 
 
-def _html_table(frame: pd.DataFrame, kind: str) -> str:
+def _html_table(frame: pd.DataFrame, kind: str, *, include_total: bool = True) -> str:
     if frame.empty:
         return "<p>No rows found for this month.</p>"
-    rows = frame.to_dict("records") + [_totals_row(frame, kind)]
+    rows = frame.to_dict("records")
+    if include_total:
+        rows.append(_totals_row(frame, kind))
     columns = list(frame.columns)
     parts = [
         "<table>",
@@ -506,7 +597,7 @@ def _html_table(frame: pd.DataFrame, kind: str) -> str:
             value = row.get(column)
             if column == "PCH" and value == last_pch and not is_total:
                 text = ""
-            elif column in {"PCH", "Project"}:
+            elif column in {"PCH", "Project", "Month", "Gang"}:
                 text = html.escape(str(value if not pd.isna(value) else ""))
             else:
                 text = _format_number(value)
@@ -521,6 +612,8 @@ def _html_table(frame: pd.DataFrame, kind: str) -> str:
 def _build_html(
     erection: pd.DataFrame,
     stringing: pd.DataFrame,
+    foundation_by_gang: pd.DataFrame,
+    foundation_by_project: pd.DataFrame,
     *,
     month_start: pd.Timestamp,
     as_of_date: pd.Timestamp,
@@ -549,6 +642,10 @@ tr.total td {{ font-weight: 700; background: #f2f2f2; }}
 {_html_table(erection, "erection")}
 <h3>Stringing Productivity</h3>
 {_html_table(stringing, "stringing")}
+<h3>Foundation Completions by Gang and Month</h3>
+{_html_table(foundation_by_gang, "foundation_gang", include_total=False)}
+<h3>Foundation Project-Month Cross Reference</h3>
+{_html_table(foundation_by_project, "foundation_project", include_total=False)}
 <p>Regards,</p>
 </body>
 </html>
@@ -583,9 +680,18 @@ def prepare_mail(args: argparse.Namespace) -> MailArtifacts:
 
     erection = _build_erection_table(month_start, month_end, as_of_date, mapping)
     stringing = _build_stringing_table(month_start, month_end, as_of_date, mapping)
+    foundation_by_gang = _build_foundation_gang_month_table(month_start, month_end, as_of_date, mapping)
+    foundation_by_project = _build_foundation_project_month_table(month_start, month_end, as_of_date, mapping)
 
     subject = f"Daily DPR Productivity Summary - {month_start:%B %Y} MTD as on {as_of_date:%d-%b-%Y}"
-    html_body = _build_html(erection, stringing, month_start=month_start, as_of_date=as_of_date)
+    html_body = _build_html(
+        erection,
+        stringing,
+        foundation_by_gang,
+        foundation_by_project,
+        month_start=month_start,
+        as_of_date=as_of_date,
+    )
     output_path = args.output_html or PRODUCTIVITY_DIR / f"Daily_DPR_Mail_{as_of_date:%Y-%m-%d}.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html_body, encoding="utf-8")
@@ -599,6 +705,8 @@ def prepare_mail(args: argparse.Namespace) -> MailArtifacts:
         as_of_date=as_of_date,
         erection=erection,
         stringing=stringing,
+        foundation_by_gang=foundation_by_gang,
+        foundation_by_project=foundation_by_project,
     )
 
 
@@ -609,6 +717,8 @@ def main() -> int:
     print(f"[daily-mail] HTML body: {artifacts.html_path}")
     print(f"[daily-mail] Erection rows: {len(artifacts.erection)}")
     print(f"[daily-mail] Stringing rows: {len(artifacts.stringing)}")
+    print(f"[daily-mail] Foundation gang-month rows: {len(artifacts.foundation_by_gang)}")
+    print(f"[daily-mail] Foundation project-month rows: {len(artifacts.foundation_by_project)}")
     if args.no_draft:
         print("[daily-mail] Outlook draft creation skipped.")
     else:

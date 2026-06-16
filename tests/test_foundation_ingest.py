@@ -90,17 +90,17 @@ class FoundationIngestTests(unittest.TestCase):
                 dpr_root / "TA 510 - DPR - 2026-05-10.xlsx",
                 "FDN",
                 [
-                    ["Location No", "Foundation Completion Date", "Status"],
-                    ["1/0", "2026-05-09", "Completed"],
-                    ["1/1", "2026-05-10", "Completed"],
+                    ["Location No", "Foundation Completion Date", "Gang Name", "Status"],
+                    ["1/0", "2026-05-09", "Gang A", "Completed"],
+                    ["1/1", "2026-05-10", "Gang B", "Completed"],
                 ],
             )
             _write_dpr(
                 dpr_root / "TA 510 - DPR - 2026-05-11.xlsx",
                 "FDN",
                 [
-                    ["Location No", "Foundation Completion Date", "Status"],
-                    ["1/0", "2026-05-09", "Completed"],
+                    ["Location No", "Foundation Completion Date", "Gang Name", "Status"],
+                    ["1/0", "2026-05-09", "Gang A", "Completed"],
                 ],
             )
 
@@ -113,6 +113,7 @@ class FoundationIngestTests(unittest.TestCase):
             detail_df = completion_df[completion_df["source_type"].astype(str).str.lower() == "detail"]
             self.assertEqual(len(detail_df.index), 2)
             self.assertEqual(set(detail_df["location_no"].astype(str)), {"1/0", "1/1"})
+            self.assertEqual(set(detail_df["gang_name"].astype(str)), {"Gang A", "Gang B"})
 
     def test_compile_uses_template_mapping_for_wide_sheet_date_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -134,6 +135,7 @@ class FoundationIngestTests(unittest.TestCase):
                         1: "Location No",
                         38: "Foundation Status",
                         44: "Foundation Completion Date",
+                        45: "Sub-Contractor Name",
                     }
                 },
             )
@@ -148,6 +150,7 @@ class FoundationIngestTests(unittest.TestCase):
             row_done[1] = "1/0"
             row_done[38] = "C"
             row_done[44] = "2026-05-10"
+            row_done[45] = "Contractor A"
             row_wip = [""] * width
             row_wip[0] = "2"
             row_wip[1] = "1/1"
@@ -172,6 +175,7 @@ class FoundationIngestTests(unittest.TestCase):
             detail_df = completion_df[completion_df["source_type"].astype(str).str.lower() == "detail"]
             self.assertEqual(len(detail_df.index), 1)
             self.assertEqual(str(detail_df.iloc[0]["location_no"]), "1/0")
+            self.assertEqual(str(detail_df.iloc[0]["gang_name"]), "Contractor A")
             tb501 = coverage_df[coverage_df["project_code"].astype(str).str.upper().eq("TB 501")]
             self.assertFalse(tb501.empty)
             self.assertEqual(str(tb501.iloc[0]["status"]).upper(), "OK_DETAIL")

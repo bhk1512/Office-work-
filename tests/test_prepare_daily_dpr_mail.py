@@ -112,6 +112,74 @@ class PrepareDailyDprMailTests(unittest.TestCase):
         self.assertEqual(row["Actual Towers (Nos.)"], 1)
         self.assertAlmostEqual(row["Total MT"], 27.48)
 
+    def test_foundation_tables_group_by_completion_month_and_count_unique_gangs(self) -> None:
+        completions = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 510",
+                    "project_display": "TA 510",
+                    "event_date": pd.Timestamp("2026-05-02"),
+                    "event_value": 1,
+                    "gang_name": "Gang A",
+                },
+                {
+                    "project_code": "TA 510",
+                    "project_display": "TA 510",
+                    "event_date": pd.Timestamp("2026-05-28"),
+                    "event_value": 1,
+                    "gang_name": "Gang A",
+                },
+                {
+                    "project_code": "TA 510",
+                    "project_display": "TA 510",
+                    "event_date": pd.Timestamp("2026-05-31"),
+                    "event_value": 1,
+                    "gang_name": "Gang B",
+                },
+                {
+                    "project_code": "TA 510",
+                    "project_display": "TA 510",
+                    "event_date": pd.Timestamp("2026-06-01"),
+                    "event_value": 1,
+                    "gang_name": "Gang A",
+                },
+                {
+                    "project_code": "TA 510",
+                    "project_display": "TA 510",
+                    "event_date": pd.Timestamp("2026-05-15"),
+                    "event_value": 1,
+                    "gang_name": "",
+                },
+            ]
+        )
+        mapping = pd.DataFrame(
+            [{"project_key": "TA510", "PCH": "PCH", "Project": "TA 510"}]
+        )
+
+        with patch.object(mail, "_read_parquet", return_value=completions):
+            by_gang = mail._build_foundation_gang_month_table(
+                pd.Timestamp("2026-05-01"),
+                pd.Timestamp("2026-05-31"),
+                pd.Timestamp("2026-05-31"),
+                mapping,
+            )
+            by_project = mail._build_foundation_project_month_table(
+                pd.Timestamp("2026-05-01"),
+                pd.Timestamp("2026-05-31"),
+                pd.Timestamp("2026-05-31"),
+                mapping,
+            )
+
+        self.assertEqual(set(by_gang["Month"].astype(str)), {"May-2026"})
+        gang_a = by_gang[by_gang["Gang"].astype(str).eq("Gang A")].iloc[0]
+        self.assertEqual(int(gang_a["Foundations"]), 2)
+        unassigned = by_gang[by_gang["Gang"].astype(str).eq("Unassigned")].iloc[0]
+        self.assertEqual(int(unassigned["Foundations"]), 1)
+
+        row = by_project.iloc[0]
+        self.assertEqual(int(row["Foundations"]), 4)
+        self.assertEqual(int(row["Unique Gangs"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

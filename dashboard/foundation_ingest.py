@@ -39,6 +39,7 @@ FOUNDATION_RAW_COLUMNS = [
     "source_type",
     "quality_flag",
     "location_no",
+    "gang_name",
     "status_text",
     "cumulative_foundation",
     "fallback_note",
@@ -60,6 +61,7 @@ FOUNDATION_COMPLETIONS_COLUMNS = [
     "source_type",
     "quality_flag",
     "location_no",
+    "gang_name",
     "event_value",
     "cumulative_foundation",
 ]
@@ -389,12 +391,30 @@ def _apply_template_column_mapping(
     return remapped, changes
 
 
-def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | None, str | None]:
+def _looks_like_gang_label(label: str) -> bool:
+    normalized = _normalize_text(label)
+    label_key = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    if not label_key:
+        return False
+    gang_tokens = (
+        "gang name",
+        "gang",
+        "contractor",
+        "sub contractor",
+        "subcontractor",
+        "agency",
+        "vendor",
+    )
+    return any(token in label_key for token in gang_tokens)
+
+
+def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | None, str | None, str | None]:
     best_row: int | None = None
     best_score = -1
     best_location = None
     best_completion = None
     best_status = None
+    best_gang = None
 
     max_rows = min(len(df_raw.index), 40)
     max_cols = min(len(df_raw.columns), 50)
@@ -403,6 +423,7 @@ def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | 
         location_col = None
         completion_col = None
         status_col = None
+        gang_col = None
         score = 0
         for col_idx, label in enumerate(row_labels):
             if not label:
@@ -431,14 +452,18 @@ def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | 
             if status_col is None and ("status" in label or "remark" in label):
                 status_col = col_idx
                 score += 1
+            if gang_col is None and _looks_like_gang_label(label):
+                gang_col = col_idx
+                score += 1
         if location_col is not None and completion_col is not None and score > best_score:
             best_score = score
             best_row = row_idx
             best_location = f"c{location_col}"
             best_completion = f"c{completion_col}"
             best_status = f"c{status_col}" if status_col is not None else None
+            best_gang = f"c{gang_col}" if gang_col is not None else None
 
-    return best_row, best_location, best_completion, best_status
+    return best_row, best_location, best_completion, best_status, best_gang
 
 
 def _extract_location_date_rowwise(
@@ -512,10 +537,11 @@ def _pick_matching_workbooks_for_sheet(
 
 def _resolve_template_column_indices(
     template_map: dict[int, str],
-) -> tuple[int | None, list[int], int | None]:
+) -> tuple[int | None, list[int], int | None, int | None]:
     location_idx = None
     completion_indices: list[int] = []
     status_idx = None
+    gang_idx = None
 
     for idx, raw_label in sorted(template_map.items()):
         label = _normalize_text(raw_label)
@@ -550,8 +576,10 @@ def _resolve_template_column_indices(
             completion_indices.append(int(idx))
         if status_idx is None and ("status" in label or "remark" in label):
             status_idx = int(idx)
+        if gang_idx is None and _looks_like_gang_label(label):
+            gang_idx = int(idx)
     completion_indices = sorted({idx for idx in completion_indices})
-    return location_idx, completion_indices, status_idx
+    return location_idx, completion_indices, status_idx, gang_idx
 
 
 def _parse_foundation_sheet_with_template_map(
@@ -571,7 +599,7 @@ def _parse_foundation_sheet_with_template_map(
     template_sheet: str,
 ) -> FoundationParseResult:
     remapped_df, template_changes = _apply_template_column_mapping(df_raw, template_map)
-    location_idx, completion_indices, status_idx = _resolve_template_column_indices(template_map)
+    location_idx, completion_indices, status_idx, gang_idx = _resolve_template_column_indices(template_map)
     if location_idx is None or not completion_indices:
         return FoundationParseResult(
             raw_rows=[],
@@ -631,6 +659,9 @@ def _parse_foundation_sheet_with_template_map(
         status_text = ""
         if status_idx is not None and status_idx < max_col_count:
             status_text = _as_text(remapped_df.iat[row_idx, status_idx])
+        gang_name = ""
+        if gang_idx is not None and gang_idx < max_col_count:
+            gang_name = _as_text(remapped_df.iat[row_idx, gang_idx])
         event_date = pd.NaT
         for completion_idx in completion_indices:
             event_date = _coerce_date(remapped_df.iat[row_idx, completion_idx], report_ts=report_ts)
@@ -647,6 +678,7 @@ def _parse_foundation_sheet_with_template_map(
                     "detail_marker_no_date" if _looks_completed(status_text) else "detail_unparsed"
                 ),
                 "location_no": location,
+                "gang_name": gang_name,
                 "status_text": status_text,
                 "cumulative_foundation": pd.NA,
             }
@@ -658,6 +690,7 @@ def _parse_foundation_sheet_with_template_map(
                     "event_date": event_date,
                     "quality_flag": "detail_date",
                     "location_no": location,
+                    "gang_name": gang_name,
                     "event_value": 1.0,
                     "cumulative_foundation": pd.NA,
                 }
@@ -764,7 +797,7 @@ def _parse_foundation_sheet_dataframe(
     completion_rows: list[dict[str, object]] = []
     report_ts = _parse_report_timestamp(report_date)
 
-    header_row, location_key, completion_key, status_key = _detect_header(df_raw)
+    header_row, location_key, completion_key, status_key, gang_key = _detect_header(df_raw)
     rows_examined = int(len(df_raw.index))
 
     if header_row is not None and location_key and completion_key:
@@ -776,9 +809,11 @@ def _parse_foundation_sheet_dataframe(
         location_idx = int(location_key[1:])
         completion_idx = int(completion_key[1:])
         status_idx = int(status_key[1:]) if status_key else None
+        gang_idx = int(gang_key[1:]) if gang_key else None
         location_col = data.columns[location_idx] if location_idx < len(data.columns) else None
         completion_col = data.columns[completion_idx] if completion_idx < len(data.columns) else None
         status_col = data.columns[status_idx] if status_idx is not None and status_idx < len(data.columns) else None
+        gang_col = data.columns[gang_idx] if gang_idx is not None and gang_idx < len(data.columns) else None
         completion_label = _normalize_text(completion_col or "")
 
         location_candidates = 0
@@ -790,6 +825,7 @@ def _parse_foundation_sheet_dataframe(
                 continue
             location_candidates += 1
             status_text = _as_text(row.get(status_col)) if status_col else ""
+            gang_name = _as_text(row.get(gang_col)) if gang_col else ""
             event_date = _coerce_date(
                 row.get(completion_col),
                 report_ts=report_ts,
@@ -812,6 +848,7 @@ def _parse_foundation_sheet_dataframe(
                     "detail_marker_no_date" if _looks_completed(status_text) else "detail_unparsed"
                 ),
                 "location_no": location,
+                "gang_name": gang_name,
                 "status_text": status_text,
                 "cumulative_foundation": cumulative_val,
             }
@@ -823,6 +860,7 @@ def _parse_foundation_sheet_dataframe(
                         "event_date": event_date,
                         "quality_flag": "detail_date",
                         "location_no": location,
+                        "gang_name": gang_name,
                         "event_value": 1.0,
                         "cumulative_foundation": pd.NA,
                     }
@@ -880,6 +918,7 @@ def _parse_foundation_sheet_dataframe(
             "event_date": event_date if pd.notna(event_date) else pd.NaT,
             "quality_flag": quality,
             "location_no": location,
+            "gang_name": "",
             "status_text": status_text,
             "cumulative_foundation": pd.NA,
         }
@@ -891,6 +930,7 @@ def _parse_foundation_sheet_dataframe(
                     "event_date": pd.Timestamp(event_date).normalize(),
                     "quality_flag": "detail_date",
                     "location_no": location,
+                    "gang_name": "",
                     "event_value": 1.0,
                     "cumulative_foundation": pd.NA,
                 }
@@ -1240,6 +1280,7 @@ def _build_snapshot_rows_from_status(
             "configured_sheet": configured_sheet,
             "source_type": "snapshot_fallback",
             "location_no": "",
+            "gang_name": "",
             "status_text": "Derived from ProgressStatus foundation cumulative snapshot.",
             "fallback_note": "snapshot_from_progress_status",
         }
@@ -1834,6 +1875,7 @@ def compile_foundation_to_workbook(
                     source_type=("source_type", "first"),
                     quality_flag=("quality_flag", "first"),
                     location_no=("location_no", "first"),
+                    gang_name=("gang_name", "first"),
                     event_value=("event_value", "first"),
                     cumulative_foundation=("cumulative_foundation", "max"),
                 )

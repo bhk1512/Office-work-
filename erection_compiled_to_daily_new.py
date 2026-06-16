@@ -30,7 +30,7 @@ import tempfile
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -695,6 +695,139 @@ def load_erection_template_mapping_config(
         wb.close()
 
 
+def load_erection_section_config(input_folder: Optional[Path]) -> Dict[str, List[Dict[str, str]]]:
+    config_path = _resolve_dpr_config_path(input_folder)
+    if config_path is None:
+        return {}
+
+    try:
+        wb = load_workbook(config_path, data_only=True, read_only=True)
+    except Exception as exc:
+        logger.warning("Erection section config: failed to read DPR config '%s': %s", config_path, exc)
+        return {}
+
+    required_headers = {
+        "source sheet": "source_sheet",
+        "section start text": "section_start_text",
+        "section end text": "section_end_text",
+        "line name": "line_name",
+        "line column": "line_column",
+        "line filter column": "line_filter_column",
+        "line filter value": "line_filter_value",
+        "template sheet": "template_sheet",
+    }
+    try:
+        mapping: Dict[str, List[Dict[str, str]]] = {}
+        suffix = " erection sections"
+        for sheet_name in wb.sheetnames:
+            sheet_key = _normalize_space_only(sheet_name)
+            if not sheet_key.endswith(suffix):
+                continue
+            project_name = str(sheet_name[: -len(" Erection Sections")]).strip()
+            project_key = _normalize_project_code_key(project_name)
+            if not project_key:
+                continue
+
+            ws = wb[sheet_name]
+            header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+            if not header_row:
+                continue
+            normalized_headers = [_normalize_space_only(v) for v in header_row]
+            header_indexes: Dict[str, int] = {}
+            for header, field in required_headers.items():
+                if header in normalized_headers:
+                    header_indexes[field] = normalized_headers.index(header)
+
+            if "source_sheet" not in header_indexes:
+                logger.warning("Erection section config: '%s' missing Source Sheet column", sheet_name)
+                continue
+
+            entries: List[Dict[str, str]] = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row is None:
+                    continue
+                entry: Dict[str, str] = {}
+                for field, idx in header_indexes.items():
+                    raw = row[idx] if idx < len(row) else None
+                    entry[field] = "" if raw in (None, "") else str(raw).strip()
+                if not entry.get("source_sheet"):
+                    continue
+                entries.append(entry)
+            if entries:
+                mapping[project_key] = entries
+        return mapping
+    finally:
+        wb.close()
+
+
+def _select_template_mapping_by_sheet(
+    template_entries: List[Dict[str, object]] | None,
+    template_sheet_name: object,
+) -> Optional[Dict[str, object]]:
+    template_key = _normalize_space_only(template_sheet_name)
+    if not template_entries or not template_key:
+        return None
+    for entry in template_entries:
+        if _normalize_space_only(entry.get("template_sheet")) == template_key:
+            return entry
+    return None
+
+
+def _row_contains_marker(row: pd.Series, marker: str) -> bool:
+    marker_key = _normalize_space_only(marker)
+    if not marker_key:
+        return False
+    for value in row.tolist():
+        if marker_key in _normalize_space_only(value):
+            return True
+    return False
+
+
+def _slice_section_frame(
+    df_raw: pd.DataFrame,
+    start_text: object = "",
+    end_text: object = "",
+) -> Tuple[pd.DataFrame, Optional[int], Optional[int]]:
+    start_marker = str(start_text or "").strip()
+    end_marker = str(end_text or "").strip()
+    start_idx = 0
+    end_idx = len(df_raw.index)
+
+    if start_marker:
+        for idx, (_, row) in enumerate(df_raw.iterrows()):
+            if _row_contains_marker(row, start_marker):
+                start_idx = idx
+                break
+
+    if end_marker:
+        for idx in range(start_idx + 1, len(df_raw.index)):
+            if _row_contains_marker(df_raw.iloc[idx], end_marker):
+                end_idx = idx
+                break
+
+    section = df_raw.iloc[start_idx:end_idx].copy().reset_index(drop=True)
+    return section, start_idx, (end_idx if end_idx < len(df_raw.index) else None)
+
+
+def _find_df_column_by_normalized(df: pd.DataFrame, candidates: Iterable[object]) -> Optional[object]:
+    candidate_keys = [_normalize_space_only(candidate) for candidate in candidates if _normalize_space_only(candidate)]
+    if not candidate_keys:
+        return None
+    by_key: Dict[str, object] = {}
+    for column in df.columns:
+        key = _normalize_space_only(column)
+        if key and key not in by_key:
+            by_key[key] = column
+    for key in candidate_keys:
+        if key in by_key:
+            return by_key[key]
+    return None
+
+
+def _line_weight_key(value: object) -> str:
+    return _normalize_space_only(value)
+
+
 def build_exact_sheet_selector(sheet_name: str):
     expected_key = _normalize_space_only(sheet_name)
 
@@ -1037,6 +1170,7 @@ def process_file(
     template_column_map: Optional[Dict[int, str]] = None,
     template_sheet_name: Optional[str] = None,
     template_mappings: Optional[List[Dict[str, object]]] = None,
+    section_config: Optional[List[Dict[str, str]]] = None,
 ):
     """
     Process a single workbook; return:
@@ -1061,7 +1195,28 @@ def process_file(
     )
 
     sheet_requests: List[Dict[str, object]] = []
-    if configured_sheet_names:
+    if section_config:
+        for section_entry in section_config:
+            configured_name = str(section_entry.get("source_sheet", "")).strip()
+            if not configured_name:
+                continue
+            fixed_line_name = normalize_line_name(section_entry.get("line_name", ""))
+            sheet_requests.append(
+                {
+                    "requested_name": configured_name,
+                    "selector": build_exact_sheet_selector(configured_name),
+                    "line_name": fixed_line_name,
+                    "line_name_source": "config" if fixed_line_name else "column",
+                    "section_start_text": str(section_entry.get("section_start_text", "")).strip(),
+                    "section_end_text": str(section_entry.get("section_end_text", "")).strip(),
+                    "line_column": str(section_entry.get("line_column", "")).strip(),
+                    "line_filter_column": str(section_entry.get("line_filter_column", "")).strip(),
+                    "line_filter_value": str(section_entry.get("line_filter_value", "")).strip(),
+                    "template_sheet": str(section_entry.get("template_sheet", "")).strip(),
+                    "drop_blank_location_rows": True,
+                }
+            )
+    elif configured_sheet_names:
         seen_keys = set()
         for configured_entry in configured_sheet_names:
             configured_name = str(configured_entry.get("sheet_name", "")).strip()
@@ -1086,6 +1241,8 @@ def process_file(
                 "line_name_source": "",
             }
         ]
+
+    line_weight_defaults: Dict[str, float] = {}
 
     def expand_per_day(source: pd.DataFrame) -> pd.DataFrame:
         if source.empty:
@@ -1130,12 +1287,19 @@ def process_file(
         line_name_source = str(sheet_request.get("line_name_source", "")).strip()
         selected_template_column_map = template_column_map
         selected_template_sheet_name = template_sheet_name
+        requested_template_sheet = str(sheet_request.get("template_sheet", "")).strip()
         if template_mappings:
-            selected_template = _select_template_mapping_for_request(
-                template_mappings,
-                configured_sheet_name=requested_name,
-                line_name=sheet_line_name,
+            selected_template = (
+                _select_template_mapping_by_sheet(template_mappings, requested_template_sheet)
+                if requested_template_sheet
+                else None
             )
+            if selected_template is None:
+                selected_template = _select_template_mapping_for_request(
+                    template_mappings,
+                    configured_sheet_name=requested_template_sheet or requested_name,
+                    line_name=sheet_line_name,
+                )
             if selected_template:
                 selected_template_column_map = selected_template.get("column_map")
                 selected_template_sheet_name = str(selected_template.get("template_sheet", "")).strip() or None
@@ -1174,6 +1338,29 @@ def process_file(
         if fallback_note:
             logger.warning("Fallback note for '%s': %s", path.name, fallback_note)
             issues.append({"file": path.name, "sheet": target, "issue": fallback_note})
+
+        section_start_text = str(sheet_request.get("section_start_text", "")).strip()
+        section_end_text = str(sheet_request.get("section_end_text", "")).strip()
+        section_start_row = None
+        section_end_row = None
+        if section_start_text or section_end_text:
+            df_raw, section_start_row, section_end_row = _slice_section_frame(
+                df_raw,
+                start_text=section_start_text,
+                end_text=section_end_text,
+            )
+            if df_raw.empty:
+                issues.append(
+                    {
+                        "file": path.name,
+                        "sheet": target,
+                        "issue": (
+                            "Configured section is empty"
+                            f" (start='{section_start_text}', end='{section_end_text}')"
+                        ),
+                    }
+                )
+                continue
 
         hdr_row, cols = find_header_row(
             df_raw,
@@ -1229,12 +1416,50 @@ def process_file(
             "detected_header_row": hdr_row,
             "columns_detected": ", ".join(cols[:20]),
         }
+        if section_start_text or section_end_text:
+            diag["section_start_text"] = section_start_text
+            diag["section_end_text"] = section_end_text
+            diag["section_start_row"] = "" if section_start_row is None else int(section_start_row) + 1
+            diag["section_end_row"] = "" if section_end_row is None else int(section_end_row)
         if requested_name:
             diag["configured_sheet"] = requested_name
         if selected_template_column_map:
             diag["template_mapping_sheet"] = selected_template_sheet_name or ""
             diag["template_mapping_applied"] = bool(applied_mapping)
             diag["template_mapping_changes"] = "; ".join(applied_mapping)
+
+        line_filter_column = str(sheet_request.get("line_filter_column", "")).strip()
+        line_filter_value = str(sheet_request.get("line_filter_value", "")).strip()
+        if line_filter_column and line_filter_value:
+            filter_col = _find_df_column_by_normalized(df, [line_filter_column])
+            if filter_col is None:
+                issues.append(
+                    {
+                        "file": path.name,
+                        "sheet": target,
+                        "issue": f"Configured line filter column not found: '{line_filter_column}'",
+                        "columns": list(df.columns),
+                    }
+                )
+                diagnostics.append(diag)
+                continue
+            filter_key = _normalize_space_only(line_filter_value)
+            filter_series = df[filter_col].astype(object).map(_normalize_space_only)
+            df = df.loc[filter_series.eq(filter_key)].copy()
+            diag["line_filter_column"] = str(filter_col)
+            diag["line_filter_value"] = line_filter_value
+            diag["line_filter_rows"] = int(len(df.index))
+
+        if sheet_request.get("drop_blank_location_rows"):
+            location_col = _find_df_column_by_normalized(df, ["location no"])
+            if location_col is not None:
+                location_text = df[location_col].astype(object).map(lambda x: str(x).strip() if pd.notna(x) else "")
+                before_rows = len(df.index)
+                df = df.loc[
+                    location_text.ne("")
+                    & ~location_text.str.casefold().isin({"nan", "none", "nat"})
+                ].copy()
+                diag["blank_location_rows_dropped"] = int(before_rows - len(df.index))
 
         # Only the fields we need for computation. Tower Weight may be absent.
         needed = ["starting date", "completion date", "location no"]
@@ -1260,11 +1485,44 @@ def process_file(
                 }
             )
 
+        line_column = str(sheet_request.get("line_column", "")).strip()
+        row_line_source = pd.Series(sheet_line_name or file_line_name, index=df.index, dtype="object")
+        if line_column:
+            line_col = _find_df_column_by_normalized(df, [line_column, "line name"])
+            if line_col is not None:
+                line_values = df[line_col].astype(object).map(normalize_line_name)
+                fallback_line = sheet_line_name or file_line_name
+                row_line_source = line_values.where(line_values.astype(str).str.strip().ne(""), fallback_line)
+                diag["line_column"] = str(line_col)
+            else:
+                issues.append(
+                    {
+                        "file": path.name,
+                        "sheet": target,
+                        "issue": f"Configured line column not found: '{line_column}'",
+                        "columns": list(df.columns),
+                    }
+                )
+
         work = df[needed].copy()
         if "tower weight" in df.columns:
             work["tower weight"] = df["tower weight"]
             diag["tower_weight_assumed_mt"] = ""
             diag["tower_weight_assumption_rows"] = 0
+        elif sheet_request.get("drop_blank_location_rows"):
+            work["tower weight"] = pd.NA
+            diag["tower_weight_assumed_mt"] = ""
+            diag["tower_weight_assumption_rows"] = int(len(work.index))
+            issues.append(
+                {
+                    "file": path.name,
+                    "sheet": target,
+                    "issue": (
+                        "'tower weight' header missing in configured section; "
+                        "will use same-file line averages where available"
+                    ),
+                }
+            )
         else:
             work["tower weight"] = DEFAULT_TOWER_WEIGHT_ASSUMED_MT
             diag["tower_weight_assumed_mt"] = float(DEFAULT_TOWER_WEIGHT_ASSUMED_MT)
@@ -1321,12 +1579,34 @@ def process_file(
         work["Gang name"] = gang_source.apply(normalize_gang_name)
         work.loc[work["Gang name"].astype(str).str.strip().eq(""), "Gang name"] = "undefined"
         work["Tower Weight"] = work["tower weight"].apply(to_number_mt)
+        work["Line Name"] = row_line_source.reindex(work.index).fillna("").astype(object)
         assumed_weight_messages: list[str] = []
         existing_weight_mask = work["Tower Weight"].notna()
         valid_existing_weight_mask = existing_weight_mask & work["Tower Weight"].between(
             TOWER_MIN_MT, TOWER_MAX_MT, inclusive="both"
         )
         missing_weight_mask = ~existing_weight_mask
+
+        if missing_weight_mask.any() and line_weight_defaults:
+            filled_by_line: Dict[str, int] = {}
+            for idx in work.index[missing_weight_mask]:
+                line_key = _line_weight_key(work.at[idx, "Line Name"])
+                default_weight = line_weight_defaults.get(line_key)
+                if default_weight is None:
+                    continue
+                work.at[idx, "Tower Weight"] = default_weight
+                line_label = str(work.at[idx, "Line Name"]).strip() or "blank line"
+                filled_by_line[line_label] = filled_by_line.get(line_label, 0) + 1
+            if filled_by_line:
+                assumed_weight_messages.append(
+                    "Assumed Tower Weight from same-file historical line averages: "
+                    + "; ".join(
+                        f"{line}={line_weight_defaults.get(_line_weight_key(line), 0):.3f} MT for {count} row(s)"
+                        for line, count in sorted(filled_by_line.items())
+                    )
+                )
+                diag["tower_weight_line_average_rows"] = int(sum(filled_by_line.values()))
+                missing_weight_mask = work["Tower Weight"].isna()
 
         # If a sheet has mixed tower weight quality, impute blanks with the average of
         # valid entered values. If no usable values exist, keep the historical 45 MT fallback.
@@ -1357,11 +1637,22 @@ def process_file(
                     "issue": message,
                 }
             )
+        if valid_existing_weight_mask.any():
+            weighted_lines = work.loc[valid_existing_weight_mask, ["Line Name", "Tower Weight"]].copy()
+            for line_name, line_frame in weighted_lines.groupby("Line Name", dropna=False):
+                line_key = _line_weight_key(line_name)
+                if not line_key:
+                    continue
+                line_weight_defaults[line_key] = float(line_frame["Tower Weight"].mean())
+
         work["Project Code"] = project_code_display or project_name
-        work["Line Name"] = sheet_line_name
-        work["Project Name"] = project_name
-        work["Project Display"] = project_name
-        work["Project Scope Key"] = project_scope_key
+        work["Project Name"] = work["Line Name"].map(
+            lambda line: build_project_display(project_code_display, line, base_project_name)
+        )
+        work["Project Display"] = work["Project Name"]
+        work["Project Scope Key"] = work["Line Name"].map(
+            lambda line: build_project_scope_key(project_code_display, line, project_name)
+        )
         work["Source File"] = path.name
         work["Source Sheet"] = target
         work["Location No."] = work["location no"].astype(object).map(
@@ -1560,6 +1851,7 @@ def main(argv=None):
     erection_template_config, erection_template_errors = load_erection_template_mapping_config(
         input_folder or (paths[0].parent if paths else None)
     )
+    erection_section_config = load_erection_section_config(input_folder or (paths[0].parent if paths else None))
     skipped_no_erection = 0
 
     for p in paths:
@@ -1570,6 +1862,7 @@ def main(argv=None):
         project_code = parse_project_from_filename(p.name)
         project_key = _normalize_project_code_key(project_code)
         configured_erection_sheets = erection_sheet_config.get(project_key)
+        configured_erection_sections = erection_section_config.get(project_key)
         template_column_map = None
         template_sheet_name = None
         template_mappings = None
@@ -1605,6 +1898,7 @@ def main(argv=None):
                 template_column_map=template_column_map,
                 template_sheet_name=template_sheet_name,
                 template_mappings=template_mappings,
+                section_config=configured_erection_sections,
             )
         except Exception as e:
             # Guardrail: never let a single bad file crash the whole pipeline
@@ -1715,6 +2009,8 @@ def main(argv=None):
         f"- If a sheet has no usable in-range Tower Weight values at all, blank rows fall back to {DEFAULT_TOWER_WEIGHT_ASSUMED_MT:.0f} MT (noted in 'Issues').",
         "- DPR_Config support: when multiple erection sheet names are configured for a project, each listed sheet is processed independently, assigned its own line identity, and then concatenated.",
         "- DPR_Config template mapping: for projects with discipline-specific template check marked Yes, column-wise mapping from the discipline template tab is applied before required-field validation.",
+        "- DPR_Config section mapping: optional '<Project> Erection Sections' tabs can split a physical sheet by marker text, filter rows, derive line names from a column, and use section-specific template tabs.",
+        "- Sectioned rows with missing Tower Weight first use same-file historical averages for the same Line Name before falling back to the default assumption.",
         "- Sheets:",
         "    â€¢ ProdDailyExpanded  : per-day expanded rows used by the dashboard",
         "    â€¢ ProdDailyExpandedSingles : per-day expanded rows including single-occurrence gangs",
