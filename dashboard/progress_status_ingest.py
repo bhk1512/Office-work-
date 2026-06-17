@@ -1353,6 +1353,27 @@ def _merge_status_history(current: pd.DataFrame, output_path: Path) -> pd.DataFr
 
     previous = previous.reindex(columns=RAWDATA_COLUMNS).copy()
     current = current.reindex(columns=RAWDATA_COLUMNS).copy()
+    if not current.empty:
+        # If a source workbook is parsed again after its configured status sheet
+        # changes, discard the older snapshot for that workbook/date before the
+        # row-level merge. Otherwise stale rows from the previous configured
+        # sheet can coexist with the corrected current rows.
+        for frame in (previous, current):
+            frame["report_date"] = pd.to_datetime(frame["report_date"], errors="coerce").dt.normalize()
+            frame["source_file"] = frame["source_file"].fillna("").astype(str)
+            frame["project_scope_key"] = frame["project_scope_key"].fillna("").astype(str)
+
+        current_sources = current[
+            ["project_scope_key", "report_date", "source_file"]
+        ].drop_duplicates()
+        if not current_sources.empty:
+            previous = previous.merge(
+                current_sources.assign(_drop_current_source=1),
+                on=["project_scope_key", "report_date", "source_file"],
+                how="left",
+            )
+            previous = previous[previous["_drop_current_source"].isna()].drop(columns="_drop_current_source")
+
     previous["_current_snapshot"] = 0
     current["_current_snapshot"] = 1
     combined = pd.concat([previous, current], ignore_index=True)
