@@ -215,7 +215,7 @@ def _normalize_activity(raw: object) -> str:
         return "foundation"
     if "earthing" in text:
         return "earthing"
-    if "tower erection" in text or text == "erection":
+    if "tower erection" in text or text.startswith("erection"):
         return "tower_erection"
     if "tack welding" in text or "tackwelding" in text:
         return "tack_welding"

@@ -289,6 +289,11 @@ class ProgressStatusIngestTests(unittest.TestCase):
         self.assertEqual(len(merged), 2)
         self.assertEqual(set(pd.to_datetime(merged["report_date"]).dt.day), {7, 9})
 
+    def test_erection_loc_normalizes_to_tower_erection(self) -> None:
+        result = status_ingest._normalize_activity("Erection (Loc)")  # type: ignore[attr-defined]
+
+        self.assertEqual(result, "tower_erection")
+
 
 if __name__ == "__main__":
     unittest.main()
