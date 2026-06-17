@@ -112,73 +112,79 @@ class PrepareDailyDprMailTests(unittest.TestCase):
         self.assertEqual(row["Actual Towers (Nos.)"], 1)
         self.assertAlmostEqual(row["Total MT"], 27.48)
 
-    def test_foundation_tables_group_by_completion_month_and_count_unique_gangs(self) -> None:
-        completions = pd.DataFrame(
+    def test_erection_total_mt_uses_undated_completed_rows_when_status_has_line_actual(self) -> None:
+        status = pd.DataFrame(
             [
                 {
-                    "project_code": "TA 510",
-                    "project_display": "TA 510",
-                    "event_date": pd.Timestamp("2026-05-02"),
-                    "event_value": 1,
-                    "gang_name": "Gang A",
+                    "project_code": "TB 501",
+                    "line_name": "132kV",
+                    "month": pd.Timestamp("2026-06-01"),
+                    "report_date": pd.Timestamp("2026-06-15"),
+                    "activity_group": "Tower Erection",
+                    "core_activity": True,
+                    "plan_for_month": 5,
+                    "progress_for_month": 1,
+                    "quantity_primary": 39,
+                    "cumulative_progress": 32,
                 },
                 {
-                    "project_code": "TA 510",
-                    "project_display": "TA 510",
-                    "event_date": pd.Timestamp("2026-05-28"),
-                    "event_value": 1,
-                    "gang_name": "Gang A",
+                    "project_code": "TB 501",
+                    "line_name": "220kV",
+                    "month": pd.Timestamp("2026-06-01"),
+                    "report_date": pd.Timestamp("2026-06-15"),
+                    "activity_group": "Tower Erection",
+                    "core_activity": True,
+                    "plan_for_month": 0,
+                    "progress_for_month": 0,
+                    "quantity_primary": 199,
+                    "cumulative_progress": 199,
+                },
+            ]
+        )
+        erection_raw = pd.DataFrame(
+            [
+                {
+                    "Project Code": "TB 501",
+                    "Line Name": "132kV",
+                    "Complete Date": pd.NaT,
+                    "Location No.": "2/1",
+                    "Tower Weight": 11.815,
+                    "Status": "C",
                 },
                 {
-                    "project_code": "TA 510",
-                    "project_display": "TA 510",
-                    "event_date": pd.Timestamp("2026-05-31"),
-                    "event_value": 1,
-                    "gang_name": "Gang B",
-                },
-                {
-                    "project_code": "TA 510",
-                    "project_display": "TA 510",
-                    "event_date": pd.Timestamp("2026-06-01"),
-                    "event_value": 1,
-                    "gang_name": "Gang A",
-                },
-                {
-                    "project_code": "TA 510",
-                    "project_display": "TA 510",
-                    "event_date": pd.Timestamp("2026-05-15"),
-                    "event_value": 1,
-                    "gang_name": "",
+                    "Project Code": "TB 501",
+                    "Line Name": "220kV",
+                    "Complete Date": pd.NaT,
+                    "Location No.": "35/0",
+                    "Tower Weight": 18.459,
+                    "Status": "C",
                 },
             ]
         )
         mapping = pd.DataFrame(
-            [{"project_key": "TA510", "PCH": "PCH", "Project": "TA 510"}]
+            [{"project_key": "TB501", "PCH": "PCH", "Project": "TB 501"}]
         )
 
-        with patch.object(mail, "_read_parquet", return_value=completions):
-            by_gang = mail._build_foundation_gang_month_table(
-                pd.Timestamp("2026-05-01"),
-                pd.Timestamp("2026-05-31"),
-                pd.Timestamp("2026-05-31"),
-                mapping,
-            )
-            by_project = mail._build_foundation_project_month_table(
-                pd.Timestamp("2026-05-01"),
-                pd.Timestamp("2026-05-31"),
-                pd.Timestamp("2026-05-31"),
+        def fake_read(path):
+            path_text = str(path)
+            if path_text.endswith("StringingSummary\\StatusActivityFact.parquet"):
+                return status
+            if path_text.endswith("Erection\\RawData.parquet"):
+                return erection_raw
+            return pd.DataFrame()
+
+        with patch.object(mail, "_read_parquet", side_effect=fake_read):
+            result = mail._build_erection_table(
+                pd.Timestamp("2026-06-01"),
+                pd.Timestamp("2026-06-30"),
+                pd.Timestamp("2026-06-17"),
                 mapping,
             )
 
-        self.assertEqual(set(by_gang["Month"].astype(str)), {"May-2026"})
-        gang_a = by_gang[by_gang["Gang"].astype(str).eq("Gang A")].iloc[0]
-        self.assertEqual(int(gang_a["Foundations"]), 2)
-        unassigned = by_gang[by_gang["Gang"].astype(str).eq("Unassigned")].iloc[0]
-        self.assertEqual(int(unassigned["Foundations"]), 1)
-
-        row = by_project.iloc[0]
-        self.assertEqual(int(row["Foundations"]), 4)
-        self.assertEqual(int(row["Unique Gangs"]), 2)
+        row = result.iloc[0]
+        self.assertEqual(row["Actual Towers (Nos.)"], 1)
+        self.assertAlmostEqual(row["Total MT"], 11.82)
+        self.assertAlmostEqual(row["Avg Tower Wt (MT)"], 11.82)
 
 
 if __name__ == "__main__":

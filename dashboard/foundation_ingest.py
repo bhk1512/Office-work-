@@ -32,6 +32,7 @@ FOUNDATION_RAW_COLUMNS = [
     "line_name",
     "line_name_source",
     "report_date",
+    "start_date",
     "event_date",
     "source_file",
     "source_sheet",
@@ -52,6 +53,7 @@ FOUNDATION_COMPLETIONS_COLUMNS = [
     "line_name",
     "line_name_source",
     "report_date",
+    "start_date",
     "event_date",
     "period_week_start",
     "period_month",
@@ -408,10 +410,52 @@ def _looks_like_gang_label(label: str) -> bool:
     return any(token in label_key for token in gang_tokens)
 
 
-def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | None, str | None, str | None]:
+def _label_key(label: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", _normalize_text(label)).strip()
+
+
+def _looks_like_start_label(label: object) -> bool:
+    label_key = _label_key(label)
+    if not label_key:
+        return False
+    if _looks_like_completion_label(label):
+        return False
+    return (
+        label_key in {"start", "starting", "dos"}
+        or "start date" in label_key
+        or "starting date" in label_key
+        or "date of start" in label_key
+        or "foundation start" in label_key
+        or "fdn start" in label_key
+    )
+
+
+def _looks_like_completion_label(label: object) -> bool:
+    label_key = _label_key(label)
+    if not label_key:
+        return False
+    has_start_token = any(token in label_key for token in ("start", "starting", "begin", "began"))
+    return (
+        "completion date" in label_key
+        or "complete date" in label_key
+        or "date of completion" in label_key
+        or "ending date" in label_key
+        or label_key in {"completion", "completed", "complete", "doc"}
+        or ("completed" in label_key and "date" in label_key)
+        or ("complete" in label_key and "date" in label_key)
+        or (
+            ("date" in label_key)
+            and ("foundation" in label_key or "fdn" in label_key)
+            and not has_start_token
+        )
+    )
+
+
+def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | None, str | None, str | None, str | None]:
     best_row: int | None = None
     best_score = -1
     best_location = None
+    best_start = None
     best_completion = None
     best_status = None
     best_gang = None
@@ -421,6 +465,7 @@ def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | 
     for row_idx in range(max_rows):
         row_labels = [_normalize_text(df_raw.iat[row_idx, col_idx]) for col_idx in range(max_cols)]
         location_col = None
+        start_col = None
         completion_col = None
         status_col = None
         gang_col = None
@@ -436,17 +481,17 @@ def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | 
             ):
                 location_col = col_idx
                 score += 3
+            if start_col is None and _looks_like_start_label(label):
+                start_col = col_idx
+                score += 2
             if completion_col is None:
-                if "completion date" in label or ("complete" in label and "date" in label):
+                if _looks_like_completion_label(label):
                     completion_col = col_idx
                     score += 6
-                elif ("completed on" in label or "date of completion" in label):
+                elif "completed on" in label:
                     completion_col = col_idx
                     score += 5
-                elif ("date" in label and ("foundation" in label or "fdn" in label)):
-                    completion_col = col_idx
-                    score += 4
-                elif "date" in label:
+                elif "date" in label and not _looks_like_start_label(label):
                     completion_col = col_idx
                     score += 1
             if status_col is None and ("status" in label or "remark" in label):
@@ -459,11 +504,12 @@ def _detect_header(df_raw: pd.DataFrame) -> tuple[int | None, str | None, str | 
             best_score = score
             best_row = row_idx
             best_location = f"c{location_col}"
+            best_start = f"c{start_col}" if start_col is not None else None
             best_completion = f"c{completion_col}"
             best_status = f"c{status_col}" if status_col is not None else None
             best_gang = f"c{gang_col}" if gang_col is not None else None
 
-    return best_row, best_location, best_completion, best_status, best_gang
+    return best_row, best_location, best_start, best_completion, best_status, best_gang
 
 
 def _extract_location_date_rowwise(
@@ -537,15 +583,16 @@ def _pick_matching_workbooks_for_sheet(
 
 def _resolve_template_column_indices(
     template_map: dict[int, str],
-) -> tuple[int | None, list[int], int | None, int | None]:
+) -> tuple[int | None, int | None, list[int], int | None, int | None]:
     location_idx = None
+    start_idx = None
     completion_indices: list[int] = []
     status_idx = None
     gang_idx = None
 
     for idx, raw_label in sorted(template_map.items()):
         label = _normalize_text(raw_label)
-        label_key = re.sub(r"[^a-z0-9]+", " ", label).strip()
+        label_key = _label_key(label)
         if not label:
             continue
         if location_idx is None and (
@@ -557,29 +604,16 @@ def _resolve_template_column_indices(
             or label_key == "loc"
         ):
             location_idx = int(idx)
-        has_start_token = any(token in label_key for token in ("start", "starting", "begin", "began"))
-        is_completion_label = (
-            "completion date" in label_key
-            or "complete date" in label_key
-            or "date of completion" in label_key
-            or "ending date" in label_key
-            or label_key in {"completion", "completed", "complete", "doc"}
-            or ("completed" in label_key and "date" in label_key)
-            or ("complete" in label_key and "date" in label_key)
-            or (
-                ("date" in label_key)
-                and ("foundation" in label_key or "fdn" in label_key)
-                and not has_start_token
-            )
-        )
-        if is_completion_label:
+        if start_idx is None and _looks_like_start_label(label):
+            start_idx = int(idx)
+        if _looks_like_completion_label(label):
             completion_indices.append(int(idx))
         if status_idx is None and ("status" in label or "remark" in label):
             status_idx = int(idx)
         if gang_idx is None and _looks_like_gang_label(label):
             gang_idx = int(idx)
     completion_indices = sorted({idx for idx in completion_indices})
-    return location_idx, completion_indices, status_idx, gang_idx
+    return location_idx, start_idx, completion_indices, status_idx, gang_idx
 
 
 def _parse_foundation_sheet_with_template_map(
@@ -599,7 +633,7 @@ def _parse_foundation_sheet_with_template_map(
     template_sheet: str,
 ) -> FoundationParseResult:
     remapped_df, template_changes = _apply_template_column_mapping(df_raw, template_map)
-    location_idx, completion_indices, status_idx, gang_idx = _resolve_template_column_indices(template_map)
+    location_idx, start_idx, completion_indices, status_idx, gang_idx = _resolve_template_column_indices(template_map)
     if location_idx is None or not completion_indices:
         return FoundationParseResult(
             raw_rows=[],
@@ -662,6 +696,11 @@ def _parse_foundation_sheet_with_template_map(
         gang_name = ""
         if gang_idx is not None and gang_idx < max_col_count:
             gang_name = _as_text(remapped_df.iat[row_idx, gang_idx])
+        start_date = pd.NaT
+        if start_idx is not None and start_idx < max_col_count:
+            start_date = _coerce_date(remapped_df.iat[row_idx, start_idx], report_ts=report_ts)
+            if pd.notna(start_date):
+                start_date = pd.Timestamp(start_date).normalize()
         event_date = pd.NaT
         for completion_idx in completion_indices:
             event_date = _coerce_date(remapped_df.iat[row_idx, completion_idx], report_ts=report_ts)
@@ -673,6 +712,7 @@ def _parse_foundation_sheet_with_template_map(
         raw_rows.append(
             {
                 **base_record,
+                "start_date": start_date if pd.notna(start_date) else pd.NaT,
                 "event_date": event_date if pd.notna(event_date) else pd.NaT,
                 "quality_flag": "detail_date" if pd.notna(event_date) else (
                     "detail_marker_no_date" if _looks_completed(status_text) else "detail_unparsed"
@@ -687,6 +727,7 @@ def _parse_foundation_sheet_with_template_map(
             completion_rows.append(
                 {
                     **base_record,
+                    "start_date": start_date if pd.notna(start_date) else pd.NaT,
                     "event_date": event_date,
                     "quality_flag": "detail_date",
                     "location_no": location,
@@ -797,7 +838,7 @@ def _parse_foundation_sheet_dataframe(
     completion_rows: list[dict[str, object]] = []
     report_ts = _parse_report_timestamp(report_date)
 
-    header_row, location_key, completion_key, status_key, gang_key = _detect_header(df_raw)
+    header_row, location_key, start_key, completion_key, status_key, gang_key = _detect_header(df_raw)
     rows_examined = int(len(df_raw.index))
 
     if header_row is not None and location_key and completion_key:
@@ -807,10 +848,12 @@ def _parse_foundation_sheet_dataframe(
         data.columns = labels[: len(data.columns)]
 
         location_idx = int(location_key[1:])
+        start_idx = int(start_key[1:]) if start_key else None
         completion_idx = int(completion_key[1:])
         status_idx = int(status_key[1:]) if status_key else None
         gang_idx = int(gang_key[1:]) if gang_key else None
         location_col = data.columns[location_idx] if location_idx < len(data.columns) else None
+        start_col = data.columns[start_idx] if start_idx is not None and start_idx < len(data.columns) else None
         completion_col = data.columns[completion_idx] if completion_idx < len(data.columns) else None
         status_col = data.columns[status_idx] if status_idx is not None and status_idx < len(data.columns) else None
         gang_col = data.columns[gang_idx] if gang_idx is not None and gang_idx < len(data.columns) else None
@@ -826,6 +869,12 @@ def _parse_foundation_sheet_dataframe(
             location_candidates += 1
             status_text = _as_text(row.get(status_col)) if status_col else ""
             gang_name = _as_text(row.get(gang_col)) if gang_col else ""
+            start_date = _coerce_date(
+                row.get(start_col),
+                report_ts=report_ts,
+            ) if start_col else pd.NaT
+            if pd.notna(start_date):
+                start_date = pd.Timestamp(start_date).normalize()
             event_date = _coerce_date(
                 row.get(completion_col),
                 report_ts=report_ts,
@@ -843,6 +892,7 @@ def _parse_foundation_sheet_dataframe(
 
             raw_entry = {
                 **base_record,
+                "start_date": start_date if pd.notna(start_date) else pd.NaT,
                 "event_date": event_date if pd.notna(event_date) else pd.NaT,
                 "quality_flag": "detail_date" if pd.notna(event_date) else (
                     "detail_marker_no_date" if _looks_completed(status_text) else "detail_unparsed"
@@ -857,6 +907,7 @@ def _parse_foundation_sheet_dataframe(
                 completion_rows.append(
                     {
                         **base_record,
+                        "start_date": start_date if pd.notna(start_date) else pd.NaT,
                         "event_date": event_date,
                         "quality_flag": "detail_date",
                         "location_no": location,
@@ -915,6 +966,7 @@ def _parse_foundation_sheet_dataframe(
         )
         raw_entry = {
             **base_record,
+            "start_date": pd.NaT,
             "event_date": event_date if pd.notna(event_date) else pd.NaT,
             "quality_flag": quality,
             "location_no": location,
@@ -927,6 +979,7 @@ def _parse_foundation_sheet_dataframe(
             completion_rows.append(
                 {
                     **base_record,
+                    "start_date": pd.NaT,
                     "event_date": pd.Timestamp(event_date).normalize(),
                     "quality_flag": "detail_date",
                     "location_no": location,
@@ -1287,6 +1340,7 @@ def _build_snapshot_rows_from_status(
         raw_rows.append(
             {
                 **base,
+                "start_date": pd.NaT,
                 "event_date": report_date,
                 "quality_flag": "snapshot_cumulative",
                 "cumulative_foundation": float(row["cumulative_foundation"]),
@@ -1295,6 +1349,7 @@ def _build_snapshot_rows_from_status(
         completion_rows.append(
             {
                 **base,
+                "start_date": pd.NaT,
                 "event_date": report_date,
                 "quality_flag": "snapshot_cumulative",
                 "event_value": pd.NA,
@@ -1837,7 +1892,11 @@ def compile_foundation_to_workbook(
 
     raw_df = pd.DataFrame(raw_rows_all, columns=FOUNDATION_RAW_COLUMNS)
     completions_df = pd.DataFrame(completion_rows_all, columns=FOUNDATION_COMPLETIONS_COLUMNS)
+    if not raw_df.empty:
+        raw_df["start_date"] = pd.to_datetime(raw_df["start_date"], errors="coerce").dt.normalize()
+        raw_df["event_date"] = pd.to_datetime(raw_df["event_date"], errors="coerce").dt.normalize()
     if not completions_df.empty:
+        completions_df["start_date"] = pd.to_datetime(completions_df["start_date"], errors="coerce").dt.normalize()
         completions_df["event_date"] = pd.to_datetime(completions_df["event_date"], errors="coerce").dt.normalize()
         completions_df["report_date"] = pd.to_datetime(completions_df["report_date"], errors="coerce").dt.normalize()
         completions_df["location_no"] = completions_df["location_no"].fillna("").astype(str).str.strip()
@@ -1869,6 +1928,7 @@ def compile_foundation_to_workbook(
                     line_name=("line_name", "first"),
                     line_name_source=("line_name_source", "first"),
                     report_date=("report_date", "first"),
+                    start_date=("start_date", "first"),
                     source_file=("source_file", "first"),
                     source_sheet=("source_sheet", "first"),
                     configured_sheet=("configured_sheet", "first"),

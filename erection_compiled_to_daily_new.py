@@ -64,7 +64,7 @@ EXPECTED_HEADERS = [
 
 HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "location no": ("location number", "loc no"),
-    "tower weight": ("tower weight (mt)", "tower weight(mt)", "weight mt"),
+    "tower weight": ("tower weight (mt)", "tower weight(mt)", "total tower weight", "weight mt"),
 }
 
 # Accepts: "Erection Compiled", "Erection-Compiled", "Erection Compiled v2", etc.
@@ -1836,6 +1836,8 @@ def main(argv=None):
             raise SystemExit(f"Input folder not found: {input_folder}")
         for fp in input_folder.iterdir():
             if fp.is_file() and fp.suffix.lower() in (".xlsx", ".xlsm"):
+                if fp.name.startswith("~$"):
+                    continue
                 name_lower = fp.name.lower()
                 if any(k in name_lower for k in ("consolidated", "output", "compiled")) and "erection" not in name_lower:
                     continue

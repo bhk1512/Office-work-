@@ -3343,7 +3343,18 @@ def load_daily_from_proddailyexpanded(
     if col_location:
         data["location_no"] = df[col_location].map(_normalize_location)
 
-    col_tower = _pick_optional(df, ("Tower Weight", "tower weight", "tower_weight", "tower wt", "tower mt"))
+    col_tower = _pick_optional(
+        df,
+        (
+            "Tower Weight",
+            "Total Tower Weight",
+            "tower weight",
+            "total tower weight",
+            "tower_weight",
+            "tower wt",
+            "tower mt",
+        ),
+    )
     if col_tower:
         data["tower_weight"] = pd.to_numeric(df[col_tower], errors="coerce")
 
@@ -3404,6 +3415,24 @@ def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "R
         }
     ).dropna(subset=["start", "end", "daily_prod_mt"])
 
+    tower_weight_col = None
+    for candidate in (
+        "Tower Weight",
+        "Total Tower Weight",
+        "tower weight",
+        "total tower weight",
+        "tower_weight",
+        "tower wt",
+        "tower mt",
+    ):
+        if candidate in df.columns:
+            tower_weight_col = candidate
+            break
+    if tower_weight_col:
+        base["tower_weight"] = pd.to_numeric(df[tower_weight_col], errors="coerce")
+    else:
+        base["tower_weight"] = pd.Series(index=base.index, dtype="float64")
+
     tower_type_col = None
     for candidate in ("Tower Type", "Type of Tower", "tower type", "type of tower", "type"):
         if candidate in df.columns:
@@ -3441,6 +3470,7 @@ def load_daily_from_rawdata(source: pd.DataFrame | pd.ExcelFile, sheet: str = "R
                         "project_display": record.get("project_display", ""),
                         "project_scope_key": record.get("project_scope_key", ""),
                         "gang_name": record["gang_name"],
+                        "tower_weight": record.get("tower_weight"),
                         "tower_type": record.get("tower_type", ""),
                     }
                 )
