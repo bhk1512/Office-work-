@@ -140,6 +140,8 @@ class FoundationProductivityAnalysisTests(unittest.TestCase):
         self.assertEqual(int(ta510_may["Unique Gangs"]), 1)
         self.assertEqual(float(ta510_may["Avg Foundations / Active Gang-Month"]), 2.0)
         self.assertFalse(tables["Gang Monthly Productivity"]["Gang"].astype(str).eq("Unassigned").any())
+        self.assertFalse(tables["Foundation Insights"].empty)
+        self.assertIn("Gang Productivity Benchmark", set(tables["Foundation Insights"]["Theme"].astype(str)))
 
         coverage_table = tables["Data Coverage"]
         self.assertTrue(coverage_table["Project"].astype(str).str.contains("TB 408").any())

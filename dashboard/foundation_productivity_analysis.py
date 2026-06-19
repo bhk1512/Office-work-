@@ -9,6 +9,7 @@ import pandas as pd
 
 SHEET_ORDER = [
     "Portfolio Summary",
+    "Foundation Insights",
     "Portfolio Monthly Trend",
     "Project Monthly Trend",
     "Gang Monthly Productivity",
@@ -424,6 +425,148 @@ def _data_coverage(details: pd.DataFrame, raw: pd.DataFrame | None, coverage: pd
     return pd.DataFrame(rows, columns=["Section", "Project", "Status", "Metric", "Value", "Reason"])
 
 
+def _metric(summary: pd.DataFrame, name: str, default: object = pd.NA) -> object:
+    if summary.empty or "Metric" not in summary.columns or "Value" not in summary.columns:
+        return default
+    match = summary[summary["Metric"].astype(str).eq(name)]
+    if match.empty:
+        return default
+    return match.iloc[0]["Value"]
+
+
+def _num(value: object, default: float = 0.0) -> float:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return default if pd.isna(parsed) else float(parsed)
+
+
+def _fmt(value: object, decimals: int = 2) -> str:
+    number = _num(value, default=float("nan"))
+    if pd.isna(number):
+        return "-"
+    if abs(number - round(number)) < 0.005:
+        return f"{number:,.0f}"
+    return f"{number:,.{decimals}f}"
+
+
+def _top_names(frame: pd.DataFrame, name_col: str, value_col: str, *, limit: int = 3) -> str:
+    if frame.empty or name_col not in frame.columns or value_col not in frame.columns:
+        return "-"
+    work = frame.copy()
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=[value_col]).sort_values(value_col, ascending=False).head(limit)
+    if work.empty:
+        return "-"
+    return "; ".join(f"{row[name_col]} ({_fmt(row[value_col])})" for _, row in work.iterrows())
+
+
+def _foundation_insights(
+    portfolio_summary: pd.DataFrame,
+    portfolio_monthly: pd.DataFrame,
+    project_monthly: pd.DataFrame,
+    gang_monthly: pd.DataFrame,
+    gang_summary: pd.DataFrame,
+    details: pd.DataFrame,
+) -> pd.DataFrame:
+    columns = ["Theme", "Insight", "Evidence", "Recommended Focus"]
+    total = _metric(portfolio_summary, "Total Foundations")
+    avg_gang_month = _metric(portfolio_summary, "Avg Foundations / Active Gang-Month")
+    gang_cov = _metric(portfolio_summary, "Gang Name Coverage %")
+    duration_cov = _metric(portfolio_summary, "Duration Coverage %")
+    avg_duration = _metric(portfolio_summary, "Avg Duration Days")
+
+    gang_counts = pd.to_numeric(gang_monthly.get("Foundations Completed"), errors="coerce").dropna()
+    gang_summary_work = gang_summary.copy()
+    if not gang_summary_work.empty:
+        gang_summary_work["Active Months"] = pd.to_numeric(gang_summary_work.get("Active Months"), errors="coerce")
+        gang_summary_work["Avg Foundations / Active Month"] = pd.to_numeric(
+            gang_summary_work.get("Avg Foundations / Active Month"), errors="coerce"
+        )
+    sustained = gang_summary_work[gang_summary_work.get("Active Months", pd.Series(dtype=float)).ge(6)] if not gang_summary_work.empty else pd.DataFrame()
+    top_sustained = _top_names(sustained, "Gang", "Avg Foundations / Active Month", limit=5)
+    p90 = gang_counts.quantile(0.90) if not gang_counts.empty else pd.NA
+    p95 = gang_counts.quantile(0.95) if not gang_counts.empty else pd.NA
+
+    valid_duration = pd.to_numeric(details.get("Duration Days"), errors="coerce").dropna()
+    median_duration = valid_duration.median() if not valid_duration.empty else pd.NA
+    p75_duration = valid_duration.quantile(0.75) if not valid_duration.empty else pd.NA
+    p90_duration = valid_duration.quantile(0.90) if not valid_duration.empty else pd.NA
+    high_output_duration = pd.to_numeric(
+        gang_monthly.loc[pd.to_numeric(gang_monthly.get("Foundations Completed"), errors="coerce").ge(4), "Avg Duration Days"],
+        errors="coerce",
+    ).dropna()
+    low_output_duration = pd.to_numeric(
+        gang_monthly.loc[pd.to_numeric(gang_monthly.get("Foundations Completed"), errors="coerce").le(2), "Avg Duration Days"],
+        errors="coerce",
+    ).dropna()
+
+    project_work = project_monthly.copy()
+    if not project_work.empty:
+        project_rollup = (
+            project_work.groupby(["PCH", "Project"], dropna=False)
+            .agg(
+                Months=("Month", "nunique"),
+                Total=("Foundations Completed", "sum"),
+                AvgMonth=("Foundations Completed", "mean"),
+                AvgGangs=("Unique Gangs", "mean"),
+                AvgDuration=("Avg Duration Days", "mean"),
+            )
+            .reset_index()
+        )
+        mature_projects = project_rollup[pd.to_numeric(project_rollup["Months"], errors="coerce").ge(6)]
+    else:
+        project_rollup = pd.DataFrame()
+        mature_projects = pd.DataFrame()
+    top_projects = _top_names(mature_projects.rename(columns={"AvgMonth": "Avg Foundations / Month"}), "Project", "Avg Foundations / Month", limit=5)
+    peak_months = _top_names(portfolio_monthly, "Month", "Foundations Completed", limit=3)
+
+    rows = [
+        {
+            "Theme": "Gang Productivity Benchmark",
+            "Insight": "A normal active gang-month is about 2 foundations; 4+ foundations/month is a high-output benchmark.",
+            "Evidence": (
+                f"Portfolio avg is {_fmt(avg_gang_month)} foundations per active gang-month over {_fmt(total, 0)} foundations. "
+                f"Gang-month P90 is {_fmt(p90)} and P95 is {_fmt(p95)} foundations."
+            ),
+            "Recommended Focus": "Use 4 foundations per active gang-month as the first productivity benchmark; investigate gangs consistently below 2.",
+        },
+        {
+            "Theme": "Gang Continuity",
+            "Insight": "Sustained high-output foundation gangs are materially above the portfolio average.",
+            "Evidence": f"Top sustained gangs by avg/month, minimum 6 active months: {top_sustained}.",
+            "Recommended Focus": "Keep proven foundation gangs deployed continuously on projects with available fronts instead of rotating them intermittently.",
+        },
+        {
+            "Theme": "Cycle Time",
+            "Insight": "Shorter foundation cycle time is associated with higher monthly output.",
+            "Evidence": (
+                f"Valid foundation duration median is {_fmt(median_duration)} days, P75 {_fmt(p75_duration)}, P90 {_fmt(p90_duration)}. "
+                f"Gang-months with >=4 foundations average {_fmt(high_output_duration.mean() if not high_output_duration.empty else pd.NA)} days, "
+                f"while <=2 foundation gang-months average {_fmt(low_output_duration.mean() if not low_output_duration.empty else pd.NA)} days."
+            ),
+            "Recommended Focus": "Track start-to-completion cycle; treat >14 days as a review trigger unless site conditions justify it.",
+        },
+        {
+            "Theme": "Project Scaling",
+            "Insight": "Project-level output scales where multiple active gangs are visible and monthly rhythm is sustained.",
+            "Evidence": (
+                f"Top mature projects by avg foundations/month: {top_projects}. "
+                f"Peak portfolio months: {peak_months}."
+            ),
+            "Recommended Focus": "For closure months, plan multiple foundation gangs and ensure fronts/material clearances are available before the month starts.",
+        },
+        {
+            "Theme": "DPR Data Discipline",
+            "Insight": "Foundation analysis is useful, but gang and start-date capture must improve before it can support full accountability.",
+            "Evidence": (
+                f"Gang-name coverage is {_fmt(gang_cov)}%; duration coverage is {_fmt(duration_cov)}%; "
+                f"average duration from valid rows is {_fmt(avg_duration)} days."
+            ),
+            "Recommended Focus": "Mandate gang name and foundation start date in all foundation DPR sheets; otherwise project/gang comparisons remain partial.",
+        },
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
 def build_foundation_productivity_tables(
     foundation_completions: pd.DataFrame,
     foundation_raw: pd.DataFrame | None = None,
@@ -441,13 +584,27 @@ def build_foundation_productivity_tables(
         end_month=end_month,
     )
     productivity = _productivity_rows(details)
+    portfolio_summary = _portfolio_summary(productivity, details)
+    portfolio_monthly = _portfolio_monthly(productivity)
+    project_monthly = _project_monthly(productivity)
+    gang_monthly = _gang_monthly(productivity)
+    gang_summary = _gang_summary(productivity)
+    duration_summary = _duration_summary(productivity)
     tables = {
-        "Portfolio Summary": _portfolio_summary(productivity, details),
-        "Portfolio Monthly Trend": _portfolio_monthly(productivity),
-        "Project Monthly Trend": _project_monthly(productivity),
-        "Gang Monthly Productivity": _gang_monthly(productivity),
-        "Gang Summary": _gang_summary(productivity),
-        "Duration Summary": _duration_summary(productivity),
+        "Portfolio Summary": portfolio_summary,
+        "Foundation Insights": _foundation_insights(
+            portfolio_summary,
+            portfolio_monthly,
+            project_monthly,
+            gang_monthly,
+            gang_summary,
+            details,
+        ),
+        "Portfolio Monthly Trend": portfolio_monthly,
+        "Project Monthly Trend": project_monthly,
+        "Gang Monthly Productivity": gang_monthly,
+        "Gang Summary": gang_summary,
+        "Duration Summary": duration_summary,
         "Foundation Details": details,
         "Data Coverage": _data_coverage(details, foundation_raw, foundation_coverage),
     }
