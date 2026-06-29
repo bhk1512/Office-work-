@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pandas as pd
@@ -9,6 +11,122 @@ import prepare_daily_dpr_mail as mail
 
 
 class PrepareDailyDprMailTests(unittest.TestCase):
+    def test_scope_parser_accepts_combinations_and_aliases(self) -> None:
+        self.assertEqual(mail._normalize_scope("erection,stringing"), ("erection", "stringing"))
+        self.assertEqual(mail._normalize_scope("both"), ("erection", "stringing"))
+        self.assertEqual(mail._normalize_scope("e,s"), ("erection", "stringing"))
+        self.assertEqual(mail._normalize_scope("all"), ("erection", "stringing", "foundation"))
+        self.assertEqual(mail._normalize_scope("stringing,foundation"), ("stringing", "foundation"))
+
+    def test_scope_parser_rejects_invalid_value(self) -> None:
+        with self.assertRaises(ValueError):
+            mail._normalize_scope("painting")
+
+    def test_cli_rejects_foundation_only_mail_scope(self) -> None:
+        with self.assertRaises(SystemExit):
+            mail._parse_args(["--scope", "foundation"])
+
+    def test_refresh_outputs_forwards_scope_and_compile_only_to_pipeline(self) -> None:
+        with patch.object(mail, "_run_step") as run_step:
+            mail.refresh_outputs(skip_outlook_pull=True, scope=("erection",))
+
+        run_step.assert_called_once()
+        command = run_step.call_args.args[0]
+        self.assertIn("--compile-only", command)
+        self.assertIn("--scope", command)
+        self.assertEqual(command[command.index("--scope") + 1], "erection")
+
+    def test_prepare_mail_erection_scope_skips_stringing_section_and_builder(self) -> None:
+        erection = pd.DataFrame(
+            [
+                {
+                    "PCH": "PCH",
+                    "Project": "TA 414",
+                    "Plan (Nos.)": 2,
+                    "Actual Towers (Nos.)": 1,
+                    "Total MT": 10.0,
+                    "Avg Tower Wt (MT)": 10.0,
+                    "Productivity": 1.0,
+                }
+            ]
+        )
+
+        with TemporaryDirectory() as tmp:
+            args = type(
+                "Args",
+                (),
+                {
+                    "scope": ("erection",),
+                    "skip_refresh": True,
+                    "skip_outlook_pull": False,
+                    "month": "2026-06",
+                    "as_of_date": "2026-06-09",
+                    "output_html": Path(tmp) / "mail.html",
+                    "no_draft": True,
+                    "to": "",
+                    "cc": "",
+                },
+            )()
+            with (
+                patch.object(mail, "_load_pch_mapping", return_value=pd.DataFrame(columns=["project_key", "PCH", "Project"])),
+                patch.object(mail, "_build_erection_table", return_value=erection) as build_erection,
+                patch.object(mail, "_build_stringing_table") as build_stringing,
+            ):
+                artifacts = mail.prepare_mail(args)
+
+            build_erection.assert_called_once()
+            build_stringing.assert_not_called()
+            html = artifacts.html_path.read_text(encoding="utf-8")
+            self.assertIn("Erection Productivity", html)
+            self.assertNotIn("Stringing Productivity", html)
+            self.assertIn("Daily DPR Erection Productivity Summary", artifacts.subject)
+
+    def test_prepare_mail_stringing_scope_skips_erection_section_and_builder(self) -> None:
+        stringing = pd.DataFrame(
+            [
+                {
+                    "PCH": "PCH",
+                    "Project": "TA 414",
+                    "Plan (KM)": 2.0,
+                    "Actual Achieved (KM)": 1.0,
+                    "Productivity": 30.0,
+                    "Scope (KM)": 10.0,
+                    "Stringing Completed (KM)": 5.0,
+                    "Stretch Ready (KM)": 3.0,
+                }
+            ]
+        )
+
+        with TemporaryDirectory() as tmp:
+            args = type(
+                "Args",
+                (),
+                {
+                    "scope": ("stringing",),
+                    "skip_refresh": True,
+                    "skip_outlook_pull": False,
+                    "month": "2026-06",
+                    "as_of_date": "2026-06-09",
+                    "output_html": Path(tmp) / "mail.html",
+                    "no_draft": True,
+                    "to": "",
+                    "cc": "",
+                },
+            )()
+            with (
+                patch.object(mail, "_load_pch_mapping", return_value=pd.DataFrame(columns=["project_key", "PCH", "Project"])),
+                patch.object(mail, "_build_erection_table") as build_erection,
+                patch.object(mail, "_build_stringing_table", return_value=stringing) as build_stringing,
+            ):
+                artifacts = mail.prepare_mail(args)
+
+            build_erection.assert_not_called()
+            build_stringing.assert_called_once()
+            html = artifacts.html_path.read_text(encoding="utf-8")
+            self.assertNotIn("Erection Productivity", html)
+            self.assertIn("Stringing Productivity", html)
+            self.assertIn("Daily DPR Stringing Productivity Summary", artifacts.subject)
+
     def test_activity_status_carries_prior_positive_plan_when_latest_plan_is_zero(self) -> None:
         status = pd.DataFrame(
             [

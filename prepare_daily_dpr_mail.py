@@ -24,6 +24,20 @@ PCH_ORDER = {
     "Mr. Nabajit Baruah": 3,
 }
 
+SCOPE_ORDER = ("erection", "stringing", "foundation")
+MAIL_SCOPE_ORDER = ("erection", "stringing")
+DEFAULT_SCOPE = SCOPE_ORDER
+SCOPE_ALIASES = {
+    "all": SCOPE_ORDER,
+    "both": MAIL_SCOPE_ORDER,
+    "e": ("erection",),
+    "erection": ("erection",),
+    "s": ("stringing",),
+    "stringing": ("stringing",),
+    "f": ("foundation",),
+    "foundation": ("foundation",),
+}
+
 
 @dataclass(frozen=True)
 class MailArtifacts:
@@ -34,9 +48,62 @@ class MailArtifacts:
     stringing: pd.DataFrame
 
 
-def _parse_args() -> argparse.Namespace:
+def _normalize_scope(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not str(raw).strip():
+        return DEFAULT_SCOPE
+
+    selected: set[str] = set()
+    for token in str(raw).split(","):
+        key = token.strip().casefold()
+        if not key:
+            continue
+        values = SCOPE_ALIASES.get(key)
+        if values is None:
+            valid = ", ".join(sorted(SCOPE_ALIASES))
+            raise ValueError(f"Invalid scope '{token.strip()}'. Expected one or more of: {valid}.")
+        selected.update(values)
+
+    if not selected:
+        raise ValueError("Scope must include at least one work type.")
+    return tuple(scope for scope in SCOPE_ORDER if scope in selected)
+
+
+def _scope_arg(raw: str) -> tuple[str, ...]:
+    try:
+        return _normalize_scope(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _scope_for_cli(scope: tuple[str, ...]) -> str:
+    if scope == DEFAULT_SCOPE:
+        return "all"
+    if scope == MAIL_SCOPE_ORDER:
+        return "both"
+    return ",".join(scope)
+
+
+def _mail_sections(scope: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(item for item in MAIL_SCOPE_ORDER if item in scope)
+
+
+def _validate_mail_scope(scope: tuple[str, ...]) -> None:
+    if not _mail_sections(scope):
+        raise ValueError("--scope foundation is refresh-only; include erection or stringing to create a mail.")
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Refresh DPR data and create the daily DPR productivity Outlook draft."
+    )
+    parser.add_argument(
+        "--scope",
+        type=_scope_arg,
+        default=DEFAULT_SCOPE,
+        help=(
+            "Comma-separated work types to refresh/build: all, both, erection, stringing, foundation "
+            "(aliases: e, s, f). Defaults to all."
+        ),
     )
     parser.add_argument(
         "--month",
@@ -76,7 +143,12 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional output path for the generated HTML body.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    try:
+        _validate_mail_scope(args.scope)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def _run_step(command: list[str]) -> None:
@@ -84,10 +156,21 @@ def _run_step(command: list[str]) -> None:
     subprocess.run(command, cwd=BASE_DIR, check=True)
 
 
-def refresh_outputs(*, skip_outlook_pull: bool = False) -> None:
+def refresh_outputs(*, skip_outlook_pull: bool = False, scope: tuple[str, ...] = DEFAULT_SCOPE) -> None:
     if not skip_outlook_pull:
         _run_step([sys.executable, "outlook_dpr_watcher.py"])
-    _run_step([sys.executable, "pipeline_runner.py", "--config", "pipeline_config.json", "--no-serve"])
+    _run_step(
+        [
+            sys.executable,
+            "pipeline_runner.py",
+            "--config",
+            "pipeline_config.json",
+            "--no-serve",
+            "--compile-only",
+            "--scope",
+            _scope_for_cli(scope),
+        ]
+    )
 
 
 def _compact_project(value: object) -> str:
@@ -628,9 +711,31 @@ def _build_html(
     *,
     month_start: pd.Timestamp,
     as_of_date: pd.Timestamp,
+    sections: tuple[str, ...] = MAIL_SCOPE_ORDER,
 ) -> str:
     period_label = month_start.strftime("%B %Y")
     as_of_label = as_of_date.strftime("%d-%b-%Y")
+    section_labels = {"erection": "erection", "stringing": "stringing"}
+    selected_labels = [section_labels[section] for section in sections]
+    if len(selected_labels) == 1:
+        work_label = selected_labels[0]
+    else:
+        work_label = " and ".join(selected_labels)
+
+    body_parts = [
+        "<p>Respected Sirs,</p>",
+        (
+            "<p>Please find below the monthly productivity summary for ongoing "
+            f"{work_label} works for {period_label} month-to-date, as on {as_of_label}.</p>"
+        ),
+    ]
+    if "erection" in sections:
+        body_parts.extend(["<h3>Erection Productivity</h3>", _html_table(erection, "erection")])
+    if "stringing" in sections:
+        body_parts.extend(["<h3>Stringing Productivity</h3>", _html_table(stringing, "stringing")])
+    body_parts.extend(["<p>Regards,</p>"])
+
+    body_html = "\n".join(body_parts)
     return f"""<!doctype html>
 <html>
 <head>
@@ -647,13 +752,7 @@ tr.total td {{ font-weight: 700; background: #f2f2f2; }}
 </style>
 </head>
 <body>
-<p>Respected Sirs,</p>
-<p>Please find below the monthly productivity summary for ongoing erection and stringing works for {period_label} month-to-date, as on {as_of_label}.</p>
-<h3>Erection Productivity</h3>
-{_html_table(erection, "erection")}
-<h3>Stringing Productivity</h3>
-{_html_table(stringing, "stringing")}
-<p>Regards,</p>
+{body_html}
 </body>
 </html>
 """
@@ -678,18 +777,41 @@ def _create_outlook_draft(subject: str, html_body: str, *, to: str = "", cc: str
 
 
 def prepare_mail(args: argparse.Namespace) -> MailArtifacts:
+    scope = tuple(getattr(args, "scope", DEFAULT_SCOPE))
+    _validate_mail_scope(scope)
+    sections = _mail_sections(scope)
+
     if not args.skip_refresh:
-        refresh_outputs(skip_outlook_pull=args.skip_outlook_pull)
+        refresh_outputs(skip_outlook_pull=args.skip_outlook_pull, scope=scope)
 
     month_start, month_end = _month_window(args.month)
     as_of_date = _target_as_of_date(month_start, month_end, args.as_of_date)
     mapping = _load_pch_mapping()
 
-    erection = _build_erection_table(month_start, month_end, as_of_date, mapping)
-    stringing = _build_stringing_table(month_start, month_end, as_of_date, mapping)
+    erection = (
+        _build_erection_table(month_start, month_end, as_of_date, mapping)
+        if "erection" in sections
+        else pd.DataFrame()
+    )
+    stringing = (
+        _build_stringing_table(month_start, month_end, as_of_date, mapping)
+        if "stringing" in sections
+        else pd.DataFrame()
+    )
 
-    subject = f"Daily DPR Productivity Summary - {month_start:%B %Y} MTD as on {as_of_date:%d-%b-%Y}"
-    html_body = _build_html(erection, stringing, month_start=month_start, as_of_date=as_of_date)
+    subject_prefix = (
+        "Daily DPR Productivity Summary"
+        if sections == MAIL_SCOPE_ORDER
+        else f"Daily DPR {sections[0].title()} Productivity Summary"
+    )
+    subject = f"{subject_prefix} - {month_start:%B %Y} MTD as on {as_of_date:%d-%b-%Y}"
+    html_body = _build_html(
+        erection,
+        stringing,
+        month_start=month_start,
+        as_of_date=as_of_date,
+        sections=sections,
+    )
     output_path = args.output_html or PRODUCTIVITY_DIR / f"Daily_DPR_Mail_{as_of_date:%Y-%m-%d}.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html_body, encoding="utf-8")

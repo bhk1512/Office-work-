@@ -55,6 +55,61 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dash_debug": False,
 }
 
+SCOPE_ORDER: tuple[str, ...] = ("erection", "stringing", "foundation")
+MAIL_SCOPE_ORDER: tuple[str, ...] = ("erection", "stringing")
+DEFAULT_SCOPE: tuple[str, ...] = SCOPE_ORDER
+SCOPE_ALIASES: Dict[str, tuple[str, ...]] = {
+    "all": SCOPE_ORDER,
+    "both": MAIL_SCOPE_ORDER,
+    "e": ("erection",),
+    "erection": ("erection",),
+    "s": ("stringing",),
+    "stringing": ("stringing",),
+    "f": ("foundation",),
+    "foundation": ("foundation",),
+}
+
+
+def _normalize_scope(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not str(raw).strip():
+        return DEFAULT_SCOPE
+
+    selected: set[str] = set()
+    for token in str(raw).split(","):
+        key = token.strip().casefold()
+        if not key:
+            continue
+        values = SCOPE_ALIASES.get(key)
+        if values is None:
+            valid = ", ".join(sorted(SCOPE_ALIASES))
+            raise ValueError(f"Invalid scope '{token.strip()}'. Expected one or more of: {valid}.")
+        selected.update(values)
+
+    if not selected:
+        raise ValueError("Scope must include at least one work type.")
+    return tuple(scope for scope in SCOPE_ORDER if scope in selected)
+
+
+def _scope_arg(raw: str) -> tuple[str, ...]:
+    try:
+        return _normalize_scope(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _selected_pipeline_stages(scope: tuple[str, ...]) -> dict[str, bool]:
+    run_erection = "erection" in scope
+    run_stringing = "stringing" in scope
+    run_foundation = "foundation" in scope
+    return {
+        "erection": run_erection,
+        "stringing": run_stringing,
+        "foundation": run_foundation,
+        "progress_status": run_erection or run_stringing,
+        "stretch_readiness": run_stringing,
+        "stringing_summary": run_erection or run_stringing,
+    }
+
 
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
@@ -1526,6 +1581,20 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("--output", help="Destination Excel workbook path.")
     parser.add_argument("--skip-compile", action="store_true", help="Launch dashboard without re-running the pipeline.")
     parser.add_argument(
+        "--scope",
+        type=_scope_arg,
+        default=DEFAULT_SCOPE,
+        help=(
+            "Comma-separated work types to compile: all, both, erection, stringing, foundation "
+            "(aliases: e, s, f). Defaults to all."
+        ),
+    )
+    parser.add_argument(
+        "--compile-only",
+        action="store_true",
+        help="Compile requested outputs and exit without loading or launching the dashboard.",
+    )
+    parser.add_argument(
         "--force-stringing-rebuild",
         action="store_true",
         help="Delete cached Stringing outputs before compiling (forces DPR re-read).",
@@ -1593,6 +1662,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if args.extra_args:
         extra_args.extend(args.extra_args)
 
+    scope: tuple[str, ...] = tuple(args.scope)
+    stages = _selected_pipeline_stages(scope)
 
 
     stringing_out_path: Path | None = None
@@ -1623,28 +1694,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             resolved_files = filtered_candidates
             resolved_input = None
 
-        # Ensure fresh outputs on every compile run
-        # 1) Remove any existing compiled workbook
-        # 2) Remove any existing parquet dataset directory
-        if resolved_output:
-            try:
-                if resolved_output.exists() and resolved_output.is_file():
-                    print(f"[pipeline] Removing existing workbook: {resolved_output}")
-                    resolved_output.unlink()
-            except Exception as exc:
-                print(f"[pipeline] Warning: failed to remove workbook {resolved_output}: {exc}")
-
-            try:
-                parquet_dir = resolved_output.parent / f"{resolved_output.stem}_parquet"
-                if parquet_dir.exists() and parquet_dir.is_dir():
-                    print(f"[pipeline] Removing existing parquet dataset: {parquet_dir}")
-                    shutil.rmtree(parquet_dir)
-            except Exception as exc:
-                print(f"[pipeline] Warning: failed to remove parquet dir {parquet_dir}: {exc}")
-
-        if args.force_stringing_rebuild:
-            _clear_stringing_artifacts(resolved_output.parent if resolved_output else BASE_DIR)
-
         if resolved_input:
             print(f"[pipeline] Compiling from folder: {resolved_input}")
         if resolved_files:
@@ -1652,15 +1701,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         if not resolved_input and not resolved_files:
             print("[pipeline] No active DPR files remain after completed-project exclusion; skipping compile steps.")
             return
-        print(f"[pipeline] Writing output to: {resolved_output}")
-        run_pipeline(
-            input_path=resolved_input,
-            files=[str(p) for p in resolved_files] if resolved_files else None,
-            output_path=str(resolved_output) if resolved_output else None,
-            extra_args=extra_args,
-        )
-                # --- NEW: Compile Micro Plan responsibilities into the same workbook ---
-        # Prefer the input folder; if the user passed explicit files, derive a common parent
+
+        base_dir = resolved_output.parent if resolved_output else BASE_DIR
+        stringing_input = resolved_input
+        stringing_files = resolved_files
         if resolved_microplan_input:
             micro_input_dir = str(resolved_microplan_input)
         elif resolved_files:
@@ -1671,28 +1715,55 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         else:
             micro_input_dir = None
 
-        if micro_input_dir:
-            print(f"[pipeline] MicroPlan: scanning '{micro_input_dir}' and writing to '{resolved_output}'")
-            compile_microplans_to_workbook(
-                input_dir=micro_input_dir,
-                output_path=str(resolved_output),
-            )
-        else:
-            print("[pipeline] MicroPlan: no input directory configured; skipping.")
+        parquet_dir = None
 
-        if resolved_output:
-            try:
-                parquet_dir = export_workbook_to_parquet(resolved_output)
-            except Exception as exc:
-                print(f"[pipeline] Failed to export parquet dataset: {exc}")
-                parquet_dir = None
+        if stages["erection"]:
+            # Ensure fresh Erection outputs on every Erection compile run.
+            if resolved_output:
+                try:
+                    if resolved_output.exists() and resolved_output.is_file():
+                        print(f"[pipeline] Removing existing workbook: {resolved_output}")
+                        resolved_output.unlink()
+                except Exception as exc:
+                    print(f"[pipeline] Warning: failed to remove workbook {resolved_output}: {exc}")
+
+                try:
+                    parquet_dir_to_remove = resolved_output.parent / f"{resolved_output.stem}_parquet"
+                    if parquet_dir_to_remove.exists() and parquet_dir_to_remove.is_dir():
+                        print(f"[pipeline] Removing existing parquet dataset: {parquet_dir_to_remove}")
+                        shutil.rmtree(parquet_dir_to_remove)
+                except Exception as exc:
+                    print(f"[pipeline] Warning: failed to remove parquet dir {parquet_dir_to_remove}: {exc}")
+
+            print(f"[pipeline] Writing output to: {resolved_output}")
+            run_pipeline(
+                input_path=resolved_input,
+                files=[str(p) for p in resolved_files] if resolved_files else None,
+                output_path=str(resolved_output) if resolved_output else None,
+                extra_args=extra_args,
+            )
+
+            if micro_input_dir:
+                print(f"[pipeline] MicroPlan: scanning '{micro_input_dir}' and writing to '{resolved_output}'")
+                compile_microplans_to_workbook(
+                    input_dir=micro_input_dir,
+                    output_path=str(resolved_output),
+                )
+            else:
+                print("[pipeline] MicroPlan: no input directory configured; skipping.")
+
+            if resolved_output:
+                try:
+                    parquet_dir = export_workbook_to_parquet(resolved_output)
+                except Exception as exc:
+                    print(f"[pipeline] Failed to export parquet dataset: {exc}")
+                    parquet_dir = None
         else:
-            parquet_dir = None
+            print("[pipeline] Erection: skipped by --scope.")
 
         # --- Compile Stringing from the DPR sources ---
         # Always attempt to refresh micro plan outputs even if DPR compilation fails.
         # Many sites currently have malformed DPRs, but we still want the micro plans.
-        base_dir = resolved_output.parent if resolved_output else BASE_DIR
         if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
             stringing_base = base_dir.parent / "Stringing"
         else:
@@ -1702,136 +1773,151 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         stringing_out = stringing_base / "StringingCompiled_Output.xlsx"
         stringing_out_path = stringing_out
 
-        stringing_input = resolved_input
-        stringing_files = resolved_files
+        if args.force_stringing_rebuild and stages["stringing"]:
+            _clear_stringing_artifacts(base_dir)
 
-        try:
-            print(f"[pipeline] Stringing: compiling to {stringing_out}")
-            stringing_parquet_dir = compile_stringing_to_workbook(
-                stringing_input,
-                stringing_files,
-                stringing_out,
-                sheet_name=AppConfig().stringing_sheet_name,
-                completed_project_keys=completed_project_keys,
-            )
-            if stringing_parquet_dir:
-                print(f"[pipeline] Stringing: compiled parquet at {stringing_parquet_dir}")
-        except Exception as exc:
-            print(f"[pipeline] Stringing: failed to compile from DPRs: {exc}")
-
-        if micro_input_dir:
+        if stages["stringing"]:
             try:
-                print(f"[pipeline] Stringing MicroPlan: scanning '{micro_input_dir}' and writing to '{stringing_out}'")
-                compile_stringing_microplans_to_workbook(
-                    input_dir=micro_input_dir,
-                    output_path=str(stringing_out),
-                )
-            except Exception as exc:
-                print(f"[pipeline] Stringing MicroPlan: failed to compile micro plans: {exc}")
-        else:
-            print("[pipeline] Stringing MicroPlan: no input directory configured; skipping.")
-
-        if stringing_out.exists():
-            try:
-                export_workbook_to_parquet(
+                print(f"[pipeline] Stringing: compiling to {stringing_out}")
+                stringing_parquet_dir = compile_stringing_to_workbook(
+                    stringing_input,
+                    stringing_files,
                     stringing_out,
-                    sheets=("MicroPlanResponsibilities", "MicroPlanIndex", "MicroPlanDataIssues"),
+                    sheet_name=AppConfig().stringing_sheet_name,
+                    completed_project_keys=completed_project_keys,
                 )
+                if stringing_parquet_dir:
+                    print(f"[pipeline] Stringing: compiled parquet at {stringing_parquet_dir}")
             except Exception as exc:
-                print(f"[pipeline] Stringing: failed to export Micro Plan sheets to parquet: {exc}")
+                print(f"[pipeline] Stringing: failed to compile from DPRs: {exc}")
+
+            if micro_input_dir:
+                try:
+                    print(f"[pipeline] Stringing MicroPlan: scanning '{micro_input_dir}' and writing to '{stringing_out}'")
+                    compile_stringing_microplans_to_workbook(
+                        input_dir=micro_input_dir,
+                        output_path=str(stringing_out),
+                    )
+                except Exception as exc:
+                    print(f"[pipeline] Stringing MicroPlan: failed to compile micro plans: {exc}")
+            else:
+                print("[pipeline] Stringing MicroPlan: no input directory configured; skipping.")
+
+            if stringing_out.exists():
+                try:
+                    export_workbook_to_parquet(
+                        stringing_out,
+                        sheets=("MicroPlanResponsibilities", "MicroPlanIndex", "MicroPlanDataIssues"),
+                    )
+                except Exception as exc:
+                    print(f"[pipeline] Stringing: failed to export Micro Plan sheets to parquet: {exc}")
+        else:
+            print("[pipeline] Stringing: skipped by --scope.")
 
         # --- Compile Progress Status from the DPR sources ---
-        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
-            progress_status_base = base_dir.parent / "ProgressStatus"
+        if stages["progress_status"]:
+            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+                progress_status_base = base_dir.parent / "ProgressStatus"
+            else:
+                progress_status_base = base_dir / "ProgressStatus" if base_dir.name != "ProgressStatus" else base_dir
+            progress_status_base.mkdir(parents=True, exist_ok=True)
+            progress_status_out = progress_status_base / "ProgressStatus_Output.xlsx"
+            progress_status_out_path = progress_status_out
+            print(f"[pipeline] ProgressStatus: compiling to {progress_status_out}")
+            compiled_status = compile_progress_status_to_workbook(
+                stringing_input,
+                stringing_files,
+                progress_status_out,
+                completed_project_keys=completed_project_keys,
+            )
+            if compiled_status and compiled_status.exists():
+                try:
+                    export_workbook_to_parquet(
+                        compiled_status,
+                        sheets=("RawData", "Diagnostics", "Issues", "Coverage"),
+                    )
+                except Exception as exc:
+                    print(f"[pipeline] ProgressStatus: failed to export parquet: {exc}")
         else:
-            progress_status_base = base_dir / "ProgressStatus" if base_dir.name != "ProgressStatus" else base_dir
-        progress_status_base.mkdir(parents=True, exist_ok=True)
-        progress_status_out = progress_status_base / "ProgressStatus_Output.xlsx"
-        progress_status_out_path = progress_status_out
-        print(f"[pipeline] ProgressStatus: compiling to {progress_status_out}")
-        compiled_status = compile_progress_status_to_workbook(
-            stringing_input,
-            stringing_files,
-            progress_status_out,
-            completed_project_keys=completed_project_keys,
-        )
-        if compiled_status and compiled_status.exists():
-            try:
-                export_workbook_to_parquet(
-                    compiled_status,
-                    sheets=("RawData", "Diagnostics", "Issues", "Coverage"),
-                )
-            except Exception as exc:
-                print(f"[pipeline] ProgressStatus: failed to export parquet: {exc}")
+            print("[pipeline] ProgressStatus: skipped by --scope.")
 
         # --- Compile Foundation from DPR sources (detail + status fallback) ---
-        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
-            foundation_base = base_dir.parent / "Foundation"
+        if stages["foundation"]:
+            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+                foundation_base = base_dir.parent / "Foundation"
+            else:
+                foundation_base = base_dir / "Foundation" if base_dir.name != "Foundation" else base_dir
+            foundation_base.mkdir(parents=True, exist_ok=True)
+            foundation_out = foundation_base / "FoundationCompiled_Output.xlsx"
+            print(f"[pipeline] Foundation: compiling to {foundation_out}")
+            compiled_foundation = compile_foundation_to_workbook(
+                stringing_input,
+                stringing_files,
+                foundation_out,
+                completed_project_keys=completed_project_keys,
+            )
+            if compiled_foundation and compiled_foundation.exists():
+                try:
+                    export_workbook_to_parquet(
+                        compiled_foundation,
+                        sheets=("FoundationRaw", "FoundationCompletions", "Coverage", "Diagnostics", "Issues"),
+                    )
+                except Exception as exc:
+                    print(f"[pipeline] Foundation: failed to export parquet: {exc}")
         else:
-            foundation_base = base_dir / "Foundation" if base_dir.name != "Foundation" else base_dir
-        foundation_base.mkdir(parents=True, exist_ok=True)
-        foundation_out = foundation_base / "FoundationCompiled_Output.xlsx"
-        print(f"[pipeline] Foundation: compiling to {foundation_out}")
-        compiled_foundation = compile_foundation_to_workbook(
-            stringing_input,
-            stringing_files,
-            foundation_out,
-            completed_project_keys=completed_project_keys,
-        )
-        if compiled_foundation and compiled_foundation.exists():
-            try:
-                export_workbook_to_parquet(
-                    compiled_foundation,
-                    sheets=("FoundationRaw", "FoundationCompletions", "Coverage", "Diagnostics", "Issues"),
-                )
-            except Exception as exc:
-                print(f"[pipeline] Foundation: failed to export parquet: {exc}")
+            print("[pipeline] Foundation: skipped by --scope.")
 
         # --- Compile Stretch Readiness from DPR sources ---
-        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
-            stretch_base = base_dir.parent / "StretchReadiness"
+        if stages["stretch_readiness"]:
+            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+                stretch_base = base_dir.parent / "StretchReadiness"
+            else:
+                stretch_base = base_dir / "StretchReadiness" if base_dir.name != "StretchReadiness" else base_dir
+            stretch_base.mkdir(parents=True, exist_ok=True)
+            stretch_out = stretch_base / "StretchReadiness_Output.xlsx"
+            print(f"[pipeline] StretchReadiness: compiling to {stretch_out}")
+            compiled_stretch = compile_stretch_readiness_to_workbook(
+                stringing_input,
+                stringing_files,
+                stretch_out,
+                completed_project_keys=completed_project_keys,
+            )
+            if compiled_stretch and compiled_stretch.exists():
+                try:
+                    export_workbook_to_parquet(
+                        compiled_stretch,
+                        sheets=("RawData", "Summary", "ManpowerAudit", "Diagnostics", "Issues", "Coverage"),
+                    )
+                except Exception as exc:
+                    print(f"[pipeline] StretchReadiness: failed to export parquet: {exc}")
         else:
-            stretch_base = base_dir / "StretchReadiness" if base_dir.name != "StretchReadiness" else base_dir
-        stretch_base.mkdir(parents=True, exist_ok=True)
-        stretch_out = stretch_base / "StretchReadiness_Output.xlsx"
-        print(f"[pipeline] StretchReadiness: compiling to {stretch_out}")
-        compiled_stretch = compile_stretch_readiness_to_workbook(
-            stringing_input,
-            stringing_files,
-            stretch_out,
-            completed_project_keys=completed_project_keys,
-        )
-        if compiled_stretch and compiled_stretch.exists():
-            try:
-                export_workbook_to_parquet(
-                    compiled_stretch,
-                    sheets=("RawData", "Summary", "ManpowerAudit", "Diagnostics", "Issues", "Coverage"),
-                )
-            except Exception as exc:
-                print(f"[pipeline] StretchReadiness: failed to export parquet: {exc}")
+            print("[pipeline] StretchReadiness: skipped by --scope.")
 
         # --- Compile Unified Stringing Summary from Stringing + Status + Stretch artifacts ---
-        if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
-            summary_base = base_dir.parent / "StringingSummary"
+        if stages["stringing_summary"]:
+            if base_dir.name == "Erection" and base_dir.parent.name == "Parquets":
+                summary_base = base_dir.parent / "StringingSummary"
+            else:
+                summary_base = base_dir / "StringingSummary" if base_dir.name != "StringingSummary" else base_dir
+            summary_base.mkdir(parents=True, exist_ok=True)
+            summary_out = summary_base / "StringingSummary_Output.xlsx"
+            print(f"[pipeline] StringingSummary: compiling to {summary_out}")
+            compiled_summary = compile_stringing_summary_to_workbook(
+                base_dir,
+                summary_out,
+                completed_project_keys=completed_project_keys,
+            )
+            stringing_summary_out_path = compiled_summary if compiled_summary else None
+            if compiled_summary and compiled_summary.exists():
+                try:
+                    export_workbook_to_parquet(
+                        compiled_summary,
+                        sheets=stringing_summary_ingest.STRINGING_SUMMARY_SHEETS,
+                    )
+                except Exception as exc:
+                    print(f"[pipeline] StringingSummary: failed to export parquet: {exc}")
         else:
-            summary_base = base_dir / "StringingSummary" if base_dir.name != "StringingSummary" else base_dir
-        summary_base.mkdir(parents=True, exist_ok=True)
-        summary_out = summary_base / "StringingSummary_Output.xlsx"
-        print(f"[pipeline] StringingSummary: compiling to {summary_out}")
-        compiled_summary = compile_stringing_summary_to_workbook(
-            base_dir,
-            summary_out,
-            completed_project_keys=completed_project_keys,
-        )
-        stringing_summary_out_path = compiled_summary if compiled_summary else None
-        if compiled_summary and compiled_summary.exists():
-            try:
-                export_workbook_to_parquet(
-                    compiled_summary,
-                    sheets=stringing_summary_ingest.STRINGING_SUMMARY_SHEETS,
-                )
-            except Exception as exc:
-                print(f"[pipeline] StringingSummary: failed to export parquet: {exc}")
+            print("[pipeline] StringingSummary: skipped by --scope.")
     else:
         print("[pipeline] Skipping compilation step as requested.")
         parquet_dir = None
@@ -1847,6 +1933,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         print(f"[pipeline] Using dataset path: {dataset_path}")
     else:
         print("[pipeline] Dataset path unresolved; using dashboard defaults.")
+
+    if args.compile_only:
+        print("[dashboard] Skipping app load (--compile-only).")
+        return
 
     dash_host = os.getenv("DASH_HOST", config.get("dash_host", "0.0.0.0"))
     dash_port = int(os.getenv("DASH_PORT", config.get("dash_port", 8050)))
