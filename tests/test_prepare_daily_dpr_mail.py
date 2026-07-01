@@ -230,7 +230,7 @@ class PrepareDailyDprMailTests(unittest.TestCase):
         self.assertEqual(row["Actual Towers (Nos.)"], 1)
         self.assertAlmostEqual(row["Total MT"], 27.48)
 
-    def test_erection_total_mt_uses_undated_completed_rows_when_status_has_line_actual(self) -> None:
+    def test_erection_actual_does_not_use_undated_completed_rows_or_status_actual(self) -> None:
         status = pd.DataFrame(
             [
                 {
@@ -300,9 +300,65 @@ class PrepareDailyDprMailTests(unittest.TestCase):
             )
 
         row = result.iloc[0]
-        self.assertEqual(row["Actual Towers (Nos.)"], 1)
-        self.assertAlmostEqual(row["Total MT"], 11.82)
-        self.assertAlmostEqual(row["Avg Tower Wt (MT)"], 11.82)
+        self.assertEqual(row["Actual Towers (Nos.)"], 0)
+        self.assertTrue(pd.isna(row["Total MT"]))
+        self.assertIn("Status actual 1 not used", row["Data Check"])
+
+    def test_erection_actual_flags_mismatch_between_dated_erection_and_status(self) -> None:
+        status = pd.DataFrame(
+            [
+                {
+                    "project_code": "TA 506",
+                    "month": pd.Timestamp("2026-06-01"),
+                    "report_date": pd.Timestamp("2026-06-30"),
+                    "activity_group": "Tower Erection",
+                    "core_activity": True,
+                    "plan_for_month": 25,
+                    "progress_for_month": 16,
+                    "quantity_primary": 500,
+                    "cumulative_progress": 421,
+                },
+            ]
+        )
+        erection_raw = pd.DataFrame(
+            [
+                {
+                    "Project Code": "TA 506",
+                    "Complete Date": pd.Timestamp("2026-06-03"),
+                    "Location No.": "196/0",
+                    "Tower Weight": 51.17,
+                },
+                {
+                    "Project Code": "TA 506",
+                    "Complete Date": pd.Timestamp("2026-06-06"),
+                    "Location No.": "44/1",
+                    "Tower Weight": 16.97,
+                },
+            ]
+        )
+        mapping = pd.DataFrame(
+            [{"project_key": "TA506", "PCH": "PCH", "Project": "TA 506"}]
+        )
+
+        def fake_read(path):
+            path_text = str(path)
+            if path_text.endswith("StringingSummary\\StatusActivityFact.parquet"):
+                return status
+            if path_text.endswith("Erection\\RawData.parquet"):
+                return erection_raw
+            return pd.DataFrame()
+
+        with patch.object(mail, "_read_parquet", side_effect=fake_read):
+            result = mail._build_erection_table(
+                pd.Timestamp("2026-06-01"),
+                pd.Timestamp("2026-06-30"),
+                pd.Timestamp("2026-06-30"),
+                mapping,
+            )
+
+        row = result.iloc[0]
+        self.assertEqual(row["Actual Towers (Nos.)"], 2)
+        self.assertIn("Mismatch: Erection 2, Status 16", row["Data Check"])
 
 
 if __name__ == "__main__":

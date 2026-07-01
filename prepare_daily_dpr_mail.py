@@ -186,6 +186,19 @@ def _display_project(value: object) -> str:
     return str(value or "").strip()
 
 
+def _with_object_project_key(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    if "project_key" not in out.columns:
+        out["project_key"] = pd.Series(dtype="object")
+    else:
+        out["project_key"] = out["project_key"].astype("object")
+    return out
+
+
+def _project_keys_frame(keys: set[object]) -> pd.DataFrame:
+    return pd.DataFrame({"project_key": pd.Series(sorted(keys), dtype="object")})
+
+
 def _month_window(month: str | None) -> tuple[pd.Timestamp, pd.Timestamp]:
     if month:
         start = pd.Timestamp(f"{month}-01").normalize()
@@ -325,6 +338,8 @@ def _activity_status(
 def _merge_identity(frame: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         frame = pd.DataFrame(columns=["project_key", "Project"])
+    frame = _with_object_project_key(frame)
+    mapping = _with_object_project_key(mapping)
     out = frame.merge(mapping[["project_key", "PCH"]], on="project_key", how="left")
     out["PCH"] = out["PCH"].fillna("Unassigned")
     out["Project"] = out["Project"].fillna(out["project_key"].map(_display_project))
@@ -347,21 +362,15 @@ def _valid_location_mask(values: pd.Series) -> pd.Series:
     return text.notna() & text.ne("") & ~text.str.casefold().isin({"nan", "none", "nat"})
 
 
-def _line_key(value: object) -> str:
-    text = "" if pd.isna(value) else str(value).strip().upper()
-    return re.sub(r"[^A-Z0-9]", "", text)
-
-
-def _completed_status_mask(values: pd.Series) -> pd.Series:
-    text = values.astype("string").str.strip().str.casefold()
-    return text.eq("c") | text.str.contains(r"\b(?:complete|completed|done)\b", regex=True, na=False)
-
-
 def _optional_series(frame: pd.DataFrame, column: str, default: object = "") -> pd.Series:
     series = frame.get(column)
     if isinstance(series, pd.Series):
         return series
     return pd.Series(default, index=frame.index)
+
+
+def _numeric_series(frame: pd.DataFrame, column: str, default: object = pd.NA) -> pd.Series:
+    return pd.to_numeric(_optional_series(frame, column, default), errors="coerce")
 
 
 def _build_erection_table(
@@ -375,13 +384,10 @@ def _build_erection_table(
     status = _activity_status("Tower Erection", month_start, month_end, as_of_date)
 
     actual = pd.DataFrame(columns=["project_key", "Total MT", "Towers"])
-    undated_completed = pd.DataFrame(columns=["project_key", "line_key", "tower_weight"])
-    dated_line_counts = pd.DataFrame(columns=["project_key", "line_key", "dated_towers"])
     if not raw.empty:
         work = raw.copy()
         work["complete_date"] = pd.to_datetime(work.get("Complete Date"), errors="coerce").dt.normalize()
         work["project_key"] = work.get("Project Code", "").map(_compact_project)
-        work["line_key"] = _optional_series(work, "Line Name").map(_line_key)
         work["tower_weight"] = pd.to_numeric(work.get("Tower Weight"), errors="coerce")
         if "Location No." in work.columns:
             valid_location = _valid_location_mask(work["Location No."])
@@ -399,90 +405,6 @@ def _build_erection_table(
                 .agg(**{"Total MT": ("tower_weight", "sum"), "Towers": ("tower_weight", "size")})
                 .reset_index()
             )
-            dated_line_counts = (
-                work.groupby(["project_key", "line_key"], dropna=False)
-                .size()
-                .reset_index(name="dated_towers")
-            )
-
-        raw_work = raw.copy()
-        raw_work["complete_date"] = pd.to_datetime(raw_work.get("Complete Date"), errors="coerce").dt.normalize()
-        raw_work["project_key"] = raw_work.get("Project Code", "").map(_compact_project)
-        raw_work["line_key"] = _optional_series(raw_work, "Line Name").map(_line_key)
-        raw_work["tower_weight"] = pd.to_numeric(raw_work.get("Tower Weight"), errors="coerce")
-        if "Location No." in raw_work.columns:
-            raw_valid_location = _valid_location_mask(raw_work["Location No."])
-        else:
-            raw_valid_location = pd.Series(True, index=raw_work.index)
-        raw_status = raw_work["Status"] if "Status" in raw_work.columns else pd.Series("", index=raw_work.index)
-        undated_completed = raw_work[
-            raw_work["complete_date"].isna()
-            & raw_valid_location
-            & raw_work["project_key"].astype(bool)
-            & _completed_status_mask(raw_status)
-            & raw_work["tower_weight"].notna()
-        ][["project_key", "line_key", "tower_weight"]].copy()
-
-    if not undated_completed.empty and not status.empty:
-        status_raw = _read_parquet(PARQUET_DIR / "StringingSummary" / "StatusActivityFact.parquet")
-        if not status_raw.empty:
-            status_line = status_raw.copy()
-            status_line["report_date"] = pd.to_datetime(status_line.get("report_date"), errors="coerce").dt.normalize()
-            status_line["month"] = pd.to_datetime(status_line.get("month"), errors="coerce").dt.normalize()
-            status_line["project_key"] = status_line.get("project_code", "").map(_compact_project)
-            status_line["line_key"] = status_line.get("line_name", "").map(_line_key)
-            status_line["progress_for_month"] = pd.to_numeric(status_line.get("progress_for_month"), errors="coerce")
-            status_line = status_line[
-                status_line["activity_group"].astype(str).str.casefold().eq("tower erection")
-                & status_line["core_activity"].fillna(False).astype(bool)
-                & status_line["project_key"].astype(bool)
-                & status_line["line_key"].astype(bool)
-                & status_line["month"].eq(month_start)
-                & status_line["report_date"].le(min(as_of_date, month_end))
-            ].copy()
-            if not status_line.empty:
-                latest_report = status_line.groupby(["project_key", "line_key"], dropna=False)["report_date"].transform("max")
-                status_line = status_line[status_line["report_date"].eq(latest_report)].copy()
-                status_line_actual = (
-                    status_line.groupby(["project_key", "line_key"], dropna=False)["progress_for_month"]
-                    .sum(min_count=1)
-                    .reset_index(name="status_towers")
-                )
-                line_gap = status_line_actual.merge(
-                    dated_line_counts,
-                    on=["project_key", "line_key"],
-                    how="left",
-                )
-                line_gap["dated_towers"] = pd.to_numeric(line_gap.get("dated_towers"), errors="coerce").fillna(0)
-                line_gap["missing_towers"] = (
-                    pd.to_numeric(line_gap["status_towers"], errors="coerce").fillna(0) - line_gap["dated_towers"]
-                ).clip(lower=0).round().astype(int)
-
-                fallback_rows: list[dict[str, object]] = []
-                for _, gap_row in line_gap[line_gap["missing_towers"].gt(0)].iterrows():
-                    candidates = undated_completed[
-                        undated_completed["project_key"].eq(gap_row["project_key"])
-                        & undated_completed["line_key"].eq(gap_row["line_key"])
-                    ].head(int(gap_row["missing_towers"]))
-                    if candidates.empty:
-                        continue
-                    fallback_rows.append(
-                        {
-                            "project_key": gap_row["project_key"],
-                            "Total MT": float(candidates["tower_weight"].sum()),
-                            "Towers": int(len(candidates.index)),
-                        }
-                    )
-                if fallback_rows:
-                    fallback_actual = pd.DataFrame(fallback_rows).groupby("project_key", as_index=False).sum()
-                    if actual.empty:
-                        actual = fallback_actual.copy()
-                    else:
-                        actual = (
-                            pd.concat([actual, fallback_actual], ignore_index=True)
-                            .groupby("project_key", as_index=False)
-                            .agg(**{"Total MT": ("Total MT", "sum"), "Towers": ("Towers", "sum")})
-                        )
 
     productivity = pd.DataFrame(columns=["project_key", "Productivity", "total_km"])
     if not daily.empty:
@@ -502,17 +424,36 @@ def _build_erection_table(
                 .reset_index()
             )
 
-    projects = pd.DataFrame({"project_key": sorted(set(status["project_key"]) | set(actual["project_key"]))})
+    status = _with_object_project_key(status)
+    actual = _with_object_project_key(actual)
+    productivity = _with_object_project_key(productivity)
+    projects = _project_keys_frame(set(status["project_key"]) | set(actual["project_key"]))
     table = projects.merge(status[["project_key", "Project", "Plan", "Actual"]], on="project_key", how="left")
     table = table.merge(actual, on="project_key", how="left")
     table = table.merge(productivity, on="project_key", how="left")
     table = _merge_identity(table, mapping)
-    raw_towers = pd.to_numeric(table.get("Towers"), errors="coerce")
-    status_towers = pd.to_numeric(table.get("Actual"), errors="coerce")
-    table["Towers"] = raw_towers.where(raw_towers.gt(0), status_towers)
-    planned = pd.to_numeric(table.get("Plan"), errors="coerce").notna()
-    table.loc[planned & pd.to_numeric(table["Towers"], errors="coerce").isna(), "Towers"] = 0
-    table["Avg Tower Wt (MT)"] = pd.to_numeric(table.get("Total MT"), errors="coerce") / raw_towers.where(raw_towers.gt(0))
+    raw_towers = _numeric_series(table, "Towers")
+    status_towers = _numeric_series(table, "Actual")
+    table["Data Check"] = ""
+    status_has_actual = status_towers.notna() & status_towers.ne(0)
+    raw_has_actual = raw_towers.notna()
+    mismatch = raw_has_actual & status_has_actual & raw_towers.ne(status_towers)
+    table.loc[mismatch, "Data Check"] = (
+        "Mismatch: Erection "
+        + raw_towers[mismatch].round(0).astype("Int64").astype(str)
+        + ", Status "
+        + status_towers[mismatch].round(0).astype("Int64").astype(str)
+    )
+    status_only = raw_towers.isna() & status_has_actual
+    table.loc[status_only, "Data Check"] = (
+        "Status actual "
+        + status_towers[status_only].round(0).astype("Int64").astype(str)
+        + " not used; no dated Erection rows"
+    )
+    table["Towers"] = raw_towers
+    planned = _numeric_series(table, "Plan").notna()
+    table.loc[planned & _numeric_series(table, "Towers").isna(), "Towers"] = 0
+    table["Avg Tower Wt (MT)"] = _numeric_series(table, "Total MT") / raw_towers.where(raw_towers.gt(0))
     table = table.rename(columns={"Plan": "Plan (Nos.)", "Towers": "Actual Towers (Nos.)"})
     ordered = [
         "PCH",
@@ -522,6 +463,7 @@ def _build_erection_table(
         "Total MT",
         "Avg Tower Wt (MT)",
         "Productivity",
+        "Data Check",
     ]
     table = table.reindex(columns=ordered)
     keep = (
@@ -581,7 +523,10 @@ def _build_stringing_table(
                 .rename(columns={"ready_km": "Stretch Ready (KM)"})
             )
 
-    projects = pd.DataFrame({"project_key": sorted(set(status["project_key"]) | set(productivity["project_key"]))})
+    status = _with_object_project_key(status)
+    productivity = _with_object_project_key(productivity)
+    ready = _with_object_project_key(ready)
+    projects = _project_keys_frame(set(status["project_key"]) | set(productivity["project_key"]))
     table = projects.merge(
         status[["project_key", "Project", "Plan", "Actual", "Scope", "Completed"]],
         on="project_key",
@@ -599,12 +544,14 @@ def _build_stringing_table(
         }
     )
     if "total_km" in table.columns:
-        status_actual = pd.to_numeric(table.get("Actual Achieved (KM)"), errors="coerce")
-        daily_actual = pd.to_numeric(table.get("total_km"), errors="coerce")
+        status_actual = _numeric_series(table, "Actual Achieved (KM)")
+        daily_actual = _numeric_series(table, "total_km")
         table["Actual Achieved (KM)"] = status_actual.where(status_actual.notna(), daily_actual)
-    planned = pd.to_numeric(table.get("Plan (KM)"), errors="coerce").notna()
+    if "Actual Achieved (KM)" not in table.columns:
+        table["Actual Achieved (KM)"] = _numeric_series(table, "Actual Achieved (KM)")
+    planned = _numeric_series(table, "Plan (KM)").notna()
     table.loc[
-        planned & pd.to_numeric(table["Actual Achieved (KM)"], errors="coerce").isna(),
+        planned & _numeric_series(table, "Actual Achieved (KM)").isna(),
         "Actual Achieved (KM)",
     ] = 0.0
     ordered = [
@@ -630,7 +577,7 @@ def _round_numeric(frame: pd.DataFrame) -> pd.DataFrame:
     for column in out.columns:
         if column == "Actual Towers (Nos.)":
             out[column] = pd.to_numeric(out[column], errors="coerce").round(0).astype("Int64")
-        elif column not in {"PCH", "Project"}:
+        elif column not in {"PCH", "Project", "Data Check"}:
             values = pd.to_numeric(out[column], errors="coerce")
             values = values.mask(values.abs().lt(0.005), 0.0)
             out[column] = values.round(2)
@@ -693,7 +640,7 @@ def _html_table(frame: pd.DataFrame, kind: str) -> str:
             value = row.get(column)
             if column == "PCH" and value == last_pch and not is_total:
                 text = ""
-            elif column in {"PCH", "Project"}:
+            elif column in {"PCH", "Project", "Data Check"}:
                 text = html.escape(str(value if not pd.isna(value) else ""))
             else:
                 text = _format_number(value)
