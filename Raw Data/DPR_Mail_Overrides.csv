@@ -1,0 +1,4 @@
+month,scope,project_code,plan,actual,productivity,scope_total,completed,stretch_ready,source_note
+2026-06,stringing,TB408,32.00,4.40,,157.56,130.40,,Manual call confirmation used because local raw DPR is stale at 2026-06-01.
+2026-06,stringing,TA418,10.00,7.28,,48.00,39.28,,Manual call confirmation used because local raw DPR is stale at 2026-06-17.
+2026-06,stringing,TA421,5.878,4.40269,,121.342,119.86969,,Earlier valid DPR snapshot from 2026-06-29 used because 2026-06-30 status sheet regressed.

@@ -967,6 +967,8 @@ def compile_stringing_to_workbook(
         configured_sheet_name = str(configured_sheet_entry.get("sheet_name", "")).strip() if configured_sheet_entry else ""
         line_name_override = normalize_line_name(configured_sheet_entry.get("line_name", "")) if configured_sheet_entry else ""
         line_name_source = str(configured_sheet_entry.get("line_name_source", "")).strip() if configured_sheet_entry else ""
+        section_start_text = str(configured_sheet_entry.get("section_start_text", "")).strip() if configured_sheet_entry else ""
+        section_end_text = str(configured_sheet_entry.get("section_end_text", "")).strip() if configured_sheet_entry else ""
         project_key = _normalize_project_code_key(project)
         template_options = stringing_template_catalog.get(project_key)
         fallback_template_options = stringing_template_all_catalog.get(project_key)
@@ -1031,6 +1033,8 @@ def compile_stringing_to_workbook(
                 configured_sheet_name=configured_sheet_name,
                 preferred_sheet_name=preferred,
                 min_columns=min_columns,
+                section_start_text=section_start_text,
+                section_end_text=section_end_text,
             )
             found = load_result.resolved_sheet
             fallback_note = load_result.fallback_note

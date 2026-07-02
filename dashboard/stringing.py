@@ -19,6 +19,7 @@ from .project_identity import parse_project_identity_from_filename as _parse_pro
 
 # Exact headers expected from the source sheet mapped to snake_case names
 _STRINGING_COLUMN_MAP: Dict[str, str] = {
+    "Section": "section",
     "From AP": "from_ap",
     "To AP": "to_ap",
     "Method": "method",
@@ -32,10 +33,12 @@ _STRINGING_COLUMN_MAP: Dict[str, str] = {
     "Status": "status",
     "Gang Name": "gang_name",
 }
-_STRINGING_OPTIONAL_HEADERS: set[str] = {"Status"}
+_STRINGING_OPTIONAL_HEADERS: set[str] = {"Section", "Status"}
 _STRINGING_HEADER_ALIASES: Dict[str, str] = {
     "from": "From AP",
     "to": "To AP",
+    "fromap": "From AP",
+    "toap": "To AP",
     "typeofsections": "Method",
     "sectiontype": "Method",
     "payingoutrsag": "P/O",
@@ -43,6 +46,8 @@ _STRINGING_HEADER_ALIASES: Dict[str, str] = {
     "nameofgang": "Gang Name",
     "gang": "Gang Name",
     "sectionlength": "Length",
+    "sectionkm": "Length",
+    "sectionkms": "Length",
     "sectionlengthm": "Length",
     "spanm": "Length",
     "span": "Length",
@@ -61,6 +66,11 @@ _STRINGING_LENGTH_SOURCE_HEADERS: tuple[str, ...] = ("Length", "P/O")
 def _nrm_header(text: object) -> str:
     if text is None:
         return ""
+    try:
+        if pd.isna(text):
+            return ""
+    except Exception:
+        pass
     s = str(text)
     s = s.replace("\n", " ").replace("\r", " ")
     s = s.replace("_", " ")
@@ -312,18 +322,32 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
                 applied_map[col] = mapped
                 recognized_keys.add(_canon_key(alias_target))
 
+    normalized = df.rename(columns=applied_map).copy()
+    # Template/header aliases can map multiple source columns to one canonical
+    # name (for example, two variants of length). Collapse duplicates so
+    # downstream concatenation and reindexing remain stable.
+    normalized = _collapse_duplicate_columns(normalized)
+    if "section" in normalized.columns:
+        derived_from, derived_to = _derive_from_to_from_section(normalized["section"])
+        if "from_ap" not in normalized.columns or not normalized["from_ap"].map(_is_filled).any():
+            normalized["from_ap"] = derived_from
+        else:
+            normalized["from_ap"] = normalized["from_ap"].where(normalized["from_ap"].map(_is_filled), derived_from)
+        if "to_ap" not in normalized.columns or not normalized["to_ap"].map(_is_filled).any():
+            normalized["to_ap"] = derived_to
+        else:
+            normalized["to_ap"] = normalized["to_ap"].where(normalized["to_ap"].map(_is_filled), derived_to)
+        if normalized["from_ap"].map(_is_filled).any():
+            recognized_keys.add(_canon_key("From AP"))
+        if normalized["to_ap"].map(_is_filled).any():
+            recognized_keys.add(_canon_key("To AP"))
+
     present: List[str] = [
         header for header in tracked_headers if _canon_key(header) in recognized_keys
     ]
     missing: List[str] = [
         header for header in required_headers if _canon_key(header) not in recognized_keys
     ]
-
-    normalized = df.rename(columns=applied_map).copy()
-    # Template/header aliases can map multiple source columns to one canonical
-    # name (for example, two variants of length). Collapse duplicates so
-    # downstream concatenation and reindexing remain stable.
-    normalized = _collapse_duplicate_columns(normalized)
 
     report: Dict[str, object] = {
         "normalized_columns_ok": len(missing) == 0,
@@ -332,6 +356,29 @@ def normalize_stringing_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[st
         "applied_map": applied_map,
     }
     return normalized, report
+
+
+def _split_stringing_section(value: object) -> tuple[object, object]:
+    if value is None:
+        return pd.NA, pd.NA
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return pd.NA, pd.NA
+    parts = re.split(r"\s+(?:to)\s+|\s*-\s*", text, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) < 2:
+        return pd.NA, pd.NA
+    left = parts[0].strip()
+    right = parts[1].strip()
+    if not left or not right:
+        return pd.NA, pd.NA
+    return left, right
+
+
+def _derive_from_to_from_section(series: pd.Series) -> tuple[pd.Series, pd.Series]:
+    pairs = series.map(_split_stringing_section)
+    from_values = pairs.map(lambda item: item[0] if isinstance(item, tuple) else pd.NA)
+    to_values = pairs.map(lambda item: item[1] if isinstance(item, tuple) else pd.NA)
+    return from_values, to_values
 
 
 def classify_stringing_missing_headers(report: Mapping[str, object] | None) -> Dict[str, object]:
@@ -359,7 +406,31 @@ def classify_stringing_missing_headers(report: Mapping[str, object] | None) -> D
     }
 
 
-def _to_datetime_normalize(value: object) -> pd.Timestamp | None:
+def _parse_text_date_token(token: str) -> pd.Timestamp | None:
+    cleaned = re.sub(r"\s*([./-])\s*", r"\1", str(token).strip())
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    if re.match(r"^\d{4}[./-]\d{1,2}[./-]\d{1,2}$", cleaned):
+        parsed = pd.to_datetime(cleaned, errors="coerce")
+    else:
+        parsed = pd.to_datetime(cleaned, errors="coerce", dayfirst=True)
+    if pd.isna(parsed):
+        return None
+    return parsed.normalize()
+
+
+def _extract_text_dates(value: str) -> list[pd.Timestamp]:
+    pattern = re.compile(
+        r"(?<!\d)(?:\d{4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{1,2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{2,4})(?!\d)"
+    )
+    dates: list[pd.Timestamp] = []
+    for match in pattern.finditer(str(value)):
+        parsed = _parse_text_date_token(match.group(0))
+        if parsed is not None:
+            dates.append(parsed)
+    return dates
+
+
+def _to_datetime_normalize(value: object, *, prefer: str = "first") -> pd.Timestamp | None:
     """Parse a single value to a normalized Timestamp or None if invalid.
 
     Mirrors erection start/end parsing semantics: pandas to_datetime with
@@ -381,7 +452,10 @@ def _to_datetime_normalize(value: object) -> pd.Timestamp | None:
         if not text:
             parsed = pd.NaT
         else:
-            if re.match(r"^\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*$", text):
+            extracted_dates = _extract_text_dates(text)
+            if extracted_dates:
+                parsed = extracted_dates[-1] if prefer == "last" else extracted_dates[0]
+            elif re.match(r"^\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*$", text):
                 parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
             else:
                 parsed = pd.to_datetime(text, errors="coerce")
@@ -811,8 +885,8 @@ def _expand_stringing_stage_to_daily(
     if start_col not in work.columns or end_col not in work.columns:
         return _empty_stage_frame()
 
-    work[start_col] = work[start_col].map(_to_datetime_normalize)
-    work[end_col] = work[end_col].map(_to_datetime_normalize)
+    work[start_col] = work[start_col].map(lambda value: _to_datetime_normalize(value, prefer="first"))
+    work[end_col] = work[end_col].map(lambda value: _to_datetime_normalize(value, prefer="last"))
     if "po" in work.columns and "po_km" not in work.columns:
         po_values = pd.to_numeric(work["po"], errors="coerce")
         unit_series = work.get("length_unit")

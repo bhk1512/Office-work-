@@ -127,6 +127,95 @@ class PrepareDailyDprMailTests(unittest.TestCase):
             self.assertIn("Stringing Productivity", html)
             self.assertIn("Daily DPR Stringing Productivity Summary", artifacts.subject)
 
+    def test_stringing_daily_project_suffix_rolls_up_to_base_project(self) -> None:
+        status = pd.DataFrame(
+            [
+                {
+                    "project_code": "TB 501",
+                    "month": pd.Timestamp("2026-06-01"),
+                    "report_date": pd.Timestamp("2026-06-30"),
+                    "activity_group": "Stringing",
+                    "core_activity": True,
+                    "plan_for_month": 5.0,
+                    "progress_for_month": 3.0,
+                    "quantity_primary": 73.0,
+                    "cumulative_progress": 70.0,
+                }
+            ]
+        )
+        daily = pd.DataFrame(
+            [
+                {
+                    "project": "TB 501 - 220kV",
+                    "date": pd.Timestamp("2026-06-12"),
+                    "daily_km": 2.4,
+                }
+            ]
+        )
+        mapping = pd.DataFrame(
+            [{"project_key": "TB501", "PCH": "PCH", "Project": "TB 501"}]
+        )
+
+        def fake_read(path):
+            path_text = str(path)
+            if path_text.endswith("StringingSummary\\StatusActivityFact.parquet"):
+                return status
+            if path_text.endswith("Stringing\\StringingDaily.parquet"):
+                return daily
+            return pd.DataFrame()
+
+        with patch.object(mail, "_read_parquet", side_effect=fake_read):
+            result = mail._build_stringing_table(
+                pd.Timestamp("2026-06-01"),
+                pd.Timestamp("2026-06-30"),
+                pd.Timestamp("2026-06-30"),
+                mapping,
+            )
+
+        self.assertEqual(len(result.index), 1)
+        self.assertEqual(result.iloc[0]["Project"], "TB 501")
+        self.assertEqual(result.iloc[0]["Actual Achieved (KM)"], 3.0)
+
+    def test_stringing_mail_overrides_replace_selected_values(self) -> None:
+        table = pd.DataFrame(
+            [
+                {
+                    "PCH": "PCH",
+                    "Project": "TA 418",
+                    "Plan (KM)": 18.26,
+                    "Actual Achieved (KM)": 1.64,
+                    "Productivity": 0.0,
+                    "Scope (KM)": 47.84,
+                    "Stringing Completed (KM)": 31.23,
+                    "Stretch Ready (KM)": 10.0,
+                }
+            ]
+        )
+        overrides = pd.DataFrame(
+            [
+                {
+                    "project_key": "TA418",
+                    "Plan (KM)": 10.0,
+                    "Actual Achieved (KM)": 7.28,
+                    "Productivity": pd.NA,
+                    "Scope (KM)": 48.0,
+                    "Stringing Completed (KM)": 39.28,
+                    "Stretch Ready (KM)": pd.NA,
+                }
+            ]
+        )
+
+        with patch.object(mail, "_load_mail_overrides", return_value=overrides):
+            result = mail._apply_stringing_mail_overrides(table, pd.Timestamp("2026-06-01"))
+
+        row = result.iloc[0]
+        self.assertEqual(row["Plan (KM)"], 10.0)
+        self.assertEqual(row["Actual Achieved (KM)"], 7.28)
+        self.assertEqual(row["Productivity"], 0.0)
+        self.assertEqual(row["Scope (KM)"], 48.0)
+        self.assertEqual(row["Stringing Completed (KM)"], 39.28)
+        self.assertEqual(row["Stretch Ready (KM)"], 10.0)
+
     def test_activity_status_carries_prior_positive_plan_when_latest_plan_is_zero(self) -> None:
         status = pd.DataFrame(
             [

@@ -68,6 +68,8 @@ def load_stringing_sheet_config(raw_root: Path, *, repo_root: Path | None = None
         project_idx = headers.index("project code")
         stringing_idx = headers.index("stringing sheet names")
         line_idx = headers.index("stringing line names") if "stringing line names" in headers else None
+        start_idx = headers.index("stringing section start text") if "stringing section start text" in headers else None
+        end_idx = headers.index("stringing section end text") if "stringing section end text" in headers else None
 
         mapping: dict[str, list[dict[str, str]]] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
@@ -89,18 +91,45 @@ def load_stringing_sheet_config(raw_root: Path, *, repo_root: Path | None = None
                 "stringing",
                 infer_from_sheet_name=False,
             )
+            start_values = _split_config_tokens(row[start_idx] if start_idx is not None and start_idx < len(row) else None)
+            end_values = _split_config_tokens(row[end_idx] if end_idx is not None and end_idx < len(row) else None)
             deduped_entries: list[dict[str, str]] = []
             seen_sheet_keys: set[str] = set()
-            for entry in entries:
+            for idx, entry in enumerate(entries):
                 key = normalize_space_only(entry.get("sheet_name"))
                 if not key or key in seen_sheet_keys:
                     continue
                 seen_sheet_keys.add(key)
+                section_start = _entry_config_value(start_values, idx)
+                section_end = _entry_config_value(end_values, idx)
+                if section_start:
+                    entry["section_start_text"] = section_start
+                if section_end:
+                    entry["section_end_text"] = section_end
                 deduped_entries.append(entry)
             mapping[project_key] = deduped_entries
         return mapping
     finally:
         wb.close()
+
+
+def _split_config_tokens(value: object) -> list[str]:
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "nan", "na", "n/a", "null", "nil", "--", "-"}:
+        return []
+    return [part.strip() for part in re.split(r"[;]", text)]
+
+
+def _entry_config_value(values: list[str], idx: int) -> str:
+    if not values:
+        return ""
+    if idx < len(values):
+        return values[idx]
+    if len(values) == 1:
+        return values[0]
+    return ""
 
 
 def _resolve_named_template_sheet(wb, expected_name: str) -> Optional[str]:
@@ -506,6 +535,48 @@ def materialize_stringing_data(
     return data.reset_index(drop=True), int(header_row), clean_labels
 
 
+def _row_contains_text(row: pd.Series, target: str) -> bool:
+    target_key = normalize_space_only(target)
+    if not target_key:
+        return False
+    for value in row.values:
+        cell_key = normalize_space_only(value)
+        if cell_key and (cell_key == target_key or target_key in cell_key):
+            return True
+    return False
+
+
+def slice_stringing_section_frame(
+    df_raw: pd.DataFrame,
+    *,
+    section_start_text: str = "",
+    section_end_text: str = "",
+) -> pd.DataFrame:
+    if df_raw is None or df_raw.empty:
+        return df_raw
+    start_text = str(section_start_text or "").strip()
+    end_text = str(section_end_text or "").strip()
+    if not start_text and not end_text:
+        return df_raw
+
+    start_pos = 0
+    if start_text:
+        for pos, (_, row) in enumerate(df_raw.iterrows()):
+            if _row_contains_text(row, start_text):
+                start_pos = pos
+                break
+
+    end_pos = len(df_raw)
+    if end_text:
+        for pos in range(start_pos + 1, len(df_raw)):
+            row = df_raw.iloc[pos]
+            if _row_contains_text(row, end_text):
+                end_pos = pos
+                break
+
+    return df_raw.iloc[start_pos:end_pos].reset_index(drop=True)
+
+
 @dataclass(frozen=True)
 class StringingSheetLoadResult:
     frame: pd.DataFrame | None
@@ -521,6 +592,8 @@ def load_stringing_sheet_frame(
     configured_sheet_name: str = "",
     preferred_sheet_name: str = "",
     min_columns: int | None = None,
+    section_start_text: str = "",
+    section_end_text: str = "",
 ) -> StringingSheetLoadResult:
     selector = (
         (lambda names: find_stringing_sheet_name_from_list(list(names), None, [configured_sheet_name]))
@@ -534,6 +607,11 @@ def load_stringing_sheet_frame(
             if not found:
                 raise ValueError("NO_TARGET_SHEET")
             df_raw = xl.parse(sheet_name=found, header=None)
+            df_raw = slice_stringing_section_frame(
+                df_raw,
+                section_start_text=section_start_text,
+                section_end_text=section_end_text,
+            )
             frame, header_row, header_labels = materialize_stringing_data(df_raw, min_columns=min_columns)
             fallback_note = ""
             if configured_sheet_name and normalize_sheet_key(found) != normalize_sheet_key(configured_sheet_name):
@@ -554,6 +632,11 @@ def load_stringing_sheet_frame(
         )
         if found is None or df_raw is None or df_raw.empty:
             raise ValueError("NO_TARGET_SHEET")
+        df_raw = slice_stringing_section_frame(
+            df_raw,
+            section_start_text=section_start_text,
+            section_end_text=section_end_text,
+        )
         frame, header_row, header_labels = materialize_stringing_data(df_raw, min_columns=min_columns)
         note = fallback_note or ""
         if configured_sheet_name and normalize_sheet_key(found) != normalize_sheet_key(configured_sheet_name):

@@ -865,6 +865,8 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
             configured_name = str(sheet_entry.get("sheet_name", "")).strip()
             configured_line_name = normalize_line_name(sheet_entry.get("line_name", ""))
             configured_line_source = str(sheet_entry.get("line_name_source", "")).strip()
+            section_start_text = str(sheet_entry.get("section_start_text", "")).strip()
+            section_end_text = str(sheet_entry.get("section_end_text", "")).strip()
             if configured_line_name:
                 line_name_override = configured_line_name
                 line_name_source = configured_line_source or "config"
@@ -949,6 +951,8 @@ def build_stringing_artifacts_every_run(raw_root: Path, sheet_name: str) -> tupl
                     configured_sheet_name=configured_name,
                     preferred_sheet_name=sheet_name,
                     min_columns=min_columns,
+                    section_start_text=section_start_text,
+                    section_end_text=section_end_text,
                 )
                 df_raw = load_result.frame
                 actual_sheet = load_result.resolved_sheet or actual_sheet

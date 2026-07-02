@@ -17,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent
 RAW_DIR = BASE_DIR / "Raw Data"
 PARQUET_DIR = BASE_DIR / "Parquets"
 PRODUCTIVITY_DIR = BASE_DIR / "Productivity Summaries"
+MAIL_OVERRIDE_PATH = RAW_DIR / "DPR_Mail_Overrides.csv"
 
 PCH_ORDER = {
     "Mr. Arun Felbin": 1,
@@ -176,6 +177,12 @@ def refresh_outputs(*, skip_outlook_pull: bool = False, scope: tuple[str, ...] =
 def _compact_project(value: object) -> str:
     text = "" if pd.isna(value) else str(value).strip().upper()
     return re.sub(r"[^A-Z0-9]", "", text)
+
+
+def _base_project_key(value: object) -> str:
+    compact = _compact_project(value)
+    match = re.match(r"^([A-Z]{2}\d{3})", compact)
+    return match.group(1) if match else compact
 
 
 def _display_project(value: object) -> str:
@@ -373,6 +380,76 @@ def _numeric_series(frame: pd.DataFrame, column: str, default: object = pd.NA) -
     return pd.to_numeric(_optional_series(frame, column, default), errors="coerce")
 
 
+def _load_mail_overrides(month_start: pd.Timestamp, scope: str) -> pd.DataFrame:
+    columns = [
+        "project_key",
+        "Plan (KM)",
+        "Actual Achieved (KM)",
+        "Productivity",
+        "Scope (KM)",
+        "Stringing Completed (KM)",
+        "Stretch Ready (KM)",
+    ]
+    if not MAIL_OVERRIDE_PATH.exists():
+        return pd.DataFrame(columns=columns)
+
+    raw = pd.read_csv(MAIL_OVERRIDE_PATH)
+    if raw.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = raw.copy()
+    work["month"] = pd.to_datetime(work.get("month"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+    work["scope"] = work.get("scope", "").fillna("").astype(str).str.strip().str.casefold()
+    work["project_key"] = work.get("project_code", "").map(_base_project_key)
+    work = work[
+        (work["month"] == month_start)
+        & (work["scope"] == scope.casefold())
+        & work["project_key"].astype(bool)
+    ].copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    rename_map = {
+        "plan": "Plan (KM)",
+        "actual": "Actual Achieved (KM)",
+        "productivity": "Productivity",
+        "scope_total": "Scope (KM)",
+        "completed": "Stringing Completed (KM)",
+        "stretch_ready": "Stretch Ready (KM)",
+    }
+    out = work.rename(columns=rename_map)
+    for column in columns:
+        if column not in out.columns:
+            out[column] = pd.NA
+        elif column != "project_key":
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    return out[columns].drop_duplicates("project_key", keep="last").reset_index(drop=True)
+
+
+def _apply_stringing_mail_overrides(table: pd.DataFrame, month_start: pd.Timestamp) -> pd.DataFrame:
+    overrides = _load_mail_overrides(month_start, "stringing")
+    if table.empty or overrides.empty:
+        return table
+
+    out = table.copy()
+    out["project_key"] = out["Project"].map(_base_project_key)
+    out = out.merge(overrides, on="project_key", how="left", suffixes=("", "__override"))
+    for column in [
+        "Plan (KM)",
+        "Actual Achieved (KM)",
+        "Productivity",
+        "Scope (KM)",
+        "Stringing Completed (KM)",
+        "Stretch Ready (KM)",
+    ]:
+        override_column = f"{column}__override"
+        if override_column in out.columns:
+            override_values = pd.to_numeric(out[override_column], errors="coerce")
+            out[column] = override_values.where(override_values.notna(), out[column])
+            out = out.drop(columns=override_column)
+    return out.drop(columns=["project_key"])
+
+
 def _build_erection_table(
     month_start: pd.Timestamp,
     month_end: pd.Timestamp,
@@ -487,7 +564,7 @@ def _build_stringing_table(
     if not daily.empty:
         work = daily.copy()
         work["date"] = pd.to_datetime(work.get("date"), errors="coerce").dt.normalize()
-        work["project_key"] = work.get("project", "").map(_compact_project)
+        work["project_key"] = work.get("project", "").map(_base_project_key)
         work["daily_km"] = pd.to_numeric(work.get("daily_km"), errors="coerce").fillna(0.0)
         work = work[
             (work["date"] >= month_start)
@@ -565,6 +642,7 @@ def _build_stringing_table(
         "Stretch Ready (KM)",
     ]
     table = table.reindex(columns=ordered)
+    table = _apply_stringing_mail_overrides(table, month_start)
     keep = (
         pd.to_numeric(table["Plan (KM)"], errors="coerce").fillna(0).gt(0)
         | pd.to_numeric(table["Actual Achieved (KM)"], errors="coerce").fillna(0).abs().gt(0.005)

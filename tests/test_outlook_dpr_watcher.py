@@ -36,6 +36,12 @@ class _Mail:
 
 
 class OutlookDprWatcherTests(unittest.TestCase):
+    def test_parse_date_from_attachment_name_accepts_two_digit_year(self) -> None:
+        self.assertEqual(
+            watcher.parse_date_from_text("DPR - TA418 Dt-28-06-26 (PGCIL).xlsx"),
+            dt.date(2026, 6, 28),
+        )
+
     def test_configured_tb608_xlsm_attachment_is_saved(self) -> None:
         mail = _Mail(_Attachment("DPR.xlsm"))
         email_config = {

@@ -274,6 +274,8 @@ DATE_PATTERNS = [
     (re.compile(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b"), ("Y","M","D")),
     # DD-MM-YYYY / DD/MM/YYYY / DD.MM.YYYY
     (re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b"), ("D","M","Y")),
+    # DD-MM-YY / DD/MM/YY / DD.MM.YY
+    (re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b"), ("D","M","Y2")),
     # YYYYMMDD (8 digits)
     (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), ("Y","M","D")),
     # DD Mon YYYY
@@ -298,6 +300,9 @@ def parse_date_from_text(text: str) -> dt.date | None:
         for idx, key in enumerate(order):
             val = g[idx]
             if key == "Y": Y = _to_int(val)
+            elif key == "Y2":
+                year = _to_int(val)
+                Y = 2000 + year if year is not None else None
             elif key == "M": M = _to_int(val)
             elif key == "D": D = _to_int(val)
             elif key == "Mon3": M = MONTHS.get(val[:3].lower())

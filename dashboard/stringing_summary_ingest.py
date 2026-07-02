@@ -342,6 +342,7 @@ def _apply_status_stringing_resolution_policy(work: pd.DataFrame) -> pd.DataFram
             "configured_sheet",
             "template_sheet",
             "section_label",
+            "line_name",
             "stringing_resolution_policy",
         )
         if col in work.columns
@@ -367,6 +368,61 @@ def _apply_status_stringing_resolution_policy(work: pd.DataFrame) -> pd.DataFram
         | filtered_raw.str.contains(r"\bf\s*/\s*s\b", regex=True, na=False)
         | filtered_raw.str.contains("stringing -f/s", na=False)
     )
+    final_group_cols = [
+        col
+        for col in (
+            "project_scope_key",
+            "line_name",
+            "report_date",
+            "source_file",
+            "source_sheet",
+            "configured_sheet",
+            "template_sheet",
+            "section_label",
+            "stringing_resolution_policy",
+        )
+        if col in filtered.columns
+    ]
+    if final_group_cols and bool((filtered_enabled & filtered_final).any()):
+        final_scope = filtered[filtered_enabled & filtered_final].copy()
+        value_columns = [
+            column
+            for column in (
+                "plan_for_month",
+                "progress_for_month",
+                "today_progress",
+                "cumulative_progress",
+                "balance_progress",
+                "cumulative_last_month",
+            )
+            if column in final_scope.columns
+        ]
+        if value_columns:
+            numeric_values = final_scope[value_columns].apply(pd.to_numeric, errors="coerce")
+            final_scope["_value_count"] = numeric_values.notna().sum(axis=1)
+            final_scope["_cumulative_progress_score"] = pd.to_numeric(
+                final_scope.get("cumulative_progress"),
+                errors="coerce",
+            ).fillna(-1)
+            sort_cols = [*final_group_cols, "_value_count", "_cumulative_progress_score"]
+            keep_index = (
+                final_scope.sort_values(sort_cols)
+                .groupby(final_group_cols, dropna=False)
+                .tail(1)
+                .index
+            )
+            duplicate_final = filtered_enabled & filtered_final & ~filtered.index.isin(keep_index)
+            filtered = filtered.loc[~duplicate_final].copy()
+            filtered_policy = filtered["stringing_resolution_policy"].map(_normalize_stringing_resolution_policy)
+            filtered_enabled = filtered_policy.isin(_STRINGING_POLICY_PREFER_FINAL)
+            filtered_raw = filtered["activity_raw"].fillna("").astype(str).str.lower()
+            filtered_norm = filtered["activity_norm"].fillna("").astype(str).str.lower()
+            filtered_opgw = filtered_norm.str.contains("opgw", na=False) | filtered_raw.str.contains("opgw", na=False)
+            filtered_final = (~filtered_opgw) & (
+                filtered_raw.str.contains("final sag", na=False)
+                | filtered_raw.str.contains(r"\bf\s*/\s*s\b", regex=True, na=False)
+                | filtered_raw.str.contains("stringing -f/s", na=False)
+            )
     filtered.loc[filtered_enabled & filtered_final, "activity_norm"] = "stringing"
     return filtered
 

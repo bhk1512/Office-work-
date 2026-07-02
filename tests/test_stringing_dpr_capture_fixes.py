@@ -30,6 +30,33 @@ class StringingDprCaptureFixesTests(unittest.TestCase):
             self.assertIn("Configured sheet 'Stringing' not found", result.fallback_note)
             self.assertEqual(len(result.frame.index), 1)
 
+    def test_configured_section_window_limits_mixed_sheet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workbook = Path(temp_dir) / "TB 412 - DPR - 2026-06-30.xlsx"
+            frame = pd.DataFrame(
+                [
+                    ["STRINGING", None, None, None, None, None, None, None, None, None],
+                    ["Insulatour Hoisting", None, None, None, None, None, None, None, None, None],
+                    ["T/L Name", "SR.NO.", "GANG", "FROM", "TO", "Section  (Km)", "D.O.S", "D.O.S", "MP", "Remarks"],
+                    ["220 SZ", 1, "Crew", "98/0", "99/0", 0.344, "2026-06-03", "2026-06-04", 21, "Completed"],
+                    ["Conductor Paying Out,Rough Sag & Final Sag", None, None, None, None, None, None, None, None, None],
+                    ["T/L Name", "SR.NO.", "GANG", "FROM", "TO", "Section  (Km)", "D.O.S", "D.O.S", "MP", "Remarks"],
+                    ["220 SZ", 1, "Crew", "98/0", "99/0", 0.344, "2026-06-14", "2026-06-15", None, "Final Sag Completed"],
+                ]
+            )
+            with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+                frame.to_excel(writer, sheet_name="WIP", header=False, index=False)
+
+            result = ingest.load_stringing_sheet_frame(
+                workbook,
+                configured_sheet_name="WIP",
+                section_start_text="Conductor Paying Out,Rough Sag & Final Sag",
+            )
+
+            self.assertEqual(len(result.frame.index), 1)
+            self.assertEqual(result.frame.iloc[0]["from"], "98/0")
+            self.assertEqual(result.frame.iloc[0]["remarks"], "Final Sag Completed")
+
     def test_sheet_aware_template_selection_prefers_220kv(self) -> None:
         options = [
             ({0: "From AP"}, "TB 501 132kV Stringing"),
