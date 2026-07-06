@@ -823,3 +823,5 @@ JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.ba
 [Sat 07/04/2026 11:30:01.22] Trigger 11:30 starting job
 [Sat 07/04/2026 11:30:01.22] Job finished errorlevel=0
 [Mon 07/06/2026 11:30:19.24] Trigger 11:30 starting job
+[Mon 07/06/2026 11:30:19.24] Job finished errorlevel=1
+[Mon 07/06/2026 12:02:01.29] Trigger 12:02 starting job
