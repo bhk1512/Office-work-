@@ -873,3 +873,9 @@ JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.ba
 [Wed 07/15/2026 12:02:05.22] Trigger 12:02 starting job
 [Wed 07/15/2026 12:02:05.22] Job finished errorlevel=1
 [Wed 07/15/2026 16:00:02.23] Trigger 16:00 starting job
+[Wed 07/15/2026 16:00:02.23] Job finished errorlevel=1
+[Thu 07/16/2026 10:30:35.09] ===== Scheduler launch =====
+BASE=C:\Users\kaushikb\Documents\Work\Git\Office-work-
+JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.bat
+[Thu 07/16/2026 10:30:35.09] Scheduler running (keep window open).
+[Thu 07/16/2026 10:30:35.11] Trigger 10:30 starting job
