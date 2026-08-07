@@ -1,0 +1,21 @@
+Mail HTML compared: C:\Users\kaushikb\Documents\Work\Git\Office-work-\Productivity Summaries\Daily_DPR_Mail_2026-07-30.html
+Ground workbook compared: C:\Users\kaushikb\Downloads\Jul'26.xlsx / sheet 'Worker for TL '
+Rows compared: 31
+
+Erection
+  mail lower than ground: 2
+  matched: 7
+  mail higher than ground: 6
+  + TB 412: mail 32.0, ground 35.0, delta 3.0
+  + TA 419: mail 18.0, ground 20.0, delta 2.0
+
+Stringing
+  mail lower than ground: 6
+  matched: 2
+  mail higher than ground: 5
+  + TA 505: mail 14.56, ground 18.0, delta 3.4399999999999995
+  + TA 413: mail 11.29, ground 14.0, delta 2.710000000000001
+  + TB 507: mail 5.25, ground 5.6, delta 0.34999999999999964
+  + TB 412: mail 2.2, ground 2.4, delta 0.19999999999999973
+  + TA 506: mail 11.93, ground 12.0, delta 0.07000000000000028
+  + TA 414: mail 2.92, ground 2.921, delta 0.0009999999999998899

@@ -1,0 +1,42 @@
+activity,project_key,coverage,Project,ground_project_name,mail_plan,ground_plan,plan_delta_ground_minus_mail,mail_actual,ground_actual,actual_delta_ground_minus_mail,ground_wip,ground_pch
+erection,TB 501,mail_only,TB 501,,5.0,,,1.0,,,,
+stringing,TA 416,mail_only,TA 416,,4.0,,,0.68,,,,
+stringing,TB 501,mail_only,TB 501,,5.81,,,3.57,,,,
+erection,TA 513,ground_only,,TA513 Shivani- Patratu,,16.0,,,,,,Mr. Hitesh Bahri
+erection,TB 609,ground_only,,Kutch - Jamnagar Line,,3.0,,,1.0,,1.0,Mr. Arun Felbin
+erection,TB 610,ground_only,,HVDC Badla - Fathpur,,,,,1.0,,3.0,Mr. Hitesh Bahri
+erection,TB 611,ground_only,,Morena PS (South of Sabalgarh) - Karera (near Datia) 765kV D/C line,,0.0,,,,,,Mr. Nabajit Barwa
+stringing,TA 512,ground_only,,765 KV D/C Bikaner - Shivani line,,23.0,,,,,5.5,Mr. N K Gupta
+stringing,TA 513,ground_only,,TA513 Shivani- Patratu,,0.0,,,,,,Mr. Hitesh Bahri
+stringing,TA 601,ground_only,,Kurnool  - Bidhar part 2,,0.0,,,,,,Mr. Arun Felbin
+stringing,TA 602,ground_only,,HVDC KPS2 - Nagpur TL06,,0.0,,,,,,Mr. Arun Felbin
+stringing,TB 609,ground_only,,Kutch - Jamnagar Line,,0.0,,,,,,Mr. Arun Felbin
+stringing,TB 611,ground_only,,Morena PS (South of Sabalgarh) - Karera (near Datia) 765kV D/C line,,0.0,,,,,,Mr. Nabajit Barwa
+erection,TA 413,both,TA 413,765 KV D/C Bikaner Complex PART-A line,3.0,3.0,0.0,0.0,,,1.0,Mr. N K Gupta
+erection,TA 414,both,TA 414,765kV  D/C Vataman - Navsari line,30.0,40.0,10.0,12.0,11.0,-1.0,4.0,Mr. Arun Felbin
+erection,TA 419,both,TA 419,765 KV D/C Sikar - Narela Line,40.0,40.0,0.0,18.0,20.0,2.0,10.0,Mr. N K Gupta
+erection,TA 504,both,TA 504,"765 KV D/C Rishabhdeo - Mansour Tr, Line",6.0,2.0,-4.0,4.0,4.0,0.0,1.0,Mr. Nabajit Barwa
+erection,TA 505,both,TA 505,"765KV D/C Mandsour - Beawar Tr, Line",6.0,6.0,0.0,2.0,2.0,0.0,1.0,Mr. Nabajit Barwa
+erection,TA 506,both,TA 506,"400 KV D/C Sirohi - Chittorgarh Tr, Line",20.0,20.0,0.0,13.0,13.0,0.0,4.0,Mr. Nabajit Barwa
+erection,TA 509,both,TA 509,"765 KV D/C Mandsour - Kurawar Tr, Line",15.0,30.0,15.0,7.0,6.0,-1.0,2.0,Mr. Nabajit Barwa
+erection,TA 510,both,TA 510,765 KV D/C Ahmedabad - South Olpad line,285.0,15.0,-270.0,2.0,2.0,0.0,1.0,Mr. Arun Felbin
+erection,TA 512,both,TA 512,765 KV D/C Bikaner - Shivani line,20.0,30.0,10.0,28.0,25.0,-3.0,11.0,Mr. N K Gupta
+erection,TA 601,both,TA 601,Kurnool  - Bidhar part 2,25.0,25.0,0.0,29.0,28.0,-1.0,6.0,Mr. Arun Felbin
+erection,TA 602,both,TA 602,HVDC KPS2 - Nagpur TL06,20.0,30.0,10.0,11.0,11.0,0.0,1.0,Mr. Arun Felbin
+erection,TB 408,both,TB 408,765 KV D/C Sterlite (Pkg F),1.0,1.0,0.0,1.0,1.0,0.0,,Mr. N K Gupta
+erection,TB 412,both,TB 412,Chappra TL,45.0,45.0,0.0,32.0,35.0,3.0,6.0,Mr. N K Gupta
+erection,TB 507,both,TB 507,400/765 KV  TB507,55.0,55.0,0.0,27.0,24.0,-3.0,7.0,Mr. N K Gupta
+erection,TB 605,both,TB 605,Jallander - Sambha Line,41.0,35.0,-6.0,23.0,21.0,-2.0,13.0,Mr. Hitesh Bahri
+erection,TB 608,both,TB 608,Alipurdur - Bornagar - Assam,20.0,12.0,-8.0,13.0,13.0,0.0,5.0,Mr. N K Gupta
+stringing,TA 413,both,TA 413,765 KV D/C Bikaner Complex PART-A line,20.0,20.0,0.0,11.29,14.0,2.710000000000001,7.16,Mr. N K Gupta
+stringing,TA 414,both,TA 414,765kV  D/C Vataman - Navsari line,15.0,18.0,3.0,2.92,2.921,0.0009999999999998899,1.148,Mr. Arun Felbin
+stringing,TA 418,both,TA 418,765 KV D/C Kopal - Raichor,10.98,11.0,0.019999999999999574,7.43,6.0,-1.4299999999999997,0.417,Mr. Arun Felbin
+stringing,TA 419,both,TA 419,765 KV D/C Sikar - Narela Line,19.5,20.0,0.5,6.24,5.15,-1.0899999999999999,7.76,Mr. N K Gupta
+stringing,TA 505,both,TA 505,"765KV D/C Mandsour - Beawar Tr, Line",21.33,40.0,18.67,14.56,18.0,3.4399999999999995,4.221,Mr. Nabajit Barwa
+stringing,TA 506,both,TA 506,"400 KV D/C Sirohi - Chittorgarh Tr, Line",27.0,27.0,0.0,11.93,12.0,0.07000000000000028,10.0,Mr. Nabajit Barwa
+stringing,TA 509,both,TA 509,"765 KV D/C Mandsour - Kurawar Tr, Line",12.0,19.17,7.170000000000002,5.91,5.909,-0.001000000000000334,1.582,Mr. Nabajit Barwa
+stringing,TA 510,both,TA 510,765 KV D/C Ahmedabad - South Olpad line,95.0,0.0,-95.0,0.0,,,,Mr. Arun Felbin
+stringing,TB 408,both,TB 408,765 KV D/C Sterlite (Pkg F),43.46,30.0,-13.46,18.1,18.0,-0.10000000000000142,11.5,Mr. N K Gupta
+stringing,TB 412,both,TB 412,Chappra TL,6.2,20.0,13.8,2.2,2.4,0.19999999999999973,0.378,Mr. N K Gupta
+stringing,TB 507,both,TB 507,400/765 KV  TB507,21.08,21.0,-0.0799999999999983,5.25,5.6,0.34999999999999964,3.087,Mr. N K Gupta
+stringing,TB 605,both,TB 605,Jallander - Sambha Line,9.6,15.0,5.4,3.24,3.0,-0.2400000000000002,5.0,Mr. Hitesh Bahri

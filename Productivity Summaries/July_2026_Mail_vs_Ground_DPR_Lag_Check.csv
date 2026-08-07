@@ -1,0 +1,30 @@
+activity,project_key,Project,mail_actual,ground_actual,lag_ground_minus_mail,mail_plan,ground_plan,latest_dpr_date,dpr_older_than_3_days,planner_name,planner_email,latest_dpr_file
+erection,TB 412,TB 412,19.0,35.0,16.0,45.0,45.0,2026-07-19,True,Uttam Rai,raiu@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 412 - DPR - 2026-07-19.xlsx
+erection,TA 602,TA 602,4.0,11.0,7.0,20.0,30.0,2026-07-08,True,Rishi Shukla,shuklar03@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 602 - DPR - 2026-07-08.xlsx
+erection,TA 419,TA 419,13.0,20.0,7.0,40.0,40.0,2026-07-30,False,Suraj Chaudhary,chaudharys1@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 419 - DPR - 2026-07-30.xlsx
+erection,TA 601,TA 601,24.0,28.0,4.0,25.0,25.0,2026-07-29,False,Siddhesh Bhoyar,bhoyars@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 601 - DPR - 2026-07-29.xlsx
+erection,TA 414,TA 414,9.0,11.0,2.0,30.0,40.0,2026-07-30,False,Nishant Giri; Pawan Shrivastava; Sony Das,girin@kecrpg.com; Shrivasatavap@KECRPG.COM; dass33@KECRPG.COM,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 414 - DPR - 2026-07-30.xlsx
+erection,TB 605,TB 605,19.0,21.0,2.0,41.0,35.0,2026-07-29,False,M Aditya Narsimha,kumarm42@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 605 - DPR - 2026-07-29.xlsx
+erection,TB 507,TB 507,23.0,24.0,1.0,55.0,55.0,2026-07-26,True,Amartya Sarkar,sarkara1@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 507 - DPR - 2026-07-26.xlsx
+erection,TA 505,TA 505,1.0,2.0,1.0,6.0,6.0,2026-07-22,True,Muneem Meena,meenam@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 505 - DPR - 2026-07-22.xlsx
+erection,TA 509,TA 509,5.0,6.0,1.0,15.0,30.0,2026-07-28,False,Pawan Sharma; Shuvayu Das,sharmap07@KECRPG.COM; dass32@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 509 - DPR - 2026-07-28.xlsx
+erection,TA 510,TA 510,2.0,2.0,0.0,285.0,15.0,2026-07-29,False,Jayant Vaishnav,vaishnavj@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 510 - DPR - 2026-07-29.xlsx
+erection,TA 512,TA 512,25.0,25.0,0.0,20.0,30.0,2026-07-29,False,Suraj Kumar; Saurabh Katiyar,kumarsu@kecrpg.com; katiyars@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 512 - DPR - 2026-07-29.xlsx
+erection,TB 608,TB 608,13.0,13.0,0.0,20.0,12.0,2026-07-26,True,Nilashis Neogi,neogin@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 608 - DPR - 2026-07-26.xlsm
+erection,TA 504,TA 504,4.0,4.0,0.0,6.0,2.0,2026-07-27,False,Abir Das,dasa08@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 504 - DPR - 2026-07-27.xlsx
+erection,TA 506,TA 506,13.0,13.0,0.0,20.0,20.0,2026-07-27,False,,,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 506 - DPR - 2026-07-27.xlsx
+erection,TA 413,TA 413,0.0,,,3.0,3.0,2026-07-28,False,Santosh Kumar,kumarsan50@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 413 - DPR - 2026-07-28.xlsx
+erection,TB 501,TB 501,1.0,,,5.0,,2026-07-28,False,Prashun Shukla; Saksham Singh,shuklap05@KECRPG.COM; singhsak@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 501 - DPR - 2026-07-28.xlsx
+stringing,TA 505,TA 505,10.5,18.0,7.5,21.33,40.0,2026-07-22,True,Muneem Meena,meenam@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 505 - DPR - 2026-07-22.xlsx
+stringing,TA 413,TA 413,11.29,14.0,2.710000000000001,20.0,20.0,2026-07-28,False,Santosh Kumar,kumarsan50@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 413 - DPR - 2026-07-28.xlsx
+stringing,TB 412,TB 412,1.07,2.4,1.3299999999999998,6.2,20.0,2026-07-19,True,Uttam Rai,raiu@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 412 - DPR - 2026-07-19.xlsx
+stringing,TB 507,TB 507,4.89,5.6,0.71,21.08,21.0,2026-07-26,True,Amartya Sarkar,sarkara1@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 507 - DPR - 2026-07-26.xlsx
+stringing,TA 506,TA 506,11.93,12.0,0.07000000000000028,27.0,27.0,2026-07-27,False,,,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 506 - DPR - 2026-07-27.xlsx
+stringing,TA 414,TA 414,2.92,2.921,0.0009999999999998899,15.0,18.0,2026-07-30,False,Nishant Giri; Pawan Shrivastava; Sony Das,girin@kecrpg.com; Shrivasatavap@KECRPG.COM; dass33@KECRPG.COM,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 414 - DPR - 2026-07-30.xlsx
+stringing,TA 509,TA 509,5.91,5.909,-0.001000000000000334,12.0,19.17,2026-07-28,False,Pawan Sharma; Shuvayu Das,sharmap07@KECRPG.COM; dass32@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 509 - DPR - 2026-07-28.xlsx
+stringing,TB 605,TB 605,3.24,3.0,-0.2400000000000002,9.6,15.0,2026-07-29,False,M Aditya Narsimha,kumarm42@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 605 - DPR - 2026-07-29.xlsx
+stringing,TA 419,TA 419,6.24,5.15,-1.0899999999999999,19.5,20.0,2026-07-30,False,Suraj Chaudhary,chaudharys1@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 419 - DPR - 2026-07-30.xlsx
+stringing,TA 418,TA 418,7.43,6.0,-1.4299999999999997,10.98,11.0,2026-07-21,True,Tamilvelan A,tamilvelana@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 418 - DPR - 2026-07-21.xlsx
+stringing,TA 416,TA 416,0.68,,,4.0,,2026-07-16,True,Sanjib Kumar Samantaray,samantaraysk@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 416 - DPR - 2026-07-16.xlsx
+stringing,TA 510,TA 510,0.0,,,95.0,0.0,2026-07-29,False,Jayant Vaishnav,vaishnavj@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 510 - DPR - 2026-07-29.xlsx
+stringing,TB 501,TB 501,3.57,,,5.81,,2026-07-28,False,Prashun Shukla; Saksham Singh,shuklap05@KECRPG.COM; singhsak@kecrpg.com,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 501 - DPR - 2026-07-28.xlsx

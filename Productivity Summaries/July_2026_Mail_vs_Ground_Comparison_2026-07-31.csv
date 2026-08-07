@@ -1,0 +1,32 @@
+activity,project_key,Project,mail_actual,ground_actual,actual_delta_ground_minus_mail,comparison_status,mail_plan,ground_plan,plan_delta_ground_minus_mail,ground_wip,latest_dpr_date,latest_dpr_file
+erection,TB 412,TB 412,32.0,35.0,3.0,mail lower than ground,45.0,45.0,0.0,6.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 412 - DPR - 2026-07-30.xlsx
+erection,TA 419,TA 419,18.0,20.0,2.0,mail lower than ground,40.0,40.0,0.0,10.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 419 - DPR - 2026-07-30.xlsx
+erection,TA 510,TA 510,2.0,2.0,0.0,matched,285.0,15.0,-270.0,1.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 510 - DPR - 2026-07-30.xlsx
+erection,TA 602,TA 602,11.0,11.0,0.0,matched,20.0,30.0,10.0,1.0,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 602 - DPR - 2026-07-29.xlsx
+erection,TB 408,TB 408,1.0,1.0,0.0,matched,1.0,1.0,0.0,,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 408 - DPR - 2026-07-30.xlsx
+erection,TB 608,TB 608,13.0,13.0,0.0,matched,20.0,12.0,-8.0,5.0,2026-07-26,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 608 - DPR - 2026-07-26.xlsm
+erection,TA 504,TA 504,4.0,4.0,0.0,matched,6.0,2.0,-4.0,1.0,2026-07-28,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 504 - DPR - 2026-07-28.xlsx
+erection,TA 505,TA 505,2.0,2.0,0.0,matched,6.0,6.0,0.0,1.0,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 505 - DPR - 2026-07-29.xlsx
+erection,TA 506,TA 506,13.0,13.0,0.0,matched,20.0,20.0,0.0,4.0,2026-07-28,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 506 - DPR - 2026-07-28.xlsx
+erection,TA 414,TA 414,12.0,11.0,-1.0,mail higher than ground,30.0,40.0,10.0,4.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 414 - DPR - 2026-07-30.xlsx
+erection,TA 601,TA 601,29.0,28.0,-1.0,mail higher than ground,25.0,25.0,0.0,6.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 601 - DPR - 2026-07-30.xlsx
+erection,TA 509,TA 509,7.0,6.0,-1.0,mail higher than ground,15.0,30.0,15.0,2.0,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 509 - DPR - 2026-07-29.xlsx
+erection,TB 605,TB 605,23.0,21.0,-2.0,mail higher than ground,41.0,35.0,-6.0,13.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 605 - DPR - 2026-07-30.xlsx
+erection,TA 512,TA 512,28.0,25.0,-3.0,mail higher than ground,20.0,30.0,10.0,11.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 512 - DPR - 2026-07-30.xlsx
+erection,TB 507,TB 507,27.0,24.0,-3.0,mail higher than ground,55.0,55.0,0.0,7.0,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 507 - DPR - 2026-07-29.xlsx
+erection,TA 413,TA 413,0.0,,,ground actual missing,3.0,3.0,0.0,1.0,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 413 - DPR - 2026-07-29.xlsx
+erection,TB 501,TB 501,1.0,,,ground actual missing,5.0,,,,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 501 - DPR - 2026-07-30.xlsx
+stringing,TA 505,TA 505,14.56,18.0,3.4399999999999995,mail lower than ground,21.33,40.0,18.67,4.221,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 505 - DPR - 2026-07-29.xlsx
+stringing,TA 413,TA 413,11.29,14.0,2.710000000000001,mail lower than ground,20.0,20.0,0.0,7.16,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 413 - DPR - 2026-07-29.xlsx
+stringing,TB 507,TB 507,5.25,5.6,0.34999999999999964,mail lower than ground,21.08,21.0,-0.0799999999999983,3.087,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 507 - DPR - 2026-07-29.xlsx
+stringing,TB 412,TB 412,2.2,2.4,0.19999999999999973,mail lower than ground,6.2,20.0,13.8,0.378,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 412 - DPR - 2026-07-30.xlsx
+stringing,TA 506,TA 506,11.93,12.0,0.07000000000000028,mail lower than ground,27.0,27.0,0.0,10.0,2026-07-28,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 506 - DPR - 2026-07-28.xlsx
+stringing,TA 414,TA 414,2.92,2.921,0.0009999999999998899,mail lower than ground,15.0,18.0,3.0,1.148,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 414 - DPR - 2026-07-30.xlsx
+stringing,TA 509,TA 509,5.91,5.909,-0.001000000000000334,mail higher than ground,12.0,19.17,7.170000000000002,1.582,2026-07-29,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 509 - DPR - 2026-07-29.xlsx
+stringing,TB 408,TB 408,18.1,18.0,-0.10000000000000142,mail higher than ground,43.46,30.0,-13.46,11.5,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 408 - DPR - 2026-07-30.xlsx
+stringing,TB 605,TB 605,3.24,3.0,-0.2400000000000002,mail higher than ground,9.6,15.0,5.4,5.0,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 605 - DPR - 2026-07-30.xlsx
+stringing,TA 419,TA 419,6.24,5.15,-1.0899999999999999,mail higher than ground,19.5,20.0,0.5,7.76,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 419 - DPR - 2026-07-30.xlsx
+stringing,TA 418,TA 418,7.43,6.0,-1.4299999999999997,mail higher than ground,10.98,11.0,0.019999999999999574,0.417,2026-07-21,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 418 - DPR - 2026-07-21.xlsx
+stringing,TA 416,TA 416,0.68,,,ground actual missing,4.0,,,,2026-07-16,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 416 - DPR - 2026-07-16.xlsx
+stringing,TA 510,TA 510,0.0,,,ground actual missing,95.0,0.0,-95.0,,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TA 510 - DPR - 2026-07-30.xlsx
+stringing,TB 501,TB 501,3.57,,,ground actual missing,5.81,,,,2026-07-30,C:\Users\kaushikb\Documents\Work\Git\Office-work-\Raw Data\DPRs\TB 501 - DPR - 2026-07-30.xlsx

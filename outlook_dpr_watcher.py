@@ -271,13 +271,13 @@ MONTHS_FULL = {m.lower(): i for i, m in enumerate(
 
 DATE_PATTERNS = [
     # YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
-    (re.compile(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b"), ("Y","M","D")),
+    (re.compile(r"(?<!\d)(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"), ("Y","M","D")),
     # DD-MM-YYYY / DD/MM/YYYY / DD.MM.YYYY
-    (re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b"), ("D","M","Y")),
+    (re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})(?!\d)"), ("D","M","Y")),
     # DD-MM-YY / DD/MM/YY / DD.MM.YY
-    (re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b"), ("D","M","Y2")),
+    (re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})(?!\d)"), ("D","M","Y2")),
     # YYYYMMDD (8 digits)
-    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), ("Y","M","D")),
+    (re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)"), ("Y","M","D")),
     # DD Mon YYYY
     (re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3})\s+(20\d{2})\b"), ("D","Mon3","Y")),
     # Mon DD YYYY
@@ -457,6 +457,53 @@ def _resolve_attachment_match(name: str, sender_cfgs: list[dict]) -> dict | None
             }
     return None
 
+
+def _single_sender_project(sender_cfgs: list[dict]) -> str:
+    project_codes = {
+        str(entry.get("project_code") or "").strip().upper()
+        for entry in sender_cfgs
+        if str(entry.get("project_code") or "").strip()
+    }
+    if len(project_codes) == 1:
+        return next(iter(project_codes))
+    return ""
+
+
+def _attachment_is_report_like(name: str) -> bool:
+    normalized = norm(name)
+    if all(re.search(pat, normalized, flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN):
+        return True
+    tokens = set(_tokenize_attachment_key(name, drop_digits=False))
+    return "report" in tokens and ("progress" in tokens or "daily" in tokens)
+
+
+def _resolve_single_project_report_fallback(name: str, sender_cfgs: list[dict]) -> dict | None:
+    """
+    Some single-project planners change attachment names from configured DPR text
+    to variants like "TA-602 Daily Progress Report". For those senders, safely
+    fall back to their configured project only when the attachment is report-like.
+    Multi-project senders still require explicit attachment rules.
+    """
+    project_code = _single_sender_project(sender_cfgs)
+    if not project_code:
+        return None
+    attachment_project = extract_project_code(name)
+    if attachment_project and attachment_project != project_code:
+        return None
+    has_project_date_name = attachment_project == project_code and parse_date_from_text(name) is not None
+    if not _attachment_is_report_like(name) and not has_project_date_name:
+        return None
+    return {
+        "project_code": project_code,
+        "line_name": "",
+        "rule_matched": True,
+        "fallback_matched": True,
+        "match_len": 0,
+        "match_type_rank": 0,
+        "config_row_index": min(int(entry.get("config_row_index", 0)) for entry in sender_cfgs),
+        "rule_index": -1,
+    }
+
 def save_latest_for_mail(mail) -> list[str]:
     saved = []
     atts = getattr(mail, "Attachments", None)
@@ -476,6 +523,8 @@ def save_latest_for_mail(mail) -> list[str]:
             continue
         normalized_for_patterns = norm(name)
         resolved_match = _resolve_attachment_match(name, sender_cfgs)
+        if resolved_match is None:
+            resolved_match = _resolve_single_project_report_fallback(name, sender_cfgs)
         config_rule_match = resolved_match is not None and bool(resolved_match.get("rule_matched"))
         # must be a DPR-like file unless it matched a configured attachment rule
         if (not config_rule_match) and (not all(re.search(pat, normalized_for_patterns, flags=re.IGNORECASE) for pat in ATTACHMENT_MUST_CONTAIN)):
