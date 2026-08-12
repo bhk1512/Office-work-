@@ -21,6 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_COMPETITOR_INPUT = Path(r"C:\Users\kaushikb\OneDrive - RPG Enterprises\Competitor Analysis.xlsx")
 WORKING_COMPETITOR_INPUT = BASE_DIR / "Productivity Summaries" / "Competitor Analysis - working copy.xlsx"
 DEFAULT_OUTPUT = BASE_DIR / "Productivity Summaries" / "Competitor_Performance_Comparison_May_June_2026.xlsx"
+DEFAULT_SINGLE_OUTPUT = BASE_DIR / "Productivity Summaries" / "Competitor_Comparison_Single_Sheet_May_June_2026_UPDATED.xlsx"
 
 MONTHS = {
     "May'26": pd.Timestamp("2026-05-01"),
@@ -32,12 +33,13 @@ ACTIVITIES = {
     "STR": {"name": "Stringing", "unit": "KM"},
 }
 SCENARIOS = [
-    ("Idle -20%", 0.80),
-    ("Idle -10%", 0.90),
-    ("Idle Base", 1.00),
-    ("Idle +10%", 1.10),
-    ("Idle +20%", 1.20),
+    ("Case -20%", 0.80),
+    ("Case -10%", 0.90),
+    ("Case Base", 1.00),
+    ("Case +10%", 1.10),
+    ("Case +20%", 1.20),
 ]
+MONTH_PRODUCTIVITY_FACTOR = 30.0
 
 
 def norm_code(value: object) -> str:
@@ -111,6 +113,37 @@ def read_competitor(path: Path) -> pd.DataFrame:
                     }
                 )
     return pd.DataFrame(rows)
+
+
+def read_competitor_wide(path: Path) -> pd.DataFrame:
+    source = path if path.exists() else WORKING_COMPETITOR_INPUT
+    try:
+        frame = pd.read_excel(source, header=[0, 1])
+    except PermissionError:
+        if source != WORKING_COMPETITOR_INPUT and WORKING_COMPETITOR_INPUT.exists():
+            source = WORKING_COMPETITOR_INPUT
+            frame = pd.read_excel(source, header=[0, 1])
+        else:
+            raise
+
+    columns = {
+        ("Sl.No.", "Unnamed: 0_level_1"): "Sl.No.",
+        ("Project", "Unnamed: 1_level_1"): "Project",
+        ("Agency", "Unnamed: 2_level_1"): "Agency",
+        ("May'26", "FDN"): "May'26 FDN",
+        ("May'26", "ERE"): "May'26 ERE",
+        ("May'26", "STR"): "May'26 STR",
+        ("Jun'26", "FDN"): "Jun'26 FDN",
+        ("Jun'26", "ERE"): "Jun'26 ERE",
+        ("Jun'26", "STR"): "Jun'26 STR",
+        ("Internal Project Code", "Unnamed: 9_level_1"): "Internal Project Code",
+    }
+    out = pd.DataFrame({label: frame[col] for col, label in columns.items() if col in frame.columns})
+    out = out[pd.to_numeric(out["Sl.No."], errors="coerce").notna()].copy()
+    out["Sl.No."] = pd.to_numeric(out["Sl.No."], errors="coerce").astype(int)
+    for col in ["May'26 FDN", "May'26 ERE", "May'26 STR", "Jun'26 FDN", "Jun'26 ERE", "Jun'26 STR"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out.reset_index(drop=True)
 
 
 def load_project_presence() -> set[str]:
@@ -278,6 +311,7 @@ def build_erection() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     raw["Complete Date"] = pd.to_datetime(raw["Complete Date"], errors="coerce").dt.normalize()
     raw["Month"] = raw["Complete Date"].dt.to_period("M").dt.to_timestamp()
     raw["Tower Weight"] = pd.to_numeric(raw["Tower Weight"], errors="coerce")
+    raw["Productivity"] = pd.to_numeric(raw["Productivity"], errors="coerce")
     completed = raw[raw["Complete Date"].notna()].copy()
     summary = (
         completed.groupby(["Internal Code", "Month"], dropna=False)
@@ -285,7 +319,9 @@ def build_erection() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             Internal_Tower_Count=("Complete Date", "size"),
             Internal_Quantity=("Tower Weight", "sum"),
             Avg_Tower_Weight_MT=("Tower Weight", "mean"),
+            Internal_Productivity=("Productivity", "mean"),
             Tower_Weight_Rows=("Tower Weight", lambda s: int(s.notna().sum())),
+            Productivity_Rows=("Productivity", lambda s: int(s.notna().sum())),
         )
         .reset_index()
     )
@@ -293,6 +329,14 @@ def build_erection() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     summary["Data Quality Note"] = ""
     missing_weight = summary["Tower_Weight_Rows"].lt(summary["Internal_Tower_Count"])
     summary.loc[missing_weight, "Data Quality Note"] = "Some completed tower rows have missing tower weight."
+    missing_productivity = summary["Productivity_Rows"].lt(summary["Internal_Tower_Count"])
+    summary.loc[missing_productivity, "Data Quality Note"] = (
+        summary.loc[missing_productivity, "Data Quality Note"].where(
+            summary.loc[missing_productivity, "Data Quality Note"].eq(""),
+            summary.loc[missing_productivity, "Data Quality Note"] + " ",
+        )
+        + "Some completed tower rows have missing productivity."
+    )
 
     daily = pd.read_parquet(BASE_DIR / "Parquets" / "Erection" / "ProdDailyExpandedSingles.parquet")
     daily["Internal Code"] = daily["Project Code"].map(norm_code)
@@ -313,6 +357,7 @@ def build_stringing() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         positive.groupby(["Internal Code", "Month"], dropna=False)
         .agg(
             Internal_Quantity=("daily_km", "sum"),
+            Internal_Productivity=("daily_km", lambda s: float(s.dropna().mean() * MONTH_PRODUCTIVITY_FACTOR) if s.dropna().size else pd.NA),
             Internal_Daily_Row_Count=("daily_km", "size"),
             Internal_Work_Date_Count=("date", lambda s: int(s.dropna().nunique())),
         )
@@ -352,6 +397,7 @@ def lookup_code_metric(sources: Sources, activity: str, code: str, month: pd.Tim
         "Internal Unit": ACTIVITIES[activity]["unit"],
         "Internal Tower Count": pd.NA,
         "Avg Tower Weight MT": pd.NA,
+        "Internal Productivity": pd.NA,
         "Idle Days Capped": pd.NA,
         "Idle Window Count": pd.NA,
         "Work Date Count": pd.NA,
@@ -364,6 +410,7 @@ def lookup_code_metric(sources: Sources, activity: str, code: str, month: pd.Tim
         out["Internal Unit"] = r.get("Internal Unit", ACTIVITIES[activity]["unit"])
         out["Internal Tower Count"] = r.get("Internal_Tower_Count", pd.NA)
         out["Avg Tower Weight MT"] = r.get("Avg_Tower_Weight_MT", pd.NA)
+        out["Internal Productivity"] = r.get("Internal_Productivity", pd.NA)
         out["Data Quality Note"] = r.get("Data Quality Note", "")
         if activity == "FDN":
             out["Foundation Source Used"] = r.get("Foundation Source Used", "")
@@ -406,6 +453,21 @@ def build_analysis(comp: pd.DataFrame, sources: Sources) -> tuple[pd.DataFrame, 
         found_metrics = [m for m in code_metrics if bool(m.get("Internal Project Exists"))]
         qty_values = [float(m["Internal Quantity"]) for m in found_metrics if pd.notna(m.get("Internal Quantity"))]
         internal_qty = sum(qty_values) if qty_values else pd.NA
+        productivity_pairs = []
+        productivity_values = []
+        for m in found_metrics:
+            productivity_value = pd.to_numeric(pd.Series([m.get("Internal Productivity")]), errors="coerce").iloc[0]
+            quantity_value = pd.to_numeric(pd.Series([m.get("Internal Quantity")]), errors="coerce").iloc[0]
+            if pd.notna(productivity_value):
+                productivity_values.append(float(productivity_value))
+                if pd.notna(quantity_value) and float(quantity_value) > 0:
+                    productivity_pairs.append((float(quantity_value), float(productivity_value)))
+        if productivity_pairs:
+            internal_productivity = sum(qty * prod for qty, prod in productivity_pairs) / sum(qty for qty, _ in productivity_pairs)
+        elif productivity_values:
+            internal_productivity = sum(productivity_values) / len(productivity_values)
+        else:
+            internal_productivity = pd.NA
         idle_values = [float(m["Idle Days Capped"]) for m in found_metrics if pd.notna(m.get("Idle Days Capped"))]
         base_idle = sum(idle_values) / len(idle_values) if idle_values else pd.NA
         internal_work_dates = sum(int(m["Work Date Count"]) for m in found_metrics if pd.notna(m.get("Work Date Count")))
@@ -424,7 +486,14 @@ def build_analysis(comp: pd.DataFrame, sources: Sources) -> tuple[pd.DataFrame, 
         competitor_qty = float(comp_row["Competitor Quantity"])
         competitor_output = competitor_qty
         output_unit = ACTIVITIES[activity]["unit"]
+        internal_erection_tower_count = pd.NA
         if activity == "ERE":
+            tower_counts = [
+                pd.to_numeric(pd.Series([m.get("Internal Tower Count")]), errors="coerce").iloc[0]
+                for m in found_metrics
+            ]
+            tower_counts = [float(value) for value in tower_counts if pd.notna(value)]
+            internal_erection_tower_count = sum(tower_counts) if tower_counts else pd.NA
             competitor_output = competitor_qty * float(avg_tower_weight) if pd.notna(avg_tower_weight) else pd.NA
             output_unit = "MT"
 
@@ -434,18 +503,14 @@ def build_analysis(comp: pd.DataFrame, sources: Sources) -> tuple[pd.DataFrame, 
             notes.append("Missing internal code(s): " + ", ".join(missing_codes))
         if activity == "ERE" and pd.isna(avg_tower_weight) and competitor_qty:
             notes.append("No same-month internal tower weight available; competitor equivalent MT not calculated.")
-        if pd.isna(base_idle):
-            notes.append("No same-month internal work-date idle baseline available.")
+        if pd.isna(internal_productivity):
+            notes.append("No same-month internal productivity baseline available.")
         if not found_metrics:
             notes.append("No internal comparator data found.")
 
         internal_productive_days = month_days - float(base_idle) if pd.notna(base_idle) else pd.NA
-        internal_idle_adj_prod = (
-            float(internal_qty) / internal_productive_days
-            if pd.notna(internal_qty) and pd.notna(internal_productive_days) and internal_productive_days > 0
-            else pd.NA
-        )
         internal_calendar_prod = float(internal_qty) / month_days if pd.notna(internal_qty) else pd.NA
+        internal_idle_adj_prod = internal_productivity
 
         baseline = {
             **comp_row.drop(labels=["Month Start"]).to_dict(),
@@ -455,9 +520,11 @@ def build_analysis(comp: pd.DataFrame, sources: Sources) -> tuple[pd.DataFrame, 
             "Internal Quantity": internal_qty,
             "Internal Unit": output_unit,
             "Internal Work Date Count": internal_work_dates if found_metrics else pd.NA,
+            "Internal Erection Tower Count": internal_erection_tower_count,
             "Internal Avg Idle Days Capped": base_idle,
             "Internal Productive Days Proxy": internal_productive_days,
             "Internal Calendar Productivity": internal_calendar_prod,
+            "Internal Productivity": internal_productivity,
             "Internal Idle Adjusted Productivity": internal_idle_adj_prod,
             "Same-Month Avg Tower Weight MT": avg_tower_weight,
             "Competitor Equivalent Output": competitor_output,
@@ -469,9 +536,16 @@ def build_analysis(comp: pd.DataFrame, sources: Sources) -> tuple[pd.DataFrame, 
         for label, multiplier in SCENARIOS:
             scenario_idle = float(base_idle) * multiplier if pd.notna(base_idle) else pd.NA
             productive_days = month_days - scenario_idle if pd.notna(scenario_idle) else pd.NA
+            output_ratio = (
+                float(competitor_output) / float(internal_qty)
+                if pd.notna(competitor_output)
+                and pd.notna(internal_qty)
+                and float(internal_qty) > 0
+                else pd.NA
+            )
             comp_idle_prod = (
-                float(competitor_output) / productive_days
-                if pd.notna(competitor_output) and pd.notna(productive_days) and productive_days > 0
+                float(internal_productivity) * float(output_ratio) * multiplier
+                if pd.notna(internal_productivity) and pd.notna(output_ratio)
                 else pd.NA
             )
             diff = (
@@ -503,7 +577,7 @@ def build_analysis(comp: pd.DataFrame, sources: Sources) -> tuple[pd.DataFrame, 
     code_detail = pd.DataFrame(code_rows)
     baseline_detail = pd.DataFrame(baseline_rows)
     scenario_detail = pd.DataFrame(scenario_rows)
-    base_case = scenario_detail[scenario_detail["Scenario"].eq("Idle Base")].copy()
+    base_case = scenario_detail[scenario_detail["Scenario"].eq("Case Base")].copy()
     return code_detail, baseline_detail, scenario_detail, base_case
 
 
@@ -527,6 +601,132 @@ def build_summary(base_case: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).sort_values(["Activity", "Agency"]).reset_index(drop=True)
+
+
+def _single_value(frame: pd.DataFrame, column: str) -> object:
+    if frame.empty or column not in frame.columns:
+        return pd.NA
+    value = frame.iloc[0].get(column)
+    return value
+
+
+def _find_base(baseline: pd.DataFrame, sl_no: int, month: str, activity: str) -> pd.DataFrame:
+    return baseline[
+        baseline["Sl.No."].eq(sl_no)
+        & baseline["Month"].astype(str).eq(month)
+        & baseline["Activity"].astype(str).eq(activity)
+    ]
+
+
+def _find_scenario(scenarios: pd.DataFrame, sl_no: int, month: str, activity: str, scenario: str) -> pd.DataFrame:
+    return scenarios[
+        scenarios["Sl.No."].eq(sl_no)
+        & scenarios["Month"].astype(str).eq(month)
+        & scenarios["Activity"].astype(str).eq(activity)
+        & scenarios["Scenario"].astype(str).eq(scenario)
+    ]
+
+
+def build_single_sheet(comp_wide: pd.DataFrame, baseline: pd.DataFrame, scenarios: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    input_columns = [
+        "Sl.No.",
+        "Project",
+        "Agency",
+        "May'26 FDN",
+        "May'26 ERE",
+        "May'26 STR",
+        "Jun'26 FDN",
+        "Jun'26 ERE",
+        "Jun'26 STR",
+        "Internal Project Code",
+    ]
+
+    for _, source_row in comp_wide.iterrows():
+        sl_no = int(source_row["Sl.No."])
+        row = {column: source_row.get(column) for column in input_columns}
+
+        for month_label, month_start in MONTHS.items():
+            month = month_start.strftime("%Y-%m")
+            month_days = days_in_month(month_start)
+            fdn = _find_base(baseline, sl_no, month, "Foundation")
+            ere = _find_base(baseline, sl_no, month, "Erection")
+            stringing = _find_base(baseline, sl_no, month, "Stringing")
+
+            row[f"{month_label} Compared To"] = source_row.get("Internal Project Code")
+            row[f"{month_label} Our FDN Count"] = _single_value(fdn, "Internal Quantity")
+            row[f"{month_label} Our ERE Count"] = _single_value(ere, "Internal Erection Tower Count")
+            row[f"{month_label} Our STR KM"] = _single_value(stringing, "Internal Quantity")
+            row[f"{month_label} Avg Tower Weight MT"] = _single_value(ere, "Same-Month Avg Tower Weight MT")
+            row[f"{month_label} Our ERE MT"] = _single_value(ere, "Internal Quantity")
+            row[f"{month_label} Our ERE MT/day"] = _single_value(ere, "Internal Idle Adjusted Productivity")
+            row[f"{month_label} Our STR KM/month"] = _single_value(stringing, "Internal Idle Adjusted Productivity")
+            row[f"{month_label} Competitor ERE MT Equivalent"] = _single_value(ere, "Competitor Equivalent Output")
+
+            for scenario, _ in SCENARIOS:
+                ere_case = _find_scenario(scenarios, sl_no, month, "Erection", scenario)
+                str_case = _find_scenario(scenarios, sl_no, month, "Stringing", scenario)
+                row[f"{month_label} Competitor ERE MT/day ({scenario})"] = _single_value(
+                    ere_case, "Competitor Idle Adjusted Productivity"
+                )
+                str_km_day = _single_value(str_case, "Competitor Idle Adjusted Productivity")
+                row[f"{month_label} Competitor STR KM/month ({scenario})"] = str_km_day
+
+            notes = []
+            for frame in (fdn, ere, stringing):
+                note = _single_value(frame, "Baseline Notes")
+                if pd.notna(note) and str(note).strip():
+                    notes.append(str(note).strip())
+            row[f"{month_label} Notes"] = " | ".join(dict.fromkeys(notes))
+
+        rows.append(row)
+
+    ordered = input_columns[:]
+    for month_label in MONTHS:
+        ordered.extend(
+            [
+                f"{month_label} Compared To",
+                f"{month_label} Our FDN Count",
+                f"{month_label} Our ERE Count",
+                f"{month_label} Our STR KM",
+                f"{month_label} Avg Tower Weight MT",
+                f"{month_label} Our ERE MT",
+                f"{month_label} Our ERE MT/day",
+                f"{month_label} Our STR KM/month",
+                f"{month_label} Competitor ERE MT Equivalent",
+            ]
+        )
+        for scenario, _ in SCENARIOS:
+            ordered.append(f"{month_label} Competitor ERE MT/day ({scenario})")
+        for scenario, _ in SCENARIOS:
+            ordered.append(f"{month_label} Competitor STR KM/month ({scenario})")
+        ordered.append(f"{month_label} Notes")
+    return pd.DataFrame(rows).reindex(columns=ordered)
+
+
+def write_single_sheet(output: Path, single: pd.DataFrame) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(output, engine="openpyxl", datetime_format="yyyy-mm-dd", date_format="yyyy-mm-dd") as writer:
+        sheet_name = "Comparison"
+        single.to_excel(writer, sheet_name=sheet_name, index=False)
+        worksheet = writer.sheets[sheet_name]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        thin = Side(style="thin", color="A6A6A6")
+        header_fill = PatternFill("solid", fgColor="D9EAF7")
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
+        for col_idx, col_name in enumerate(single.columns, start=1):
+            width = min(
+                max(12, int(single[col_name].astype(str).str.len().quantile(0.95)) + 2 if not single.empty else len(col_name) + 2),
+                45,
+            )
+            worksheet.column_dimensions[get_column_letter(col_idx)].width = width
+            if any(token in col_name for token in ["FDN", "ERE", "STR", "Weight", "MT", "KM", "day", "month", "Equivalent"]):
+                for row in range(2, worksheet.max_row + 1):
+                    worksheet.cell(row=row, column=col_idx).number_format = "0.00"
 
 
 def methodology() -> pd.DataFrame:
@@ -607,6 +807,7 @@ def main() -> int:
         input_path = WORKING_COMPETITOR_INPUT
 
     comp = read_competitor(input_path)
+    comp_wide = read_competitor_wide(input_path)
     fdn_summary, fdn_idle, _ = build_foundation()
     ere_summary, ere_idle, _ = build_erection()
     str_summary, str_idle, _ = build_stringing()
@@ -618,9 +819,13 @@ def main() -> int:
     code_detail, baseline, scenarios, base_case = build_analysis(comp, sources)
     agency_summary = build_summary(base_case)
     write_workbook(DEFAULT_OUTPUT, comp, code_detail, baseline, scenarios, base_case, agency_summary)
+    single = build_single_sheet(comp_wide, baseline, scenarios)
+    write_single_sheet(DEFAULT_SINGLE_OUTPUT, single)
     print(DEFAULT_OUTPUT)
+    print(DEFAULT_SINGLE_OUTPUT)
     print(f"Competitor activity rows: {len(comp)}")
     print(f"Scenario rows: {len(scenarios)}")
+    print(f"Single-sheet rows: {len(single)}")
     print(f"Base-case comparable rows: {pd.to_numeric(base_case['Competitor vs Internal Difference %'], errors='coerce').notna().sum()}")
     return 0
 
