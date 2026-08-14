@@ -1045,3 +1045,5 @@ JOB_BAT=C:\Users\kaushikb\Documents\Work\Git\Office-work-\run_pipeline_commit.ba
 [Fri 08/14/2026 10:38:19.59] NOTE: Removing stale lock C:\Users\kaushikb\AppData\Local\Temp\dashboard_scheduler.lock
 [Fri 08/14/2026 10:38:19.60] Scheduler running (keep window open).
 [Fri 08/14/2026 11:30:19.19] Trigger 11:30 starting job
+[Fri 08/14/2026 11:30:19.19] Job finished errorlevel=1
+[Fri 08/14/2026 12:02:15.22] Trigger 12:02 starting job
